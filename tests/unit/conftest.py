@@ -37,8 +37,17 @@ def no_network(monkeypatch):
     def refuse(self, address, *args, **kwargs):
         pytest.fail(f"unit tests must not touch the network (connect to {address!r})", pytrace=False)
 
-    monkeypatch.setattr(socket.socket, "connect", refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    def refuse_lookup(host, *args, **kwargs):
+        pytest.fail(f"unit tests must not touch the network (name lookup of {host!r})", pytrace=False)
+
+    def refuse_send(self, data, *args):
+        pytest.fail(f"unit tests must not touch the network (sendto {args[-1]!r})", pytrace=False)
+
+    for method in ("connect", "connect_ex"):
+        monkeypatch.setattr(socket.socket, method, refuse)
+    monkeypatch.setattr(socket.socket, "sendto", refuse_send)
+    for function in ("getaddrinfo", "gethostbyname", "gethostbyname_ex"):
+        monkeypatch.setattr(socket, function, refuse_lookup)
 
 
 # Pinned binaries ======================================================================================================

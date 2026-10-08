@@ -291,3 +291,31 @@ def test_extract_member_reports_a_failed_write_as_a_write_failure_and_leaves_not
         extract_member(path, ArchiveFormat.TAR_XZ, "top/tool", target)
     assert "readable" not in str(raised.value)
     assert list(target.parent.iterdir()) == []
+
+
+def test_extract_member_reports_a_failing_close_as_a_write_failure_and_leaves_nothing(tmp_path, target, monkeypatch):
+    path = write_archive(tmp_path / "a.tar.xz", ArchiveFormat.TAR_XZ, [("top/tool", b"abc")])
+
+    class Failing(io.RawIOBase):
+        closes = 0
+
+        def writable(self):
+            return True
+
+        def write(self, data):
+            return len(data)
+
+        def close(self):
+            Failing.closes += 1
+            if Failing.closes == 1:
+                raise OSError(5, "Input/output error")
+            super().close()
+
+    def failing(fd, mode):
+        os.close(fd)
+        return io.BufferedWriter(Failing())
+
+    monkeypatch.setattr(archive.os, "fdopen", failing)
+    with pytest.raises(BinariesError, match="cannot write"):
+        extract_member(path, ArchiveFormat.TAR_XZ, "top/tool", target)
+    assert list(target.parent.iterdir()) == []

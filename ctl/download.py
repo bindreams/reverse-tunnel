@@ -6,8 +6,6 @@ import dataclasses
 import enum
 import functools
 import json
-import os
-import stat
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
@@ -20,7 +18,7 @@ from sigstore.models import Bundle
 from sigstore.verify import Verifier, policy
 
 from ctl.archive import ArchiveFormat, extract_member, hash_file, is_safe_member
-from ctl.atomic import is_link, replace_file, require_directory
+from ctl.atomic import read_file, replace_file, require_directory
 from ctl.binaries import HEX64, TOOLS, Pin, write_atomically
 from ctl.errors import AttestationError, BinariesError, UpstreamUnavailable
 from ctl.github import download, download_client
@@ -294,15 +292,10 @@ def read_digests(bin_dir: Path) -> dict[str, str]:
     """What `record_digests` wrote; `{}` when nothing was ever recorded, an error when the record cannot be trusted."""
     path = bin_dir / DIGESTS
     try:
-        if is_link(os.lstat(path)):
-            raise BinariesError(f"{path}: digests must be a regular file, not a link")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        with os.fdopen(os.open(path, flags), "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                raise BinariesError(f"{path}: digests must be a regular file")
-            text = stream.read().decode("utf-8")
-    except FileNotFoundError:
-        return {}
+        raw = read_file(bin_dir, DIGESTS)
+        if raw is None:
+            return {}
+        text = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise BinariesError(f"{path}: digests unreadable: {exc}") from exc
     try:

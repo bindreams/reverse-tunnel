@@ -86,9 +86,9 @@ def extract_member(path: Path, fmt: ArchiveFormat, member: str, target: Path) ->
     try:
         _, digest = _find(path, fmt, lambda name: name == member, copy, f"regular file at {member!r}")
         _flush(out)
-        out.close()
+        _close(out)
     except BaseException:
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(OSError, ValueError):  # already closed, or closing again fails the same way
             out.close()
         target.unlink(missing_ok=True)
         raise
@@ -185,6 +185,13 @@ def _copy_hashing(stream: IO[bytes], out: IO[bytes]) -> str:
         except OSError as exc:
             raise BinariesError(f"cannot write the extracted file: {exc}") from exc
     return digest.hexdigest()
+
+
+def _close(out: IO[bytes]) -> None:
+    try:
+        out.close()
+    except OSError as exc:
+        raise BinariesError(f"cannot write the extracted file: {exc}") from exc
 
 
 def _flush(out: IO[bytes]) -> None:

@@ -73,3 +73,33 @@ def test_an_interrupt_right_after_the_temporary_is_created_leaves_nothing_behind
     with pytest.raises(KeyboardInterrupt):
         replace_file(tmp_path, "tool", io.BytesIO(b"data"), 0o755)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_carried_over_mode_never_keeps_setuid_or_setgid(tmp_path, monkeypatch):
+    """Recorded at `fchmod`: the kernel drops set-id bits on a non-root write, but a root writer would keep them."""
+    path = tmp_path / "lock"
+    path.write_text("old")
+    path.chmod(0o6755)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o6755
+    requested = []
+    real = os.fchmod
+    monkeypatch.setattr(os, "fchmod", lambda fd, mode: (requested.append(mode), real(fd, mode))[1])
+    write_atomically(path, "new")
+    assert requested == [0o755]
+
+
+def test_a_symlinked_bin_directory_is_refused_when_reading_digests(tmp_path):
+    from ctl.download import read_digests
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / ".digests.json").write_text("{}")
+    (tmp_path / "bin").symlink_to(real)
+    with pytest.raises(BinariesError, match="link"):
+        read_digests(tmp_path / "bin")
+
+
+def test_a_missing_bin_directory_has_no_digests(tmp_path):
+    from ctl.download import read_digests
+
+    assert read_digests(tmp_path / "bin") == {}

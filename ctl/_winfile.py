@@ -45,9 +45,13 @@ STATUS_NO_SUCH_FILE = 0xC000000F
 STATUS_DELETE_PENDING = 0xC0000056
 QUERY_BUFFER_SIZE = 65536
 
-# SetFileInformationByHandle
-FILE_RENAME_INFO_EX = 22
-FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1
+# NtSetInformationFile
+FILE_DISPOSITION_INFORMATION = 13
+FILE_DISPOSITION_INFORMATION_EX = 64
+FILE_RENAME_INFORMATION_EX = 65
+FILE_RENAME_REPLACE_IF_EXISTS = 0x1
+FILE_DISPOSITION_DELETE = 0x1
+FILE_DISPOSITION_POSIX_SEMANTICS = 0x2
 
 
 class _FileInformation(ctypes.Structure):
@@ -85,7 +89,7 @@ class _IoStatusBlock(ctypes.Structure):
 
 
 class _RenameInfo(ctypes.Structure):
-    """FILE_RENAME_INFO: the name follows the header and `FileNameLength` counts its bytes."""
+    """FILE_RENAME_INFORMATION_EX: the name follows the header and `FileNameLength` counts its bytes."""
 
     _fields_ = [
         ("Flags", wintypes.DWORD),
@@ -106,8 +110,6 @@ def _kernel32():
     kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
     kernel32.GetFileType.argtypes = [wintypes.HANDLE]
     kernel32.GetFileType.restype = wintypes.DWORD
-    kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
-    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     return kernel32
@@ -127,6 +129,8 @@ def _ntdll():
         ctypes.POINTER(_IoStatusBlock), void_p, uint32, uint32, ctypes.c_ubyte, void_p, ctypes.c_ubyte
     ]
     ntdll.NtQueryDirectoryFile.restype = ctypes.c_int32
+    ntdll.NtSetInformationFile.argtypes = [void_p, ctypes.POINTER(_IoStatusBlock), void_p, uint32, uint32]
+    ntdll.NtSetInformationFile.restype = ctypes.c_int32
     ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_int32]
     ntdll.RtlNtStatusToDosError.restype = uint32
     return ntdll
@@ -230,11 +234,20 @@ def open_relative(
 
 
 def create_relative(
-    parent: int, name: str, *, label, access: int, error: type[Exception], share: int = FILE_SHARE_READ_WRITE
+    parent: int,
+    name: str,
+    *,
+    label,
+    access: int,
+    error: type[Exception],
+    into: ctypes.c_void_p,
+    share: int = FILE_SHARE_READ_WRITE
 ) -> int:
     """A handle to a new regular file `name` in the directory held by `parent`; `FileExistsError` if it exists.
 
-    The file is created through `parent`, so no path is resolved and nothing already at `name` is ever opened.
+    The file is created through `parent`, so no path is resolved and nothing already at `name` is ever opened. The kernel
+    writes the handle straight into the caller's `into`, so a caller that closes `into.value` on any failure cannot leak it,
+    even if it is interrupted the instant the call returns.
     """
     return _relative(
         parent,
@@ -246,7 +259,8 @@ def create_relative(
         directory=False,
         error=error,
         single_link=True,
-        share=share
+        share=share,
+        into=into
     )
 
 
@@ -259,46 +273,79 @@ def _entry_name(name: str, label, error: type[Exception]) -> bytes:
 
 
 def _relative(
-    parent: int, name: str, *, label, access: int, disposition: int, options: int, directory: bool,
-    error: type[Exception], single_link: bool, share: int
+    parent: int,
+    name: str,
+    *,
+    label,
+    access: int,
+    disposition: int,
+    options: int,
+    directory: bool,
+    error: type[Exception],
+    single_link: bool,
+    share: int,
+    into: ctypes.c_void_p | None = None
 ) -> int:
     encoded = _entry_name(name, label, error)
     kernel32, ntdll = _kernel32(), _ntdll()
     buffer = ctypes.create_string_buffer(encoded + b"\0\0")
     text = _UnicodeString(len(encoded), len(encoded) + 2, ctypes.addressof(buffer))
     attributes = _ObjectAttributes(ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(text), 0, None, None)
-    handle, status_block = ctypes.c_void_p(), _IoStatusBlock()
-    status = ntdll.NtCreateFile(
-        ctypes.byref(handle), access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, ctypes.byref(attributes),
-        ctypes.byref(status_block), None, 0, share, disposition, options, None, 0
-    )
-    if status < 0:
-        _raise_status(ntdll, status)
-    assert handle.value is not None
+    handle, status_block = into if into is not None else ctypes.c_void_p(), _IoStatusBlock()
     try:
+        status = ntdll.NtCreateFile(
+            ctypes.byref(handle), access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, ctypes.byref(attributes),
+            ctypes.byref(status_block), None, 0, share, disposition, options, None, 0
+        )
+        if status < 0:
+            _raise_status(ntdll, status)
+        assert handle.value is not None
         _inspect(kernel32, handle.value, label, directory=directory, single_link=single_link, error=error)
-        return handle.value
     except BaseException:
-        kernel32.CloseHandle(handle.value)
+        if handle.value is not None:
+            kernel32.CloseHandle(handle.value)
+            handle.value = None
         raise
+    return handle.value
 
 
 def rename_over(handle: int, directory: int, name: str, *, label, error: type[Exception]) -> None:
     """Rename the open file `handle` (which needs DELETE access) to `name` in the directory held by `directory`.
 
-    An existing entry of that name is replaced. The destination is given relative to the directory handle, so no path is
-    resolved; `directory` needs FILE_ADD_FILE.
+    An existing entry of that name is replaced. The destination is given relative to the directory handle through
+    `NtSetInformationFile` (the Win32 wrapper may rewrite a relative name as a DOS path); `directory` needs FILE_ADD_FILE.
     """
     encoded = _entry_name(name, label, error)
     size = ctypes.sizeof(_RenameInfo) + len(encoded)
     buffer = ctypes.create_string_buffer(size)
     info = _RenameInfo.from_buffer(buffer)
-    info.Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+    info.Flags = FILE_RENAME_REPLACE_IF_EXISTS
     info.RootDirectory = directory
     info.FileNameLength = len(encoded)
     ctypes.memmove(ctypes.addressof(buffer) + _RenameInfo.FileName.offset, encoded, len(encoded))
-    if not _kernel32().SetFileInformationByHandle(handle, FILE_RENAME_INFO_EX, buffer, size):
-        raise ctypes.WinError(ctypes.get_last_error())
+    _set_information(handle, FILE_RENAME_INFORMATION_EX, buffer, size)
+
+
+def delete_now(handle: int) -> None:
+    """Delete the file open as `handle` (which needs DELETE access), by name, without a path.
+
+    POSIX semantics remove the name at once even while handles stay open; where the volume cannot do that, the plain
+    disposition deletes when the last handle closes.
+    """
+    flags = ctypes.c_uint32(FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS)
+    try:
+        _set_information(handle, FILE_DISPOSITION_INFORMATION_EX, flags, ctypes.sizeof(flags))
+    except OSError:
+        _set_information(handle, FILE_DISPOSITION_INFORMATION, ctypes.c_ubyte(1), 1)
+
+
+def _set_information(handle: int, information_class: int, buffer, size: int) -> None:
+    ntdll = _ntdll()
+    status = ntdll.NtSetInformationFile(
+        handle, ctypes.byref(_IoStatusBlock()), ctypes.addressof(buffer), size, information_class
+    )
+    if status < 0:
+        _raise_status(ntdll, status)
 
 
 def list_names(directory: int) -> list[str]:

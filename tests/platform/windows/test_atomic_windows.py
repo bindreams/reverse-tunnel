@@ -109,10 +109,11 @@ def test_a_failing_source_leaves_the_old_file_and_no_temporary(tmp_path):
 
 
 def test_an_interrupt_right_after_the_temporary_is_created_leaves_nothing_behind(tmp_path, monkeypatch):
+    """The handle is left open when the interrupt lands: cleanup must delete through it and close it."""
     real = winfile.create_relative
 
     def interrupted(*args, **kwargs):
-        winfile.close_handle(real(*args, **kwargs))
+        real(*args, **kwargs)
         raise KeyboardInterrupt
 
     monkeypatch.setattr(winfile, "create_relative", interrupted)
@@ -132,3 +133,43 @@ def test_a_name_that_is_not_a_single_entry_is_refused(tmp_path):
         with pytest.raises(BinariesError, match="single directory entry"):
             put(tmp_path, name)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_failed_rename_deletes_the_temporary_and_keeps_the_old_file(tmp_path, monkeypatch):
+    put(tmp_path, "tool", b"old")
+
+    def refused(*args, **kwargs):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(winfile, "rename_over", refused)
+    with pytest.raises(PermissionError):
+        put(tmp_path, "tool", b"new")
+    assert [p.name for p in tmp_path.iterdir()] == ["tool"]
+    assert (tmp_path / "tool").read_bytes() == b"old"
+
+
+def test_a_successful_replace_is_never_deleted_by_the_cleanup(tmp_path, monkeypatch):
+    """An interrupt after the rename must not take the new file with it."""
+    real = winfile.rename_over
+
+    def renamed_then_interrupted(*args, **kwargs):
+        real(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(winfile, "rename_over", renamed_then_interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        put(tmp_path, "tool", b"new")
+    assert (tmp_path / "tool").read_bytes() == b"new"
+
+
+def test_digests_are_read_through_the_directory_handle_and_a_link_is_refused(tmp_path):
+    from ctl.download import read_digests
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / ".digests.json").write_text("{}")
+    os.symlink(real, tmp_path / "bin", target_is_directory=True)
+    with pytest.raises(BinariesError, match="reparse point"):
+        read_digests(tmp_path / "bin")
+    assert read_digests(real) == {}
+    assert read_digests(tmp_path / "missing") == {}
