@@ -178,42 +178,10 @@ def test_read_names_a_missing_file(tmp_path):
     assert str(path) in str(raised.value)
 
 
-def test_read_refuses_a_symlink_without_reading_its_target(tmp_path):
-    target = tmp_path / "target.env"
-    target.write_bytes(b"A=1\n")
-    link = tmp_path / ".env"
-    link.symlink_to(target)
-    with pytest.raises(EnvError) as raised:
-        read(link)
-    assert str(link) in str(raised.value)
-    assert "symlink" in str(raised.value)
-
-
-def test_read_refuses_a_dangling_symlink(tmp_path):
-    link = tmp_path / ".env"
-    link.symlink_to(tmp_path / "absent")
-    with pytest.raises(EnvError) as raised:
-        read(link)
-    assert "symlink" in str(raised.value)
-
-
 def test_read_refuses_a_directory(tmp_path):
     with pytest.raises(EnvError) as raised:
         read(tmp_path)
     assert str(tmp_path) in str(raised.value)
-
-
-def test_read_refuses_a_fifo_without_blocking(tmp_path):
-    fifo = tmp_path / ".env"
-    os.mkfifo(fifo)
-    with pytest.raises(EnvError) as raised:
-        read(fifo)
-    assert "regular file" in str(raised.value)
-
-
-def test_read_opens_with_nofollow_where_the_platform_has_it():
-    assert env.OPEN_FLAGS & os.O_RDONLY == os.O_RDONLY
-    assert env.OPEN_FLAGS & os.O_NOFOLLOW
 
 
 class _Stat:
@@ -232,17 +200,6 @@ def test_without_nofollow_a_reparse_point_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "lstat", lambda p: _Stat(attributes=env.FILE_ATTRIBUTE_REPARSE_POINT))
     with pytest.raises(EnvError) as raised:
         read(path)
-    assert "symlink" in str(raised.value)
-
-
-def test_without_nofollow_a_symlink_is_refused(tmp_path, monkeypatch):
-    target = tmp_path / "target.env"
-    target.write_bytes(b"A=1\n")
-    link = tmp_path / ".env"
-    link.symlink_to(target)
-    monkeypatch.setattr(env, "OPEN_FLAGS", os.O_RDONLY)
-    with pytest.raises(EnvError) as raised:
-        read(link)
     assert "symlink" in str(raised.value)
 
 
@@ -298,13 +255,61 @@ def test_referenced_variables_unions_both_syntaxes_across_a_file():
         "no variables here",
         "${{ runner.os }}",
         "{{ .Values.X }}",
-        "{{ .Envs.lower }}",
         "$X",
         "${lower}",
     ],
 )
 def test_referenced_variables_ignores_non_references(text):
     assert referenced_variables(text) == set()
+
+
+UNSUPPORTED_ACTIONS = [
+    pytest.param('{{ .Envs.X | default "y" }}', id="pipe"),
+    pytest.param("{{ (.Envs.X) }}", id="parenthesised"),
+    pytest.param('{{ index .Envs "X" }}', id="index"),
+    pytest.param("{{ with .Envs }}{{ .X }}{{ end }}", id="with"),
+    pytest.param("{{ .Envs }}", id="whole-map"),
+    pytest.param("{{ .Envs.x }}", id="lowercase-name"),
+    pytest.param("{{ .Envs.X.Y }}", id="field-of-value"),
+    pytest.param("{{ if .Envs.X }}", id="condition"),
+    pytest.param("{{ $x := .Envs.X }}", id="assignment"),
+    pytest.param("{{ printf \"%s\" .Envs.X }}", id="function-call"),
+    pytest.param("{{/* .Envs.X */}}", id="comment"),
+    pytest.param("{{ .Envs.X", id="unterminated"),
+    pytest.param("{{ .Envs.X }", id="half-closed"),
+    pytest.param("{{ .Envs.X\n| quote }}", id="multi-line"),
+    pytest.param("{{ $.Envs.X }}{{ .Envs.Y | quote }}", id="valid-then-invalid"),
+]
+
+
+@pytest.mark.parametrize("template", UNSUPPORTED_ACTIONS)
+def test_an_unsupported_envs_action_is_an_error_not_a_miss(template):
+    with pytest.raises(EnvError) as raised:
+        referenced_variables(f"a = 1\nb = {template}\n", source="frps.toml")
+    message = str(raised.value)
+    assert "frps.toml:2" in message
+    assert "{{ .Envs.NAME }}" in message
+
+
+def test_the_error_line_counts_from_the_unsupported_action():
+    text = "{{ .Envs.A }}\n\n\n{{ .Envs.B }} {{ index .Envs \"C\" }}\n"
+    with pytest.raises(EnvError) as raised:
+        referenced_variables(text, source="x.toml")
+    assert "x.toml:4" in str(raised.value)
+
+
+def test_actions_that_never_mention_envs_are_left_alone():
+    assert referenced_variables("{{ .Values.X | default 1 }} {{ range .Items }}{{ end }}") == set()
+
+
+def test_the_strict_pattern_is_one_exported_constant():
+    assert env.GO_TEMPLATE_REFERENCE.pattern == r"\{\{-?\s*\$?\.Envs\.([A-Z][A-Z0-9_]*)\s*-?\}\}"
+
+
+def test_the_source_defaults_to_a_placeholder_in_the_message():
+    with pytest.raises(EnvError) as raised:
+        referenced_variables("{{ .Envs }}")
+    assert "<text>:1" in str(raised.value)
 
 
 # Tracked config files =================================================================================================

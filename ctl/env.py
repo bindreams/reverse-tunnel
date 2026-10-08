@@ -13,6 +13,9 @@ KEY = re.compile(r"[A-Z][A-Z0-9_]*", re.ASCII)
 BANNED_VALUE_CHARACTERS = frozenset("\"'`$\\#")
 # Go `text/template` ignores whitespace and trim markers around the action, so the match must too.
 GO_TEMPLATE_REFERENCE = re.compile(r"\{\{-?\s*\$?\.Envs\.([A-Z][A-Z0-9_]*)\s*-?\}\}")
+# Any action, including an unterminated one that runs to the end of the text.
+GO_TEMPLATE_ACTION = re.compile(r"\{\{(?:(?!\}\}).)*(?:\}\}|$)", re.DOTALL)
+ENVS_WORD = re.compile(r"\bEnvs\b")
 COMPOSE_REFERENCE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[?-][^}]*)?\}")
 CONFIG_SUFFIXES = frozenset({".toml", ".yaml", ".yml", ".conf"})
 CONFIG_NAMES = frozenset({"Caddyfile"})
@@ -109,8 +112,15 @@ def _refuse_link(path: Path, opened: os.stat_result) -> None:
 # Variable references ==================================================================================================
 
 
-def referenced_variables(text: str) -> set[str]:
-    """Every variable a Go template (`{{ .Envs.X }}`) or compose/goetia (`${X}`) document names."""
+def referenced_variables(text: str, *, source: str = "<text>") -> set[str]:
+    """Every variable a Go template (`{{ .Envs.X }}`) or compose/goetia (`${X}`) document names.
+
+    A template action that mentions `Envs` in any other form is an error: it could read a variable this scan misses.
+    """
+    for action in GO_TEMPLATE_ACTION.finditer(text):
+        if ENVS_WORD.search(action.group()) and not GO_TEMPLATE_REFERENCE.fullmatch(action.group()):
+            line = text.count("\n", 0, action.start()) + 1
+            raise EnvError(f"{source}:{line}: unsupported template action; only `{{{{ .Envs.NAME }}}}` is supported")
     return set(GO_TEMPLATE_REFERENCE.findall(text)) | set(COMPOSE_REFERENCE.findall(text))
 
 

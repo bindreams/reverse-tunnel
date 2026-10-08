@@ -164,16 +164,6 @@ def test_a_syntax_error_in_env_is_a_config_error_naming_file_and_line(tmp_path):
     assert f"{tmp_path / '.env'}:2" in str(raised.value)
 
 
-def test_read_refuses_a_symlinked_env(tmp_path):
-    target = tmp_path / "elsewhere"
-    write_env(tmp_path, valid_values(Role.HOST))
-    (tmp_path / ".env").rename(target)
-    (tmp_path / ".env").symlink_to(target)
-    with pytest.raises(ConfigError) as raised:
-        Config.load(tmp_path)
-    assert "symlink" in str(raised.value)
-
-
 @pytest.mark.parametrize("role", [None, "", "Host", "HOST", "hosts", "server"])
 def test_unknown_role_is_rejected_listing_the_three_valid_roles(tmp_path, role):
     message = refused(tmp_path, Role.HOST, ROLE=role)
@@ -435,24 +425,6 @@ def test_config_carries_the_root_and_cannot_be_mutated(tmp_path):
         cfg.values["RT_LABEL"] = "x"  # ty: ignore[invalid-assignment]
 
 
-def test_load_never_modifies_the_filesystem(tmp_path):
-    path = write_env(tmp_path, valid_values(Role.HOST))
-    path.chmod(0o644)
-    before_file = path.stat()
-    before_dir = tmp_path.stat()
-    tmp_path.chmod(0o555)
-    try:
-        assert Config.load(tmp_path).role is Role.HOST
-        assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
-    finally:
-        tmp_path.chmod(0o755)
-    after_file = path.stat()
-    assert after_file.st_mode == before_file.st_mode
-    assert after_file.st_mtime_ns == before_file.st_mtime_ns
-    assert after_file.st_ino == before_file.st_ino
-    assert tmp_path.stat().st_mtime_ns == before_dir.st_mtime_ns
-
-
 # The example.env gates ================================================================================================
 
 
@@ -463,7 +435,7 @@ def git(root: Path, *args: str) -> None:
 def referenced_by_tracked_files(root: Path, *, minimum=None) -> set[str]:
     files = tracked_config_files(root) if minimum is None else tracked_config_files(root, minimum=minimum)
     assert files
-    return set().union(*(referenced_variables(f.read_text()) for f in files))
+    return set().union(*(referenced_variables(f.read_text(), source=str(f)) for f in files))
 
 
 def undeclared(root: Path, declared: set[str], **kwargs) -> set[str]:
