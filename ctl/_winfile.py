@@ -46,9 +46,17 @@ STATUS_DELETE_PENDING = 0xC0000056
 QUERY_BUFFER_SIZE = 65536
 
 # NtSetInformationFile
+FILE_RENAME_INFORMATION = 10
 FILE_DISPOSITION_INFORMATION = 13
 FILE_DISPOSITION_INFORMATION_EX = 64
 FILE_RENAME_INFORMATION_EX = 65
+FILE_NAME_INFORMATION = 9
+# A volume or an older Windows that does not know the `Ex` classes answers one of these, and the plain class serves.
+STATUS_INVALID_INFO_CLASS = 0xC0000003
+STATUS_INVALID_PARAMETER = 0xC000000D
+STATUS_NOT_SUPPORTED = 0xC00000BB
+UNSUPPORTED_CLASS = (STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED)
+NAME_BUFFER_SIZE = 4 + 2 * 32768
 FILE_RENAME_REPLACE_IF_EXISTS = 0x1
 FILE_DISPOSITION_DELETE = 0x1
 FILE_DISPOSITION_POSIX_SEMANTICS = 0x2
@@ -131,6 +139,8 @@ def _ntdll():
     ntdll.NtQueryDirectoryFile.restype = ctypes.c_int32
     ntdll.NtSetInformationFile.argtypes = [void_p, ctypes.POINTER(_IoStatusBlock), void_p, uint32, uint32]
     ntdll.NtSetInformationFile.restype = ctypes.c_int32
+    ntdll.NtQueryInformationFile.argtypes = [void_p, ctypes.POINTER(_IoStatusBlock), void_p, uint32, uint32]
+    ntdll.NtQueryInformationFile.restype = ctypes.c_int32
     ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_int32]
     ntdll.RtlNtStatusToDosError.restype = uint32
     return ntdll
@@ -302,9 +312,10 @@ def _relative(
         assert handle.value is not None
         _inspect(kernel32, handle.value, label, directory=directory, single_link=single_link, error=error)
     except BaseException:
-        if handle.value is not None:
+        # A handle in the caller's `into` is the caller's to dispose of: for a file just created that means deleting it
+        # before closing, which only the caller knows how to do.
+        if into is None and handle.value is not None:
             kernel32.CloseHandle(handle.value)
-            handle.value = None
         raise
     return handle.value
 
@@ -314,6 +325,8 @@ def rename_over(handle: int, directory: int, name: str, *, label, error: type[Ex
 
     An existing entry of that name is replaced. The destination is given relative to the directory handle through
     `NtSetInformationFile` (the Win32 wrapper may rewrite a relative name as a DOS path); `directory` needs FILE_ADD_FILE.
+    Where `FileRenameInformationEx` is not understood, the same buffer is sent as `FileRenameInformation`, whose first
+    byte is `ReplaceIfExists`.
     """
     encoded = _entry_name(name, label, error)
     size = ctypes.sizeof(_RenameInfo) + len(encoded)
@@ -323,7 +336,11 @@ def rename_over(handle: int, directory: int, name: str, *, label, error: type[Ex
     info.RootDirectory = directory
     info.FileNameLength = len(encoded)
     ctypes.memmove(ctypes.addressof(buffer) + _RenameInfo.FileName.offset, encoded, len(encoded))
-    _set_information(handle, FILE_RENAME_INFORMATION_EX, buffer, size)
+    status = _set_information(handle, FILE_RENAME_INFORMATION_EX, buffer, size)
+    if status & 0xFFFFFFFF in UNSUPPORTED_CLASS:
+        status = _set_information(handle, FILE_RENAME_INFORMATION, buffer, size)
+    if status < 0:
+        _raise_status(_ntdll(), status)
 
 
 def delete_now(handle: int) -> None:
@@ -333,19 +350,32 @@ def delete_now(handle: int) -> None:
     disposition deletes when the last handle closes.
     """
     flags = ctypes.c_uint32(FILE_DISPOSITION_DELETE | FILE_DISPOSITION_POSIX_SEMANTICS)
-    try:
-        _set_information(handle, FILE_DISPOSITION_INFORMATION_EX, flags, ctypes.sizeof(flags))
-    except OSError:
-        _set_information(handle, FILE_DISPOSITION_INFORMATION, ctypes.c_ubyte(1), 1)
+    status = _set_information(handle, FILE_DISPOSITION_INFORMATION_EX, flags, ctypes.sizeof(flags))
+    if status < 0:
+        status = _set_information(handle, FILE_DISPOSITION_INFORMATION, ctypes.c_ubyte(1), 1)
+    if status < 0:
+        _raise_status(_ntdll(), status)
 
 
-def _set_information(handle: int, information_class: int, buffer, size: int) -> None:
+def final_name(handle: int) -> str:
+    """The last component of the name the open file `handle` has now, which a rename through the handle changes."""
     ntdll = _ntdll()
-    status = ntdll.NtSetInformationFile(
-        handle, ctypes.byref(_IoStatusBlock()), ctypes.addressof(buffer), size, information_class
+    buffer = ctypes.create_string_buffer(NAME_BUFFER_SIZE)
+    status = ntdll.NtQueryInformationFile(
+        handle, ctypes.byref(_IoStatusBlock()), ctypes.addressof(buffer), NAME_BUFFER_SIZE, FILE_NAME_INFORMATION
     )
     if status < 0:
         _raise_status(ntdll, status)
+    length = ctypes.c_uint32.from_buffer(buffer).value
+    path = ctypes.wstring_at(ctypes.addressof(buffer) + 4, length // 2)
+    return path.rsplit("\\", 1)[-1]
+
+
+def _set_information(handle: int, information_class: int, buffer, size: int) -> int:
+    """The NTSTATUS of `NtSetInformationFile`; the callers decide which failures to retry."""
+    return _ntdll().NtSetInformationFile(
+        handle, ctypes.byref(_IoStatusBlock()), ctypes.addressof(buffer), size, information_class
+    )
 
 
 def list_names(directory: int) -> list[str]:

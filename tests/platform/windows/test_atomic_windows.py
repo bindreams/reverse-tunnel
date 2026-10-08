@@ -173,3 +173,34 @@ def test_digests_are_read_through_the_directory_handle_and_a_link_is_refused(tmp
         read_digests(tmp_path / "bin")
     assert read_digests(real) == {}
     assert read_digests(tmp_path / "missing") == {}
+
+
+def test_a_handle_reports_the_name_it_has_now_and_a_rename_through_it_changes_it(tmp_path):
+    import ctypes
+
+    directory = winfile.open_handle(
+        tmp_path,
+        access=winfile.FILE_ADD_FILE | winfile.FILE_LIST_DIRECTORY,
+        disposition=winfile.OPEN_EXISTING,
+        directory=True,
+        error=BinariesError,
+        share=winfile.FILE_SHARE_READ_WRITE,
+    )
+    holder = ctypes.c_void_p()
+    try:
+        winfile.create_relative(
+            directory,
+            ".temporary",
+            label=tmp_path / ".temporary",
+            access=winfile.GENERIC_WRITE | winfile.DELETE,
+            error=BinariesError,
+            into=holder
+        )
+        assert holder.value is not None
+        assert winfile.final_name(holder.value) == ".temporary"
+        winfile.rename_over(holder.value, directory, "final", label=tmp_path / "final", error=BinariesError)
+        assert winfile.final_name(holder.value) == "final"
+        winfile.close_handle(holder.value)
+    finally:
+        winfile.close_handle(directory)
+    assert [p.name for p in tmp_path.iterdir()] == ["final"]

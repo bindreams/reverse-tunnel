@@ -10,14 +10,18 @@ import contextlib
 import ctypes
 import os
 import secrets
+import signal
 import stat
 import sys
+import threading
+from collections.abc import Callable, Generator
 from pathlib import Path
+from types import FrameType
 from typing import IO
 
-from ctl.archive import CHUNK
 from ctl.errors import BinariesError
 
+CHUNK = 1 << 20
 DEFAULT_MODE = 0o644
 PERMISSION_BITS = 0o777  # a carried-over mode never keeps setuid, setgid or sticky
 O_BINARY = getattr(os, "O_BINARY", 0)
@@ -27,6 +31,38 @@ def is_link(status: os.stat_result) -> bool:
     return stat.S_ISLNK(
         status.st_mode
     ) or bool(getattr(status, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+@contextlib.contextmanager
+def deferred_interrupts() -> Generator[None]:
+    """Hold Ctrl-C (and Ctrl-Break on Windows) until the block ends, then raise `KeyboardInterrupt` if one arrived.
+
+    A block that creates, writes, renames and cleans up files must not be torn in the middle: an interrupt between a
+    system call returning and its result being stored would leak a handle or a temporary no matter how the code is
+    ordered. The previous handlers are restored on exit. Signals can only be handled on the main thread, so elsewhere the
+    block simply runs; a signal whose handler is `SIG_IGN` stays ignored.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    names = ("SIGINT", "SIGBREAK")
+    arrived: list[int] = []
+    previous: dict[int, Callable[[int, FrameType | None], object] | int | None] = {}
+
+    def record(number: int, frame: object) -> None:
+        arrived.append(number)
+
+    for name in names:
+        number = getattr(signal, name, None)
+        if number is not None and signal.getsignal(number) != signal.SIG_IGN:
+            previous[number] = signal.signal(number, record)
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+        if arrived:
+            raise KeyboardInterrupt
 
 
 def require_directory(directory: Path) -> None:
@@ -48,10 +84,11 @@ def replace_file(directory: Path, name: str, source: IO[bytes], mode: int | None
     """
     if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
         raise BinariesError(f"{directory / name}: not a single directory entry name")
-    if sys.platform == "win32":
-        _replace_windows(directory, name, source)
-    else:
-        _replace_posix(directory, name, source, mode)
+    with deferred_interrupts():
+        if sys.platform == "win32":
+            _replace_windows(directory, name, source)
+        else:
+            _replace_posix(directory, name, source, mode)
     return directory / name
 
 
@@ -63,9 +100,8 @@ def read_file(directory: Path, name: str) -> bytes | None:
     """
     if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
         raise BinariesError(f"{directory / name}: not a single directory entry name")
-    if sys.platform == "win32":
-        return _read_windows(directory, name)
-    return _read_posix(directory, name)
+    with deferred_interrupts():
+        return _read_windows(directory, name) if sys.platform == "win32" else _read_posix(directory, name)
 
 
 # POSIX ================================================================================================================
@@ -164,12 +200,12 @@ def _write(fd: int, source: IO[bytes]) -> None:
 # Windows ==============================================================================================================
 
 
-def _open_directory_windows(directory: Path, winfile, *, missing_ok: bool = False) -> int:
+def _open_directory_windows(directory: Path, winfile, *, missing_ok: bool = False, access: int | None = None) -> int:
     """The directory as a held handle: no reparse point, and nobody can rename or delete it while it is held."""
     try:
         return winfile.open_handle(
             directory,
-            access=winfile.FILE_ADD_FILE | winfile.FILE_LIST_DIRECTORY,
+            access=winfile.FILE_ADD_FILE | winfile.FILE_LIST_DIRECTORY if access is None else access,
             disposition=winfile.OPEN_EXISTING,
             directory=True,
             error=BinariesError,
@@ -190,9 +226,8 @@ def _replace_windows(directory: Path, name: str, source: IO[bytes]) -> None:
 
     handle = _open_directory_windows(directory, winfile)
     temporary = f".{name}.{secrets.token_hex(8)}.tmp"
-    created = ctypes.c_void_p()  # the kernel writes the new file's handle here, so no interrupt can lose it
+    created = ctypes.c_void_p()  # the kernel writes the new file's handle here
     fd = -1
-    renaming = False
     try:
         _vet_destination(handle, directory, name, winfile)
         winfile.create_relative(
@@ -205,33 +240,35 @@ def _replace_windows(directory: Path, name: str, source: IO[bytes]) -> None:
         )
         assert created.value is not None
         fd = msvcrt.open_osfhandle(created.value, os.O_WRONLY | O_BINARY)  # the descriptor now owns the handle
+        created.value = None
         _write(fd, source)
         os.fsync(fd)
-        renaming = True  # from here the handle may name the destination, which must never be deleted
-        try:
-            winfile.rename_over(msvcrt.get_osfhandle(fd), handle, name, label=directory / name, error=BinariesError)
-        except Exception:
-            renaming = False
-            raise
+        winfile.rename_over(msvcrt.get_osfhandle(fd), handle, name, label=directory / name, error=BinariesError)
         os.close(fd)
         fd = -1
     except BaseException:
-        _discard_windows(fd, created, renaming, winfile)
+        _discard_windows(fd, created, temporary, winfile)
         raise
     finally:
         winfile.close_handle(handle)
 
 
-def _discard_windows(fd: int, created: ctypes.c_void_p, renaming: bool, winfile) -> None:
-    """Delete the temporary through its own handle, then close it; nothing is resolved by path."""
+def _discard_windows(fd: int, created: ctypes.c_void_p, temporary: str, winfile) -> None:
+    """Delete the temporary through its own handle, then close it; nothing is resolved by path.
+
+    The handle is asked for its name rather than trusting a record of what was done: only a file still called
+    `temporary` is deleted, so a completed rename can never take the destination with it.
+    """
     import msvcrt
 
     owned = created.value
     with contextlib.suppress(OSError):
-        owned = msvcrt.get_osfhandle(fd) if fd >= 0 else created.value
-    if owned is not None and not renaming:
+        if fd >= 0:
+            owned = msvcrt.get_osfhandle(fd)
+    if owned is not None:
         with contextlib.suppress(OSError):
-            winfile.delete_now(owned)
+            if winfile.final_name(owned) == temporary:
+                winfile.delete_now(owned)
     if fd >= 0:
         os.close(fd)
     elif created.value is not None:
@@ -255,7 +292,9 @@ def _read_windows(directory: Path, name: str) -> bytes | None:
     from ctl import _winfile as winfile
 
     try:
-        handle = _open_directory_windows(directory, winfile, missing_ok=True)
+        handle = _open_directory_windows(
+            directory, winfile, missing_ok=True, access=winfile.FILE_LIST_DIRECTORY | winfile.READ_CONTROL
+        )
     except FileNotFoundError:
         return None
     try:
@@ -265,7 +304,11 @@ def _read_windows(directory: Path, name: str) -> bytes | None:
             )
         except FileNotFoundError:
             return None
-        fd = msvcrt.open_osfhandle(file, os.O_RDONLY | O_BINARY)
+        try:
+            fd = msvcrt.open_osfhandle(file, os.O_RDONLY | O_BINARY)
+        except BaseException:
+            winfile.close_handle(file)
+            raise
         with os.fdopen(fd, "rb") as stream:
             return stream.read()
     finally:

@@ -22,6 +22,7 @@ from functools import partial
 from typing import IO, Literal, TypeVar
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from ctl.atomic import CHUNK, deferred_interrupts
 from ctl.errors import BinariesError
 
 
@@ -36,7 +37,6 @@ TAR_MODES: dict[ArchiveFormat, Literal["r:gz", "r:xz"]] = {
     ArchiveFormat.TAR_GZ: "r:gz",
     ArchiveFormat.TAR_XZ: "r:xz",
 }
-CHUNK = 1 << 20
 T = TypeVar("T")
 
 
@@ -74,23 +74,40 @@ def extract_member(path: Path, fmt: ArchiveFormat, member: str, target: Path) ->
     if target.parent.is_symlink() or not target.parent.is_dir():
         raise BinariesError(f"{target}: the parent must be an existing directory and not a link")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-    out = os.fdopen(os.open(target, flags, 0o600), "wb")
     copied: list[str] = []
+    fd, out, created = -1, None, False
 
     def copy(stream: IO[bytes]) -> str:
         if copied:
             raise BinariesError(f"{path.name}: more than one regular file at {member!r}")
         copied.append(member)
+        assert out is not None
         return _copy_hashing(stream, out)
 
     try:
-        _, digest = _find(path, fmt, lambda name: name == member, copy, f"regular file at {member!r}")
-        _flush(out)
-        _close(out)
-    except BaseException:
-        with contextlib.suppress(OSError, ValueError):  # already closed, or closing again fails the same way
-            out.close()
-        target.unlink(missing_ok=True)
+        with deferred_interrupts():  # creating, writing and cleaning up are one unit
+            try:
+                fd = os.open(target, flags, 0o600)
+                created = True
+                out = os.fdopen(fd, "wb")
+                _, digest = _find(path, fmt, lambda name: name == member, copy, f"regular file at {member!r}")
+                _flush(out)
+                _close(out)
+            except BaseException:
+                if out is not None:
+                    with contextlib.suppress(
+                        OSError, ValueError
+                    ):  # already closed, or closing again fails the same way
+                        out.close()
+                elif fd >= 0:
+                    os.close(fd)
+                if created:
+                    target.unlink(missing_ok=True)
+                raise
+    except KeyboardInterrupt:
+        if created:  # a Ctrl-C deferred until the copy had finished: the caller is leaving, so leave nothing
+            with deferred_interrupts():
+                target.unlink(missing_ok=True)
         raise
     return digest
 
