@@ -36,6 +36,17 @@ from ctl.perms import (
 ACL_ACCESS = winfile.READ_CONTROL | winfile.WRITE_DAC
 LOCAL_SERVICE = "localservice"
 FLAT = "; remove it, this directory holds regular files only"
+RETRY = "remove it, or close the process holding it, then rerun"
+
+
+def _listed(names: list[str], wanted: tuple[str, ...]) -> dict[str, str]:
+    """For each of `wanted` present in `names` (compared case-insensitively), the name as the directory lists it."""
+    by_folded = {name.casefold(): name for name in names}
+    return {name: by_folded[name.casefold()] for name in wanted if name.casefold() in by_folded}
+
+
+def _unopenable(label: Path, exc: OSError) -> PermsError:
+    return PermsError(f"{label}: listed but cannot be opened: {exc.strerror or exc}; {RETRY}")
 
 
 @contextmanager
@@ -206,7 +217,8 @@ def converge_dir(
                 readers=readers,
                 writers=writers,
                 isolate=isolate,
-                parent=parent
+                parent=parent,
+                parent_label=str(path.parent)
             )
             _verify(handle, path, wanted, isolate=isolate)
 
@@ -226,7 +238,7 @@ def _open_entries(stack: ExitStack, directory: int, where: Path) -> list[tuple[i
         except PermsError as exc:
             raise PermsError(f"{exc}{FLAT}") from exc
         except OSError as exc:  # a name just listed that cannot be opened is not skipped: fail closed
-            raise PermsError(f"{label}: listed but cannot be opened: {exc.strerror or exc}") from exc
+            raise _unopenable(label, exc) from exc
         stack.callback(winfile.close_handle, handle)
         entries.append((handle, label))
     return entries
@@ -254,13 +266,22 @@ def converge_tree(path: Path, owner: Account | None, root: Path) -> None:
         )
         entries = _open_entries(stack, held, path)
         wanted = winacl.apply(
-            held, directory=True, operator=operator, readers=frozenset(), writers=writers, isolate=False, parent=parent
+            held,
+            directory=True,
+            operator=operator,
+            readers=frozenset(),
+            writers=writers,
+            isolate=False,
+            parent=parent,
+            parent_label=str(path.parent)
         )
         _verify(held, path, wanted, isolate=False)
-        new_entries = winacl.read_entries(held)[0]
+        new_entries = winacl.read_entries(held)[0]  # as they are on disk
         for handle, label in entries:
             owner_sid, group_sid = winacl.owner_and_group(handle)
-            inherited = winacl.inherited_for(new_entries, directory=False, owner=owner_sid, group=group_sid)
+            inherited = winacl.inherited_for(
+                new_entries, directory=False, owner=owner_sid, group=group_sid, parent_label=str(path)
+            )
             winacl.set_dacl(handle, inherited, protected=False)
             if winacl.read_acl_handle(handle).protected:
                 raise PermsError(f"{label}: inheritance is still broken after the reset")
@@ -291,20 +312,21 @@ def grant_service_read(root: Path, account: Account) -> None:
         )
         top = _Target(root_handle, root, True, [])
         targets: list[_Target] = []
-        present = {name.casefold() for name in winfile.list_names(root_handle)}
-        for name in ("bin", "host"):
-            if name not in present:  # absent, not unopenable: whatever is created there later inherits normally
-                continue
+        # A directory missing from the listing is absent, not unopenable: whatever is created there inherits normally.
+        for name in _listed(winfile.list_names(root_handle), ("bin", "host")).values():
             label = root / name
-            handle = winfile.open_relative(
-                root_handle,
-                name,
-                label=label,
-                access=listing,
-                directory=True,
-                error=PermsError,
-                share=winfile.FILE_SHARE_READ_WRITE
-            )
+            try:
+                handle = winfile.open_relative(
+                    root_handle,
+                    name,
+                    label=label,
+                    access=listing,
+                    directory=True,
+                    error=PermsError,
+                    share=winfile.FILE_SHARE_READ_WRITE
+                )
+            except OSError as exc:
+                raise _unopenable(label, exc) from exc
             stack.callback(winfile.close_handle, handle)
             directory = _Target(handle, label, True, [], top)
             targets.append(directory)
@@ -326,13 +348,19 @@ def grant_service_read(root: Path, account: Account) -> None:
             e for e in top.entries
             if e.flags & winacl.INHERITED_ACE or e.sid != sid or e.ace_type != winacl.ACCESS_ALLOWED_ACE_TYPE
         ]
-        top.entries = kept + [service]
+        top.entries = winacl.canonical(kept + [service])  # the order it will have on disk
         winacl.set_dacl(root_handle, top.entries, protected=root_protected)
         for target in targets:
             assert target.parent is not None
             owner_sid, group_sid = winacl.owner_and_group(target.handle)
-            target.entries = winacl.explicit(target.entries) + winacl.inherited_for(
-                target.parent.entries, directory=target.directory, owner=owner_sid, group=group_sid
+            target.entries = winacl.canonical(
+                winacl.explicit(target.entries) + winacl.inherited_for(
+                    target.parent.entries,
+                    directory=target.directory,
+                    owner=owner_sid,
+                    group=group_sid,
+                    parent_label=str(target.parent.label)
+                )
             )
             winacl.set_dacl(target.handle, target.entries, protected=False)
         for target in [top, *targets]:

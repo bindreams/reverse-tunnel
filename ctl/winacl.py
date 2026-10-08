@@ -26,6 +26,8 @@ SID_ADMINISTRATORS = "S-1-5-32-544"
 SID_USERS = "S-1-5-32-545"
 SID_CREATOR_OWNER = "S-1-3-0"
 SID_CREATOR_GROUP = "S-1-3-1"
+# CREATOR OWNER SERVER and CREATOR GROUP SERVER have server-side semantics this module does not model.
+SERVER_CREATOR_SIDS = frozenset({"S-1-3-2", "S-1-3-3"})
 
 # The access masks `icacls` means by F, M, RX, R and R,W.
 FULL = 0x1F01FF
@@ -55,6 +57,10 @@ SDDL_REVISION_1 = 1
 # SDDL ACE flag tokens, in the order SDDL writes them.
 SDDL_FLAGS = ((OBJECT_INHERIT_ACE, "OI"), (CONTAINER_INHERIT_ACE, "CI"), (NO_PROPAGATE_INHERIT_ACE, "NP"),
               (INHERIT_ONLY_ACE, "IO"), (INHERITED_ACE, "ID"))
+
+
+class UnsupportedInheritance(OSError):
+    """An inheritable ACE whose inherited form this module cannot compute faithfully."""
 
 
 class Entry(NamedTuple):
@@ -103,22 +109,32 @@ def _effective(ace: Entry, owner: str | None, group: str | None) -> Entry:
     return ace._replace(sid=sid, mask=mask, flags=INHERITED_ACE)
 
 
-def inherited_for(parent: Iterable[Entry],
-                  *,
-                  directory: bool,
-                  owner: str | None = None,
-                  group: str | None = None) -> list[Entry]:
+def inherited_for(
+    parent: Iterable[Entry],
+    *,
+    directory: bool,
+    owner: str | None = None,
+    group: str | None = None,
+    parent_label: str = "<parent>",
+) -> list[Entry]:
     """The ACEs a new child of `parent` inherits, as NTFS computes them. `owner` and `group` are the child's.
 
     A file takes every object-inheritable ACE. A directory takes a container-inheritable one, and an object-only one
     as an inherit-only ACE for its own files. Every result carries INHERITED_ACE. The effective ACE for the child maps
     CREATOR OWNER and CREATOR GROUP to `owner` and `group` and generic rights to file rights. A directory that passes
-    such an ACE on keeps the original, unmapped, as a second inherit-only ACE. `parent` holds all of the parent's ACEs,
-    its own inherited ones included.
+    such an ACE on keeps the original, unmapped, as a second inherit-only ACE. OWNER RIGHTS is passed on as any other
+    SID. The result follows the order of `parent`, which holds all of the parent's ACEs, its own inherited ones
+    included, as they are on disk. An inheritable CREATOR OWNER SERVER or CREATOR GROUP SERVER ACE raises
+    `UnsupportedInheritance` naming `parent_label`.
     """
     result = []
     for ace in parent:
         flags = ace.flags
+        if flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) and ace.sid in SERVER_CREATOR_SIDS:
+            raise UnsupportedInheritance(
+                f"{parent_label}: grants {ace.sid}, which is inherited with server semantics this tool does not "
+                "model; remove that ACE"
+            )
         if not directory:
             if flags & OBJECT_INHERIT_ACE:
                 result.append(_effective(ace, owner, group))
@@ -140,8 +156,14 @@ def explicit(entries: Iterable[Entry]) -> list[Entry]:
 
 
 def canonical(entries: Iterable[Entry]) -> list[Entry]:
-    """Explicit denies, explicit allows, inherited denies, inherited allows: the order Windows expects."""
-    return sorted(entries, key=lambda ace: (bool(ace.flags & INHERITED_ACE), ace.ace_type == ACCESS_ALLOWED_ACE_TYPE))
+    """The order a DACL is stored in: explicit denies, explicit allows, then inherited ACEs in the order given.
+
+    NTFS keeps inherited ACEs in inheritance order, which follows the parent's, so they are never re-sorted.
+    """
+    entries = list(entries)
+    own = sorted((e for e in entries if not e.flags & INHERITED_ACE),
+                 key=lambda e: e.ace_type == ACCESS_ALLOWED_ACE_TYPE)
+    return own + [e for e in entries if e.flags & INHERITED_ACE]
 
 
 def to_sddl(entries: Iterable[Entry], *, protected: bool) -> str:
@@ -311,6 +333,7 @@ def apply(
     writers: Collection[str],
     isolate: bool,
     parent: Iterable[Entry] = (),
+    parent_label: str = "<parent>",
 ) -> frozenset[str]:
     """Make the explicit ACEs of the object exactly the `grants`, inheritable by children if it is a directory.
 
@@ -323,6 +346,6 @@ def apply(
     entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()]
     if not isolate:
         owner, group = owner_and_group(handle)
-        entries += inherited_for(parent, directory=directory, owner=owner, group=group)
+        entries += inherited_for(parent, directory=directory, owner=owner, group=group, parent_label=parent_label)
     set_dacl(handle, entries, protected=isolate)
     return frozenset(wanted)

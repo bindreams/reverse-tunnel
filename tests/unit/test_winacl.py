@@ -81,7 +81,7 @@ def test_explicit_drops_the_inherited_entries():
     assert [e.flags for e in kept] == [OI, 0]
 
 
-def test_sddl_orders_explicit_before_inherited_and_denies_before_allows():
+def test_sddl_orders_explicit_before_inherited_and_explicit_denies_before_explicit_allows():
     entries = [
         entry(ID | OI | CI, sid="S-1-5-18"),
         entry(OI | CI, sid="S-1-5-19"),
@@ -188,3 +188,59 @@ def test_a_creator_ace_without_the_owner_it_needs_is_an_error():
     parent = [entry(OI | CI, mask=FILE_ALL_ACCESS, sid=CREATOR_OWNER)]
     with pytest.raises(ValueError):
         winacl.inherited_for(parent, directory=False)
+
+
+def test_inherited_aces_keep_the_order_they_were_given_even_when_an_allow_precedes_a_deny():
+    entries = [
+        entry(ID | OI | CI, mask=0x1, sid="S-1-5-32-544"),
+        entry(ID | OI | CI, ace_type=DENY, mask=0x2, sid="S-1-5-32-546"),
+        entry(0, mask=0x3, sid="S-1-5-19"),
+        entry(0, ace_type=DENY, mask=0x4, sid="S-1-5-32-545"),
+    ]
+    assert [(e.sid, e.flags) for e in winacl.canonical(entries)] == [
+        ("S-1-5-32-545", 0),
+        ("S-1-5-19", 0),
+        ("S-1-5-32-544", ID | OI | CI),
+        ("S-1-5-32-546", ID | OI | CI),
+    ]
+
+
+def test_inherited_for_emits_in_the_parents_order():
+    parent = [
+        entry(OI | CI, mask=0x1, sid="S-1-5-32-544"),
+        entry(ID | OI | CI, ace_type=DENY, mask=0x2, sid="S-1-5-32-546"),
+        entry(OI | CI, mask=0x3, sid="S-1-5-19"),
+    ]
+    assert [e.sid for e in inherit(parent, directory=True)] == ["S-1-5-32-544", "S-1-5-32-546", "S-1-5-19"]
+
+
+@pytest.mark.parametrize("sid", ["S-1-3-2", "S-1-3-3"])
+@pytest.mark.parametrize("flags", [OI, CI, OI | CI, OI | CI | IO])
+@pytest.mark.parametrize("directory", [False, True])
+def test_creator_server_sids_are_refused_naming_the_sid_and_the_parent(sid, flags, directory):
+    with pytest.raises(OSError) as raised:
+        winacl.inherited_for([entry(flags, sid=sid)],
+                             directory=directory,
+                             owner=OWNER,
+                             group=GROUP,
+                             parent_label="C:/repo")
+    assert sid in str(raised.value)
+    assert "C:/repo" in str(raised.value)
+
+
+def test_a_creator_server_ace_that_is_not_inheritable_is_not_a_problem():
+    assert inherit([entry(0, sid="S-1-3-2")], directory=True) == []
+
+
+def test_owner_rights_is_neither_substituted_nor_split():
+    parent = [entry(OI | CI, mask=0x20000, sid="S-1-3-4")]
+    assert as_set(inherit(parent, directory=False)) == {("S-1-3-4", 0x20000, ID)}
+    assert as_set(inherit(parent, directory=True)) == {("S-1-3-4", 0x20000, ID | OI | CI)}
+    assert len(inherit(parent, directory=True)) == 1
+
+
+def test_a_delete_pending_status_says_so():
+    from ctl import _winfile
+
+    error = _winfile._status_error(None, 0xC0000056 - (1 << 32))
+    assert "being deleted" in str(error)

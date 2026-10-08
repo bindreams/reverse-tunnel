@@ -11,6 +11,7 @@ as `RootDirectory`), so no path is ever resolved a second time.
 """
 
 import ctypes
+import errno
 from ctypes import wintypes
 
 GENERIC_READ = 0x80000000
@@ -38,6 +39,7 @@ OBJ_CASE_INSENSITIVE = 0x40
 FILE_NAMES_INFORMATION = 12
 STATUS_NO_MORE_FILES = 0x80000006
 STATUS_NO_SUCH_FILE = 0xC000000F
+STATUS_DELETE_PENDING = 0xC0000056
 QUERY_BUFFER_SIZE = 65536
 
 
@@ -110,9 +112,15 @@ def _ntdll():
     return ntdll
 
 
+def _status_error(ntdll, status: int) -> OSError:
+    """The `OSError` (a `FileNotFoundError` for a missing name, and so on) that an NTSTATUS means."""
+    if status & 0xFFFFFFFF == STATUS_DELETE_PENDING:
+        return OSError(errno.EBUSY, "is being deleted")
+    return ctypes.WinError(ntdll.RtlNtStatusToDosError(status))
+
+
 def _raise_status(ntdll, status: int):
-    """Raise the `OSError` (a `FileNotFoundError` for a missing name, and so on) that an NTSTATUS means."""
-    raise ctypes.WinError(ntdll.RtlNtStatusToDosError(status))
+    raise _status_error(ntdll, status)
 
 
 def close_handle(handle: int) -> None:

@@ -142,3 +142,9 @@ def test_converge_tree_accepts_a_flat_directory_of_regular_files(tmp_path):
     (logs / "frpc.log").write_bytes(b"")
     (logs / "websocat.log").write_bytes(b"")
     converge_tree(logs, None, 0o750, root=tmp_path)
+
+
+def test_listed_names_are_matched_case_insensitively_and_returned_as_listed():
+    from ctl import perms_windows
+
+    assert perms_windows._listed(["Bin", "HOST", "ctl"], ("bin", "host", "logs")) == {"bin": "Bin", "host": "HOST"}

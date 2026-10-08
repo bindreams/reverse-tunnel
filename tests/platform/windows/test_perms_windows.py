@@ -566,36 +566,65 @@ def test_grant_service_read_opens_a_non_bmp_file_name_in_bin(tmp_path):
 # Differential against NTFS ============================================================================================
 
 
-def test_inherited_for_reproduces_what_ntfs_computes_for_creator_owner_and_generic_rights(tmp_path):
-    parent = tmp_path / "parent"
+def icacls(*arguments: str) -> None:
+    subprocess.run(["icacls", *arguments], check=True, capture_output=True)
+
+
+def differential_parent(tmp_path: Path) -> Path:
+    """A directory whose ACL has every inheritance case: an inherited deny from above, then explicit ACEs of each kind."""
+    grandparent = tmp_path / "grandparent"
+    grandparent.mkdir()
+    icacls(str(grandparent), "/inheritance:r", "/grant:r", f"*{SID_ADMINISTRATORS}:(OI)(CI)(F)")
+    icacls(str(grandparent), "/deny", "*S-1-5-32-546:(OI)(CI)(W)")
+    parent = grandparent / "parent"
     parent.mkdir()
-    subprocess.run(
-        [
-            "icacls",
-            str(parent), "/inheritance:r", "/grant:r", f"*{SID_ADMINISTRATORS}:(OI)(CI)(F)", "*S-1-3-0:(OI)(CI)(IO)(F)",
-            f"*{SID_USERS}:(OI)(CI)(GR,GE)"
-        ],
-        check=True,
-        capture_output=True,
+    icacls(
+        str(parent), "/grant:r", "*S-1-3-0:(OI)(CI)(IO)(F)", "*S-1-3-1:(OI)(CI)(IO)(R)",
+        f"*{SID_USERS}:(OI)(CI)(GR,GE)", "*S-1-5-32-547:(OI)(CI)(NP)(R)", "*S-1-5-32-551:(OI)(RX)",
+        "*S-1-3-4:(OI)(CI)(RC)"
     )
+    return parent
+
+
+def test_inherited_for_reproduces_the_ordered_acl_ntfs_computes(tmp_path):
+    parent = differential_parent(tmp_path)
     child_file = parent / "f"
     child_file.write_bytes(b"")
     child_dir = parent / "d"
     child_dir.mkdir()
     parent_entries = entries_of(parent)
+    assert any(e.flags & winacl.INHERITED_ACE and e.ace_type == winacl.ACCESS_DENIED_ACE_TYPE for e in parent_entries)
 
-    def triples(entries):
-        return {(e.sid, e.mask, e.flags) for e in entries}
+    def ordered(entries):
+        return [(e.ace_type, e.sid, e.mask, e.flags) for e in entries]
 
     for path, directory in ((child_file, False), (child_dir, True)):
         with perms_windows._handle(path, directory=directory) as handle:
-            by_ntfs = triples(winacl.read_entries(handle)[0])
+            by_ntfs = ordered(winacl.read_entries(handle)[0])
             owner, group = winacl.owner_and_group(handle)
             winacl.set_dacl(handle, [], protected=False)
             assert winacl.read_entries(handle)[0] == []
             computed = winacl.inherited_for(parent_entries, directory=directory, owner=owner, group=group)
             winacl.set_dacl(handle, computed, protected=False)
-            assert triples(winacl.read_entries(handle)[0]) == by_ntfs, path
+            assert ordered(winacl.read_entries(handle)[0]) == by_ntfs, path
+
+
+def test_a_creator_owner_server_ace_on_the_parent_is_refused_naming_the_sid_and_the_parent(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    icacls(str(parent), "/grant:r", "*S-1-3-2:(OI)(CI)(F)")
+    with pytest.raises(PermsError) as raised:
+        converge_tree(parent / "logs", LOCAL_SERVICE, 0o750, root=parent)
+    assert "S-1-3-2" in str(raised.value)
+    assert str(parent) in str(raised.value)
+
+
+def test_grant_service_read_opens_a_directory_by_the_name_the_listing_gives(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "Bin").mkdir(parents=True)
+    (repo / "Bin" / "frpc.exe").write_bytes(b"")
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert SID_LOCAL_SERVICE in principals(repo / "Bin" / "frpc.exe")
 
 
 # Inspection ===========================================================================================================
