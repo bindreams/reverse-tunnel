@@ -57,3 +57,19 @@ def test_a_symlinked_digest_record_is_refused(tmp_path):
     (tmp_path / ".digests.json").symlink_to(real)
     with pytest.raises(BinariesError, match="link"):
         read_digests(tmp_path)
+
+
+def test_an_interrupt_right_after_the_temporary_is_created_leaves_nothing_behind(tmp_path, monkeypatch):
+    real = os.open
+
+    def interrupted(path, flags, *args, **kwargs):
+        fd = real(path, flags, *args, **kwargs)
+        if flags & os.O_EXCL:
+            os.close(fd)
+            raise KeyboardInterrupt
+        return fd
+
+    monkeypatch.setattr(os, "open", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        replace_file(tmp_path, "tool", io.BytesIO(b"data"), 0o755)
+    assert list(tmp_path.iterdir()) == []

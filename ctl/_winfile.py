@@ -16,7 +16,9 @@ from ctypes import wintypes
 
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
+DELETE = 0x00010000
 FILE_LIST_DIRECTORY = 0x00000001
+FILE_ADD_FILE = 0x00000002
 FILE_READ_ATTRIBUTES = 0x00000080
 READ_CONTROL = 0x00020000
 WRITE_DAC = 0x00040000
@@ -33,6 +35,8 @@ FILE_TYPE_DISK = 1
 
 # NtCreateFile and NtQueryDirectoryFile
 FILE_OPEN = 1
+FILE_CREATE = 2
+FILE_NON_DIRECTORY_FILE = 0x00000040
 FILE_OPEN_REPARSE_POINT = 0x00200000
 FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 FILE_NAMES_INFORMATION = 12
@@ -40,6 +44,10 @@ STATUS_NO_MORE_FILES = 0x80000006
 STATUS_NO_SUCH_FILE = 0xC000000F
 STATUS_DELETE_PENDING = 0xC0000056
 QUERY_BUFFER_SIZE = 65536
+
+# SetFileInformationByHandle
+FILE_RENAME_INFO_EX = 22
+FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1
 
 
 class _FileInformation(ctypes.Structure):
@@ -76,6 +84,17 @@ class _IoStatusBlock(ctypes.Structure):
     _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_void_p)]
 
 
+class _RenameInfo(ctypes.Structure):
+    """FILE_RENAME_INFO: the name follows the header and `FileNameLength` counts its bytes."""
+
+    _fields_ = [
+        ("Flags", wintypes.DWORD),
+        ("RootDirectory", wintypes.HANDLE),
+        ("FileNameLength", wintypes.DWORD),
+        ("FileName", ctypes.c_wchar * 1),
+    ]
+
+
 def _kernel32():
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = [
@@ -87,6 +106,8 @@ def _kernel32():
     kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
     kernel32.GetFileType.argtypes = [wintypes.HANDLE]
     kernel32.GetFileType.restype = wintypes.DWORD
+    kernel32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
     return kernel32
@@ -194,20 +215,62 @@ def open_relative(
     `NtCreateFile` adds no rights of its own, unlike `CreateFileW`, so SYNCHRONIZE and FILE_READ_ATTRIBUTES (which the
     vetting needs) are requested here.
     """
+    return _relative(
+        parent,
+        name,
+        label=label,
+        access=access,
+        disposition=FILE_OPEN,
+        options=FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        directory=directory,
+        error=error,
+        single_link=single_link,
+        share=share
+    )
+
+
+def create_relative(
+    parent: int, name: str, *, label, access: int, error: type[Exception], share: int = FILE_SHARE_READ_WRITE
+) -> int:
+    """A handle to a new regular file `name` in the directory held by `parent`; `FileExistsError` if it exists.
+
+    The file is created through `parent`, so no path is resolved and nothing already at `name` is ever opened.
+    """
+    return _relative(
+        parent,
+        name,
+        label=label,
+        access=access,
+        disposition=FILE_CREATE,
+        options=FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+        directory=False,
+        error=error,
+        single_link=True,
+        share=share
+    )
+
+
+def _entry_name(name: str, label, error: type[Exception]) -> bytes:
     if not name or "\\" in name or "/" in name or ":" in name:
         raise error(f"{label}: not a single directory entry name")
-    kernel32, ntdll = _kernel32(), _ntdll()
     # UNICODE_STRING counts bytes of UTF-16, so a name outside the BMP (two units a character) is twice as long as its
     # code points; a lone surrogate is a legal NTFS name and passes through.
-    encoded = name.encode("utf-16-le", "surrogatepass")
+    return name.encode("utf-16-le", "surrogatepass")
+
+
+def _relative(
+    parent: int, name: str, *, label, access: int, disposition: int, options: int, directory: bool,
+    error: type[Exception], single_link: bool, share: int
+) -> int:
+    encoded = _entry_name(name, label, error)
+    kernel32, ntdll = _kernel32(), _ntdll()
     buffer = ctypes.create_string_buffer(encoded + b"\0\0")
     text = _UnicodeString(len(encoded), len(encoded) + 2, ctypes.addressof(buffer))
     attributes = _ObjectAttributes(ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(text), 0, None, None)
     handle, status_block = ctypes.c_void_p(), _IoStatusBlock()
     status = ntdll.NtCreateFile(
         ctypes.byref(handle), access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, ctypes.byref(attributes),
-        ctypes.byref(status_block), None, 0, share, FILE_OPEN, FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
-        None, 0
+        ctypes.byref(status_block), None, 0, share, disposition, options, None, 0
     )
     if status < 0:
         _raise_status(ntdll, status)
@@ -218,6 +281,24 @@ def open_relative(
     except BaseException:
         kernel32.CloseHandle(handle.value)
         raise
+
+
+def rename_over(handle: int, directory: int, name: str, *, label, error: type[Exception]) -> None:
+    """Rename the open file `handle` (which needs DELETE access) to `name` in the directory held by `directory`.
+
+    An existing entry of that name is replaced. The destination is given relative to the directory handle, so no path is
+    resolved; `directory` needs FILE_ADD_FILE.
+    """
+    encoded = _entry_name(name, label, error)
+    size = ctypes.sizeof(_RenameInfo) + len(encoded)
+    buffer = ctypes.create_string_buffer(size)
+    info = _RenameInfo.from_buffer(buffer)
+    info.Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+    info.RootDirectory = directory
+    info.FileNameLength = len(encoded)
+    ctypes.memmove(ctypes.addressof(buffer) + _RenameInfo.FileName.offset, encoded, len(encoded))
+    if not _kernel32().SetFileInformationByHandle(handle, FILE_RENAME_INFO_EX, buffer, size):
+        raise ctypes.WinError(ctypes.get_last_error())
 
 
 def list_names(directory: int) -> list[str]:

@@ -237,6 +237,11 @@ def test_a_well_formed_statement_for_the_digest_passes_the_statement_checks():
     check(Scripted(statement()))
 
 
+def test_any_one_matching_subject_among_several_is_enough():
+    subjects = [{"name": n, "digest": {"sha256": d}} for n, d in [("a", "cd" * 32), ("b", DIGEST), ("c", "ef" * 32)]]
+    check(Scripted(statement(subject=subjects)))
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -245,10 +250,14 @@ def test_a_well_formed_statement_for_the_digest_passes_the_statement_checks():
         statement(subject=[]),
         statement(subject=[{"name": "a", "digest": {"sha256": "cd" * 32}}]),
         statement(subject=[{"name": "a", "digest": {"sha512": DIGEST}}]),
+        statement(subject=[{"name": "a", "digest": {"sha256": DIGEST.upper()}}]),
         b"[]",
         b"not json",
     ],
-    ids=["old-type", "other-predicate", "no-subjects", "other-digest", "other-algorithm", "array", "not-json"],
+    ids=[
+        "old-type", "other-predicate", "no-subjects", "other-digest", "other-algorithm", "uppercase", "array",
+        "not-json"
+    ],
 )
 def test_a_statement_that_is_not_the_pinned_provenance_for_the_digest_is_rejected(payload):
     with pytest.raises(AttestationError):

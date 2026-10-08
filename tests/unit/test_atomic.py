@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from ctl import atomic
 from ctl.atomic import replace_file
 from ctl.errors import BinariesError
 
@@ -53,22 +52,6 @@ def test_a_failing_source_leaves_the_old_file_and_no_temporary_behind(tmp_path):
     assert (tmp_path / "tool").read_bytes() == b"old"
 
 
-def test_an_interrupt_right_after_the_temporary_is_created_leaves_nothing_behind(tmp_path, monkeypatch):
-    real = os.open
-
-    def interrupted(path, flags, *args, **kwargs):
-        fd = real(path, flags, *args, **kwargs)
-        if flags & os.O_EXCL:
-            os.close(fd)
-            raise KeyboardInterrupt
-        return fd
-
-    monkeypatch.setattr(atomic.os, "open", interrupted)
-    with pytest.raises(KeyboardInterrupt):
-        put(tmp_path, "tool", b"data", 0o755)
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_a_missing_directory_is_refused(tmp_path):
     with pytest.raises(BinariesError, match="directory"):
         put(tmp_path / "missing", "tool", b"data")
@@ -78,3 +61,12 @@ def test_a_file_in_place_of_the_directory_is_refused(tmp_path):
     (tmp_path / "bin").write_bytes(b"")
     with pytest.raises(BinariesError, match="directory"):
         put(tmp_path / "bin", "tool", b"data")
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\\b", "../escape", "nul\0byte"])
+def test_a_name_that_is_not_a_single_entry_is_refused(tmp_path, name):
+    (tmp_path / "sub").mkdir()
+    with pytest.raises(BinariesError, match="single directory entry"):
+        put(tmp_path, name, b"data")
+    assert [p.name for p in tmp_path.iterdir()] == ["sub"]
+    assert list((tmp_path / "sub").iterdir()) == []

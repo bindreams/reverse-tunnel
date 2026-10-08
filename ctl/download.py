@@ -16,10 +16,8 @@ from typing import Self
 
 import httpx
 from sigstore.dsse import Statement
-from sigstore.hashes import Hashed
 from sigstore.models import Bundle
 from sigstore.verify import Verifier, policy
-from sigstore_models.common.v1 import HashAlgorithm
 
 from ctl.archive import ArchiveFormat, extract_member, hash_file, is_safe_member
 from ctl.atomic import is_link, replace_file, require_directory
@@ -112,10 +110,11 @@ def verify_attestation_digest(
         kind, payload = verifier.verify_dsse(parsed, policy.checks())
         if kind != IN_TOTO_PAYLOAD:
             raise AttestationError(f"the attestation's payload is {kind}, not an in-toto statement")
-        statement = Statement(payload)  # schema-checked; its `_type` can only be in-toto v1
-        if statement._inner.predicate_type != SLSA_PROVENANCE:
-            raise AttestationError(f"the attestation is {statement._inner.predicate_type}, not SLSA provenance")
-        if not statement._matches_digest(Hashed(algorithm=HashAlgorithm.SHA2_256, digest=bytes.fromhex(digest))):
+        Statement(payload)  # rejects anything that is not an in-toto v1 statement with at least one subject
+        document = json.loads(payload)
+        if document["predicateType"] != SLSA_PROVENANCE:
+            raise AttestationError(f"the attestation is {document['predicateType']}, not SLSA provenance")
+        if digest not in [subject["digest"].get("sha256") for subject in document["subject"]]:
             raise AttestationError(f"the attestation has no subject with sha256 {digest}")
     except AttestationError:
         raise
