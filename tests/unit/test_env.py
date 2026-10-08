@@ -270,10 +270,10 @@ def test_referenced_variables_unions_both_syntaxes_across_a_file():
     "text",
     [
         "no variables here",
-        "${{ runner.os }}",
-        "{{ .Values.X }}",
         "$X",
-        "${lower}",
+        "price: $5",
+        "$$",
+        "$${LIT}",
     ],
 )
 def test_referenced_variables_ignores_non_references(text):
@@ -299,6 +299,12 @@ UNSUPPORTED_ACTIONS = [
     pytest.param("{{ printf `}}` .Envs.X }}", id="closing-braces-in-a-raw-string"),
     pytest.param('{{ printf "{{ .Envs.X }}" .Envs.Y }}', id="a-reference-inside-a-string-hides-the-real-one"),
     pytest.param('{{ "}}" }}{{ .Envs.X | quote }}', id="string-then-pipe"),
+    pytest.param('{{ index . (printf "En%s" "vs") }}', id="envs-built-at-run-time"),
+    pytest.param("{{ range $k, $v := . }}{{ $v.RT_X }}{{ end }}", id="range-over-the-root"),
+    pytest.param("{{ .Values.X }}", id="any-other-action"),
+    pytest.param("{{ $x := 1 }}", id="variable-assignment"),
+    pytest.param("{{{ .Envs.X }}", id="extra-opening-brace"),
+    pytest.param("{{ .Envs.X }}{{", id="trailing-opening-braces"),
     pytest.param("# Envs are expanded here", id="the-word-outside-any-action"),
     pytest.param("x = .Envs.X", id="a-bare-field-outside-any-action"),
     pytest.param("{{ $.Envs.X }}{{ .Envs.Y | quote }}", id="valid-then-invalid"),
@@ -321,8 +327,8 @@ def test_the_error_line_counts_from_the_unsupported_action():
     assert "x.toml:4" in str(raised.value)
 
 
-def test_actions_that_never_mention_envs_are_left_alone():
-    assert referenced_variables("{{ .Values.X | default 1 }} {{ range .Items }}{{ end }}") == set()
+def test_text_without_any_template_action_is_left_alone():
+    assert referenced_variables("a = { b = 1 }\nc = '}}'\n") == set()
 
 
 def test_the_strict_pattern_is_one_exported_constant():
@@ -383,13 +389,33 @@ def test_strict_interpolation_accepts_the_strict_forms_and_skips_escapes(text, n
     assert referenced_variables(text, source="compose.yaml", strict_dollar=True) == names
 
 
-@pytest.mark.parametrize("text", ["$${RT_LIT}", "$RT_X", "${RT_X-d}", "${lower}", "${RT_A:-${RT_B}"])
-def test_lenient_scanning_never_counts_an_escape_or_an_odd_form_as_a_reference(text):
-    assert referenced_variables(text) <= {"RT_B"}
+@pytest.mark.parametrize("text", ["$${RT_LIT}", "$RT_X", "$host", "a $ b", "$$$$ ${A}$"])
+def test_lenient_scanning_ignores_a_bare_dollar_and_never_counts_an_escape(text):
+    assert referenced_variables(text) <= {"A"}
     assert "RT_LIT" not in referenced_variables(text)
 
 
-CADDY_PLACEHOLDERS = ["{$RT_X}", "{$RT_X:default}", "{env.RT_X}", "x {$HOME}/y", "root {env.ROOT_DIR}"]
+@pytest.mark.parametrize("form", [f for f in STRICT_REJECTED if "${" in f])
+def test_lenient_scanning_still_rejects_an_unsupported_interpolation(form):
+    with pytest.raises(EnvError) as raised:
+        referenced_variables(f"a\n{form}\n", source="nginx.conf")
+    assert "nginx.conf:2" in str(raised.value)
+
+
+def test_lenient_scanning_still_finds_the_strict_forms():
+    assert referenced_variables("${A} ${B:?m} ${C:-d} $host") == {"A", "B", "C"}
+
+
+CADDY_PLACEHOLDERS = [
+    "{$RT_X}",
+    "{$RT_X:default}",
+    "{env.RT_X}",
+    "x {$HOME}/y",
+    "root {env.ROOT_DIR}",
+    'respond "{{$RT_X}"',
+    "{{$RT_X}}",
+    "{{env.RT_X}}",
+]
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -401,21 +427,44 @@ def test_a_caddy_env_placeholder_is_unsupported(text, strict):
     assert "Caddyfile:2" in str(raised.value)
 
 
-@pytest.mark.parametrize(
-    "text", ["{{$x := 1}}", "{{ $x := 1 }}", "{ $x }", '{"env": "x"}', "{environment}", "{{ .Values.env.X }}"]
-)
+@pytest.mark.parametrize("text", ["{ $x }", '{"env": "x"}', "{environment}", "{ env.X }", "{$ }", "{$1}"])
 def test_text_that_only_resembles_a_caddy_placeholder_is_left_alone(text):
     assert referenced_variables(text) == set()
 
 
-def test_referenced_in_file_is_strict_for_yaml_only(tmp_path):
-    yaml = tmp_path / "compose.yaml"
-    yaml.write_text("a: $RT_X\n")
+STRICT_FILES = [
+    "compose.yaml", "goetia.yml", "frps.toml", "a.json", "a.ini", "a.tmpl", "a.service", "a.plist", "A.YAML"
+]
+
+
+@pytest.mark.parametrize("name", STRICT_FILES)
+def test_referenced_in_file_is_strict_about_a_bare_dollar(tmp_path, name):
+    path = tmp_path / name
+    path.write_text("a\n$RT_X\n")
     with pytest.raises(EnvError) as raised:
-        referenced_in_file(yaml)
-    assert f"{yaml}:1" in str(raised.value)
+        referenced_in_file(path)
+    assert f"{path}:2" in str(raised.value)
+
+
+@pytest.mark.parametrize("name", ["nginx.conf", "Caddyfile"])
+def test_referenced_in_file_is_lenient_about_a_bare_dollar_in_conf_and_caddyfile(tmp_path, name):
+    path = tmp_path / name
+    path.write_text("proxy_set_header Host $host;\nx ${RT_A}\n")
+    assert referenced_in_file(path) == {"RT_A"}
+
+
+@pytest.mark.parametrize("name", ["nginx.conf", "Caddyfile"])
+def test_referenced_in_file_rejects_an_odd_interpolation_even_when_lenient(tmp_path, name):
+    path = tmp_path / name
+    path.write_text("a ${RT_A:-${RT_B}}\n")
+    with pytest.raises(EnvError) as raised:
+        referenced_in_file(path)
+    assert f"{path}:1" in str(raised.value)
+
+
+def test_referenced_in_file_finds_go_references_in_toml(tmp_path):
     toml = tmp_path / "frps.toml"
-    toml.write_text("a = '$RT_X'\nb = '{{ .Envs.RT_B }}'\n")
+    toml.write_text("b = '{{ .Envs.RT_B }}'\n")
     assert referenced_in_file(toml) == {"RT_B"}
 
 

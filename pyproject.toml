@@ -13,7 +13,7 @@ dependencies = []
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit"]
+testpaths = ["tests/unit", "tests/platform"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
 

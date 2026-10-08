@@ -14,16 +14,19 @@ KEY = re.compile(r"[A-Z][A-Z0-9_]*", re.ASCII)
 BANNED_VALUE_CHARACTERS = frozenset("\"'`$\\#")
 # Go `text/template` ignores whitespace and trim markers around the action, so the match must too.
 GO_TEMPLATE_REFERENCE = re.compile(r"\{\{-?\s*\$?\.Envs\.([A-Z][A-Z0-9_]*)\s*-?\}\}")
+UNSUPPORTED_TEMPLATE = "unsupported template syntax; only `{{ .Envs.NAME }}` is supported"
 ENVS_WORD = re.compile(r"\bEnvs\b")
 COMPOSE_REFERENCE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[?-][^}$\n]*)?\}")
-# Caddy's own env syntax; a `{{` before the brace marks a Go template variable instead.
-CADDY_PLACEHOLDER = re.compile(r"(?<!\{)\{(?:\$[A-Za-z_]|env\.)")
+# Caddy finds `{$NAME}` and `{env.NAME}` anywhere in its input, so no context may excuse one.
+CADDY_PLACEHOLDER = re.compile(r"\{(?:\$[A-Za-z_]|env\.)")
+OPENING_BRACES = re.compile(r"(?=\{\{)")
 CONFIG_SUFFIXES = frozenset({".toml", ".yaml", ".yml", ".json", ".conf", ".ini", ".tmpl", ".service", ".plist"})
 CONFIG_NAMES = frozenset({"Caddyfile"})
 # Workflows are not deployment templates: their `${...}` is shell or Actions syntax, not a `.env` reference.
 EXCLUDED_DIRECTORIES = frozenset({".github"})
-# YAML is where compose and goetia interpolate `${...}`, so a `$` there must be exactly a supported form.
-STRICT_DOLLAR_SUFFIXES = frozenset({".yaml", ".yml"})
+# Everywhere but these, a `$` must be exactly a supported form. nginx and Caddy use `$name` for their own variables.
+LENIENT_DOLLAR_SUFFIXES = frozenset({".conf"})
+LENIENT_DOLLAR_NAMES = frozenset({"Caddyfile"})
 # A rename of any of these must turn the template gates red rather than quietly shrink them.
 KNOWN_MINIMUM = ("prek.toml", "pyproject.toml")
 
@@ -174,27 +177,31 @@ def _open_windows(path: Path) -> int:
 def referenced_variables(text: str, *, source: str = "<text>", strict_dollar: bool = False) -> set[str]:
     """Every variable a Go template (`{{ .Envs.X }}`) or compose/goetia (`${X}`) document names.
 
-    Fails closed: any `Envs` outside a `{{ .Envs.NAME }}` reference could read a variable this scan would miss, and
-    so could a Caddy placeholder, so both are errors. With `strict_dollar`, every `$` must be a `$$` escape or one of
-    `${NAME}`, `${NAME:?msg}`, `${NAME:-default}`.
+    Fails closed, because each form below could read a variable this scan would miss:
+    - a Caddy placeholder anywhere;
+    - a `{{` that does not begin a `{{ .Envs.NAME }}` reference, or an `Envs` outside one;
+    - a `${` that is not `${NAME}`, `${NAME:?msg}` or `${NAME:-default}`.
+    With `strict_dollar`, a `$` that is neither a `$$` escape nor one of those forms is an error too.
     """
-    go_spans = [match.span() for match in GO_TEMPLATE_REFERENCE.finditer(text)]
-    for word in ENVS_WORD.finditer(text):
-        if not any(start <= word.start() and word.end() <= end for start, end in go_spans):
-            raise _unsupported(
-                text, word.start(), source, "unsupported template syntax; only `{{ .Envs.NAME }}` is supported"
-            )
     caddy = CADDY_PLACEHOLDER.search(text)
     if caddy:
         raise _unsupported(text, caddy.start(), source, "unsupported Caddy env placeholder; write the value literally")
-    names = {match.group(1) for match in GO_TEMPLATE_REFERENCE.finditer(text)}
-    return names | _dollar_references(_blank(text, go_spans), source, strict_dollar)
+    references = list(GO_TEMPLATE_REFERENCE.finditer(text))
+    go_spans = [match.span() for match in references]
+    starts = {start for start, _ in go_spans}
+    for opening in OPENING_BRACES.finditer(text):
+        if opening.start() not in starts:
+            raise _unsupported(text, opening.start(), source, UNSUPPORTED_TEMPLATE)
+    for word in ENVS_WORD.finditer(text):
+        if not any(start <= word.start() and word.end() <= end for start, end in go_spans):
+            raise _unsupported(text, word.start(), source, UNSUPPORTED_TEMPLATE)
+    return {match.group(1) for match in references} | _dollar_references(_blank(text, go_spans), source, strict_dollar)
 
 
 def referenced_in_file(path: Path) -> set[str]:
-    """`referenced_variables` of one tracked file, strict about `$` in YAML."""
-    strict = path.suffix.lower() in STRICT_DOLLAR_SUFFIXES
-    return referenced_variables(read_text(path), source=str(path), strict_dollar=strict)
+    """`referenced_variables` of one tracked file, strict about a bare `$` except in `.conf` and `Caddyfile`."""
+    lenient = path.suffix.lower() in LENIENT_DOLLAR_SUFFIXES or path.name in LENIENT_DOLLAR_NAMES
+    return referenced_variables(read_text(path), source=str(path), strict_dollar=not lenient)
 
 
 def _dollar_references(text: str, source: str, strict: bool) -> set[str]:
@@ -206,7 +213,7 @@ def _dollar_references(text: str, source: str, strict: bool) -> set[str]:
         elif match := COMPOSE_REFERENCE.match(text, position):
             names.add(match.group(1))
             position = match.end()
-        elif strict:
+        elif strict or text.startswith("${", position):
             raise _unsupported(
                 text, position, source, "unsupported `$`; use `$$`, `${NAME}`, `${NAME:?msg}` or `${NAME:-default}`"
             )

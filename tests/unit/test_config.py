@@ -270,6 +270,10 @@ BAD_HOSTS = [
     "1.2.3.4.5",
     "127.0.0.1.",
     "example.0x1",
+    "example.0x",
+    "example.0xg",
+    "example.0XG",
+    "example.0xfoo",
     "example.123",
 ]
 GOOD_HOSTS = [
