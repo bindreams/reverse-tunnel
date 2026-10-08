@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ctl import binaries
 from ctl.client import render_ssh_config
-from ctl.config import Config, ConfigError
+from ctl.config import Config, ConfigError, Role
 from ctl.env import EnvError
 from ctl.errors import BinariesError, InstallError
 from ctl.install import install, uninstall
@@ -37,6 +37,13 @@ def build_parser() -> argparse.ArgumentParser:
                 "--allow-self-disconnect",
                 action="store_true",
                 help="host role: restart websocat even though this session may be running over the tunnel",
+            )
+        if name == "uninstall":
+            subparser.add_argument(
+                "--force",
+                action="store_true",
+                help="bridge role: remove secrets/ without checking that the container is down, "
+                "for when docker is not available",
             )
         if name == "client-config":
             subparser.add_argument("label", help="the host to reach: its RT_LABEL")
@@ -65,15 +72,37 @@ def pin_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def effective_uid() -> int | None:
+    """The uid this process acts as; None where there is no such thing (Windows)."""
+    return os.geteuid() if hasattr(os, "geteuid") else None
+
+
+def refuse_root(command: str, config: Config) -> None:
+    """The bridge and the client run as the operator: what root creates in this directory the operator cannot replace."""
+    if config.role in (Role.BRIDGE, Role.CLIENT) and effective_uid() == 0:
+        raise InstallError(
+            f"ROLE={config.role} must not run `{command}` as root (sudo): the files root creates in this directory "
+            "(secrets/, bin/) are ones you can no longer replace. Rerun as yourself"
+        )
+
+
 def run_command(args: argparse.Namespace) -> int:
     if args.command == "pin":
         return pin_command(args)
     if args.command in {"install", "uninstall", "client-config"}:
         config = Config.load(args.root)
         if args.command == "install":
+            if args.allow_self_disconnect and config.role is not Role.HOST:
+                build_parser().error(
+                    "--allow-self-disconnect applies to ROLE=host only; this deployment has no websocat to restart"
+                )
+            refuse_root("install", config)
             return install(config, allow_self_disconnect=args.allow_self_disconnect)
         if args.command == "uninstall":
-            return uninstall(config)
+            if args.force and config.role is not Role.BRIDGE:
+                build_parser().error("--force applies to ROLE=bridge only; no other role checks a container")
+            refuse_root("uninstall", config)
+            return uninstall(config, force=args.force)
         print(render_ssh_config(config, args.label), end="")
         return 0
     print(f"ctl {args.command}: not implemented yet", file=sys.stderr)
@@ -86,6 +115,6 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     args.root = root
     try:
         return run_command(args)
-    except (ConfigError, EnvError, BinariesError, InstallError, PermsError) as exc:
+    except (ConfigError, EnvError, BinariesError, InstallError, PermsError, OSError) as exc:
         print(f"ctl {args.command}: {exc}", file=sys.stderr)
         return 1

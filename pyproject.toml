@@ -23,6 +23,7 @@ pythonpath = ["."]
 addopts = "-ra --strict-markers"
 markers = [
   "root: needs uid 0 and fails, never skips, without it; opt out explicitly with -m 'not root'",
+  "mount: mounts filesystems; needs root and a private mount namespace, and fails, never skips, without them; opt out explicitly with -m 'not mount'",
 ]
 
 [dependency-groups]

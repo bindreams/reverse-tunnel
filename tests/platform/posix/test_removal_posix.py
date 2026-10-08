@@ -81,8 +81,9 @@ def test_a_directory_that_cannot_be_removed_because_it_is_busy_is_named(tmp_path
         return real(path, dir_fd=dir_fd)
 
     monkeypatch.setattr(removal.os, "rmdir", busy)
-    with pytest.raises(InstallError, match="Device or resource busy"):
+    with pytest.raises(InstallError, match="Device or resource busy") as raised:
         remove_directory(tmp_path, "bin")
+    assert "remove it yourself" not in str(raised.value)  # emptying it would not help
 
 
 def test_a_directory_swapped_for_a_symlink_after_the_check_is_not_followed(tmp_path, tmp_path_factory, monkeypatch):

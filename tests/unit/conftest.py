@@ -9,7 +9,7 @@ from scanner_support import TERM, git
 from sigstore.models import TrustedRoot
 from sigstore.verify import Verifier
 
-from ctl import binaries
+from ctl import binaries, cli
 
 
 @pytest.fixture
@@ -25,6 +25,16 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     git(root, "init", "-q", "-b", "main")
     return root
+
+
+# Who is running =======================================================================================================
+
+
+@pytest.fixture(autouse=True)
+def not_root(monkeypatch):
+    """The CLI refuses root for some roles. These tests are about the commands, not about who runs them, and the
+    container recipe runs the whole suite as root."""
+    monkeypatch.setattr(cli, "effective_uid", lambda: 4242)
 
 
 # No network ===========================================================================================================

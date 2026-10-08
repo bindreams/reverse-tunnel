@@ -13,7 +13,7 @@ import pytest
 from ctl.config import Config, Role
 from ctl.errors import InstallError
 from ctl.install import Services, install
-from tests.deployment_support import GOOD_TOKEN, tree, write_env
+from tests.unit.deployment_support import GOOD_TOKEN, tree, write_env
 
 OPERATOR_UID = OPERATOR_GID = 4242
 
@@ -59,6 +59,7 @@ def test_bridge_install_detects_a_compose_created_token_directory(deployment):
     message = str(raised.value)
     assert "sudo rm -rf ./secrets" in message
     assert "ctl install" in message and "docker compose up" in message
+    assert "under sudo" in message  # the other way to end up here
     steps = message[message.index(", run `"):]  # the instruction, after the explanation that also names the commands
     assert steps.index("sudo rm -rf ./secrets") < steps.index("ctl install") < steps.index("docker compose up")
     assert tree(deployment) == before
@@ -83,3 +84,27 @@ def test_the_named_remedy_works(deployment):
     token = deployment / "secrets" / "token"
     assert token.read_text() == GOOD_TOKEN + "\n"
     assert (token.stat().st_uid, (deployment / "secrets").stat().st_uid) == (OPERATOR_UID, OPERATOR_UID)
+
+
+@pytest.mark.root
+def test_a_root_owned_token_file_in_an_operator_owned_secrets_dir_gets_the_remedy(deployment):
+    """What `sudo ctl install` leaves: a regular file, so no directory test would notice it."""
+    (deployment / "secrets" / "token").rmdir()
+    os.chown(deployment / "secrets", OPERATOR_UID, OPERATOR_GID)
+    (deployment / "secrets" / "token").write_text("x")
+    before = tree(deployment)
+    with pytest.raises(InstallError) as raised:
+        install_as_operator(deployment)
+    assert "secrets/token is owned by uid 0" in str(raised.value)
+    assert "sudo rm -rf ./secrets" in str(raised.value)
+    assert tree(deployment) == before
+
+
+@pytest.mark.root
+def test_a_secrets_dir_the_operator_cannot_enter_gets_the_remedy_not_a_traceback(deployment):
+    (deployment / "secrets" / "token").rmdir()
+    (deployment / "secrets" / "token").write_text("x")
+    (deployment / "secrets").chmod(0o700)  # root-only: the operator cannot even look inside
+    with pytest.raises(InstallError) as raised:
+        install_as_operator(deployment)
+    assert "sudo rm -rf ./secrets" in str(raised.value)

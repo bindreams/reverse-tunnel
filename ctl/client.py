@@ -28,7 +28,11 @@ def _websocat_command(root: Path) -> str:
     installed = root / "bin" / WEBSOCAT
     if not installed.is_file():
         return "websocat"
-    return subprocess.list2cmdline([str(installed)]) if sys.platform == "win32" else shlex.quote(str(installed))
+    path = str(installed)
+    if "\n" in path or "\r" in path:
+        raise ConfigError(f"{path}: contains a line break, which an ssh_config line cannot hold; move the deployment")
+    quoted = subprocess.list2cmdline([path]) if sys.platform == "win32" else shlex.quote(path)
+    return quoted.replace("%", "%%")  # ssh expands `%` tokens in a ProxyCommand before the shell sees it
 
 
 def render_ssh_config(config: Config, label: str) -> str:

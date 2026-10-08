@@ -10,7 +10,7 @@ from ctl.download import Fetcher
 from ctl.errors import InstallError
 from ctl.install import Services, install, uninstall
 from ctl.perms import PermsError
-from tests.deployment_support import write_env
+from tests.unit.deployment_support import write_env
 from tests.unit.binaries_support import SEED_LOCK, VERSIONS, Upstream
 
 

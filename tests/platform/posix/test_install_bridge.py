@@ -8,7 +8,8 @@ from ctl import download, perms
 from ctl.config import Config, Role
 from ctl.errors import InstallError
 from ctl.install import Services, install, uninstall
-from tests.deployment_support import GOOD_TOKEN, OTHER_TOKEN, tree, write_env
+from ctl.perms import PermsError
+from tests.unit.deployment_support import GOOD_TOKEN, OTHER_TOKEN, tree, write_env
 
 
 class Docker:
@@ -192,7 +193,7 @@ def test_bridge_install_detects_a_directory_where_the_token_belongs(root, config
         install(config, services=services)
     message = str(raised.value)
     assert "secrets/token is a directory" in message
-    assert "rm -rf ./secrets" in message and "sudo" not in message
+    assert "rm -rf ./secrets" in message and "sudo rm -rf" not in message
     assert "ctl install" in message and "docker compose up" in message
     assert tree(root) == before
     assert mode_of(root / ".env") == 0o644
@@ -231,11 +232,23 @@ def test_bridge_uninstall_keeps_the_token_when_the_container_will_not_go_down(ro
     assert (root / "secrets" / "token").exists()
 
 
-def test_bridge_uninstall_without_docker_still_removes_the_token(root, config, capsys):
+def test_bridge_uninstall_without_docker_cannot_tell_whether_the_container_runs_and_keeps_the_token(
+    root, config, capsys
+):
     assert install(config, services=Services(run=Docker())) == 0
-    assert uninstall(config, services=Services(run=Docker(missing=True))) == 0
+    assert uninstall(config, services=Services(run=Docker(missing=True))) == 1
+    err = capsys.readouterr().err
+    assert "docker" in err and "could not be checked" in err and "--force" in err
+    assert (root / "secrets" / "token").exists()
+
+
+def test_bridge_uninstall_force_skips_docker_and_removes_the_token(root, config, capsys):
+    assert install(config, services=Services(run=Docker())) == 0
+    docker = Docker(missing=True)
+    assert uninstall(config, force=True, services=Services(run=docker)) == 0
+    assert docker.calls == []
     assert not (root / "secrets").exists()
-    assert "docker" in capsys.readouterr().out
+    assert "--force" in capsys.readouterr().out
 
 
 def test_bridge_uninstall_never_removes_through_a_symlinked_secrets_dir(root, config, services, tmp_path_factory):
@@ -252,3 +265,54 @@ def test_bridge_uninstall_removes_the_empty_directory_docker_left_at_the_token(r
     (root / "secrets" / "token").mkdir(parents=True)
     assert uninstall(config, services=services) == 0
     assert not (root / "secrets").exists()
+
+
+# A later step failing -------------------------------------------------------------------------------------------------
+
+
+def test_the_recreate_notice_survives_a_failure_after_the_token_changed(root, config, services, capsys, monkeypatch):
+    assert install(config, services=services) == 0
+    capsys.readouterr()
+    changed = write_env(root, Role.BRIDGE, RT_TOKEN=OTHER_TOKEN)
+
+    def fail(path, *args, **kwargs):
+        raise PermsError(f"{path}: injected")
+
+    monkeypatch.setattr(perms, "harden_file", fail)
+    with pytest.raises(PermsError, match="injected"):
+        install(changed, services=services)
+    err = capsys.readouterr().err
+    assert "recreate" in err and "drops every connected tunnel" in err
+    assert (root / "secrets" / "token").read_text() == OTHER_TOKEN + "\n"
+
+
+def test_the_recreate_notice_survives_a_failure_inside_the_write_itself(root, config, services, capsys, monkeypatch):
+    """`write_secret` fails after its rename (the directory sync): the token has changed though the call raised."""
+    assert install(config, services=services) == 0
+    capsys.readouterr()
+    changed = write_env(root, Role.BRIDGE, RT_TOKEN=OTHER_TOKEN)
+    real = perms.write_secret
+
+    def write_then_fail(*args, **kwargs):
+        real(*args, **kwargs)
+        raise PermsError("injected after the rename")
+
+    monkeypatch.setattr(perms, "write_secret", write_then_fail)
+    with pytest.raises(PermsError, match="injected"):
+        install(changed, services=services)
+    assert "drops every connected tunnel" in capsys.readouterr().err
+
+
+def test_no_recreate_notice_when_the_write_failed_and_the_old_token_stands(root, config, services, capsys, monkeypatch):
+    assert install(config, services=services) == 0
+    capsys.readouterr()
+    changed = write_env(root, Role.BRIDGE, RT_TOKEN=OTHER_TOKEN)
+
+    def fail(*args, **kwargs):
+        raise PermsError("injected before the rename")
+
+    monkeypatch.setattr(perms, "write_secret", fail)
+    with pytest.raises(PermsError):
+        install(changed, services=services)
+    assert "recreate" not in capsys.readouterr().err
+    assert (root / "secrets" / "token").read_text() == GOOD_TOKEN + "\n"

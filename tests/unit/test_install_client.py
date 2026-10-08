@@ -9,7 +9,7 @@ from ctl.config import Config, Role
 from ctl.download import DIGESTS, Fetcher, Installed, TrustLevel, describe_install, read_digests
 from ctl.errors import BinariesError, InstallError
 from ctl.install import Services, install, uninstall
-from tests.deployment_support import tree, write_env
+from deployment_support import tree, write_env
 
 PLATFORM = "linux-x86_64"
 CLIENT_ENV = "ROLE=client\nRT_DOMAIN=tunnel.example.com\nRT_SCHEME=wss\nRT_PUBLIC_PORT=443\n"

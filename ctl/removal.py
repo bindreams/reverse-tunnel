@@ -65,6 +65,7 @@ def _remove_posix(parent: Path, name: str) -> bool:
             raise InstallError(f"{path}: not a directory ({MANUAL})")
         fd = _open_directory(path, dir_fd=parent_fd, name=name)
         try:
+            _refuse_mount_point(path, fd, parent_fd)
             _empty(fd, path)
         finally:
             os.close(fd)
@@ -72,6 +73,32 @@ def _remove_posix(parent: Path, name: str) -> bool:
         return True
     finally:
         os.close(parent_fd)
+
+
+def _mount_id(fd: int) -> str:
+    """The kernel's id of the mount `fd` lives on (Linux); two bind mounts of one filesystem share `st_dev` but not this."""
+    try:
+        text = Path(f"/proc/self/fdinfo/{fd}").read_text()
+    except OSError as exc:
+        raise InstallError(
+            f"cannot tell which mount a directory is on ({exc.strerror or exc}); nothing was removed"
+        ) from exc
+    for line in text.splitlines():
+        if line.startswith("mnt_id:"):
+            return line.split()[1]
+    raise InstallError("cannot tell which mount a directory is on (no mnt_id in fdinfo); nothing was removed")
+
+
+def _refuse_mount_point(path: Path, fd: int, parent_fd: int) -> None:
+    """Refuse a directory that is the root of a mount, before anything under it is touched.
+
+    Emptying it first and failing on the final `rmdir` (`EBUSY`) would already have deleted the contents of whatever is
+    mounted there.
+    """
+    if os.fstat(fd).st_dev != os.fstat(parent_fd).st_dev or (
+        sys.platform.startswith("linux") and _mount_id(fd) != _mount_id(parent_fd)
+    ):
+        raise InstallError(f"{path}: is a mount point; unmount it first. Nothing was removed")
 
 
 def _empty(directory_fd: int, path: Path) -> None:
@@ -90,7 +117,8 @@ def _empty(directory_fd: int, path: Path) -> None:
         except FileNotFoundError:
             continue
         except OSError as exc:
-            raise InstallError(f"{path / entry}: {exc.strerror or exc}; it must be empty, {MANUAL}") from exc
+            hint = f"; it must be empty, {MANUAL}" if exc.errno in (errno.ENOTEMPTY, errno.EEXIST) else ""
+            raise InstallError(f"{path / entry}: {exc.strerror or exc}{hint}") from exc
 
 
 def _rmdir(path: Path, name: str, parent_fd: int) -> None:

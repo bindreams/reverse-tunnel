@@ -5,7 +5,7 @@ from pathlib import Path
 from ctl.config import Config, Role
 from ctl.env import read
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 GOOD_TOKEN = "0123456789abcdef" * 4
 OTHER_TOKEN = "fedcba9876543210" * 4
 GOOD_PASSWORD = "correct-horse-battery_staple"

@@ -5,7 +5,7 @@ import pytest
 
 from ctl.client import render_ssh_config
 from ctl.config import Config, ConfigError, Role
-from tests.deployment_support import REPO_ROOT, write_env
+from deployment_support import REPO_ROOT, write_env
 
 WEBSOCAT = "websocat.exe" if sys.platform == "win32" else "websocat"
 
@@ -139,3 +139,22 @@ def test_the_shipped_example_is_what_the_command_prints_for_the_shipped_env(tmp_
     shipped = (REPO_ROOT / "examples" / "ssh_config").read_text()
     config = write_env(tmp_path, Role.CLIENT)
     assert render_ssh_config(config, "alpha") in shipped
+
+
+def test_a_percent_in_the_installed_path_is_escaped_for_ssh(tmp_path):
+    """ssh expands `%` tokens in a ProxyCommand, so a literal one is written `%%`."""
+    root = tmp_path / "100%h"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / WEBSOCAT).write_text("x")
+    line = proxy_command(render_ssh_config(client(root), "alpha"))
+    assert str(root / "bin" / WEBSOCAT).replace("%", "%%") in line
+    assert line.count("%h") == 2  # the escaped `%%h` of the path and the real one in the URL
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r"])
+def test_an_installed_path_with_a_line_break_is_refused(tmp_path, newline):
+    root = tmp_path / f"a{newline}b"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin" / WEBSOCAT).write_text("x")
+    with pytest.raises(ConfigError, match="line break"):
+        render_ssh_config(client(root), "alpha")
