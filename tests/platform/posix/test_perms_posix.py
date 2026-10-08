@@ -98,20 +98,20 @@ def test_secret_is_never_briefly_world_readable(tmp_path, umask0, monkeypatch):
     seen: list[tuple[str, int]] = []
     real = {name: getattr(os, name) for name in ("open", "fchown", "fchmod", "write")}
 
-    def observe(label: str) -> None:
-        seen.append((label, mode_of(path)))
+    def observe(label: str, fd: int) -> None:
+        seen.append((label, stat.S_IMODE(os.fstat(fd).st_mode)))
 
-    def spy_open(target, *args, **kwargs):
-        fd = real["open"](target, *args, **kwargs)
-        if os.fspath(target) == os.fspath(path):
-            observe("open")
+    def spy_open(*args, **kwargs):
+        fd = real["open"](*args, **kwargs)
+        if args[1] & os.O_CREAT:
+            observe("open", fd)
         return fd
 
     def spy(name: str):
 
-        def wrapper(*args, **kwargs):
-            observe(name)
-            return real[name](*args, **kwargs)
+        def wrapper(fd, *args, **kwargs):
+            observe(name, fd)
+            return real[name](fd, *args, **kwargs)
 
         return wrapper
 
@@ -122,6 +122,48 @@ def test_secret_is_never_briefly_world_readable(tmp_path, umask0, monkeypatch):
     monkeypatch.undo()
     assert {label for label, _ in seen} == {"open", "fchown", "fchmod", "write"}
     assert {mode for _, mode in seen} == {0o600}
+
+
+def test_secret_is_replaced_atomically_not_rewritten(tmp_path):
+    path = tmp_path / "token"
+    path.write_bytes(b"old-secret")
+    with open(path, "rb") as reader:
+        write_secret(path, b"new", me(), NO_READERS)
+        assert reader.read() == b"old-secret"
+    assert path.read_bytes() == b"new"
+
+
+def test_secret_is_fsynced_and_then_its_directory_after_the_rename(tmp_path, monkeypatch):
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        events.append("fsync-directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync-file")
+        return real_fsync(fd)
+
+    def replace(*args, **kwargs):
+        events.append("replace")
+        return real_replace(*args, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+    write_secret(tmp_path / "token", b"secret", me(), NO_READERS)
+    assert events == ["fsync-file", "replace", "fsync-directory"]
+
+
+def test_write_secret_removes_its_temporary_file_when_the_chown_fails(tmp_path):
+    with pytest.raises(ValueError):
+        write_secret(tmp_path / "token", b"secret", Account("windows-only", None, None), NO_READERS)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_write_secret_refuses_a_symlinked_directory(tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "secrets").symlink_to(tmp_path / "real")
+    with pytest.raises(PermsError) as raised:
+        write_secret(tmp_path / "secrets" / "token", b"secret", me(), NO_READERS)
+    assert str(tmp_path / "secrets") in str(raised.value)
+    assert list((tmp_path / "real").iterdir()) == []
 
 
 def test_harden_file_tightens_the_mode_and_keeps_the_owner(tmp_path):

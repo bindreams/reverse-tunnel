@@ -10,6 +10,8 @@ import sys
 from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 
+from ctl import _winfile as winfile
+
 KEY = re.compile(r"[A-Z][A-Z0-9_]*", re.ASCII)
 BANNED_VALUE_CHARACTERS = frozenset("\"'`$\\#")
 # Go `text/template` ignores whitespace and trim markers around the action, so the match must too.
@@ -33,9 +35,6 @@ KNOWN_MINIMUM = ("prek.toml", "pyproject.toml")
 # `O_NONBLOCK` keeps a FIFO at the path from blocking the open; `O_BINARY` stops Windows translating line endings
 # before the dialect sees them. Windows has no `O_NOFOLLOW`; it opens through `_open_windows` instead.
 OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
-FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-FILE_ATTRIBUTE_DIRECTORY = 0x10
-FILE_TYPE_DISK = 1
 
 
 class EnvError(Exception):
@@ -113,61 +112,16 @@ def _os_failure(path: Path, exc: OSError) -> str:
 
 
 def _open_windows(path: Path) -> int:
-    """Open `path` read-only as a file descriptor, refusing any reparse point before its target is ever opened.
-
-    `FILE_FLAG_OPEN_REPARSE_POINT` opens the link itself, so a symlink or junction (or a name that leads to a pipe or
-    device) is inspected rather than followed; `FILE_FLAG_BACKUP_SEMANTICS` lets the open succeed on a directory so
-    that it is refused here with a clear message.
-    """
-    import ctypes
+    """Open `path` read-only as a file descriptor, refusing any reparse point before its target is ever opened."""
     import msvcrt
-    from ctypes import wintypes
 
-    generic_read, share_all, open_existing = 0x80000000, 0x7, 3
-    flags = 0x00200000 | 0x02000000  # FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS
-
-    class FileInformation(ctypes.Structure):
-        _fields_ = [
-            ("dwFileAttributes", wintypes.DWORD),
-            ("ftCreationTime", wintypes.FILETIME),
-            ("ftLastAccessTime", wintypes.FILETIME),
-            ("ftLastWriteTime", wintypes.FILETIME),
-            ("dwVolumeSerialNumber", wintypes.DWORD),
-            ("nFileSizeHigh", wintypes.DWORD),
-            ("nFileSizeLow", wintypes.DWORD),
-            ("nNumberOfLinks", wintypes.DWORD),
-            ("nFileIndexHigh", wintypes.DWORD),
-            ("nFileIndexLow", wintypes.DWORD),
-        ]
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateFileW.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
-        wintypes.HANDLE
-    ]
-    kernel32.CreateFileW.restype = wintypes.HANDLE
-    kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(FileInformation)]
-    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
-    kernel32.GetFileType.argtypes = [wintypes.HANDLE]
-    kernel32.GetFileType.restype = wintypes.DWORD
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-
-    handle = kernel32.CreateFileW(str(path), generic_read, share_all, None, open_existing, flags, None)
-    if handle is None or handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
+    handle = winfile.open_handle(
+        path, access=winfile.GENERIC_READ, disposition=winfile.OPEN_EXISTING, directory=False, error=EnvError
+    )
     try:
-        information = FileInformation()
-        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        attributes = information.dwFileAttributes
-        if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-            raise EnvError(f"{path}: is a symlink or other reparse point; refusing to follow it")
-        if attributes & FILE_ATTRIBUTE_DIRECTORY or kernel32.GetFileType(handle) != FILE_TYPE_DISK:
-            raise EnvError(f"{path}: not a regular file")
         return msvcrt.open_osfhandle(handle, os.O_RDONLY)
     except BaseException:
-        kernel32.CloseHandle(handle)
+        winfile.close_handle(handle)
         raise
 
 

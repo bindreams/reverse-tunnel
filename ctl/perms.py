@@ -6,18 +6,19 @@ open descriptor: path-based `chown`/`chmod` follow symlinks, and an account that
 at any file on the machine.
 
 On POSIX the owner and mode express who may read what. On Windows `os.chmod` sets no ACL, so the same intent is an ACL
-of well-known SIDs (see `ctl.winacl`): `owner=None` means the path stays the operator's and the operator's SID is
-granted explicitly; `readers` and `writers` are the SIDs of the other accounts, and POSIX ignores them.
+of well-known SIDs (see `ctl.winacl`), set through a handle that `ctl._winfile` has already vetted: `owner=None` means
+the path stays the operator's and the operator's SID is granted explicitly; `readers` and `writers` are the SIDs of the
+other accounts, and POSIX ignores them.
 """
 
 import dataclasses
 import enum
 import errno
 import os
+import secrets
 import stat
-import subprocess
 import sys
-from collections.abc import Generator, Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -138,7 +139,7 @@ def _require_regular(fd: int, path: Path) -> None:
         raise PermsError(f"{path}: not a regular file")
 
 
-def _write_all(fd: int, data: bytes) -> None:
+def write_all(fd: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
         view = view[os.write(fd, view):]
@@ -180,111 +181,82 @@ def _converge_entries(directory_fd: int, directory: Path, owner: Account) -> Non
             os.close(fd)
 
 
-# Windows ==============================================================================================================
+# Files ================================================================================================================
 
 
-def _reject_reparse_point(path: Path) -> None:
-    """Refuse a symlink or junction. Windows has no `O_NOFOLLOW`, so this check precedes the act."""
-    attributes = getattr(os.lstat(path), "st_file_attributes", 0)
-    if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-        raise PermsError(f"{path}: is a symlink or other reparse point; refusing to follow it")
+def check_destination(path: Path, status: os.stat_result | None) -> None:
+    """Refuse a destination that is not a regular file or absent.
+
+    A diagnostic, not a boundary: nothing here follows or writes through a link, and a swap after this call changes
+    only which file the rename replaces.
+    """
+    if status is None:
+        return
+    if stat.S_ISLNK(status.st_mode) or getattr(status, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise PermsError(f"{path}: is a symlink; refusing to replace it")
+    if not stat.S_ISREG(status.st_mode):
+        raise PermsError(f"{path}: not a regular file")
 
 
-def _reject_if_reparse_point(path: Path) -> None:
+def unlink_quietly(name: str, *, dir_fd: int | None = None) -> None:
     try:
-        _reject_reparse_point(path)
+        os.unlink(name, dir_fd=dir_fd)
     except FileNotFoundError:
         pass
 
 
-@contextmanager
-def _acl_errors(path: Path) -> Generator[None]:
-    try:
-        yield
-    except subprocess.CalledProcessError as exc:
-        raise PermsError(f"{path}: icacls failed: {(exc.stderr or exc.stdout or '').strip()}") from exc
-    except OSError as exc:
-        raise PermsError(f"{path}: {exc.strerror or exc}") from exc
-
-
-def _apply_acl(
-    path: Path,
-    *,
-    directory: bool,
-    owner: Account | None,
-    readers: frozenset[str],
-    writers: frozenset[str],
-    isolate: bool,
-) -> None:
-    with _acl_errors(path):
-        wanted = winacl.apply(
-            path,
-            directory=directory,
-            operator=current_user_sid() if owner is None else None,
-            readers=readers,
-            writers=writers,
-            isolate=isolate,
-        )
-        actual = principals(path)
-    if isolate and actual != wanted:
-        raise PermsError(f"{path}: the ACL grants {sorted(actual)}, expected {sorted(wanted)}")
-    if not wanted <= actual:
-        raise PermsError(f"{path}: the ACL lacks {sorted(wanted - actual)}")
-
-
-def _sid_of(account: Account) -> str:
-    if account.name.casefold() == LOCAL_SERVICE.casefold():
-        return SID_LOCAL_SERVICE
-    raise ValueError(f"no well-known SID for account {account.name!r}")
-
-
-def _windows_directory(path: Path) -> None:
-    try:
-        _reject_reparse_point(path)
-    except FileNotFoundError:
-        try:
-            os.mkdir(path)
-        except OSError as exc:
-            raise PermsError(f"{path}: {exc.strerror or exc}") from exc
-        return
-    if not path.is_dir():
-        raise PermsError(f"{path}: not a directory")
-
-
-def _windows_entries(directory: Path) -> Iterator[Path]:
-    for entry in directory.iterdir():
-        _reject_reparse_point(entry)
-        yield entry
-        if entry.is_dir():
-            yield from _windows_entries(entry)
-
-
-# Files ================================================================================================================
+def temporary_name(path: Path) -> str:
+    return f".{path.name}.{secrets.token_hex(8)}.tmp"
 
 
 def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozenset[str]) -> None:
-    """Write `data` to `path`, never readable by anyone the final mode excludes, even for an instant.
+    """Replace `path` with `data`, atomically and never readable by anyone the final mode excludes, even for an instant.
 
-    The file is created `0600`, so there is no window at `0666 & ~umask`, and `O_NOFOLLOW` stops a pre-existing symlink
-    redirecting the secret. Ownership and mode are set on the descriptor before the first byte is written.
+    The secret is written to a temporary file beside `path`, created `0600` with `O_EXCL|O_NOFOLLOW`, so there is no
+    window at `0666 & ~umask` and nothing is written through a link. Ownership and mode are set on the descriptor before
+    the first byte, the data is flushed, and `rename` swaps it in: a reader sees the old secret or the new one, never a
+    truncated file, and a crash leaves the old one. `rename` replaces whatever is at the name without following it, so
+    a symlink swapped in after the destination check is replaced, not written through.
     """
     if sys.platform == "win32":
-        _reject_if_reparse_point(path)
-        fd = _open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | O_BINARY, SECRET_MODE)
-        try:
-            _apply_acl(path, directory=False, owner=owner, readers=readers, writers=frozenset(), isolate=True)
-            _write_all(fd, data)
-        finally:
-            os.close(fd)
+        from ctl import perms_windows
+
+        perms_windows.write_secret(path, data, owner, readers)
         return
-    fd = _open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, SECRET_MODE)
+    directory_fd = _open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        _require_regular(fd, path)
-        _chown(fd, owner)
-        os.fchmod(fd, SECRET_MODE)
-        _write_all(fd, data)
+        try:
+            status = os.lstat(path.name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            status = None
+        check_destination(path, status)
+        while True:
+            name = temporary_name(path)
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, SECRET_MODE, dir_fd=directory_fd)
+                break
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise _failure(path.parent / name, exc) from exc
+        try:
+            try:
+                _chown(fd, owner)
+                os.fchmod(fd, SECRET_MODE)
+                write_all(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                os.replace(name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            except OSError as exc:
+                raise PermsError(f"{path}: {exc.strerror or exc}") from exc
+        except BaseException:
+            unlink_quietly(name, dir_fd=directory_fd)
+            raise
+        os.fsync(directory_fd)
     finally:
-        os.close(fd)
+        os.close(directory_fd)
 
 
 def harden_file(path: Path, owner: Account | None, readers: frozenset[str]) -> None:
@@ -293,13 +265,9 @@ def harden_file(path: Path, owner: Account | None, readers: frozenset[str]) -> N
     Refuses a symlink: the guarantee would otherwise be made about a different file than the one the operator hardened.
     """
     if sys.platform == "win32":
-        try:
-            _reject_reparse_point(path)
-        except OSError as exc:
-            raise PermsError(f"{path}: {exc.strerror or exc}") from exc
-        if not path.is_file():
-            raise PermsError(f"{path}: not a regular file")
-        _apply_acl(path, directory=False, owner=owner, readers=readers, writers=frozenset(), isolate=True)
+        from ctl import perms_windows
+
+        perms_windows.harden_file(path, owner, readers)
         return
     fd = _open(path, os.O_RDONLY)
     try:
@@ -329,8 +297,9 @@ def converge_dir(
     On Windows `isolate` breaks inheritance; only `.env`, `secrets/` and the token do, never the repository root.
     """
     if sys.platform == "win32":
-        _windows_directory(path)
-        _apply_acl(path, directory=True, owner=owner, readers=readers, writers=writers, isolate=isolate)
+        from ctl import perms_windows
+
+        perms_windows.converge_dir(path, owner, readers, writers, isolate)
         return
     with _converged(path, owner, mode):
         pass
@@ -341,14 +310,12 @@ def converge_tree(path: Path, owner: Account | None, mode: int) -> None:
 
     systemd opens a log's append target after dropping to `User=`, so a stale owner is `EACCES` and the daemon never
     starts. A symlink anywhere in the tree is refused: a service that can write `logs/` could plant one for root to chown.
+    On Windows every entry is reset to inherit its ACL from its parent.
     """
     if sys.platform == "win32":
-        with _acl_errors(path):
-            _windows_directory(path)
-            entries = list(_windows_entries(path))
-            for entry in entries:
-                if entry.parent == path:
-                    winacl.reset_to_inherited(entry)
+        from ctl import perms_windows
+
+        perms_windows.converge_tree(path)
         return
     with _converged(path, owner, mode) as fd:
         if owner is not None:
@@ -362,9 +329,9 @@ def grant_traverse(path: Path, account: Account) -> None:
     """
     if sys.platform != "win32":
         return
-    _reject_reparse_point(path)
-    with _acl_errors(path):
-        winacl.grant_traversal(path, _sid_of(account))
+    from ctl import perms_windows
+
+    perms_windows.grant_traverse(path, account)
 
 
 # Inspection ===========================================================================================================

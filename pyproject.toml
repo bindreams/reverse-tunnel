@@ -6,7 +6,9 @@ readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE.md"]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pywin32>=312 ; sys_platform == 'win32'",
+]
 
 [tool.uv]
 # `ctl` is run in place (`uv run -m ctl`), never installed.
@@ -25,6 +27,7 @@ dev = [
     "prek>=0.5.5",
     "pytest>=9.1.1",
     "ty>=0.0.85",
+    "types-pywin32>=312.0.0.20261006",
     "yapf>=0.43.0",
 ]
 

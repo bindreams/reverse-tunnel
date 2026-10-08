@@ -1,3 +1,6 @@
+import errno
+import os
+
 import pytest
 
 from ctl import perms
@@ -45,6 +48,7 @@ def test_write_secret_refuses_a_symlink_at_the_destination(tmp_path):
     assert str(link) in str(raised.value)
     assert "symlink" in str(raised.value)
     assert sentinel.read_bytes() == b"untouched"
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["sentinel", "token"]
 
 
 def test_write_secret_refuses_a_dangling_symlink(tmp_path):
@@ -65,3 +69,37 @@ def test_harden_file_refuses_a_symlink(tmp_path):
         harden_file(link, None, NO_READERS)
     assert str(link) in str(raised.value)
     assert "symlink" in str(raised.value)
+
+
+def names(directory) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir())
+
+
+def test_write_secret_leaves_only_the_destination(tmp_path):
+    write_secret(tmp_path / "token", b"secret", None, NO_READERS)
+    assert names(tmp_path) == ["token"]
+
+
+def test_write_secret_keeps_the_previous_secret_when_the_write_fails(tmp_path, monkeypatch):
+    path = tmp_path / "token"
+    write_secret(path, b"old", None, NO_READERS)
+
+    def full_disk(fd, data):
+        raise OSError(errno.ENOSPC, "no space left on device")
+
+    monkeypatch.setattr(os, "write", full_disk)
+    with pytest.raises(OSError):
+        write_secret(path, b"new", None, NO_READERS)
+    monkeypatch.undo()
+    assert path.read_bytes() == b"old"
+    assert names(tmp_path) == ["token"]
+
+
+def test_write_secret_keeps_the_previous_secret_when_it_cannot_replace_it(tmp_path):
+    path = tmp_path / "token"
+    path.mkdir()
+    with pytest.raises(PermsError) as raised:
+        write_secret(path, b"new", None, NO_READERS)
+    assert str(path) in str(raised.value)
+    assert names(tmp_path) == ["token"]
+    assert path.is_dir()

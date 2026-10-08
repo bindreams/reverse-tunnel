@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from ctl import winacl
+from ctl import perms_windows, winacl
 from ctl.perms import (
     SID_ADMINISTRATORS,
     SID_AUTHENTICATED_USERS,
@@ -132,6 +132,43 @@ def test_a_secret_is_never_written_under_the_permissive_inherited_acl(tmp_path):
     assert winacl.read_acl(path).protected
     assert SID_LOCAL_SERVICE in principals(path)
     assert operator() not in principals(path)
+
+
+def test_harden_file_refuses_a_directory_junction(tmp_path):
+    import _winapi
+
+    target = tmp_path / "target"
+    target.mkdir()
+    junction = tmp_path / "junction"
+    _winapi.CreateJunction(str(target), str(junction))
+    before = winacl.read_acl(target)
+    with pytest.raises(PermsError) as raised:
+        harden_file(junction, None, NO_READERS)
+    assert "reparse point" in str(raised.value)
+    assert winacl.read_acl(target) == before
+
+
+def test_write_secret_sets_the_acl_before_the_first_byte_is_written(tmp_path, monkeypatch):
+    seen: list[frozenset[str]] = []
+    real = perms_windows.write_all
+
+    def spy(fd, data):
+        (temporary, ) = [entry for entry in tmp_path.iterdir() if entry.name.endswith(".tmp")]
+        seen.append(principals(temporary))
+        real(fd, data)
+
+    monkeypatch.setattr(perms_windows, "write_all", spy)
+    write_secret(tmp_path / "token", b"secret", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}))
+    assert seen == [frozenset({SID_ADMINISTRATORS, SID_LOCAL_SERVICE})]
+
+
+def test_write_secret_replaces_a_hardened_secret_and_keeps_the_acl(tmp_path):
+    path = tmp_path / "token"
+    write_secret(path, b"old", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}))
+    write_secret(path, b"new", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}))
+    assert path.read_bytes() == b"new"
+    assert principals(path) == {SID_ADMINISTRATORS, SID_LOCAL_SERVICE}
+    assert [entry.name for entry in tmp_path.iterdir()] == ["token"]
 
 
 # Directories ==========================================================================================================

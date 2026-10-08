@@ -9,4 +9,4 @@ Tests that only mean something on one operating system live in a directory for i
 
 - A bare `pytest` collects `tests/unit` plus this OS's directory; `conftest.py` at the repository root ignores the other.
 - Each CI job runs its directory by path. An empty collection is exit code 5, so a renamed or emptied directory turns the job red instead of passing quietly.
-- A test marked `root` chowns to other accounts, so it fails without uid 0 and never skips. Run it in a throwaway container or on CI, never on a development machine and never under `sudo` there. The container needs an account named `rt-test-svc`.
+- A test marked `root` chowns to other accounts, so it fails without uid 0 and never skips. Run it in a throwaway container or on CI, never on a development machine and never under `sudo` there. The machine needs an unprivileged account named `rt-test-svc`; the CI jobs and the container recipe create it.
