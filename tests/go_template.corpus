@@ -36,13 +36,6 @@
       ]
     },
     {
-      "id": "trim-no-space",
-      "text": "a = 1\nb = {{-.Envs.X}}\n",
-      "names": [
-        "X"
-      ]
-    },
-    {
       "id": "tab-and-newline",
       "text": "a = 1\nb = {{\t.Envs.X\n}}\n",
       "names": [
@@ -92,6 +85,27 @@
     {
       "id": "carriage-returns",
       "text": "a = 1\r\nb = \"{{ .Envs.X }}\"\r\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "trim-markers-with-root-dollar",
+      "text": "a = 1\nb = {{- $.Envs.X  -}}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "trim-marker-then-newline",
+      "text": "a = 1\nb = {{-\n.Envs.X\n-}}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "non-ascii-elsewhere",
+      "text": "a = \"\u00e9\"\nb = \"{{ .Envs.X }}\" # \u00fcn\u00efcode\n",
       "names": [
         "X"
       ]
@@ -242,6 +256,56 @@
       "id": "bad-action-after-a-multi-line-valid-one",
       "text": "a = \"{{\n.Envs.A\n}}\"\nb = {{ .Envs.B | quote }}\n",
       "line": 4
+    },
+    {
+      "id": "trim-left-without-space",
+      "text": "a = 1\nb = {{-.Envs.X}}\n",
+      "line": 2
+    },
+    {
+      "id": "trim-right-without-space",
+      "text": "a = 1\nb = {{ .Envs.X-}}\n",
+      "line": 2
+    },
+    {
+      "id": "trim-both-without-space",
+      "text": "a = 1\nb = {{-.Envs.X-}}\n",
+      "line": 2
+    },
+    {
+      "id": "trim-left-valid-right-without-space",
+      "text": "a = 1\nb = {{- .Envs.X-}}\n",
+      "line": 2
+    },
+    {
+      "id": "form-feed-is-not-go-space",
+      "text": "a = 1\nb = {{\f.Envs.X}}\n",
+      "line": 2
+    },
+    {
+      "id": "vertical-tab-is-not-go-space",
+      "text": "a = 1\nb = {{ .Envs.X\u000b}}\n",
+      "line": 2
+    },
+    {
+      "id": "no-break-space-is-not-go-space",
+      "text": "a = 1\nb = {{\u00a0.Envs.X}}\n",
+      "line": 2
+    },
+    {
+      "id": "non-ascii-before-envs",
+      "text": "a = 1\nb = \u00e9Envs\n",
+      "line": 2
+    },
+    {
+      "id": "non-ascii-after-envs",
+      "text": "a = 1\nb = Envs\u00e9\n",
+      "line": 2
+    },
+    {
+      "id": "non-ascii-in-the-name",
+      "text": "a = 1\nb = {{ .Envs.X\u00e9 }}\n",
+      "line": 2
     }
   ]
 }

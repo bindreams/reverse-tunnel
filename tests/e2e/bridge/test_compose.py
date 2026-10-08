@@ -76,6 +76,15 @@ def test_compose_config_fails_when_a_required_variable_is_empty(config_project: 
     assert variable in result.stderr
 
 
+def test_service_is_hardened(config_project: Project):
+    service = config_project.config()["services"]["frps"]
+    assert service["cap_drop"] == ["ALL"]
+    assert service["cap_add"] == ["DAC_READ_SEARCH"]
+    assert service["security_opt"] == ["no-new-privileges:true"]
+    assert service["read_only"] is True
+    assert service["tmpfs"] == ["/run/rt:mode=0700"]
+
+
 # compose.traefik.yaml =================================================================================================
 
 
@@ -103,10 +112,10 @@ def test_traefik_overlay_routes_the_vhost_and_the_control_connection(config_proj
     assert labels["traefik.http.services.rt-control.loadbalancer.server.port"] == "8001"
 
 
-def test_traefik_vhost_rule_matches_one_label_under_the_domain(config_project: Project):
+def test_traefik_vhost_rule_quotes_the_domain_so_its_dots_are_literal(config_project: Project):
     rule = config_project.config(overlay=True)["services"]["frps"]["labels"]["traefik.http.routers.rt-vhost.rule"]
     # `config` prints a literal `$` as `$$`, the escape the file itself uses.
-    assert rule == r"HostRegexp(`^[a-z0-9-]+\.tunnel.example.com$$`)"
+    assert rule == r"HostRegexp(`^[a-z0-9-]+\.\Qtunnel.example.com\E$$`)"
 
 
 def test_traefik_overlay_attaches_frps_to_the_external_proxy_network(config_project: Project):

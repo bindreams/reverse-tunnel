@@ -3,6 +3,8 @@ import tomllib
 
 import pytest
 
+from ctl import config
+from ctl.env import GO_TEMPLATE_REFERENCE
 from ctl.config import EXAMPLE_ADMIN_PASSWORD, EXAMPLE_TOKEN
 from scanner_support import REPO_ROOT
 
@@ -44,7 +46,7 @@ def test_frps_config_names_no_host_and_no_proxy():
     assert "[[proxies]]" not in FRPS_TOML.read_text(encoding="utf-8")
     for value in string_values(config):
         value = re.sub(r"\{\{[^}]*\}\}", "", value)
-        if re.fullmatch(r"[0-9.]+", value):  # an address such as 0.0.0.0 is a bind, not a host
+        if value == "0.0.0.0":  # the bind address of the admin API, not a host
             continue
         assert not re.search(r"[A-Za-z0-9-]+\.[A-Za-z0-9-]+", value), f"literal host-like value {value!r}"
 
@@ -119,6 +121,27 @@ def test_entrypoint_placeholders_match_the_ones_ctl_refuses():
     assert f"EXAMPLE_ADMIN_PASSWORD={EXAMPLE_ADMIN_PASSWORD}\n" in text
 
 
+def entrypoint_constant(name: str) -> str:
+    match = re.search(rf"^{name}='?([^'\n]*)'?$", ENTRYPOINT.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match, name
+    return match.group(1)
+
+
+def test_entrypoint_value_rules_are_the_ones_ctl_applies():
+    assert entrypoint_constant("ADMIN_PASSWORD_PATTERN") == f"^{config.ADMIN_PASSWORD.pattern}$"
+    assert entrypoint_constant("DNS_LABEL_PATTERN") == config.DNS_LABEL.pattern
+    assert entrypoint_constant("NUMERIC_LABEL_PATTERN") == "^" + config.NUMERIC_LABEL.pattern.replace("(?:", "(")
+    assert int(entrypoint_constant("MAX_DNS_NAME_LENGTH")) == config.MAX_DNS_NAME_LENGTH
+
+
+def test_entrypoint_template_pattern_is_the_one_ctl_applies():
+    """The awk literal is `GO_TEMPLATE_REFERENCE` anchored, as an ERE with `\\` doubled before a metacharacter."""
+    literal = re.search(r'^\s*pattern = "(.*)"$', ENTRYPOINT.read_text(encoding="utf-8"), re.MULTILINE)
+    assert literal
+    expected = re.sub(r"\\([{}$.])", r"\\\\\1", GO_TEMPLATE_REFERENCE.pattern).replace("(?:", "(")
+    assert literal.group(1) == "^" + expected
+
+
 # compose files ========================================================================================================
 
 
@@ -150,3 +173,7 @@ def test_nginx_example_forwards_websocket_upgrades_and_the_host():
 def test_caddy_example_ships_the_vhost_and_the_control_site():
     text = (REPO_ROOT / "examples" / "Caddyfile").read_text(encoding="utf-8")
     assert re.findall(r"^(\S+) \{$", text, re.MULTILINE) == ["*.tunnel.example.com", "bridge.example.com"]
+
+
+def test_traefik_overlay_says_it_needs_traefik_v3():
+    assert "Traefik v3" in (REPO_ROOT / "compose.traefik.yaml").read_text(encoding="utf-8")

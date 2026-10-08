@@ -1,4 +1,4 @@
-# Overlay for a Traefik that shares a Docker network with this stack:
+# Overlay for a Traefik v3 that shares a Docker network with this stack (the rules use v3's `HostRegexp` syntax):
 #   docker compose -f compose.yaml -f compose.traefik.yaml up --wait
 # Set the entrypoints and TLS of the two routers on Traefik's side (for example `entryPoints.<name>.http.tls`).
 services:
@@ -16,8 +16,9 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: ${RT_PROXY_NETWORK:?set RT_PROXY_NETWORK in .env}
-      # Tunnels: <label>.RT_DOMAIN. frps routes on Host, so it must reach the container unchanged.
-      traefik.http.routers.rt-vhost.rule: 'HostRegexp(`^[a-z0-9-]+\.${RT_DOMAIN:?set RT_DOMAIN in .env}$$`)'
+      # Tunnels: <label>.RT_DOMAIN, with the domain's dots taken literally (\Q..\E). frps routes on Host, so Traefik
+      # passes it on unchanged.
+      traefik.http.routers.rt-vhost.rule: 'HostRegexp(`^[a-z0-9-]+\.\Q${RT_DOMAIN:?set RT_DOMAIN in .env}\E$$`)'
       traefik.http.routers.rt-vhost.service: rt-vhost
       traefik.http.services.rt-vhost.loadbalancer.server.port: "8080"
       traefik.http.services.rt-vhost.loadbalancer.passhostheader: "true"

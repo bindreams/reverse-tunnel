@@ -40,9 +40,15 @@ def image() -> Iterator[str]:
     assert removal.returncode == 0, removal.stderr
 
 
+@pytest.fixture(scope="session")
+def service(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """The frps service of `compose.yaml`, rendered by compose."""
+    return make_project(tmp_path_factory.mktemp("service")).config()["services"]["frps"]
+
+
 @pytest.fixture
-def entrypoint(image: str, tmp_path: Path) -> Entrypoint:
-    return Entrypoint(image, tmp_path)
+def entrypoint(image: str, tmp_path: Path, service: dict) -> Entrypoint:
+    return Entrypoint(image, tmp_path, service)
 
 
 @pytest.fixture(scope="session")

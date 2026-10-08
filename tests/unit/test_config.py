@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -15,7 +16,7 @@ from ctl.config import (
     ConfigError,
     Role,
 )
-from ctl.env import read, referenced_in_file, tracked_config_files
+from ctl.env import EnvError, read, referenced_in_file, tracked_config_files
 from scanner_support import GIT_ENV, REPO_ROOT
 
 EXAMPLE_ENV = REPO_ROOT / "example.env"
@@ -524,3 +525,42 @@ def test_a_key_that_a_template_now_references_must_leave_both_allowlists():
 
 def test_the_two_allowlists_do_not_overlap():
     assert CTL_ONLY & PENDING_TEMPLATE_KEYS == set()
+
+
+# Value rules shared with the bridge entrypoint ========================================================================
+
+VALUE_RULES = json.loads((REPO_ROOT / "tests" / "value_rules.corpus").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("value", VALUE_RULES["domain"]["accepted"])
+def test_rt_domain_accepts_the_corpus(tmp_path, value):
+    assert config.is_dns_name(value)
+    assert load(tmp_path, Role.BRIDGE, RT_DOMAIN=value).values["RT_DOMAIN"] == value
+
+
+@pytest.mark.parametrize("value", VALUE_RULES["domain"]["rejected"])
+def test_rt_domain_rejects_the_corpus(tmp_path, value):
+    assert not config.is_dns_name(value)
+    if "\n" not in value:  # a newline cannot be written into a `.env` value at all
+        with pytest.raises((ConfigError, EnvError)):
+            load(tmp_path, Role.BRIDGE, RT_DOMAIN=value)
+
+
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("address", ["10.0.0.1", "::1", "2001:db8::1"])
+def test_rt_domain_refuses_an_ip_address_because_tunnels_are_subdomains(tmp_path, role, address):
+    assert "RT_DOMAIN" in refused(tmp_path, role, RT_DOMAIN=address)
+
+
+@pytest.mark.parametrize("value", VALUE_RULES["admin_password"]["accepted"])
+def test_the_admin_password_accepts_the_corpus(tmp_path, value):
+    assert config.ADMIN_PASSWORD.fullmatch(value)
+    assert load(tmp_path, Role.BRIDGE, RT_ADMIN_PASSWORD=value).values["RT_ADMIN_PASSWORD"] == value
+
+
+@pytest.mark.parametrize("value", VALUE_RULES["admin_password"]["rejected"])
+def test_the_admin_password_rejects_the_corpus(tmp_path, value):
+    assert not config.ADMIN_PASSWORD.fullmatch(value)
+    if "\n" not in value:
+        with pytest.raises((ConfigError, EnvError)):
+            load(tmp_path, Role.BRIDGE, RT_ADMIN_PASSWORD=value)

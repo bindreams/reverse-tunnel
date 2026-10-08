@@ -31,6 +31,15 @@ services:
         read_only: true
         bind:
           create_host_path: false
+    # The container keeps one capability: it reads the operator's 0600 token and, dropping the rest, cannot do more.
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    # The entrypoint's private copy of the token and config; it refuses to start without this mount.
+    tmpfs:
+      - /run/rt:mode=0700
     healthcheck:
       # /healthz sits outside frps's authentication.
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7500/healthz"]

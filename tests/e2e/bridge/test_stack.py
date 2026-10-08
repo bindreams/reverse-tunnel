@@ -74,3 +74,21 @@ def test_compose_does_not_create_a_missing_token_source(tmp_path):
     finally:
         down = project.compose("down", "--volumes", "--remove-orphans", "--rmi", "local")
         assert down.returncode == 0, down.stderr
+
+
+CAPABILITY_NUMBERS = {"DAC_OVERRIDE": 1, "DAC_READ_SEARCH": 2}
+
+
+def test_the_running_container_holds_exactly_the_added_capabilities(running: Project):
+    status = running.compose("exec", "-T", "frps", "grep", "-E", "^Cap(Eff|Bnd|Prm):", "/proc/1/status")
+    assert status.returncode == 0, status.stderr
+    expected = sum(1 << CAPABILITY_NUMBERS[name] for name in running.config()["services"]["frps"]["cap_add"])
+    masks = {line.split(":")[0]: int(line.split()[1], 16) for line in status.stdout.splitlines()}
+    assert masks == {"CapPrm": expected, "CapEff": expected, "CapBnd": expected}
+
+
+def test_the_running_container_cannot_write_its_root_filesystem_and_keeps_state_on_a_tmpfs(running: Project):
+    script = "touch /x 2>&1; grep -c ' /run/rt tmpfs ' /proc/mounts"
+    result = running.compose("exec", "-T", "frps", "sh", "-c", script)
+    assert "Read-only file system" in result.stdout
+    assert result.stdout.splitlines()[-1] == "1"

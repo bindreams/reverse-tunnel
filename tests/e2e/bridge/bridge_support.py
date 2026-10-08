@@ -27,12 +27,44 @@ def run(*args: str, cwd: Path | None = None, env: Mapping[str, str] | None = Non
     return subprocess.run(args, cwd=cwd, env=env or clean_environment(), capture_output=True, text=True, check=False)
 
 
+# A uid that is neither root nor, in the sandbox, the account running the tests.
+OTHER_UID = 12345
+
+
+def write_operator_token(path: Path, content: bytes) -> None:
+    """A token as `ctl install` leaves it: mode 0600 and owned by an account other than the container's root."""
+    path.write_bytes(content)
+    path.chmod(0o600)
+    if os.geteuid() == 0:
+        os.chown(path, OTHER_UID, OTHER_UID)
+
+
 @dataclass
 class Entrypoint:
-    """Runs the image's entrypoint against a token and a config, then a command that proves the checks passed."""
+    """Runs the image's entrypoint against a token and a config, then a command that proves the checks passed.
+
+    `service` is the frps service of the repository's `compose.yaml` as `docker compose config` renders it; its
+    capabilities, security options, read-only root and tmpfs become `docker run` flags, so a run is hardened exactly
+    as the stack is.
+    """
 
     image: str
     directory: Path
+    service: dict
+
+    def hardening(self, *, tmpfs: bool = True, add_capabilities: bool = True) -> list[str]:
+        flags: list[str] = []
+        for capability in self.service.get("cap_drop", []):
+            flags += ["--cap-drop", capability]
+        for capability in self.service.get("cap_add", []) if add_capabilities else []:
+            flags += ["--cap-add", capability]
+        for option in self.service.get("security_opt", []):
+            flags += ["--security-opt", option]
+        if self.service.get("read_only"):
+            flags.append("--read-only")
+        for target in self.service.get("tmpfs", []) if tmpfs else []:
+            flags += ["--tmpfs", target]
+        return flags
 
     def run(
         self,
@@ -41,20 +73,21 @@ class Entrypoint:
         config: str | None = None,
         environment: Mapping[str, str | None] | None = None,
         command: tuple[str, ...] = ("echo", "STARTED"),
+        tmpfs: bool = True,
+        add_capabilities: bool = True,
+        extra: tuple[str, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         """`token=None` and `config=None` mount nothing at that path."""
-        environment = {"RT_DOMAIN": GOOD_DOMAIN, "RT_ADMIN_PASSWORD": GOOD_PASSWORD, **(environment or {})}
         mounts: list[str] = []
         if token is not None:
             path = self.directory / f"token-{uuid.uuid4().hex[:8]}"
-            path.write_bytes(token if isinstance(token, bytes) else token.encode())
+            write_operator_token(path, token if isinstance(token, bytes) else token.encode())
             mounts += self.mount(path, "/rt/secrets/token")
         if config is not None:
             path = self.directory / f"frps-{uuid.uuid4().hex[:8]}.toml"
             path.write_text(config, encoding="utf-8")
             mounts += self.mount(path, "/rt/bridge/frps.toml")
-        flags = [f"--env={name}={value}" for name, value in environment.items() if value is not None]
-        return run("docker", "run", "--rm", "--network", "none", *mounts, *flags, self.image, *command)
+        return self.docker_run(mounts, environment, command, tmpfs, add_capabilities, extra)
 
     def run_with_mounts(
         self,
@@ -62,9 +95,16 @@ class Entrypoint:
         *,
         command: tuple[str, ...] = ("echo", "STARTED"),
     ) -> subprocess.CompletedProcess[str]:
-        flags = [f"--env=RT_DOMAIN={GOOD_DOMAIN}", f"--env=RT_ADMIN_PASSWORD={GOOD_PASSWORD}"]
         arguments = [argument for source, target in mounts for argument in self.mount(source, target)]
-        return run("docker", "run", "--rm", "--network", "none", *arguments, *flags, self.image, *command)
+        return self.docker_run(arguments, None, command, True, True, ())
+
+    def docker_run(self, mounts, environment, command, tmpfs, add_capabilities, extra):
+        environment = {"RT_DOMAIN": GOOD_DOMAIN, "RT_ADMIN_PASSWORD": GOOD_PASSWORD, **(environment or {})}
+        flags = [f"--env={name}={value}" for name, value in environment.items() if value is not None]
+        hardening = self.hardening(tmpfs=tmpfs, add_capabilities=add_capabilities)
+        return run(
+            "docker", "run", "--rm", "--network", "none", *hardening, *extra, *mounts, *flags, self.image, *command
+        )
 
     @staticmethod
     def mount(source: Path, target: str) -> list[str]:
@@ -107,7 +147,7 @@ def make_project(directory: Path, **overrides: str | None) -> Project:
         else:
             shutil.copy2(source, root / name)
     (root / "secrets").mkdir(mode=0o711)
-    (root / "secrets" / "token").write_text(GOOD_TOKEN + "\n")
+    write_operator_token(root / "secrets" / "token", (GOOD_TOKEN + "\n").encode())
     values = {
         "RT_DOMAIN": GOOD_DOMAIN,
         "RT_ADMIN_PASSWORD": GOOD_PASSWORD,

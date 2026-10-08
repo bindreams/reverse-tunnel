@@ -284,7 +284,9 @@ def test_an_unsupported_envs_action_is_an_error_not_a_miss(text, line):
 
 
 def test_the_strict_pattern_is_one_exported_constant():
-    assert env.GO_TEMPLATE_REFERENCE.pattern == r"\{\{-?\s*\$?\.Envs\.([A-Z][A-Z0-9_]*)\s*-?\}\}"
+    assert env.GO_TEMPLATE_REFERENCE.pattern == (
+        r"\{\{(?:-[ \t\r\n])?[ \t\r\n]*\$?\.Envs\.([A-Z][A-Z0-9_]*)(?:[ \t\r\n]+-|[ \t\r\n]*)\}\}"
+    )
 
 
 def test_the_source_defaults_to_a_placeholder_in_the_message():

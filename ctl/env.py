@@ -14,10 +14,13 @@ from ctl import _winfile as winfile
 
 KEY = re.compile(r"[A-Z][A-Z0-9_]*", re.ASCII)
 BANNED_VALUE_CHARACTERS = frozenset("\"'`$\\#")
-# Go `text/template` ignores whitespace and trim markers around the action, so the match must too.
-GO_TEMPLATE_REFERENCE = re.compile(r"\{\{-?\s*\$?\.Envs\.([A-Z][A-Z0-9_]*)\s*-?\}\}")
+# Go `text/template` skips ASCII space, tab, CR and LF around an action, and reads `-` as a trim marker only when
+# whitespace is adjacent: `{{- ` on the left, ` -}}` on the right. `bridge/entrypoint.sh` mirrors this pattern.
+GO_TEMPLATE_REFERENCE = re.compile(
+    r"\{\{(?:-[ \t\r\n])?[ \t\r\n]*\$?\.Envs\.([A-Z][A-Z0-9_]*)(?:[ \t\r\n]+-|[ \t\r\n]*)\}\}"
+)
 UNSUPPORTED_TEMPLATE = "unsupported template syntax; only `{{ .Envs.NAME }}` is supported"
-ENVS_WORD = re.compile(r"\bEnvs\b")
+ENVS_WORD = re.compile(r"\bEnvs\b", re.ASCII)
 COMPOSE_REFERENCE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[?-][^}$\n]*)?\}")
 # Caddy finds `{$NAME}` and `{env.NAME}` anywhere in its input, so no context may excuse one.
 CADDY_PLACEHOLDER = re.compile(r"\{(?:\$[A-Za-z_]|env\.)")

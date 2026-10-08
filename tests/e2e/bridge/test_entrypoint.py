@@ -1,8 +1,9 @@
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
-from bridge_support import GOOD_TOKEN, Entrypoint, assert_refused
+from bridge_support import GOOD_TOKEN, REPO_ROOT, Entrypoint, assert_refused
 
 EXAMPLE_TOKEN = "0" * 64
 EXAMPLE_PASSWORD = "example-admin-password"
@@ -78,6 +79,40 @@ def test_reports_the_token_before_the_admin_password(entrypoint: Entrypoint, tra
     assert_refused(result, "/rt/secrets/token is the example token")
 
 
+# The state directory ==================================================================================================
+
+
+def test_refuses_to_start_when_run_rt_is_not_a_tmpfs(entrypoint: Entrypoint, tracked_config: str):
+    """The private copy of the token must not reach the container's writable layer."""
+    result = entrypoint.run(config=tracked_config, tmpfs=False, extra=("--volume", "/run/rt"))
+    assert_refused(result, "/run/rt is not a tmpfs")
+
+
+def test_refuses_to_start_when_run_rt_is_just_a_directory(entrypoint: Entrypoint, tracked_config: str):
+    result = entrypoint.run(config=tracked_config, tmpfs=False)
+    assert_refused(result, "/run/rt is not a tmpfs")
+
+
+def test_run_rt_is_private_to_root(entrypoint: Entrypoint, tracked_config: str):
+    result = entrypoint.run(config=tracked_config, command=("stat", "-c", "%a %U", "/run/rt"))
+    assert result.stdout.strip() == "700 root", result.stderr
+
+
+def test_the_token_copy_is_on_the_tmpfs_and_the_root_filesystem_is_read_only(
+    entrypoint: Entrypoint, tracked_config: str
+):
+    script = "grep -c ' /run/rt tmpfs ' /proc/mounts; touch /x 2>&1; cat /run/rt/work/secrets/token > /dev/null"
+    result = entrypoint.run(config=tracked_config, command=("sh", "-c", script))
+    assert result.stdout.splitlines()[0] == "1", result.stdout
+    assert "Read-only file system" in result.stdout
+
+
+def test_names_a_token_the_container_cannot_read(entrypoint: Entrypoint, tracked_config: str):
+    """The container keeps only the capabilities it needs; reading the operator's 0600 file is one of them."""
+    result = entrypoint.run(config=tracked_config, add_capabilities=False)
+    assert_refused(result, "cannot read /rt/secrets/token")
+
+
 # The admin password ===================================================================================================
 
 
@@ -90,6 +125,40 @@ def test_refuses_a_missing_admin_password(entrypoint: Entrypoint, tracked_config
 def test_refuses_the_example_admin_password(entrypoint: Entrypoint, tracked_config: str):
     result = entrypoint.run(config=tracked_config, environment={"RT_ADMIN_PASSWORD": EXAMPLE_PASSWORD})
     assert_refused(result, "RT_ADMIN_PASSWORD is the example password")
+
+
+# Values shaped like ctl.config's ======================================================================================
+
+VALUE_RULES = json.loads((REPO_ROOT / "tests" / "value_rules.corpus").read_text(encoding="utf-8"))
+
+
+def passable(values: list[str]) -> list[str]:
+    """An environment variable cannot hold a NUL byte, so those corpus entries only apply to `ctl.config`."""
+    return [value for value in values if "\x00" not in value]
+
+
+@pytest.mark.parametrize("value", VALUE_RULES["domain"]["accepted"])
+def test_accepts_every_domain_ctl_accepts(entrypoint: Entrypoint, tracked_config: str, value: str):
+    result = entrypoint.run(config=tracked_config, environment={"RT_DOMAIN": value})
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("value", passable(VALUE_RULES["domain"]["rejected"]))
+def test_refuses_every_domain_ctl_refuses(entrypoint: Entrypoint, tracked_config: str, value: str):
+    result = entrypoint.run(config=tracked_config, environment={"RT_DOMAIN": value})
+    assert_refused(result, "RT_DOMAIN must be a DNS name")
+
+
+@pytest.mark.parametrize("value", VALUE_RULES["admin_password"]["accepted"])
+def test_accepts_every_admin_password_ctl_accepts(entrypoint: Entrypoint, tracked_config: str, value: str):
+    result = entrypoint.run(config=tracked_config, environment={"RT_ADMIN_PASSWORD": value})
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("value", passable(VALUE_RULES["admin_password"]["rejected"]))
+def test_refuses_every_admin_password_ctl_refuses(entrypoint: Entrypoint, tracked_config: str, value: str):
+    result = entrypoint.run(config=tracked_config, environment={"RT_ADMIN_PASSWORD": value})
+    assert_refused(result, "RT_ADMIN_PASSWORD must be at least 16 characters")
 
 
 # The config ===========================================================================================================
@@ -115,11 +184,33 @@ def test_refuses_a_missing_rt_domain(entrypoint: Entrypoint, tracked_config: str
     assert_refused(result, "RT_DOMAIN is unset or empty")
 
 
-def test_refuses_a_missing_variable_written_without_template_spaces(entrypoint: Entrypoint, tracked_config: str):
-    config = tracked_config.replace("{{ .Envs.RT_DOMAIN }}", "{{.Envs.RT_DOMAIN}}")
-    assert config != tracked_config
-    result = entrypoint.run(config=config, environment={"RT_DOMAIN": None})
-    assert_refused(result, "RT_DOMAIN is unset or empty")
+@pytest.mark.parametrize("reference", ["{{ .Envs.RT_NOTE }}", "{{.Envs.RT_NOTE}}", "{{- $.Envs.RT_NOTE -}}"])
+def test_refuses_a_missing_variable_whatever_the_template_spacing(entrypoint: Entrypoint, reference: str):
+    result = entrypoint.run(config=f'note = "{reference}"\n', environment={"RT_NOTE": None})
+    assert_refused(result, "RT_NOTE is unset or empty")
+
+
+UNSAFE_VALUES = [
+    pytest.param('a"b', id="double-quote"),
+    pytest.param("a\\b", id="backslash"),
+    pytest.param("a\nb", id="newline"),
+    pytest.param("\n", id="only-a-newline"),
+    pytest.param("a\tb", id="tab"),
+    pytest.param("a\x01b", id="control-character"),
+    pytest.param("a\x7fb", id="delete"),
+    pytest.param("a\rb", id="carriage-return"),
+]
+
+
+@pytest.mark.parametrize("value", UNSAFE_VALUES)
+def test_refuses_a_referenced_value_that_would_break_the_toml_string(entrypoint: Entrypoint, value: str):
+    result = entrypoint.run(config='note = "{{ .Envs.RT_NOTE }}"\n', environment={"RT_NOTE": value})
+    assert_refused(result, "RT_NOTE contains a double quote, a backslash or a control character")
+
+
+def test_accepts_a_referenced_value_with_spaces_braces_and_non_ascii(entrypoint: Entrypoint):
+    result = entrypoint.run(config='note = "{{ .Envs.RT_NOTE }}"\n', environment={"RT_NOTE": "a {b} \u00e9 'c' $d"})
+    assert result.returncode == 0, result.stderr
 
 
 def test_starts_with_the_tracked_config_and_valid_inputs(entrypoint: Entrypoint, tracked_config: str):

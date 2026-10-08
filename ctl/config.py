@@ -76,7 +76,7 @@ NUMERIC_LABEL = re.compile(r"(?:[0-9]+$|0[xX])", re.ASCII)
 PORT = re.compile(r"[1-9][0-9]{0,4}", re.ASCII)
 MAX_DNS_NAME_LENGTH = 253
 MAX_PORT = 65535
-HOST_KEYS = frozenset({"RT_DOMAIN", "RT_SERVER_ADDR", "RT_CONTROL_HOST", "RT_PUBLIC_HOST"})
+HOST_KEYS = frozenset({"RT_SERVER_ADDR", "RT_CONTROL_HOST", "RT_PUBLIC_HOST"})
 
 
 def service_user_required() -> bool:
@@ -92,11 +92,22 @@ def _required_keys(role: Role) -> frozenset[str]:
 # Validation ===========================================================================================================
 
 
-def _is_dns_name_or_ip(value: str) -> bool:
-    """A strict dotted-quad IPv4, an IPv6 literal, or a DNS name.
+def is_dns_name(value: str) -> bool:
+    """A DNS name whose labels are letters, digits and inner hyphens and whose last label is not numeric or `0x…`.
 
-    Anything else numeric-looking (`127.1`, `0x7f.1`, `010.0.0.1`) is refused: `getaddrinfo` reads those through
-    `inet_aton` as an address the operator did not write. A DNS name therefore cannot end in a numeric label or one starting `0x`.
+    The numeric last label is refused because `getaddrinfo` reads such a name through `inet_aton` as an address the
+    operator did not write. `bridge/entrypoint.sh` applies the same rule.
+    """
+    labels = value.split(".")
+    if len(value) > MAX_DNS_NAME_LENGTH or not all(DNS_LABEL.fullmatch(label) for label in labels):
+        return False
+    return not NUMERIC_LABEL.match(labels[-1])
+
+
+def _is_dns_name_or_ip(value: str) -> bool:
+    """A strict dotted-quad IPv4, an IPv6 literal, or a DNS name (see `is_dns_name`).
+
+    Anything else numeric-looking (`127.1`, `0x7f.1`, `010.0.0.1`) is refused.
     """
     if ":" in value:
         try:
@@ -110,10 +121,7 @@ def _is_dns_name_or_ip(value: str) -> bool:
         except ValueError:
             return False
         return True
-    labels = value.split(".")
-    if len(value) > MAX_DNS_NAME_LENGTH or not all(DNS_LABEL.fullmatch(label) for label in labels):
-        return False
-    return not NUMERIC_LABEL.match(labels[-1])
+    return is_dns_name(value)
 
 
 def _check_port(value: str) -> bool:
@@ -143,6 +151,10 @@ def _check_shape(key: str, value: str) -> str | None:
     elif key == "RT_SCHEME":
         if value not in SCHEMES:
             return f"must be one of {', '.join(SCHEMES)}"
+    elif key == "RT_DOMAIN":
+        # Tunnels are `<label>.<RT_DOMAIN>`, which is no address when the domain is one.
+        if not is_dns_name(value):
+            return "must be a DNS name (not an IP address), without a scheme, port, path or trailing dot"
     elif key in HOST_KEYS:
         if not _is_dns_name_or_ip(value):
             return "must be a DNS name or IP address, without a scheme, port, path or trailing dot"

@@ -1,0 +1,77 @@
+{
+  "domain": {
+    "accepted": [
+      "example.com",
+      "tunnel.example.com",
+      "a-b.example.com",
+      "A.Example.COM",
+      "localhost",
+      "xn--bcher-kva.de",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com",
+      "1.example.com",
+      "0x.example.com",
+      "example.c0m",
+      "10.0.0.1.example.com",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ],
+    "rejected": [
+      "10.0.0.1",
+      "0.0.0.0",
+      "::1",
+      "2001:db8::1",
+      "127.1",
+      "2130706433",
+      "example.123",
+      "example.0x1",
+      "a_b.example.com",
+      "-a.example.com",
+      "a-.example.com",
+      "a..example.com",
+      ".example.com",
+      "example.com.",
+      "*.example.com",
+      "https://x.example.com",
+      "x.example.com:80",
+      "x.example.com/path",
+      "ex ample.com",
+      "example.com\n",
+      "example.com\t",
+      "example.com\n.evil.com",
+      "a\"b.example.com",
+      "a\\b.example.com",
+      "a'b.example.com",
+      "a$b.example.com",
+      "caf\u00e9.example.com",
+      "a\u0000b.example.com",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ]
+  },
+  "admin_password": {
+    "accepted": [
+      "abcdefghijklmnop",
+      "correct-horse-battery_staple",
+      "A_B-C_D-E_F-G_H-",
+      "0123456789012345678901234567890123456789012345678901234567890123456789",
+      "----------------"
+    ],
+    "rejected": [
+      "abcdefghijklmno",
+      "abcdefghijklmnop\"",
+      "abcdefghijklmnop\\",
+      "abcdefghijklm nop",
+      "abcdefghijklmnop\n",
+      "abcdefghijklmnop\nabcdefghijklmnop",
+      "abcdefghijklmnop\t",
+      "abcdefghijklmnop.",
+      "abcdefghijklmnop$",
+      "abcdefghijklmnop`",
+      "abcdefghijklmnop'",
+      "abcdefghijklmnop\u00e9",
+      "abcdefghijklmnop\u007f",
+      "abcdefghijklmnop\r",
+      "abcdefghijklmnop{{",
+      "abcdefghijklmnop\u0000x"
+    ]
+  }
+}
