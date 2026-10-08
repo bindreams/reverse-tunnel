@@ -1,0 +1,211 @@
+# Pinned third-party binaries. Regenerate digests with `uv run -m ctl pin --update`.
+# Only the `version` lines are edited by hand (Renovate bumps them); everything else is generated.
+
+[frp]
+# renovate: datasource=github-releases depName=fatedier/frp
+version = "0.71.0"
+
+[[frp.linux-x86_64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_linux_amd64.tar.gz"
+asset_sha256 = "84f27e39f11169f7adcef8e8b70c9329de17747b1f14dad9fb95eef5682ea716"
+member_sha256 = "f79fff8de3089ec711ff8bdd4b73e00dfe491a1c3d754983c8b0f8d58c21b068"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_linux_amd64/frpc"
+install_name = "frpc"
+
+[[frp.linux-x86_64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_linux_amd64.tar.gz"
+asset_sha256 = "84f27e39f11169f7adcef8e8b70c9329de17747b1f14dad9fb95eef5682ea716"
+member_sha256 = "b95dee2bf29a021c562565cdf2116376b9fa7590361bd36ef57041a04d0e6654"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_linux_amd64/frps"
+install_name = "frps"
+
+[[frp.linux-aarch64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_linux_arm64.tar.gz"
+asset_sha256 = "f33c293c275d8fc68c654b6fba8f10b2551d6463d09a9fc9cffb7227eae82266"
+member_sha256 = "6e8e45fd0c7514b636fd8d049212f8a5715e8b33c412cf968988252e7a8a00f2"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_linux_arm64/frpc"
+install_name = "frpc"
+
+[[frp.linux-aarch64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_linux_arm64.tar.gz"
+asset_sha256 = "f33c293c275d8fc68c654b6fba8f10b2551d6463d09a9fc9cffb7227eae82266"
+member_sha256 = "68263b9cab7d9a570593fd8e0593c5a4bafdd35f0dc386e9814ade063ffa6120"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_linux_arm64/frps"
+install_name = "frps"
+
+[[frp.macos-x86_64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_darwin_amd64.tar.gz"
+asset_sha256 = "1b1b4e2f1836e21e8733f1dddaacd4ed9ae67d7dbee39046b9d7b7eda6253637"
+member_sha256 = "84d6c56072fe6bfa83d040320d433a674b30b98908c4942bc2d477084338afc0"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_darwin_amd64/frpc"
+install_name = "frpc"
+
+[[frp.macos-x86_64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_darwin_amd64.tar.gz"
+asset_sha256 = "1b1b4e2f1836e21e8733f1dddaacd4ed9ae67d7dbee39046b9d7b7eda6253637"
+member_sha256 = "4c551b65cca7bc6646f8363719666be56252695a68f30151d3f2648cdd2640e9"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_darwin_amd64/frps"
+install_name = "frps"
+
+[[frp.macos-aarch64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_darwin_arm64.tar.gz"
+asset_sha256 = "45be02b186860d375ed49a8941ae9569628a54bf14e67fc36b29c98c99dabcc6"
+member_sha256 = "3ce4ba70ffce7da4026940586c5f3454df50814f4c050d6560efc556b3adef48"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_darwin_arm64/frpc"
+install_name = "frpc"
+
+[[frp.macos-aarch64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_darwin_arm64.tar.gz"
+asset_sha256 = "45be02b186860d375ed49a8941ae9569628a54bf14e67fc36b29c98c99dabcc6"
+member_sha256 = "71a4896060db4a9290bd830f48561334a3660545a0907c29dfade42f91f57037"
+archive_format = "tar.gz"
+archive_member = "frp_0.71.0_darwin_arm64/frps"
+install_name = "frps"
+
+[[frp.windows-x86_64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_windows_amd64.zip"
+asset_sha256 = "9e5062e3e5cf07e67144a3a4acf175ef6a2486f3605dd6cf288bae34ab39819f"
+member_sha256 = "c9c59f9bb99561405b81d68f688384aec49369df10489044315292b0eaac957a"
+archive_format = "zip"
+archive_member = "frp_0.71.0_windows_amd64/frpc.exe"
+install_name = "frpc.exe"
+
+[[frp.windows-x86_64]]
+url = "https://github.com/fatedier/frp/releases/download/v0.71.0/frp_0.71.0_windows_amd64.zip"
+asset_sha256 = "9e5062e3e5cf07e67144a3a4acf175ef6a2486f3605dd6cf288bae34ab39819f"
+member_sha256 = "6d5fbb17da4651ef981fa5233d14cd6d63c7266e920010aa98ed5db6424061eb"
+archive_format = "zip"
+archive_member = "frp_0.71.0_windows_amd64/frps.exe"
+install_name = "frps.exe"
+[websocat]
+# renovate: datasource=github-releases depName=vi/websocat
+version = "1.14.1"
+
+[[websocat.linux-x86_64]]
+url = "https://github.com/vi/websocat/releases/download/v1.14.1/websocat.x86_64-unknown-linux-musl"
+asset_sha256 = "66f8dd3a0394761556339117f8bb5123bddefd44e087af2a72ec22b0bd08d514"
+member_sha256 = "66f8dd3a0394761556339117f8bb5123bddefd44e087af2a72ec22b0bd08d514"
+archive_format = "bare"
+install_name = "websocat"
+
+[[websocat.linux-aarch64]]
+url = "https://github.com/vi/websocat/releases/download/v1.14.1/websocat.aarch64-unknown-linux-musl"
+asset_sha256 = "711a69576a2ff473fb01a90ffafb571c2ed019e55479d7ae71b12c2eadeb7011"
+member_sha256 = "711a69576a2ff473fb01a90ffafb571c2ed019e55479d7ae71b12c2eadeb7011"
+archive_format = "bare"
+install_name = "websocat"
+
+[[websocat.macos-x86_64]]
+url = "https://github.com/vi/websocat/releases/download/v1.14.1/websocat.x86_64-apple-darwin"
+asset_sha256 = "45521ba59a6604785543406bf8e398ce7d565d54c09657176afba795dd28f191"
+member_sha256 = "45521ba59a6604785543406bf8e398ce7d565d54c09657176afba795dd28f191"
+archive_format = "bare"
+install_name = "websocat"
+
+[[websocat.macos-aarch64]]
+url = "https://github.com/vi/websocat/releases/download/v1.14.1/websocat.aarch64-apple-darwin"
+asset_sha256 = "c7402a1de17aa5446f86a7fe439cf502c49436c1f2df298c16fd8c2bf092a84e"
+member_sha256 = "c7402a1de17aa5446f86a7fe439cf502c49436c1f2df298c16fd8c2bf092a84e"
+archive_format = "bare"
+install_name = "websocat"
+
+[[websocat.windows-x86_64]]
+url = "https://github.com/vi/websocat/releases/download/v1.14.1/websocat.x86_64-pc-windows-gnu.exe"
+asset_sha256 = "284339b5b86f2b11496137d97b6705bb2ef27e64f21527c1ba240bdb6177ba3b"
+member_sha256 = "284339b5b86f2b11496137d97b6705bb2ef27e64f21527c1ba240bdb6177ba3b"
+archive_format = "bare"
+install_name = "websocat.exe"
+[goetia]
+# renovate: datasource=github-releases depName=bindreams/goetia
+version = "0.1.0"
+
+[[goetia.linux-x86_64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-x86_64-unknown-linux-musl.tar.xz"
+asset_sha256 = "3ddb82ef47824d1561036ae46448b1e59bc8b3427591cdfa87c47d670300b558"
+member_sha256 = "3b14211395cb17364e52ea10b0fda766cb06e440e182dcbfd6d2e70cf413090c"
+archive_format = "tar.xz"
+archive_member = "goetia-x86_64-unknown-linux-musl/goetia"
+install_name = "goetia"
+
+[[goetia.linux-x86_64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-x86_64-unknown-linux-musl.tar.xz"
+asset_sha256 = "3ddb82ef47824d1561036ae46448b1e59bc8b3427591cdfa87c47d670300b558"
+member_sha256 = "8efc16eb0eb16962528779e600735e5ab48716cbe46bdd8122bb224849d7d1d4"
+archive_format = "tar.xz"
+archive_member = "goetia-x86_64-unknown-linux-musl/goetia-shim"
+install_name = "goetia-shim"
+
+[[goetia.linux-aarch64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-aarch64-unknown-linux-musl.tar.xz"
+asset_sha256 = "fb7bdb71613c73214e77e4daa45f9f029130a99c6c954fd7076f8a1dfcf50ce6"
+member_sha256 = "4d747e0e94066e9e40f01eb7f2e7a2c53ce1245b6479e41c726dfe632bc3294a"
+archive_format = "tar.xz"
+archive_member = "goetia-aarch64-unknown-linux-musl/goetia"
+install_name = "goetia"
+
+[[goetia.linux-aarch64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-aarch64-unknown-linux-musl.tar.xz"
+asset_sha256 = "fb7bdb71613c73214e77e4daa45f9f029130a99c6c954fd7076f8a1dfcf50ce6"
+member_sha256 = "5354c44e4bb0c5a2ace87629fff23eb0196e90da43a0b540169efb5bd9ad5b00"
+archive_format = "tar.xz"
+archive_member = "goetia-aarch64-unknown-linux-musl/goetia-shim"
+install_name = "goetia-shim"
+
+[[goetia.macos-x86_64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-x86_64-apple-darwin.tar.xz"
+asset_sha256 = "ccefddbb897829ad01a09a78d42e439e1bff24329c577a7df449ca8fcfb4956c"
+member_sha256 = "165860fb696f34387c41d28d8e7f56897ccf22d8b029c73b41c15e2ecf2087b4"
+archive_format = "tar.xz"
+archive_member = "goetia-x86_64-apple-darwin/goetia"
+install_name = "goetia"
+
+[[goetia.macos-x86_64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-x86_64-apple-darwin.tar.xz"
+asset_sha256 = "ccefddbb897829ad01a09a78d42e439e1bff24329c577a7df449ca8fcfb4956c"
+member_sha256 = "8a9eb8414db8718f9d936848a095755ab1b4e7f4883c1222555efa8eca0bd30f"
+archive_format = "tar.xz"
+archive_member = "goetia-x86_64-apple-darwin/goetia-shim"
+install_name = "goetia-shim"
+
+[[goetia.macos-aarch64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-aarch64-apple-darwin.tar.xz"
+asset_sha256 = "e922db86c3ea18a5df3dd8b000556f1eaa8dff60e419d737be948e62cf5d8553"
+member_sha256 = "7b6ff0da12839a0a98f4f0eae13fb86bb2a52bb36625414770f2e80185c72c5a"
+archive_format = "tar.xz"
+archive_member = "goetia-aarch64-apple-darwin/goetia"
+install_name = "goetia"
+
+[[goetia.macos-aarch64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-aarch64-apple-darwin.tar.xz"
+asset_sha256 = "e922db86c3ea18a5df3dd8b000556f1eaa8dff60e419d737be948e62cf5d8553"
+member_sha256 = "dda7cf1043779257d0667a4a33c1446f0cc9a67d627b72f82df55a0ea64c34eb"
+archive_format = "tar.xz"
+archive_member = "goetia-aarch64-apple-darwin/goetia-shim"
+install_name = "goetia-shim"
+
+[[goetia.windows-x86_64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-x86_64-pc-windows-msvc.zip"
+asset_sha256 = "81bc1d47df43388331ad67d5310711facbf3747a674ad1840ac27e8739c4bf45"
+member_sha256 = "8b8be118a2d32e939afbcfaf79add13b7f35b96764cda06a082d4de40a754e15"
+archive_format = "zip"
+archive_member = "goetia-x86_64-pc-windows-msvc/goetia.exe"
+install_name = "goetia.exe"
+
+[[goetia.windows-x86_64]]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia-x86_64-pc-windows-msvc.zip"
+asset_sha256 = "81bc1d47df43388331ad67d5310711facbf3747a674ad1840ac27e8739c4bf45"
+member_sha256 = "8a5a338bcf2d85da1784509566097dee17f2824e78833435a9fcb22fbf22f81f"
+archive_format = "zip"
+archive_member = "goetia-x86_64-pc-windows-msvc/goetia-shim.exe"
+install_name = "goetia-shim.exe"
+
+[goetia.bundle]
+url = "https://github.com/bindreams/goetia/releases/download/v0.1.0/goetia.sigstore.json"
+asset_sha256 = "07aed903daed75d40dd9e5055d9a31651e849391d8a6ca05c79ef20b02b910d6"
