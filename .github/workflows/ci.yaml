@@ -28,8 +28,8 @@ jobs:
       - run: uv run prek run --all-files
       # The prek hook only sees staged changes; these cover the whole tree and every ref.
       - run: python3 scripts/no-personal-artifacts.py --tree
-      # checkout fetches branches and tags only; notes are published content too.
-      - run: git fetch --no-tags origin '+refs/notes/*:refs/notes/*'
+      # checkout fetches heads and tags only; notes, refs/pull/* and custom namespaces are public too.
+      - run: git fetch --no-tags origin '+refs/*:refs/fetched/*'
       - run: python3 scripts/no-personal-artifacts.py --history
 
   unit:

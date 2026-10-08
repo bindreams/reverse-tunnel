@@ -164,17 +164,18 @@ def test_message_mode_scans_hash_lines_too(repo, hashes_file, tmp_path):
     assert "msg:3: banned-term" in result.stderr
 
 
-def test_message_mode_ignores_everything_after_gits_scissors_line(repo, hashes_file, tmp_path):
-    message = tmp_path / "msg"
-    scissors = "# " + "-" * 24 + " >8 " + "-" * 24
-    message.write_text(f"feat: x\n{scissors}\ndiff --git a/{TERM} b/{TERM}\n+{TERM}\n")
-    assert run_script(repo, hashes_file, "--message", str(message)).returncode == 0
+SCISSORS = "# " + "-" * 24 + " >8 " + "-" * 24
 
 
-def test_message_mode_still_scans_comment_lines_before_the_scissors(repo, hashes_file, tmp_path):
+def test_message_mode_scans_below_gits_scissors_line_too(repo, hashes_file, tmp_path):
     message = tmp_path / "msg"
-    scissors = "# " + "-" * 24 + " >8 " + "-" * 24
-    message.write_text(f"feat: x\n# {TERM}\n{scissors}\n")
+    message.write_text(f"feat: x\n{SCISSORS}\ndiff --git a/{TERM} b/{TERM}\n+{TERM}\n")
+    assert run_script(repo, hashes_file, "--message", str(message)).returncode == 1
+
+
+def test_message_mode_scans_comment_lines_above_the_scissors(repo, hashes_file, tmp_path):
+    message = tmp_path / "msg"
+    message.write_text(f"feat: x\n# {TERM}\n{SCISSORS}\n")
     assert run_script(repo, hashes_file, "--message", str(message)).returncode == 1
 
 
@@ -182,7 +183,7 @@ def test_message_mode_tells_the_committer_how_to_get_past_a_template_match(repo,
     message = tmp_path / "msg"
     message.write_text(f"feat: x\n#\tnew file:   {TERM}.txt\n")
     stderr = run_script(repo, hashes_file, "--message", str(message)).stderr
-    assert "commit template" in stderr and "commit with -m" in stderr
+    assert "commit template" in stderr and "commit with -m" in stderr and "-v" in stderr
 
 
 def test_history_scans_an_annotated_tag_message(repo, hashes_file):

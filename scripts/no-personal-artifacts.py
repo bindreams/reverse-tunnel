@@ -14,7 +14,7 @@ Modes (default `--staged`):
     --staged     scan the staged blobs and paths (what the prek hook runs)
     --tree       scan every blob and path in the index
     --history    scan every object reachable from any ref: blobs, path names, commit and tag messages, ref names
-    --message F  scan every line of a commit message file
+    --message F  scan every line of a commit message file, template comments and `-v` diff included
 
 Content is read from git objects, so symlink targets are covered. Text is UTF-8 without NUL bytes, or UTF-16/32 with a
 BOM that decodes cleanly. Anything else is itself a finding ("binary content not allowed"), because a compressed or
@@ -73,7 +73,8 @@ BOMS = {
     codecs.BOM_UTF16_LE: "utf-16",
     codecs.BOM_UTF16_BE: "utf-16",
 }
-SCISSORS = re.compile(r"^# -{24} >8 -{24}$", re.MULTILINE)
+OPAQUE_HEADER = re.compile(r"(?:(?:tree|parent|object) [0-9a-f]{40,64}|type (?:commit|tree|blob|tag))")
+UTF8_NAMES = {"utf-8", "utf8"}
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,10 @@ class Finding:
 
     def __str__(self) -> str:
         return f"{self.source}:{self.line}: {self.kind}" if self.line else f"{self.source}: {self.kind}"
+
+
+class InputError(Exception):
+    """A problem with what the user asked us to scan; its message goes through `redact_text` before it is printed."""
 
 
 # Scanning =============================================================================================================
@@ -138,6 +143,16 @@ def display(path: str, hashes: Hashes, locator: str) -> str:
     """The path as it may be logged: verbatim when clean, else only the kinds found and a way to locate it."""
     kinds = scan_line(path, hashes)
     return f"<path redacted: {', '.join(kinds)}> ({locator})" if kinds else path
+
+
+def redact_text(text: str, hashes: Hashes) -> str:
+    """Make arbitrary text (an error message, git's stderr) safe for a public log."""
+    text = re.sub(r"[A-Za-z0-9]+", lambda m: "<redacted>" if contains_banned_name(m[0].lower(), hashes) else m[0], text)
+    lines = []
+    for line in text.split("\n"):
+        kinds = scan_line(line, hashes)
+        lines.append(f"<line redacted: {', '.join(kinds)}>" if kinds else line)
+    return "\n".join(lines)
 
 
 def unique(findings: list[Finding]) -> list[Finding]:
@@ -196,9 +211,7 @@ def git(*args: str, stdin: bytes | None = None) -> bytes:
                             capture_output=True,
                             check=False)
     if result.returncode:
-        sys.stderr.write(result.stderr.decode(errors="replace"))
-        print(f"git {args[0]} failed (exit {result.returncode})", file=sys.stderr)
-        raise SystemExit(2)
+        raise InputError(f"git {args[0]} failed (exit {result.returncode}): {result.stderr.decode(errors='replace')}")
     return result.stdout
 
 
@@ -213,8 +226,7 @@ def read_objects(ids: Sequence[str]) -> list[tuple[str, str, bytes]]:
         end = out.index(b"\n", position)
         header = out[position:end].decode().split(" ")
         if len(header) != 3:
-            print(f"git cat-file: {' '.join(header)}", file=sys.stderr)
-            raise SystemExit(2)
+            raise InputError(f"git cat-file: {' '.join(header)}")
         name, kind, size = header[0], header[1], int(header[2])
         objects.append((name, kind, out[end + 1:end + 1 + size]))
         position = end + 1 + size + 1
@@ -270,17 +282,38 @@ def tree_names(data: bytes, id_size: int) -> list[str]:
     return names
 
 
+def header_lines(header: str) -> list[tuple[int, str]]:
+    """Header lines with a folded continuation (`mergetag`, `gpgsig`) unfolded into lines of its own."""
+    lines = [line[1:] if line.startswith(" ") else line for line in header.split("\n")]
+    return [(number, line) for number, line in enumerate(lines, 1) if not OPAQUE_HEADER.fullmatch(line)]
+
+
+def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes) -> list[Finding]:
+    raw_header, _, raw_body = data.partition(b"\n\n")
+    findings = []
+    texts = {}
+    for part, raw in (("header", raw_header), ("message", raw_body)):
+        try:
+            texts[part] = raw.decode()
+        except UnicodeDecodeError:
+            texts[part] = raw.decode(errors="replace")
+            findings.append(Finding(source, 0, f"invalid UTF-8 in {part}"))
+    for line in texts["header"].split("\n"):
+        encoding = line.removeprefix("encoding ") if line.startswith("encoding ") else None
+        if encoding is not None and encoding.strip().lower() not in UTF8_NAMES:
+            findings.append(Finding(source, 0, "non-UTF-8 commit encoding"))
+    findings += [
+        Finding(f"{source} header", n, k) for n, line in header_lines(texts["header"]) for k in scan_line(line, hashes)
+    ]
+    return findings + scan_text(texts["message"], hashes, f"{source} message")
+
+
 def scan_object(name: str, kind: str, data: bytes, hashes: Hashes, path: str = "") -> list[Finding]:
     source = f"{kind} {name[:12]}"
     if kind == "blob":
         return scan_content(source, data, hashes, path in BINARY_ALLOWED)
     if kind in ("commit", "tag"):
-        header, _, body = data.partition(b"\n\n")
-        findings = scan_text(body.decode(errors="replace"), hashes, f"{source} message")
-        for line in header.decode(errors="replace").split("\n"):
-            if line.startswith("tag "):  # the name inside the object outlives any ref that carried it
-                findings += [Finding(f"{source} header", 0, k) for k in scan_line(line[4:], hashes)]
-        return findings
+        return scan_commit_or_tag(source, data, hashes)
     if kind == "tree":
         return [Finding(source, 0, k) for entry in tree_names(data, len(name) // 2) for k in scan_line(entry, hashes)]
     return []
@@ -301,11 +334,14 @@ def scan_history(hashes: Hashes) -> list[Finding]:
 
 def read_path(path: str) -> bytes:
     file = Path(path)
-    if file.is_symlink():
-        return os.fsencode(os.readlink(file))
-    if file.is_file():
-        return file.read_bytes()
-    raise ValueError(f"{path}: not a file")
+    try:
+        if file.is_symlink():
+            return os.fsencode(os.readlink(file))
+        if file.is_file():
+            return file.read_bytes()
+    except OSError as error:
+        raise InputError(f"{path}: {error.strerror or error}") from error
+    raise InputError(f"{path}: not a file")
 
 
 def scan_files(paths: Sequence[str], hashes: Hashes) -> list[Finding]:
@@ -316,8 +352,11 @@ def scan_files(paths: Sequence[str], hashes: Hashes) -> list[Finding]:
 
 
 def scan_message(path: str, hashes: Hashes) -> list[Finding]:
-    """Scan every line above git's scissors line; git always removes that line and what follows."""
-    text = SCISSORS.split(Path(path).read_text(errors="replace"), maxsplit=1)[0]
+    """Scan every line: with `-m` or `-F` git keeps template comments and anything after the scissors line."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError as error:
+        raise InputError(f"{path}: {error.strerror or error}") from error
     return scan_text(text, hashes, display(path, hashes, "message file"))
 
 
@@ -363,14 +402,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             findings = scan_message(args.message, hashes)
         else:
             findings = scan_staged(hashes)
-    except ValueError as error:
-        parser.error(str(error))
+    except (InputError, OSError) as error:
+        print(redact_text(f"error: {error}", hashes), file=sys.stderr)
+        return 2
     for finding in findings:
         print(finding, file=sys.stderr)
     if findings:
         print(f"{len(findings)} personal artifact(s) found; matched text withheld.", file=sys.stderr)
         if args.message:
-            print("If this matched git's commit template, rename the file or commit with -m.", file=sys.stderr)
+            print(
+                "If this matched git's commit template or a `-v` diff, rename the file or commit with -m and without -v.",
+                file=sys.stderr,
+            )
         return 1
     return 0
 

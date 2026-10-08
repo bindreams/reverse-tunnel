@@ -31,9 +31,25 @@ def load_script():
     return module
 
 
-def git(cwd: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, env=GIT_ENV, capture_output=True, text=True, check=True)
+def git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    result = subprocess.run(["git", *args],
+                            cwd=cwd,
+                            env={**GIT_ENV, **(env or {})},
+                            capture_output=True,
+                            text=True,
+                            check=True)
     return result.stdout
+
+
+def hash_raw_object(cwd: Path, kind: str, content: bytes) -> str:
+    """Write an object git itself would not produce, such as a commit with an odd `encoding` header."""
+    result = subprocess.run(["git", "hash-object", "-t", kind, "-w", "--stdin"],
+                            cwd=cwd,
+                            env=GIT_ENV,
+                            input=content,
+                            capture_output=True,
+                            check=True)
+    return result.stdout.decode().strip()
 
 
 def run_script(cwd: Path, hashes: Path, *args: str) -> subprocess.CompletedProcess[str]:
