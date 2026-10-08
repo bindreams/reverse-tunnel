@@ -4,7 +4,7 @@ import re
 import shlex
 
 import pytest
-from scanner_support import REPO_ROOT, TERM, git, git_bytes, hash_raw_object, run_script
+from scanner_support import REPO_ROOT, TERM, git, git_bytes, hash_raw_object, load_script, run_script
 
 CLEAN_IDENTITY = {"GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "1+dev@users.noreply.github.com"}
 
@@ -354,3 +354,99 @@ def test_a_non_utf8_ref_name_is_a_finding(repo, hashes_file):
     packed.write_bytes(b"# pack-refs with: peeled fully-peeled sorted \n" + head.encode() + b" refs/heads/caf\xe9\n")
     result = run_script(repo, hashes_file, "--history")
     assert result.returncode == 1 and "invalid UTF-8 in ref name" in result.stderr and "Traceback" not in result.stderr
+
+
+# Where the identity relaxation applies ================================================================================
+
+MAIL = "a" + "@" + "corp.invalid"  # flagged by the e-mail check wherever the relaxation does not apply
+KEY = "-----BEGIN OPENSSH " + "PRIVATE KEY-----"
+
+
+def raw_tag_headers(repo, tagger: str, message: str = "release\n") -> None:
+    seed(repo)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    content = f"object {head}\ntype commit\ntag v1\n{tagger}\n\n{message}".encode()
+    git(repo, "update-ref", "refs/tags/v1", hash_raw_object(repo, "tag", content))
+
+
+def mergetag(tag_header_lines: str, message_lines: str = "") -> bytes:
+    """A mergetag header: the embedded tag header, a blank continuation line, then the embedded message."""
+    lines = ["object " + "0" * 40, "type commit", "tag v1", *tag_header_lines.split("\n"), ""]
+    lines += message_lines.split("\n") if message_lines else ["release"]
+    return ("mergetag " + "\n ".join(lines) + "\n").encode()
+
+
+def test_a_mergetag_message_line_that_imitates_an_identity_gets_every_check(repo, hashes_file):
+    raw_commit(repo, mergetag("tagger t <t@example.com> 0 +0000", f"author {MAIL} {KEY}"))
+    result = run_script(repo, hashes_file, "--history")
+    assert result.returncode == 1 and "private-key" in result.stderr and "email" in result.stderr
+
+
+def test_a_gpgsig_line_that_imitates_an_identity_gets_every_check(repo, hashes_file):
+    raw_commit(repo, folded("gpgsig", pgp(f"Comment: author {MAIL}")))
+    assert "email" in run_script(repo, hashes_file, "--history").stderr
+
+
+def test_a_continuation_in_a_custom_header_that_imitates_an_identity_gets_every_check(repo, hashes_file):
+    raw_commit(repo, f"x-note a\n committer {MAIL}\n".encode())
+    assert "email" in run_script(repo, hashes_file, "--history").stderr
+
+
+def test_a_custom_top_level_header_that_imitates_an_identity_gets_every_check(repo, hashes_file):
+    raw_commit(repo, f"author-note {MAIL}\n".encode())
+    assert "email" in run_script(repo, hashes_file, "--history").stderr
+
+
+def test_a_top_level_tagger_on_a_commit_is_not_relaxed(repo, hashes_file):
+    raw_commit(repo, f"tagger {MAIL}\n".encode())
+    assert "email" in run_script(repo, hashes_file, "--history").stderr
+
+
+def test_a_top_level_author_on_a_tag_is_not_relaxed(repo, hashes_file):
+    raw_tag_headers(repo, f"author {MAIL}")
+    assert "email" in run_script(repo, hashes_file, "--history").stderr
+
+
+def test_a_tag_tagger_line_is_relaxed(repo, hashes_file):
+    raw_tag_headers(repo, f"tagger Real Name <{MAIL}> 0 +0000")
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+def test_the_tagger_in_a_mergetag_header_section_is_relaxed(repo, hashes_file):
+    raw_commit(repo, mergetag(f"tagger Real Name <{MAIL}> 0 +0000"))
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+def test_a_banned_name_in_a_relaxed_identity_is_still_found(repo, hashes_file):
+    raw_commit(repo, mergetag(f"tagger {TERM} <t@example.com> 0 +0000"))
+    assert run_script(repo, hashes_file, "--history").returncode == 1
+
+
+def test_a_tagger_after_the_embedded_message_starts_is_not_relaxed(repo, hashes_file):
+    raw_commit(repo, mergetag("tagger t <t@example.com> 0 +0000", f"tagger {MAIL}"))
+    assert "email" in run_script(repo, hashes_file, "--history").stderr
+
+
+# Invalid-UTF-8 paths are redacted =====================================================================================
+
+
+def test_an_invalid_utf8_path_is_not_printed(repo, hashes_file):
+    blob = hash_raw_object(repo, "blob", b"clean\n")
+    git_bytes(repo, "update-index", "--add", "--index-info", stdin=b"100644 " + blob.encode() + b"\tzzq\xe9uux.txt\n")
+    result = run_script(repo, hashes_file, "--staged")
+    assert result.returncode == 1
+    assert "zzq" not in result.stdout + result.stderr
+    assert f"<path redacted: invalid UTF-8 in path> (blob {blob[:12]})" in result.stderr
+
+
+def test_display_redacts_an_invalid_utf8_path_from_argv(hashes_file):
+
+    module = load_script()
+    shown = module.display("zzq\udce9uux.txt", module.load_hashes(hashes_file), "argument 1")
+    assert shown == "<path redacted: invalid UTF-8 in path> (argument 1)"
+
+
+def test_a_valid_path_with_no_finding_is_still_printed(hashes_file):
+
+    module = load_script()
+    assert module.display("src/a.txt", module.load_hashes(hashes_file), "x") == "src/a.txt"

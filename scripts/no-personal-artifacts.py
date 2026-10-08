@@ -81,8 +81,9 @@ SIGNATURE_END = re.compile(r"-----END (?:PGP SIGNATURE|SSH SIGNATURE|SIGNED MESS
 # An armour line of signature bytes (at most 76 characters in practice) or the `=XXXX` checksum. Short lines are
 # scanned, so a name alone on a line is not hidden.
 SIGNATURE_BYTES = re.compile(r"[A-Za-z0-9+/=]{40,}|=[A-Za-z0-9+/]{4}")
-# Identity lines hold real people's names and e-mail addresses, so only banned terms are looked for there.
-IDENTITY_KEYS = ("author ", "committer ", "tagger ")
+# Identity lines hold real people's names and e-mail addresses, so only banned terms are looked for there. Which
+# top-level header carries an identity depends on the object type; nothing else is relaxed.
+IDENTITY_KEYS = {"commit": ("author", "committer"), "tag": ("tagger", )}
 SIGNED_HEADERS = {"gpgsig", "gpgsig-sha256", "mergetag"}
 UTF8_NAMES = {"utf-8", "utf8"}
 
@@ -123,10 +124,10 @@ def load_hashes(path: Path) -> Hashes:
             continue
         entry = ENTRY.fullmatch(line)
         if not entry:
-            raise ValueError(f"{path}:{number}: expected `LENGTH SHA256-HEX`")
+            raise ValueError(f"line {number}: expected `LENGTH SHA256-HEX`")
         by_length.setdefault(int(entry[1]), set()).add(entry[2])
     if not by_length:
-        raise ValueError(f"{path}: no entries, so nothing would ever match")
+        raise ValueError("no entries, so nothing would ever match")
     return {length: frozenset(digests) for length, digests in by_length.items()}
 
 
@@ -153,7 +154,8 @@ def scan_line(line: str, hashes: Hashes, banned_only: bool = False) -> list[str]
 
 def display(path: str, hashes: Hashes, locator: str) -> str:
     """The path as it may be logged: verbatim when clean, else only the kinds found and a way to locate it."""
-    kinds = scan_line(path, hashes)
+    text, valid = as_text(path)
+    kinds = scan_line(text, hashes) + ([] if valid else [INVALID_PATH])
     return f"<path redacted: {', '.join(kinds)}> ({locator})" if kinds else path
 
 
@@ -210,7 +212,8 @@ def scan_content(source: str, data: bytes, hashes: Hashes, allowed: bool = False
 
 def scan_blob(path: str, data: bytes, hashes: Hashes, locator: str = "") -> list[Finding]:
     shown = display(path, hashes, locator)
-    path_findings = [Finding(shown, 0, kind) for kind in scan_line(path, hashes)]
+    text, valid = as_text(path)
+    path_findings = [Finding(shown, 0, kind) for kind in scan_line(text, hashes) + ([] if valid else [INVALID_PATH])]
     return path_findings + scan_content(shown, data, hashes, path in BINARY_ALLOWED)
 
 
@@ -260,7 +263,7 @@ def scan_entries(entries: Sequence[tuple[str, str, str]], hashes: Hashes) -> lis
     shown = {}
     for _, blob, path in entries:
         text, valid = as_text(path)
-        shown[path] = display(text, hashes, f"blob {blob[:12]}")
+        shown[path] = display(path, hashes, f"blob {blob[:12]}")
         findings += [Finding(shown[path], 0, kind) for kind in scan_line(text, hashes)]
         findings += [] if valid else [Finding(shown[path], 0, INVALID_PATH)]
     blobs = [(blob, path) for mode, blob, path in entries if mode != GITLINK]
@@ -341,21 +344,37 @@ def strip_signatures(items: Sequence[Item]) -> tuple[list[tuple[int, str]], bool
     return kept, unterminated | inside
 
 
-def header_lines(header: str) -> tuple[list[tuple[int, str]], bool]:
-    """Header lines with a folded continuation (`mergetag`, `gpgsig`) unfolded into lines of its own."""
+def header_lines(header: str, kind: str) -> tuple[list[tuple[int, str]], bool, set[int]]:
+    """Header lines, a folded continuation (`mergetag`, `gpgsig`) unfolded into lines of its own.
+
+    Also returns the numbers of the identity lines, which are checked for banned terms only: the top-level identity
+    headers of this object type, and the `tagger` of the tag embedded in a `mergetag` (before its blank line).
+    """
     items: list[Item] = []
-    region: int | None = None
+    identities: set[int] = set()
+    key = ""
+    region = None  # the number of the top-level line a signed header started on
+    embedded_header = False
     for number, raw in enumerate(header.split("\n"), 1):
-        if not raw.startswith(" "):
-            region = number if raw.partition(" ")[0] in SIGNED_HEADERS else None
         line = raw.removeprefix(" ")
+        if not raw.startswith(" "):
+            key = raw.partition(" ")[0]
+            region = number if key in SIGNED_HEADERS else None
+            embedded_header = key == "mergetag"
+            if key in IDENTITY_KEYS.get(kind, ()) and raw.startswith(f"{key} "):
+                identities.add(number)
+        else:
+            embedded_header &= bool(line)
+            if embedded_header and key == "mergetag" and line.startswith("tagger "):
+                identities.add(number)
         if not OPAQUE_HEADER.fullmatch(line):
             items.append((number, line, region))
-    return strip_signatures(items)
+    kept, unterminated = strip_signatures(items)
+    return kept, unterminated, identities
 
 
-def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes, signed_message: bool = False) -> list[Finding]:
-    """`signed_message` marks a tag, whose message may end in a signature block; a commit message never does."""
+def scan_commit_or_tag(source: str, kind: str, data: bytes, hashes: Hashes) -> list[Finding]:
+    """A tag's message may end in a signature block; a commit message never does."""
     raw_header, _, raw_body = data.partition(b"\n\n")
     findings = []
     texts = {}
@@ -372,14 +391,14 @@ def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes, signed_message:
         encoding = line.removeprefix("encoding ") if line.startswith("encoding ") else None
         if encoding is not None and encoding.strip().lower() not in UTF8_NAMES:
             findings.append(Finding(source, 0, "non-UTF-8 commit encoding"))
-    lines, unterminated = header_lines(texts["header"])
-    message_items = [(n, line, 0 if signed_message else None) for n, line in enumerate(texts["message"].split("\n"), 1)]
+    lines, unterminated, identities = header_lines(texts["header"], kind)
+    message_items = [(n, line, 0 if kind == "tag" else None) for n, line in enumerate(texts["message"].split("\n"), 1)]
     message, message_unterminated = strip_signatures(message_items)
     if unterminated or message_unterminated:
         findings.append(Finding(source, 0, "unterminated signature block"))
     findings += [
         Finding(f"{source} header", n, k) for n, line in lines
-        for k in scan_line(line, hashes, banned_only=line.startswith(IDENTITY_KEYS))
+        for k in scan_line(line, hashes, banned_only=n in identities)
     ]
     return findings + [
         Finding(f"{source} message", number, kind) for number, line in message for kind in scan_line(line, hashes)
@@ -391,7 +410,7 @@ def scan_object(name: str, kind: str, data: bytes, hashes: Hashes, path: str = "
     if kind == "blob":
         return scan_content(source, data, hashes, path in BINARY_ALLOWED)
     if kind in ("commit", "tag"):
-        return scan_commit_or_tag(source, data, hashes, signed_message=kind == "tag")
+        return scan_commit_or_tag(source, kind, data, hashes)
     if kind == "tree":
         findings = []
         for entry, valid in tree_names(data, len(name) // 2):
@@ -502,7 +521,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         hashes = load_hashes(args.hashes)
     except (OSError, ValueError) as error:
-        print(f"error: ban list unreadable: {error}", file=sys.stderr)
+        reason = error.strerror if isinstance(error, OSError) else error  # neither names the path
+        print(f"error: ban list unreadable ({type(error).__name__}: {reason})", file=sys.stderr)
         return 2
     try:
         if args.files:

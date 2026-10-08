@@ -93,3 +93,17 @@ def test_argparse_errors_still_say_what_was_wrong(repo, hashes_file):
 def test_a_usage_error_is_withheld_when_the_ban_list_cannot_be_read(repo, tmp_path):
     result = run_script(repo, tmp_path / "missing.txt", f"-{TERM}.txt")
     assert result.returncode == 2 and TERM not in result.stdout + result.stderr
+
+
+def test_an_unreadable_ban_list_error_does_not_print_its_path(repo, tmp_path):
+    result = run_script(repo, tmp_path / f"{TERM}.txt", "a.txt")
+    assert result.returncode == 2 and "ban list unreadable" in result.stderr
+    assert TERM not in result.stdout + result.stderr and "FileNotFoundError" in result.stderr
+
+
+def test_a_malformed_ban_list_error_does_not_print_its_path(repo, tmp_path):
+    bad = tmp_path / f"{TERM}.txt"
+    bad.write_text("not an entry\n")
+    result = run_script(repo, bad, "a.txt")
+    assert result.returncode == 2 and "ban list unreadable" in result.stderr
+    assert TERM not in result.stdout + result.stderr
