@@ -16,6 +16,9 @@ package = false
 testpaths = ["tests/unit", "tests/platform"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
+markers = [
+  "root: needs uid 0 and fails, never skips, without it; opt out explicitly with -m 'not root'",
+]
 
 [dependency-groups]
 dev = [

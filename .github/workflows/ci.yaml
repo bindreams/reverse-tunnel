@@ -44,3 +44,29 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run pytest tests/unit
+
+  # Each platform job runs its directory by path: an empty collection is exit code 5, never a quiet pass.
+  platform-posix:
+    name: Platform tests (POSIX, as root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      # Unelevated, so the environment is owned by the runner user rather than root.
+      - run: uv sync --locked
+      # The ownership tests chown to this account and fail without it.
+      - run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin rt-test-svc
+      - run: sudo -E env "PATH=$PATH" .venv/bin/python -m pytest -p no:cacheprovider tests/platform/posix
+
+  platform-windows:
+    name: Platform tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest tests/unit tests/platform/windows
