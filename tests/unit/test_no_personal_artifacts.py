@@ -50,6 +50,9 @@ def path(*parts, sep):
         (path("HOMEPATH=", "Users", "alice", sep="\\"), "home-path"),
         ('{"p":"' + path("", "Users", "alice", "x", sep="\\/") + '"}', "home-path"),
         ("alice" + "@" + "github.com", "email"),
+        ("file://" + path("", "Users", "alice", "x", sep="/"), "home-path"),
+        ("cd " + path("", "home", "alice", sep="/"), "home-path"),
+        ("(" + path("", "home", "alice", sep="/") + ")", "home-path"),
     ],
 )
 def test_structural_artifacts_are_found(text, kind, hashes_file):
@@ -67,6 +70,11 @@ def test_structural_artifacts_are_found(text, kind, hashes_file):
         "/home/runner/work",
         "/home/<user>/rt",
         "/Users/user/rt",
+        "src/home/index.html",
+        "docs/Users/guide.md",
+        "./home/notes.txt",
+        "../home/notes.txt",
+        "my_home/notes.txt",
     ],
 )
 def test_placeholders_are_not_flagged(text, hashes_file):

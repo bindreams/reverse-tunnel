@@ -54,8 +54,12 @@ STRUCTURAL = {
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})")
 EMAIL_ADDRESSES = {"git@github.com"}
 EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "users.noreply.github.com"}
-# Any run of `/` or `\` separates the parts, which covers JSON-escaped `\/` and drive-less Windows paths.
-HOME_PATH = re.compile(r"[/\\]+(?:Users|home)[/\\]+([A-Za-z0-9._-]+)", re.IGNORECASE)
+# Any run of `/` or `\` separates the parts, which covers JSON-escaped `\/`. Without a drive letter the run must open a
+# path: `src/home/index.html` has a segment named home but is not a home directory.
+HOME_PATHS = (
+    re.compile(r"(?<![A-Za-z0-9_.~/\\-])[/\\]+(?:Users|home)[/\\]+([A-Za-z0-9._-]+)", re.IGNORECASE),
+    re.compile(r"[A-Za-z]:[/\\]+Users[/\\]+([A-Za-z0-9._-]+)", re.IGNORECASE),
+)
 HOME_NAMES = {"user", "username", "you", "me", "example", "runner", "operator", "service", "public", "default"}
 
 # Binary content =======================================================================================================
@@ -125,9 +129,15 @@ def scan_line(line: str, hashes: Hashes) -> list[str]:
     kinds += [kind for kind, pattern in STRUCTURAL.items() if pattern.search(line)]
     if any(m[0].lower() not in EMAIL_ADDRESSES and m[1].lower() not in EMAIL_DOMAINS for m in EMAIL.finditer(line)):
         kinds.append("email")
-    if any(m[1].lower() not in HOME_NAMES for m in HOME_PATH.finditer(line)):
+    if any(m[1].lower() not in HOME_NAMES for pattern in HOME_PATHS for m in pattern.finditer(line)):
         kinds.append("home-path")
     return kinds
+
+
+def display(path: str, hashes: Hashes, locator: str) -> str:
+    """The path as it may be logged: verbatim when clean, else only the kinds found and a way to locate it."""
+    kinds = scan_line(path, hashes)
+    return f"<path redacted: {', '.join(kinds)}> ({locator})" if kinds else path
 
 
 def unique(findings: list[Finding]) -> list[Finding]:
@@ -171,9 +181,10 @@ def scan_content(source: str, data: bytes, hashes: Hashes, allowed: bool = False
     return unique(findings)
 
 
-def scan_blob(path: str, data: bytes, hashes: Hashes) -> list[Finding]:
-    path_findings = [Finding(path, 0, kind) for kind in scan_line(path, hashes)]
-    return path_findings + scan_content(path, data, hashes, path in BINARY_ALLOWED)
+def scan_blob(path: str, data: bytes, hashes: Hashes, locator: str = "") -> list[Finding]:
+    shown = display(path, hashes, locator)
+    path_findings = [Finding(shown, 0, kind) for kind in scan_line(path, hashes)]
+    return path_findings + scan_content(shown, data, hashes, path in BINARY_ALLOWED)
 
 
 # Git ==================================================================================================================
@@ -212,12 +223,11 @@ def read_objects(ids: Sequence[str]) -> list[tuple[str, str, bytes]]:
 
 def scan_entries(entries: Sequence[tuple[str, str, str]], hashes: Hashes) -> list[Finding]:
     """Scan (mode, blob id, path) triples: the path always, the blob unless it is a submodule commit."""
-    findings = []
-    blobs = [(path, blob) for mode, blob, path in entries if mode != GITLINK]
-    for path in {path for _, _, path in entries}:
-        findings += [Finding(path, 0, kind) for kind in scan_line(path, hashes)]
-    for (path, _), (_, _, data) in zip(blobs, read_objects([blob for _, blob in blobs])):
-        findings += scan_content(path, data, hashes, path in BINARY_ALLOWED)
+    shown = {path: display(path, hashes, f"blob {blob[:12]}") for _, blob, path in entries}
+    findings = [Finding(shown[path], 0, kind) for _, _, path in entries for kind in scan_line(path, hashes)]
+    blobs = [(blob, path) for mode, blob, path in entries if mode != GITLINK]
+    for (_, path), (_, _, data) in zip(blobs, read_objects([blob for blob, _ in blobs])):
+        findings += scan_content(shown[path], data, hashes, path in BINARY_ALLOWED)
     return unique(findings)
 
 
@@ -299,13 +309,16 @@ def read_path(path: str) -> bytes:
 
 
 def scan_files(paths: Sequence[str], hashes: Hashes) -> list[Finding]:
-    return unique([f for path in paths for f in scan_blob(path, read_path(path), hashes)])
+    return unique([
+        f for number, path in enumerate(paths, 1)
+        for f in scan_blob(path, read_path(path), hashes, f"argument {number}")
+    ])
 
 
 def scan_message(path: str, hashes: Hashes) -> list[Finding]:
     """Scan every line above git's scissors line; git always removes that line and what follows."""
     text = SCISSORS.split(Path(path).read_text(errors="replace"), maxsplit=1)[0]
-    return scan_text(text, hashes, path)
+    return scan_text(text, hashes, display(path, hashes, "message file"))
 
 
 # Entrypoint ===========================================================================================================
