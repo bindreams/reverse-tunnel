@@ -256,12 +256,19 @@ def _url(entry: dict, where: str, source: str) -> str:
     return url
 
 
-def _check_asset(url: str, expected: str, where: str, source: str) -> None:
-    """A version bump that leaves the old URLs behind must fail here, not at first install."""
-    if asset_name_of(url) != expected:
-        raise BinariesError(
-            f"{source}: {where}: `url` names {asset_name_of(url)!r} but this pin's version needs {expected!r}"
-        )
+def _check_asset(url: str, expected: str, version: str, where: str, source: str) -> None:
+    """A version bump that leaves the old URLs behind must fail here, not at first install.
+
+    A GitHub download URL ends `/releases/download/<tag>/<asset>`: both the asset and the tag must belong to `version`.
+    """
+    parts = PurePosixPath(unquote(urlsplit(url).path)).parts
+    if len(parts) < 5 or parts[-4:-2] != ("releases", "download"):
+        raise BinariesError(f"{source}: {where}: `url` must end in releases/download/<tag>/<asset> (got {url!r})")
+    tag, asset = parts[-2:]
+    if asset != expected:
+        raise BinariesError(f"{source}: {where}: `url` names {asset!r} but this pin's version needs {expected!r}")
+    if tag not in (f"v{version}", version):
+        raise BinariesError(f"{source}: {where}: `url` has release tag {tag!r} but the pinned version is {version!r}")
 
 
 def _parse_pin(tool: str, version: str, platform: str, entry: dict, source: str) -> Pin:
@@ -270,7 +277,7 @@ def _parse_pin(tool: str, version: str, platform: str, entry: dict, source: str)
     if unknown := set(entry) - expected:
         raise BinariesError(f"{source}: {where}: unknown keys {sorted(unknown)}")
     url = _url(entry, where, source)
-    _check_asset(url, TOOLS[tool].asset(version, platform), where, source)
+    _check_asset(url, TOOLS[tool].asset(version, platform), version, where, source)
     asset_sha256 = _digest(entry, "asset_sha256", where, source)
     member_sha256 = _digest(entry, "member_sha256", where, source)
     try:
@@ -298,7 +305,7 @@ def _parse_bundle(tool: str, version: str, asset: str, entry: object, source: st
         raise BinariesError(f"{source}: [{where}] must hold exactly `url` and `asset_sha256`")
     digest = _digest(entry, "asset_sha256", where, source)
     url = _url(entry, where, source)
-    _check_asset(url, asset, where, source)
+    _check_asset(url, asset, version, where, source)
     return Pin(tool, version, url, digest, digest, ArchiveFormat.BARE, None, asset)
 
 

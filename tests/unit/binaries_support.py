@@ -166,6 +166,7 @@ def tool_assets(tool: str, version: str, generation: str = "a") -> dict[str, byt
 
 API = "https://api.github.com"
 ASSET_HOST = "https://assets.example.test"
+DOWNLOADS = "/releases/download/"
 
 
 @dataclass(frozen=True)
@@ -178,7 +179,7 @@ class Request:
 class Upstream:
     """An in-process stand-in for the releases API and the asset host, served through `httpx.MockTransport`.
 
-    Answers `/repos/<owner>/<repo>/releases/tags/<tag>` and `/dl/<id>/<name>` asset bodies. There is deliberately no
+    Answers `/repos/<owner>/<repo>/releases/tags/<tag>` and `/<owner>/<repo>/releases/download/<tag>/<name>` asset bodies. There is deliberately no
     release listing: a client that enumerates releases gets a 404. Unlike GitHub, the tag endpoint also serves drafts,
     so the client's own draft check is what the tests exercise. No sockets.
     """
@@ -190,7 +191,6 @@ class Upstream:
         self._failures: dict[str, tuple[int, dict[str, str]]] = {}
         self._hangups: set[str] = set()
         self._requests: list[Request] = []
-        self._next_id = 0
 
     # Content ----------------------------------------------------------------------------------------------------------
 
@@ -211,10 +211,9 @@ class Upstream:
         """
         digests = digests or {}
         served = served or {}
-        self._next_id += 1
         listed = []
         for name, body in assets.items():
-            path = f"/dl/{self._next_id}/{name}"
+            path = f"/{repo}{DOWNLOADS}{tag}/{name}"
             self._bodies[path] = served.get(name, body)
             digest = digests[name] if name in digests else f"sha256:{sha256(body)}"
             listed.append({"name": name, "browser_download_url": ASSET_HOST + path, "digest": digest})

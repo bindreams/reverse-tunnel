@@ -8,6 +8,7 @@ import pytest
 from binaries_support import (
     BINARIES,
     BUNDLE_ASSET,
+    DOWNLOADS,
     PLATFORMS,
     REPOS,
     SEED_LOCK,
@@ -134,13 +135,13 @@ def test_refresh_is_idempotent(published, lock_path):
 
 def test_refresh_downloads_each_asset_once(published, lock_path):
     run(lock_path, published)
-    downloads = [r.path for r in published.requests if r.path.startswith("/dl/")]
+    downloads = [r.path for r in published.requests if DOWNLOADS in r.path]
     assert len(downloads) == len(set(downloads)) == 5 + 5 + 5 + 1
 
 
 def test_refresh_never_downloads_the_assets_it_does_not_pin(published, lock_path):
     run(lock_path, published)
-    fetched = {r.path.rsplit("/", 1)[1] for r in published.requests if r.path.startswith("/dl/")}
+    fetched = {r.path.rsplit("/", 1)[1] for r in published.requests if DOWNLOADS in r.path}
     assert "SHA256SUMS" not in fetched
 
 
@@ -176,7 +177,7 @@ def test_refresh_downloads_only_the_named_tools_assets(published, lock_path):
     run(lock_path, published)
     seen = len(published.requests)
     run(lock_path, published, only=["frp"])
-    downloaded = {r.path.rsplit("/", 1)[1] for r in published.requests[seen:] if r.path.startswith("/dl/")}
+    downloaded = {r.path.rsplit("/", 1)[1] for r in published.requests[seen:] if DOWNLOADS in r.path}
     assert downloaded == {asset_name("frp", "0.71.0", platform) for platform in PLATFORMS}
     looked_up = [r.path for r in published.requests[seen:] if r.path.startswith("/repos/")]
     assert looked_up == tag_paths("frp")
@@ -588,9 +589,9 @@ def test_compare_checks_the_bundle(published, generated_lock_path):
 
 
 def test_compare_never_downloads_an_asset(published, generated_lock_path):
-    before = len([r for r in published.requests if r.path.startswith("/dl/")])
+    before = len([r for r in published.requests if DOWNLOADS in r.path])
     compare_to_upstream(load_lock(generated_lock_path), transport=published.transport)
-    assert len([r for r in published.requests if r.path.startswith("/dl/")]) == before
+    assert len([r for r in published.requests if DOWNLOADS in r.path]) == before
 
 
 def test_compare_looks_each_release_up_once_per_tool_by_tag(published, generated_lock_path):

@@ -190,6 +190,53 @@ def test_load_lock_rejects_a_url_naming_a_different_asset(generated_lock_path, t
         load_lock(edited(generated_lock_path, swap))
 
 
+@pytest.mark.parametrize(
+    ("tool", "platform"),
+    [("websocat", "macos-x86_64"), ("frp", "linux-x86_64"), ("goetia", "linux-aarch64"), ("goetia", "bundle")],
+)
+def test_load_lock_rejects_a_url_whose_release_tag_is_not_the_pinned_version(generated_lock_path, tool, platform):
+
+    def stale(document):
+        entry = document[tool][platform]
+        entry = entry if platform == "bundle" else entry[0]
+        head, tag, name = entry["url"].rsplit("/", 2)
+        entry["url"] = f"{head}/v9.9.9/{name}"
+
+    with pytest.raises(BinariesError) as raised:
+        load_lock(edited(generated_lock_path, stale))
+    assert "v9.9.9" in str(raised.value)
+    assert f"{tool}.{platform}" in str(raised.value)
+
+
+def test_load_lock_rejects_a_websocat_url_left_behind_by_a_version_bump(generated_lock_path):
+    bumped = generated_lock_path.read_text().replace('version = "1.14.1"', 'version = "1.15.0"')
+    stale = generated_lock_path.with_name("stale.lock.toml")
+    stale.write_text(bumped)
+    with pytest.raises(BinariesError, match="websocat"):
+        load_lock(stale)
+
+
+def test_load_lock_accepts_a_tag_without_the_v_prefix(generated_lock_path):
+
+    def untagged(document):
+        entry = document["websocat"]["linux-x86_64"][0]
+        head, tag, name = entry["url"].rsplit("/", 2)
+        entry["url"] = f"{head}/{tag.removeprefix('v')}/{name}"
+
+    assert load_lock(edited(generated_lock_path, untagged))
+
+
+@pytest.mark.parametrize("path", ["/some-asset", "/releases/download/some-asset", "/x/y/z/some-asset"])
+def test_load_lock_rejects_a_url_that_is_not_a_release_download(generated_lock_path, path):
+
+    def other(document):
+        entry = document["goetia"]["bundle"]
+        entry["url"] = "https://example.com" + path.replace("some-asset", "goetia.sigstore.json")
+
+    with pytest.raises(BinariesError, match="releases/download"):
+        load_lock(edited(generated_lock_path, other))
+
+
 def test_load_lock_rejects_the_seed_with_no_pins(lock_path):
     with pytest.raises(BinariesError):
         load_lock(lock_path)
