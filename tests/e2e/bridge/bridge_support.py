@@ -122,8 +122,12 @@ class Project:
     def write_env(self) -> None:
         (self.root / ".env").write_text("".join(f"{key}={value}\n" for key, value in self.values.items()))
 
-    def compose(self, *args: str, overlay: bool = False) -> subprocess.CompletedProcess[str]:
-        files = ["-f", "compose.yaml", *(["-f", "compose.traefik.yaml"] if overlay else [])]
+    def compose(self,
+                *args: str,
+                overlay: bool = False,
+                extra_files: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
+        names = ["compose.yaml", *(["compose.traefik.yaml"] if overlay else []), *extra_files]
+        files = [argument for name in names for argument in ("-f", name)]
         self.write_env()
         return run("docker", "compose", "--project-name", self.name, *files, *args, cwd=self.root)
 

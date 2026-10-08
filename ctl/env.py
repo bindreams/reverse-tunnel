@@ -15,11 +15,12 @@ from ctl import _winfile as winfile
 KEY = re.compile(r"[A-Z][A-Z0-9_]*", re.ASCII)
 BANNED_VALUE_CHARACTERS = frozenset("\"'`$\\#")
 # Go `text/template` skips ASCII space, tab, CR and LF around an action, and reads `-` as a trim marker only when
-# whitespace is adjacent: `{{- ` on the left, ` -}}` on the right. `bridge/entrypoint.sh` mirrors this pattern.
+# whitespace is adjacent: `{{- ` on the left, ` -}}` on the right. Only `RT_*` names may be referenced: any other is a
+# variable of the platform or the shell, not of this deployment. `bridge/entrypoint.sh` mirrors this pattern.
 GO_TEMPLATE_REFERENCE = re.compile(
-    r"\{\{(?:-[ \t\r\n])?[ \t\r\n]*\$?\.Envs\.([A-Z][A-Z0-9_]*)(?:[ \t\r\n]+-|[ \t\r\n]*)\}\}"
+    r"\{\{(?:-[ \t\r\n])?[ \t\r\n]*\$?\.Envs\.(RT_[A-Z0-9_]*)(?:[ \t\r\n]+-|[ \t\r\n]*)\}\}"
 )
-UNSUPPORTED_TEMPLATE = "unsupported template syntax; only `{{ .Envs.NAME }}` is supported"
+UNSUPPORTED_TEMPLATE = "unsupported template syntax; only `{{ .Envs.RT_NAME }}` is supported"
 ENVS_WORD = re.compile(r"\bEnvs\b", re.ASCII)
 COMPOSE_REFERENCE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[?-][^}$\n]*)?\}")
 # Caddy finds `{$NAME}` and `{env.NAME}` anywhere in its input, so no context may excuse one.
@@ -136,7 +137,7 @@ def referenced_variables(text: str, *, source: str = "<text>", strict_dollar: bo
 
     Fails closed, because each form below could read a variable this scan would miss:
     - a Caddy placeholder anywhere;
-    - a `{{` that does not begin a `{{ .Envs.NAME }}` reference, or an `Envs` outside one;
+    - a `{{` that does not begin a `{{ .Envs.RT_NAME }}` reference, or an `Envs` outside one;
     - a `${` that is not `${NAME}`, `${NAME:?msg}` or `${NAME:-default}`.
     With `strict_dollar`, a `$` that is neither a `$$` escape nor one of those forms is an error too.
     """

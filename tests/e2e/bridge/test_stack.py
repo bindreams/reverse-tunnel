@@ -92,3 +92,47 @@ def test_the_running_container_cannot_write_its_root_filesystem_and_keeps_state_
     result = running.compose("exec", "-T", "frps", "sh", "-c", script)
     assert "Read-only file system" in result.stdout
     assert result.stdout.splitlines()[-1] == "1"
+
+
+# The environment frps runs with =======================================================================================
+
+# Valid for the entrypoint's rules, and distinctive enough that a stray default or a rewrite cannot match them.
+DOMAIN = "distinct-domain.example.org"
+PASSWORD = "Distinct_Admin-Password_0123"
+SENTINELS = {
+    "RT_SENTINEL_SPACES": "a  b   c",
+    "RT_SENTINEL_PUNCTUATION": "Qz9-_.:/=+,;@%^&*()[]{}|<>?~!",
+    "RT_SENTINEL_QUOTES": "it's \"quoted\" and \\ backslashed",
+}
+SENTINEL_FILE = "compose.sentinels.yaml"
+
+
+def environment_of_pid_one(project: Project) -> dict[str, str]:
+    result = project.compose("exec", "-T", "frps", "cat", "/proc/1/environ", extra_files=(SENTINEL_FILE, ))
+    assert result.returncode == 0, result.stderr
+    entries = [entry for entry in result.stdout.split("\0") if entry]
+    return dict(entry.split("=", 1) for entry in entries)
+
+
+def test_frps_carries_every_rt_variable_exactly_as_given(tmp_path):
+    project = make_project(
+        tmp_path,
+        RT_CONTROL_PORT="0",
+        RT_VHOST_PORT="0",
+        RT_ADMIN_PORT="0",
+        RT_DOMAIN=DOMAIN,
+        RT_ADMIN_PASSWORD=PASSWORD,
+    )
+    # A JSON string is a YAML string; `$` is doubled so that compose does not interpolate it.
+    entries = [f"      {name}: {json.dumps(value.replace('$', '$$'))}" for name, value in SENTINELS.items()]
+    (project.root / SENTINEL_FILE).write_text("\n".join(["services:", "  frps:", "    environment:", *entries]) + "\n")
+    try:
+        up = project.compose("up", "--detach", "--wait", "--build", extra_files=(SENTINEL_FILE, ))
+        assert up.returncode == 0, up.stdout + up.stderr
+        environment = environment_of_pid_one(project)
+        given = {"RT_DOMAIN": DOMAIN, "RT_ADMIN_PASSWORD": PASSWORD, **SENTINELS}
+        assert {name: value for name, value in environment.items() if name.startswith("RT_")} == given
+        assert set(environment) - set(given) <= {"PATH", "HOSTNAME", "HOME", "PWD", "OLDPWD", "SHLVL"}
+    finally:
+        down = project.compose("down", "--volumes", "--remove-orphans", "--rmi", "local", extra_files=(SENTINEL_FILE, ))
+        assert down.returncode == 0, down.stderr

@@ -280,12 +280,12 @@ def test_an_unsupported_envs_action_is_an_error_not_a_miss(text, line):
         referenced_variables(text, source="frps.toml")
     message = str(raised.value)
     assert f"frps.toml:{line}" in message
-    assert "{{ .Envs.NAME }}" in message
+    assert "{{ .Envs.RT_NAME }}" in message
 
 
 def test_the_strict_pattern_is_one_exported_constant():
     assert env.GO_TEMPLATE_REFERENCE.pattern == (
-        r"\{\{(?:-[ \t\r\n])?[ \t\r\n]*\$?\.Envs\.([A-Z][A-Z0-9_]*)(?:[ \t\r\n]+-|[ \t\r\n]*)\}\}"
+        r"\{\{(?:-[ \t\r\n])?[ \t\r\n]*\$?\.Envs\.(RT_[A-Z0-9_]*)(?:[ \t\r\n]+-|[ \t\r\n]*)\}\}"
     )
 
 
@@ -333,7 +333,7 @@ STRICT_ACCEPTED = [
     ("$$$$", set()),
     ("a $$ b", set()),
     ("$${LIT} ${A}", {"A"}),
-    ("{{ $.Envs.X }}", {"X"}),
+    ("{{ $.Envs.RT_X }}", {"RT_X"}),
     ("no dollars", set()),
 ]
 

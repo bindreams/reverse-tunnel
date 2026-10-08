@@ -27,7 +27,11 @@ def test_names_the_first_referenced_variable_that_is_unset(entrypoint: Entrypoin
 
 @pytest.mark.parametrize(("text", "line"), REJECTED)
 def test_rejects_every_action_the_python_gate_rejects(entrypoint: Entrypoint, text: str, line: int):
-    everything = {name: "value" for name in ("X", "Y", "A", "B", "C", "RT_X")}
+    everything = {
+        name: "value"
+        for name in
+        ("RT_X", "RT_Y", "RT_A", "RT_B", "RT_C", "PPID", "IFS", "HOME", "STATE", "RT", "RTX", "XRT_X", "OPTIND")
+    }
     result = entrypoint.run(config=text, environment=everything)
     assert_refused(result, f"frps.toml:{line}: unsupported template syntax")
-    assert "{{ .Envs.NAME }}" in result.stderr
+    assert "{{ .Envs.RT_NAME }}" in result.stderr

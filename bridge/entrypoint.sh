@@ -3,8 +3,8 @@
 # then records what frps loaded. The checks live here so they hold for a bare `docker compose up` as well as for `ctl`.
 set -eu
 
-# Every name this script defines is lowercase and nothing is exported: an uppercase name belongs to the operator, and
-# frps must see exactly the environment it was given.
+# Every name this script defines is lowercase and nothing is exported, so frps receives every variable it was given
+# unchanged (the `RT_*` ones are what its config can reference); the shell itself adds PWD, OLDPWD and SHLVL.
 newline='
 '
 
@@ -70,13 +70,13 @@ find_unsafe_characters() {
 	esac
 }
 
-# Prints the variable of each `{{ .Envs.NAME }}` reference in $1. It applies ctl.env's rules, so the two cannot
+# Prints the variable of each `{{ .Envs.RT_NAME }}` reference in $1. It applies ctl.env's rules, so the two cannot
 # drift (tests/go_template.corpus): every `{{` must begin a strict reference, and `Envs` may appear only inside one.
 scan_template() {
 	LC_ALL=C awk -v file="$mounted_config" '
 	function fail(offset,   head) {
 		head = substr(text, 1, offset - 1)
-		printf "bridge: %s:%d: unsupported template syntax; only `{{ .Envs.NAME }}` is supported\n", \
+		printf "bridge: %s:%d: unsupported template syntax; only `{{ .Envs.RT_NAME }}` is supported\n", \
 			file, gsub(/\n/, "\n", head) + 1 > "/dev/stderr"
 		exit 1
 	}
@@ -87,7 +87,7 @@ scan_template() {
 		return 0
 	}
 	BEGIN {
-		pattern = "^\\{\\{(-[ \t\r\n])?[ \t\r\n]*\\$?\\.Envs\\.([A-Z][A-Z0-9_]*)([ \t\r\n]+-|[ \t\r\n]*)\\}\\}"
+		pattern = "^\\{\\{(-[ \t\r\n])?[ \t\r\n]*\\$?\\.Envs\\.(RT_[A-Z0-9_]*)([ \t\r\n]+-|[ \t\r\n]*)\\}\\}"
 	}
 	{ text = text $0 "\n" }
 	END {

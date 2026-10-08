@@ -2,51 +2,51 @@
   "accepted": [
     {
       "id": "bare",
-      "text": "a = 1\nb = {{.Envs.X}}\n",
+      "text": "a = 1\nb = {{.Envs.RT_X}}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "spaced",
-      "text": "a = 1\nb = {{ .Envs.X }}\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X }}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "wide-spaces",
-      "text": "a = 1\nb = {{  .Envs.X  }}\n",
+      "text": "a = 1\nb = {{  .Envs.RT_X  }}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "root-dollar",
-      "text": "a = 1\nb = {{ $.Envs.X }}\n",
+      "text": "a = 1\nb = {{ $.Envs.RT_X }}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "trim-markers",
-      "text": "a = 1\nb = {{- .Envs.X -}}\n",
+      "text": "a = 1\nb = {{- .Envs.RT_X -}}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "tab-and-newline",
-      "text": "a = 1\nb = {{\t.Envs.X\n}}\n",
+      "text": "a = 1\nb = {{\t.Envs.RT_X\n}}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "quoted",
-      "text": "a = 1\nb = x = \"{{ .Envs.X }}\"\n",
+      "text": "a = 1\nb = x = \"{{ .Envs.RT_X }}\"\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
@@ -59,10 +59,10 @@
     },
     {
       "id": "two-on-a-line",
-      "text": "a = \"{{ .Envs.A }}.{{- $.Envs.B_2 }}\"\n",
+      "text": "a = \"{{ .Envs.RT_A }}.{{- $.Envs.RT_B_2 }}\"\n",
       "names": [
-        "A",
-        "B_2"
+        "RT_A",
+        "RT_B_2"
       ]
     },
     {
@@ -77,49 +77,49 @@
     },
     {
       "id": "no-trailing-newline",
-      "text": "a = \"{{ .Envs.X }}\"",
+      "text": "a = \"{{ .Envs.RT_X }}\"",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "carriage-returns",
-      "text": "a = 1\r\nb = \"{{ .Envs.X }}\"\r\n",
+      "text": "a = 1\r\nb = \"{{ .Envs.RT_X }}\"\r\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "trim-markers-with-root-dollar",
-      "text": "a = 1\nb = {{- $.Envs.X  -}}\n",
+      "text": "a = 1\nb = {{- $.Envs.RT_X  -}}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "trim-marker-then-newline",
-      "text": "a = 1\nb = {{-\n.Envs.X\n-}}\n",
+      "text": "a = 1\nb = {{-\n.Envs.RT_X\n-}}\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     },
     {
       "id": "non-ascii-elsewhere",
-      "text": "a = \"\u00e9\"\nb = \"{{ .Envs.X }}\" # \u00fcn\u00efcode\n",
+      "text": "a = \"\u00e9\"\nb = \"{{ .Envs.RT_X }}\" # \u00fcn\u00efcode\n",
       "names": [
-        "X"
+        "RT_X"
       ]
     }
   ],
   "rejected": [
     {
       "id": "pipe",
-      "text": "a = 1\nb = {{ .Envs.X | default \"y\" }}\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X | default \"y\" }}\n",
       "line": 2
     },
     {
       "id": "parenthesised",
-      "text": "a = 1\nb = {{ (.Envs.X) }}\n",
+      "text": "a = 1\nb = {{ (.Envs.RT_X) }}\n",
       "line": 2
     },
     {
@@ -144,62 +144,62 @@
     },
     {
       "id": "field-of-value",
-      "text": "a = 1\nb = {{ .Envs.X.Y }}\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X.Y }}\n",
       "line": 2
     },
     {
       "id": "condition",
-      "text": "a = 1\nb = {{ if .Envs.X }}\n",
+      "text": "a = 1\nb = {{ if .Envs.RT_X }}\n",
       "line": 2
     },
     {
       "id": "assignment",
-      "text": "a = 1\nb = {{ $x := .Envs.X }}\n",
+      "text": "a = 1\nb = {{ $x := .Envs.RT_X }}\n",
       "line": 2
     },
     {
       "id": "function-call",
-      "text": "a = 1\nb = {{ printf \"%s\" .Envs.X }}\n",
+      "text": "a = 1\nb = {{ printf \"%s\" .Envs.RT_X }}\n",
       "line": 2
     },
     {
       "id": "comment",
-      "text": "a = 1\nb = {{/* .Envs.X */}}\n",
+      "text": "a = 1\nb = {{/* .Envs.RT_X */}}\n",
       "line": 2
     },
     {
       "id": "unterminated",
-      "text": "a = 1\nb = {{ .Envs.X\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X\n",
       "line": 2
     },
     {
       "id": "half-closed",
-      "text": "a = 1\nb = {{ .Envs.X }\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X }\n",
       "line": 2
     },
     {
       "id": "multi-line",
-      "text": "a = 1\nb = {{ .Envs.X\n| quote }}\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X\n| quote }}\n",
       "line": 2
     },
     {
       "id": "closing-braces-in-a-string",
-      "text": "a = 1\nb = {{ printf \"}}\" .Envs.X }}\n",
+      "text": "a = 1\nb = {{ printf \"}}\" .Envs.RT_X }}\n",
       "line": 2
     },
     {
       "id": "closing-braces-in-a-raw-string",
-      "text": "a = 1\nb = {{ printf `}}` .Envs.X }}\n",
+      "text": "a = 1\nb = {{ printf `}}` .Envs.RT_X }}\n",
       "line": 2
     },
     {
       "id": "a-reference-inside-a-string-hides-the-real-one",
-      "text": "a = 1\nb = {{ printf \"{{ .Envs.X }}\" .Envs.Y }}\n",
+      "text": "a = 1\nb = {{ printf \"{{ .Envs.RT_X }}\" .Envs.RT_Y }}\n",
       "line": 2
     },
     {
       "id": "string-then-pipe",
-      "text": "a = 1\nb = {{ \"}}\" }}{{ .Envs.X | quote }}\n",
+      "text": "a = 1\nb = {{ \"}}\" }}{{ .Envs.RT_X | quote }}\n",
       "line": 2
     },
     {
@@ -224,12 +224,12 @@
     },
     {
       "id": "extra-opening-brace",
-      "text": "a = 1\nb = {{{ .Envs.X }}\n",
+      "text": "a = 1\nb = {{{ .Envs.RT_X }}\n",
       "line": 2
     },
     {
       "id": "trailing-opening-braces",
-      "text": "a = 1\nb = {{ .Envs.X }}{{\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X }}{{\n",
       "line": 2
     },
     {
@@ -239,57 +239,57 @@
     },
     {
       "id": "a-bare-field-outside-any-action",
-      "text": "a = 1\nb = x = .Envs.X\n",
+      "text": "a = 1\nb = x = .Envs.RT_X\n",
       "line": 2
     },
     {
       "id": "valid-then-invalid",
-      "text": "a = 1\nb = {{ $.Envs.X }}{{ .Envs.Y | quote }}\n",
+      "text": "a = 1\nb = {{ $.Envs.RT_X }}{{ .Envs.RT_Y | quote }}\n",
       "line": 2
     },
     {
       "id": "error-line-counts-from-the-bad-action",
-      "text": "{{ .Envs.A }}\n\n\n{{ .Envs.B }} {{ index .Envs \"C\" }}\n",
+      "text": "{{ .Envs.RT_A }}\n\n\n{{ .Envs.RT_B }} {{ index .Envs \"C\" }}\n",
       "line": 4
     },
     {
       "id": "bad-action-after-a-multi-line-valid-one",
-      "text": "a = \"{{\n.Envs.A\n}}\"\nb = {{ .Envs.B | quote }}\n",
+      "text": "a = \"{{\n.Envs.RT_A\n}}\"\nb = {{ .Envs.RT_B | quote }}\n",
       "line": 4
     },
     {
       "id": "trim-left-without-space",
-      "text": "a = 1\nb = {{-.Envs.X}}\n",
+      "text": "a = 1\nb = {{-.Envs.RT_X}}\n",
       "line": 2
     },
     {
       "id": "trim-right-without-space",
-      "text": "a = 1\nb = {{ .Envs.X-}}\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X-}}\n",
       "line": 2
     },
     {
       "id": "trim-both-without-space",
-      "text": "a = 1\nb = {{-.Envs.X-}}\n",
+      "text": "a = 1\nb = {{-.Envs.RT_X-}}\n",
       "line": 2
     },
     {
       "id": "trim-left-valid-right-without-space",
-      "text": "a = 1\nb = {{- .Envs.X-}}\n",
+      "text": "a = 1\nb = {{- .Envs.RT_X-}}\n",
       "line": 2
     },
     {
       "id": "form-feed-is-not-go-space",
-      "text": "a = 1\nb = {{\f.Envs.X}}\n",
+      "text": "a = 1\nb = {{\f.Envs.RT_X}}\n",
       "line": 2
     },
     {
       "id": "vertical-tab-is-not-go-space",
-      "text": "a = 1\nb = {{ .Envs.X\u000b}}\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X\u000b}}\n",
       "line": 2
     },
     {
       "id": "no-break-space-is-not-go-space",
-      "text": "a = 1\nb = {{\u00a0.Envs.X}}\n",
+      "text": "a = 1\nb = {{\u00a0.Envs.RT_X}}\n",
       "line": 2
     },
     {
@@ -304,7 +304,52 @@
     },
     {
       "id": "non-ascii-in-the-name",
-      "text": "a = 1\nb = {{ .Envs.X\u00e9 }}\n",
+      "text": "a = 1\nb = {{ .Envs.RT_X\u00e9 }}\n",
+      "line": 2
+    },
+    {
+      "id": "shell-special-parameter-ppid",
+      "text": "a = 1\nb = {{ .Envs.PPID }}\n",
+      "line": 2
+    },
+    {
+      "id": "shell-field-separator-ifs",
+      "text": "a = 1\nb = {{ .Envs.IFS }}\n",
+      "line": 2
+    },
+    {
+      "id": "shell-option-index-optind",
+      "text": "a = 1\nb = {{ .Envs.OPTIND }}\n",
+      "line": 2
+    },
+    {
+      "id": "ordinary-environment-variable-home",
+      "text": "a = 1\nb = {{ .Envs.HOME }}\n",
+      "line": 2
+    },
+    {
+      "id": "the-scripts-former-variable-state",
+      "text": "a = 1\nb = {{ .Envs.STATE }}\n",
+      "line": 2
+    },
+    {
+      "id": "the-prefix-without-its-underscore",
+      "text": "a = 1\nb = {{ .Envs.RT }}\n",
+      "line": 2
+    },
+    {
+      "id": "a-prefix-only-after-other-letters",
+      "text": "a = 1\nb = {{ .Envs.XRT_X }}\n",
+      "line": 2
+    },
+    {
+      "id": "lowercase-prefix",
+      "text": "a = 1\nb = {{ .Envs.rt_x }}\n",
+      "line": 2
+    },
+    {
+      "id": "rt-without-underscore-then-name",
+      "text": "a = 1\nb = {{ .Envs.RTX }}\n",
       "line": 2
     }
   ]

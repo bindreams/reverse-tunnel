@@ -214,26 +214,7 @@ def test_refuses_a_referenced_value_that_would_break_the_toml_string(entrypoint:
     assert_refused(result, "RT_NOTE contains a double quote, a backslash or a control character")
 
 
-# The script's own names and the operator's ============================================================================
-
-# Shell variables, special parameters and names the script used to define; none is an environment variable.
-SHELL_NAMES = ["STATE", "WORK", "PPID", "IFS", "OPTIND", "LC_ALL", "MOUNTED_TOKEN", "EXAMPLE_TOKEN", "PS1", "LINENO"]
-
-
-@pytest.mark.parametrize("name", SHELL_NAMES)
-def test_refuses_a_reference_to_a_shell_variable_that_is_not_in_the_environment(entrypoint: Entrypoint, name: str):
-    result = entrypoint.run(config=f'note = "{{{{ .Envs.{name} }}}}"\n')
-    assert_refused(result, f"{name} is unset or empty")
-
-
-@pytest.mark.parametrize(
-    "name", ["STATE", "WORK", "LC_ALL", "MOUNTED_TOKEN", "ADMIN_PASSWORD_PATTERN", "EXAMPLE_TOKEN"]
-)
-def test_an_operator_variable_survives_with_its_own_value(entrypoint: Entrypoint, name: str):
-    config = f'note = "{{{{ .Envs.{name} }}}}"\n'
-    result = entrypoint.run(config=config, environment={name: "operator-value"}, command=("printenv", name))
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == "operator-value\n"
+# The environment frps is given ========================================================================================
 
 
 def test_frps_starts_with_only_the_environment_it_was_given(entrypoint: Entrypoint, tracked_config: str):

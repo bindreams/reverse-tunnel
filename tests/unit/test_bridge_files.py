@@ -177,11 +177,3 @@ def test_caddy_example_ships_the_vhost_and_the_control_site():
 
 def test_traefik_overlay_says_it_needs_traefik_v3():
     assert "Traefik v3" in (REPO_ROOT / "compose.traefik.yaml").read_text(encoding="utf-8")
-
-
-def test_entrypoint_defines_no_uppercase_variable_and_exports_nothing():
-    """An uppercase name belongs to the operator: assigning one would overwrite the value frps is meant to see."""
-    text = ENTRYPOINT.read_text(encoding="utf-8")
-    # `LC_ALL=C command` sets the variable for that command alone.
-    assert re.findall(r"^\s*(?:export\s+)?(?!LC_ALL=C [a-z])([A-Z_][A-Z0-9_]*)=", text, re.MULTILINE) == []
-    assert not re.search(r"^\s*export\b", text, re.MULTILINE)
