@@ -1,5 +1,7 @@
 import os
+import secrets
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -16,7 +18,7 @@ from ctl.perms import (
     converge_dir,
     converge_tree,
     describe,
-    grant_traverse,
+    grant_service_read,
     harden_file,
     principals,
     write_secret,
@@ -37,8 +39,74 @@ INHERITED_ACE = 0x10
 WRITING = FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE
 
 
-def operator() -> str:
-    return winacl.current_user_sid()
+@dataclass
+class StandardUser:
+    name: str
+    sid: str
+    token: object
+
+
+def owner_of(path: Path) -> str:
+    """The operator for files under `path`: the SID that owns it."""
+    return perms_windows.operator_sid(path)
+
+
+def enable_privilege(name: str) -> None:
+    import win32api
+    import win32con
+    import win32security
+
+    token = win32security.OpenProcessToken(
+        win32api.GetCurrentProcess(), win32con.TOKEN_ADJUST_PRIVILEGES | win32con.TOKEN_QUERY
+    )
+    # pywin32 takes None for the local machine and a list of pairs; its stubs say otherwise.
+    luid = win32security.LookupPrivilegeValue(None, name)  # ty: ignore[invalid-argument-type]
+    privileges = [(luid, win32con.SE_PRIVILEGE_ENABLED)]
+    win32security.AdjustTokenPrivileges(token, False, privileges)  # ty: ignore[invalid-argument-type]
+
+
+def make_owner(path: Path, user: StandardUser) -> None:
+    import win32security
+
+    enable_privilege("SeRestorePrivilege")
+    enable_privilege("SeTakeOwnershipPrivilege")
+    win32security.SetNamedSecurityInfo(
+        str(path), win32security.SE_FILE_OBJECT, win32security.OWNER_SECURITY_INFORMATION,
+        win32security.ConvertStringSidToSid(user.sid), None, None, None
+    )
+
+
+@pytest.fixture
+def standard_user():
+    """A throwaway local non-administrator with a random password, logged on and removed afterwards."""
+    import win32con
+    import win32net
+    import win32netcon
+    import win32security
+
+    name = f"rt{secrets.token_hex(4)}"
+    password = "Aa1-" + secrets.token_urlsafe(24)
+    win32net.NetUserAdd(
+        None,  # ty: ignore[invalid-argument-type]
+        1,
+        {
+            "name": name,
+            "password": password,
+            "priv": win32netcon.USER_PRIV_USER,
+            "home_dir": None,
+            "comment": None,
+            "flags": win32netcon.UF_SCRIPT | win32netcon.UF_DONT_EXPIRE_PASSWD,
+            "script_path": None,
+        }
+    )
+    try:
+        sid, _, _ = win32security.LookupAccountName(None, name)
+        token = win32security.LogonUser(
+            name, ".", password, win32con.LOGON32_LOGON_NETWORK, win32con.LOGON32_PROVIDER_DEFAULT
+        )
+        yield StandardUser(name, win32security.ConvertSidToStringSid(sid), token)
+    finally:
+        win32net.NetUserDel(None, name)  # ty: ignore[invalid-argument-type]
 
 
 def ace_for(path: Path, sid: str) -> winacl.Ace:
@@ -64,7 +132,7 @@ def test_hardened_file_grants_no_access_to_users_everyone_or_authenticated_users
 def test_env_grants_no_access_to_localservice(tmp_path):
     path = env_file(tmp_path)
     harden_file(path, None, NO_READERS)
-    assert principals(path) == {operator(), SID_ADMINISTRATORS}
+    assert principals(path) == {owner_of(tmp_path), SID_ADMINISTRATORS}
     assert SID_LOCAL_SERVICE not in principals(path)
 
 
@@ -78,19 +146,46 @@ def test_token_grants_localservice_read_but_not_write(tmp_path):
     assert path.read_bytes() == b"secret"
 
 
-def test_repo_owner_keeps_read_access_where_inheritance_is_broken(tmp_path):
-    path = env_file(tmp_path)
+def test_repo_owner_keeps_read_access_where_inheritance_is_broken(tmp_path, standard_user):
+    import win32security
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    make_owner(root, standard_user)
+    path = env_file(root)
     harden_file(path, None, NO_READERS)
     assert winacl.read_acl(path).protected
-    assert path.read_bytes() == b"RT_TOKEN=x\n"
-    with open(path, "ab") as file:
-        file.write(b"")
+    assert principals(path) == {standard_user.sid, SID_ADMINISTRATORS}
+    win32security.ImpersonateLoggedOnUser(standard_user.token)
+    try:
+        data = path.read_bytes()
+    finally:
+        win32security.RevertToSelf()
+    assert data == b"RT_TOKEN=x\n"
+
+
+def test_the_operator_is_the_owner_of_the_repository_root_not_the_process_user(tmp_path, standard_user):
+    root = tmp_path / "repo"
+    root.mkdir()
+    make_owner(root, standard_user)
+    assert perms_windows.operator_sid(root) == standard_user.sid
+
+
+def test_harden_file_refuses_a_hard_linked_file(tmp_path):
+    other = tmp_path / "other"
+    other.write_bytes(b"")
+    os.link(other, tmp_path / ".env")
+    before = winacl.read_acl(other)
+    with pytest.raises(PermsError) as raised:
+        harden_file(tmp_path / ".env", None, NO_READERS)
+    assert "hard link" in str(raised.value)
+    assert winacl.read_acl(other) == before
 
 
 def test_a_plain_0600_file_is_reported_as_not_owner_only(tmp_path):
     path = env_file(tmp_path)
     os.chmod(path, 0o600)
-    assert principals(path) != {operator(), SID_ADMINISTRATORS}
+    assert principals(path) != {owner_of(tmp_path), SID_ADMINISTRATORS}
 
 
 def test_principals_reports_an_unexpected_sid(tmp_path):
@@ -104,7 +199,7 @@ def test_harden_file_removes_a_stale_explicit_grant(tmp_path):
     path = env_file(tmp_path)
     subprocess.run(["icacls", str(path), "/grant", f"*{SID_USERS}:(R)"], check=True, capture_output=True)
     harden_file(path, None, NO_READERS)
-    assert principals(path) == {operator(), SID_ADMINISTRATORS}
+    assert principals(path) == {owner_of(tmp_path), SID_ADMINISTRATORS}
 
 
 def test_harden_file_is_idempotent(tmp_path):
@@ -126,12 +221,12 @@ def test_harden_file_refuses_a_reparse_point_naming_the_path(tmp_path):
 
 def test_a_secret_is_never_written_under_the_permissive_inherited_acl(tmp_path):
     folder = tmp_path / "secrets"
-    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, operator()}))
+    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, owner_of(tmp_path)}))
     path = folder / "token"
     write_secret(path, b"secret", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}))
     assert winacl.read_acl(path).protected
     assert SID_LOCAL_SERVICE in principals(path)
-    assert operator() not in principals(path)
+    assert owner_of(tmp_path) not in principals(path)
 
 
 def test_harden_file_refuses_a_directory_junction(tmp_path):
@@ -176,8 +271,8 @@ def test_write_secret_replaces_a_hardened_secret_and_keeps_the_acl(tmp_path):
 
 def test_directory_grants_carry_object_and_container_inherit(tmp_path):
     folder = tmp_path / "secrets"
-    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, operator()}))
-    for sid in (SID_LOCAL_SERVICE, operator(), SID_ADMINISTRATORS):
+    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, owner_of(tmp_path)}))
+    for sid in (SID_LOCAL_SERVICE, owner_of(tmp_path), SID_ADMINISTRATORS):
         flags = ace_for(folder, sid).flags
         assert flags & OBJECT_INHERIT_ACE and flags & CONTAINER_INHERIT_ACE, sid
     child = folder / "child"
@@ -187,11 +282,11 @@ def test_directory_grants_carry_object_and_container_inherit(tmp_path):
 
 def test_secrets_directory_grants_localservice_read_and_execute_but_not_write(tmp_path):
     folder = tmp_path / "secrets"
-    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, operator()}))
+    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, owner_of(tmp_path)}))
     ace = ace_for(folder, SID_LOCAL_SERVICE)
     assert ace.mask & FILE_EXECUTE
     assert not ace.mask & WRITING
-    assert principals(folder) == {SID_LOCAL_SERVICE, operator(), SID_ADMINISTRATORS}
+    assert principals(folder) == {SID_LOCAL_SERVICE, owner_of(tmp_path), SID_ADMINISTRATORS}
 
 
 def test_logs_directory_grants_localservice_modify(tmp_path):
@@ -207,7 +302,7 @@ def test_converge_dir_removes_a_stale_explicit_grant(tmp_path):
     folder = tmp_path / "secrets"
     folder.mkdir()
     subprocess.run(["icacls", str(folder), "/grant", f"*{SID_USERS}:(OI)(CI)(R)"], check=True, capture_output=True)
-    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, operator()}))
+    converge_dir(folder, LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE, owner_of(tmp_path)}))
     assert SID_USERS not in principals(folder)
 
 
@@ -228,38 +323,103 @@ def test_converge_tree_refuses_a_reparse_point_entry(tmp_path):
     logs.mkdir()
     target = tmp_path / "sentinel"
     target.write_bytes(b"")
+    before = winacl.read_acl(target)
     (logs / "frpc.log").symlink_to(target)
     with pytest.raises(PermsError) as raised:
         converge_tree(logs, LOCAL_SERVICE, 0o750)
     assert str(logs / "frpc.log") in str(raised.value)
+    assert "remove it" in str(raised.value)
+    assert winacl.read_acl(target) == before
+
+
+def test_converge_tree_refuses_a_subdirectory_and_does_not_enter_it(tmp_path):
+    logs = tmp_path / "logs"
+    (logs / "old").mkdir(parents=True)
+    inner = logs / "old" / "frpc.log.1"
+    inner.write_bytes(b"")
+    harden_file(inner, None, NO_READERS)
+    before = winacl.read_acl(inner)
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, LOCAL_SERVICE, 0o750)
+    assert str(logs / "old") in str(raised.value)
+    assert "remove it" in str(raised.value)
+    assert winacl.read_acl(inner) == before
+
+
+def test_converge_tree_refuses_a_junction_entry(tmp_path):
+    import _winapi
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    _winapi.CreateJunction(str(target), str(logs / "junction"))
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, LOCAL_SERVICE, 0o750)
+    assert "reparse point" in str(raised.value)
+
+
+def test_converge_tree_refuses_a_hard_linked_entry(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    other = tmp_path / "other"
+    other.write_bytes(b"")
+    os.link(other, logs / "frpc.log")
+    before = winacl.read_acl(other)
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, LOCAL_SERVICE, 0o750)
+    assert "hard link" in str(raised.value)
+    assert winacl.read_acl(other) == before
+
+
+def test_converge_tree_converges_the_directory_itself(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    converge_tree(logs, LOCAL_SERVICE, 0o750)
+    ace = ace_for(logs, SID_LOCAL_SERVICE)
+    assert ace.mask & FILE_WRITE_DATA
+    assert ace.flags & OBJECT_INHERIT_ACE and ace.flags & CONTAINER_INHERIT_ACE
+    assert SID_ADMINISTRATORS in principals(logs)
+    assert not winacl.read_acl(logs).protected
 
 
 def test_converge_tree_restores_inheritance_on_an_existing_entry(tmp_path):
     logs = tmp_path / "logs"
-    converge_dir(logs, LOCAL_SERVICE, 0o750, NO_READERS, writers=frozenset({SID_LOCAL_SERVICE}), isolate=False)
+    logs.mkdir()
     entry = logs / "frpc.log"
     entry.write_bytes(b"")
     harden_file(entry, None, NO_READERS)
+    assert SID_LOCAL_SERVICE not in principals(entry)
     converge_tree(logs, LOCAL_SERVICE, 0o750)
     assert SID_LOCAL_SERVICE in principals(entry)
     assert not winacl.read_acl(entry).protected
 
 
-# Traversal ============================================================================================================
+# Service access =======================================================================================================
 
 
-def test_grant_traverse_makes_a_profile_directory_reachable_by_localservice(tmp_path):
-    folder = tmp_path / "profile"
-    folder.mkdir()
-    before = winacl.read_acl(folder)
-    grant_traverse(folder, LOCAL_SERVICE)
-    ace = ace_for(folder, SID_LOCAL_SERVICE)
+def test_grant_service_read_reaches_the_repository_and_leaves_its_ancestors_alone(tmp_path):
+    profile = tmp_path / "profile"
+    repo = profile / "repo"
+    (repo / "bin").mkdir(parents=True)
+    (repo / "host").mkdir()
+    (repo / "host" / "frpc.toml").write_bytes(b"")
+    env = env_file(repo)
+    harden_file(env, None, NO_READERS)
+    secrets_dir = repo / "secrets"
+    converge_dir(secrets_dir, LOCAL_SERVICE, 0o711, NO_READERS)
+    before = {path: winacl.read_acl(path) for path in (profile, tmp_path, env, secrets_dir)}
+    grant_service_read(repo, LOCAL_SERVICE)
+    for path, acl in before.items():
+        assert winacl.read_acl(path) == acl, path
+    ace = ace_for(repo, SID_LOCAL_SERVICE)
     assert ace.mask & FILE_EXECUTE and ace.mask & FILE_READ_DATA
     assert not ace.mask & WRITING
     assert ace.flags & OBJECT_INHERIT_ACE and ace.flags & CONTAINER_INHERIT_ACE
-    assert winacl.read_acl(folder).protected == before.protected
-    (folder / "bin").mkdir()
-    assert SID_LOCAL_SERVICE in principals(folder / "bin")
+    for path in (repo / "bin", repo / "host", repo / "host" / "frpc.toml"):
+        assert SID_LOCAL_SERVICE in principals(path), path
+        assert not winacl.read_acl(path).protected, path
+    assert SID_LOCAL_SERVICE not in principals(env)
 
 
 # Inspection ===========================================================================================================
@@ -271,7 +431,3 @@ def test_describe_lists_the_sids_and_the_inheritance_state(tmp_path):
     text = describe(path)
     assert SID_ADMINISTRATORS in text
     assert "inheritance broken" in text
-
-
-def test_current_user_sid_is_a_sid():
-    assert winacl.current_user_sid().startswith("S-1-5-")

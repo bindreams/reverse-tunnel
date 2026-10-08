@@ -55,31 +55,47 @@ class Acl:
 # Reading ==============================================================================================================
 
 
-def current_user_sid() -> str:
-    """The SID of the account running this process; elevation does not change it."""
-    import win32api
-    import win32con
+def owner_sid(handle: int) -> str:
+    """The SID that owns the object behind `handle`, which needs READ_CONTROL."""
     import win32security
 
-    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
-    sid, _ = win32security.GetTokenInformation(token, win32security.TokenUser)
-    return win32security.ConvertSidToStringSid(sid)
+    descriptor = win32security.GetSecurityInfo(
+        handle, win32security.SE_FILE_OBJECT, win32security.OWNER_SECURITY_INFORMATION
+    )
+    return win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())
 
 
 def read_acl(path) -> Acl:
     """The allow entries that apply to `path` itself, inherited ones included. A missing DACL grants everyone."""
     import win32security
 
-    descriptor = win32security.GetNamedSecurityInfo(
-        str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+    return _parse(
+        win32security.GetNamedSecurityInfo(
+            str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+        ), path
     )
+
+
+def read_acl_handle(handle: int) -> Acl:
+    """`read_acl` for the object behind `handle` (READ_CONTROL), so what is read is what was changed."""
+    import win32security
+
+    return _parse(
+        win32security.GetSecurityInfo(handle, win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION),
+        "<handle>"
+    )
+
+
+def _parse(descriptor, source) -> Acl:
+    import win32security
+
     control, _ = descriptor.GetSecurityDescriptorControl()
     protected = bool(control & SE_DACL_PROTECTED)
     dacl = descriptor.GetSecurityDescriptorDacl()
     if dacl is None:
         return Acl((Ace(SID_EVERYONE, FULL, 0), ), protected)
     aces = []
-    for ace_type, flags, mask, sid in _entries(dacl, path):
+    for ace_type, flags, mask, sid in _entries(dacl, source):
         if ace_type == ACCESS_ALLOWED_ACE_TYPE and not flags & INHERIT_ONLY_ACE:
             aces.append(Ace(win32security.ConvertSidToStringSid(sid), mask, flags))
     return Acl(tuple(aces), protected)
@@ -89,9 +105,12 @@ def _entries(dacl, source) -> list[tuple[int, int, int, Any]]:
     """Every ACE of `dacl` as (type, flags, mask, sid). An unknown type is an error: it may grant something unseen."""
     entries = []
     for index in range(dacl.GetAceCount()):
-        (ace_type, flags), mask, sid = dacl.GetAce(index)
+        ace = dacl.GetAce(index)
+        ace_type = ace[0][0]
+        # Object and callback ACEs unpack differently and can grant in ways this module does not model.
         if ace_type not in (ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE):
             raise OSError(f"{source}: unsupported ACE type {ace_type}; refusing to guess who it grants")
+        (ace_type, flags), mask, sid = ace
         entries.append((ace_type, flags, mask, sid))
     return entries
 
@@ -179,7 +198,7 @@ def apply(
     return frozenset(wanted)
 
 
-def grant_traversal(handle: int, sid: str) -> None:
+def grant_read(handle: int, sid: str) -> None:
     """Add an inheritable read-and-execute ACE for `sid`, leaving every other ACE and the inheritance state alone."""
     import win32security
 

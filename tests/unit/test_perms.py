@@ -5,7 +5,7 @@ import pytest
 
 from ctl import perms
 from ctl.config import ConfigError
-from ctl.perms import Account, PermsError, harden_file, resolve_service_account, write_secret
+from ctl.perms import Account, PermsError, converge_tree, harden_file, resolve_service_account, write_secret
 
 NO_READERS: frozenset[str] = frozenset()
 
@@ -103,3 +103,42 @@ def test_write_secret_keeps_the_previous_secret_when_it_cannot_replace_it(tmp_pa
     assert str(path) in str(raised.value)
     assert names(tmp_path) == ["token"]
     assert path.is_dir()
+
+
+def test_harden_file_refuses_a_hard_linked_file(tmp_path):
+    other = tmp_path / "other"
+    other.write_bytes(b"A=1\n")
+    env = tmp_path / ".env"
+    os.link(other, env)
+    with pytest.raises(PermsError) as raised:
+        harden_file(env, None, NO_READERS)
+    assert str(env) in str(raised.value)
+    assert "hard link" in str(raised.value)
+
+
+def test_write_secret_refuses_a_hard_linked_destination(tmp_path):
+    other = tmp_path / "other"
+    other.write_bytes(b"the-old-secret")
+    token = tmp_path / "token"
+    os.link(other, token)
+    with pytest.raises(PermsError) as raised:
+        write_secret(token, b"new", None, NO_READERS)
+    assert "hard link" in str(raised.value)
+    assert other.read_bytes() == b"the-old-secret"
+
+
+def test_converge_tree_refuses_a_subdirectory(tmp_path):
+    logs = tmp_path / "logs"
+    (logs / "old").mkdir(parents=True)
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, None, 0o750)
+    assert str(logs / "old") in str(raised.value)
+    assert "remove it" in str(raised.value)
+
+
+def test_converge_tree_accepts_a_flat_directory_of_regular_files(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "frpc.log").write_bytes(b"")
+    (logs / "websocat.log").write_bytes(b"")
+    converge_tree(logs, None, 0o750)

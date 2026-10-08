@@ -31,7 +31,6 @@ from ctl.winacl import (
     SID_EVERYONE,
     SID_LOCAL_SERVICE,
     SID_USERS,
-    current_user_sid,
 )
 
 SECRET_MODE = 0o600
@@ -134,9 +133,17 @@ def _chown(fd: int, owner: Account | None) -> None:
     os.fchown(fd, owner.uid, owner.gid)
 
 
-def _require_regular(fd: int, path: Path) -> None:
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+def _require_sole_regular_file(fd: int, path: Path) -> None:
+    """Refuse anything but a regular file with one name: changing a hard-linked inode changes it for every link."""
+    status = os.fstat(fd)
+    if not stat.S_ISREG(status.st_mode):
         raise PermsError(f"{path}: not a regular file")
+    if status.st_nlink > 1:
+        raise PermsError(_hard_link_message(path, status.st_nlink))
+
+
+def _hard_link_message(path: Path, links: int) -> str:
+    return f"{path}: has {links} hard links; refusing to change a file that is also reachable under another name"
 
 
 def write_all(fd: int, data: bytes) -> None:
@@ -167,16 +174,41 @@ def _converged(path: Path, owner: Account | None, mode: int) -> Generator[int]:
         os.close(fd)
 
 
-def _converge_entries(directory_fd: int, directory: Path, owner: Account) -> None:
+def _refuse_entry(path: Path, status: os.stat_result, *, directory_device: int) -> None:
+    """Refuse an entry of `logs/` that is not a regular file with one name on the directory's own filesystem.
+
+    A hard-linked file would hand root's `chown` an inode that is also reachable from outside `logs/`, and so would
+    a file on another filesystem.
+    """
+    if stat.S_ISLNK(status.st_mode):
+        raise PermsError(f"{path}: is a symlink; remove it")
+    if not stat.S_ISREG(status.st_mode):
+        raise PermsError(f"{path}: not a regular file; remove it, this directory holds regular files only")
+    if status.st_nlink > 1:
+        raise PermsError(_hard_link_message(path, status.st_nlink) + "; remove it")
+    if status.st_dev != directory_device:
+        raise PermsError(f"{path}: is on another filesystem than its directory; remove it")
+
+
+def _converge_entries(directory_fd: int, directory: Path, owner: Account | None) -> None:
+    """Give `owner` each direct entry of the directory. The directory is flat: nothing is entered, so a subdirectory
+    is refused rather than followed. Special files are refused before they are opened, since opening a FIFO or a
+    socket can block or fail."""
+    device = os.fstat(directory_fd).st_dev
     with os.scandir(directory_fd) as scan:
         names = [entry.name for entry in scan]
     for name in names:
         path = directory / name
+        try:
+            _refuse_entry(path, os.lstat(name, dir_fd=directory_fd), directory_device=device)
+        except FileNotFoundError:
+            continue
+        if owner is None:
+            continue
         fd = _open(path, os.O_RDONLY, dir_fd=directory_fd, name=name)
         try:
+            _refuse_entry(path, os.fstat(fd), directory_device=device)
             _chown(fd, owner)
-            if stat.S_ISDIR(os.fstat(fd).st_mode):
-                _converge_entries(fd, path, owner)
         finally:
             os.close(fd)
 
@@ -185,7 +217,7 @@ def _converge_entries(directory_fd: int, directory: Path, owner: Account) -> Non
 
 
 def check_destination(path: Path, status: os.stat_result | None) -> None:
-    """Refuse a destination that is not a regular file or absent.
+    """Refuse a destination that is not a regular file with one name, or absent.
 
     A diagnostic, not a boundary: nothing here follows or writes through a link, and a swap after this call changes
     only which file the rename replaces.
@@ -196,6 +228,8 @@ def check_destination(path: Path, status: os.stat_result | None) -> None:
         raise PermsError(f"{path}: is a symlink; refusing to replace it")
     if not stat.S_ISREG(status.st_mode):
         raise PermsError(f"{path}: not a regular file")
+    if status.st_nlink > 1:
+        raise PermsError(_hard_link_message(path, status.st_nlink) + "; the other name would keep the old secret")
 
 
 def unlink_quietly(name: str, *, dir_fd: int | None = None) -> None:
@@ -209,7 +243,9 @@ def temporary_name(path: Path) -> str:
     return f".{path.name}.{secrets.token_hex(8)}.tmp"
 
 
-def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozenset[str]) -> None:
+def write_secret(
+    path: Path, data: bytes, owner: Account | None, readers: frozenset[str], *, root: Path | None = None
+) -> None:
     """Replace `path` with `data`, atomically and never readable by anyone the final mode excludes, even for an instant.
 
     The secret is written to a temporary file beside `path`, created `0600` with `O_EXCL|O_NOFOLLOW`, so there is no
@@ -221,7 +257,7 @@ def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozen
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.write_secret(path, data, owner, readers)
+        perms_windows.write_secret(path, data, owner, readers, root or path.parent)
         return
     directory_fd = _open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -259,7 +295,7 @@ def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozen
         os.close(directory_fd)
 
 
-def harden_file(path: Path, owner: Account | None, readers: frozenset[str]) -> None:
+def harden_file(path: Path, owner: Account | None, readers: frozenset[str], *, root: Path | None = None) -> None:
     """Make `path` owner-only (`0600`, or on Windows an ACL of exactly the operator, Administrators and `readers`).
 
     Refuses a symlink: the guarantee would otherwise be made about a different file than the one the operator hardened.
@@ -267,11 +303,11 @@ def harden_file(path: Path, owner: Account | None, readers: frozenset[str]) -> N
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.harden_file(path, owner, readers)
+        perms_windows.harden_file(path, owner, readers, root or path.parent)
         return
     fd = _open(path, os.O_RDONLY)
     try:
-        _require_regular(fd, path)
+        _require_sole_regular_file(fd, path)
         _chown(fd, owner)
         os.fchmod(fd, SECRET_MODE)
     finally:
@@ -289,6 +325,7 @@ def converge_dir(
     *,
     writers: frozenset[str] = frozenset(),
     isolate: bool = True,
+    root: Path | None = None,
 ) -> None:
     """Create `path` if absent and reassert its owner and mode, whatever state it was left in.
 
@@ -299,39 +336,45 @@ def converge_dir(
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_dir(path, owner, readers, writers, isolate)
+        perms_windows.converge_dir(path, owner, readers, writers, isolate, root or path.parent)
         return
     with _converged(path, owner, mode):
         pass
 
 
-def converge_tree(path: Path, owner: Account | None, mode: int) -> None:
-    """`converge_dir` for `path`, then give `owner` every entry beneath it, keeping each entry's own mode.
+def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path | None = None) -> None:
+    """`converge_dir` for `path`, then the same for each of its direct entries, keeping each entry's own mode.
+
+    The directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a symlink or
+    reparse point, a FIFO, a socket, a hard-linked file, on POSIX a file on another filesystem) is refused with a message
+    telling the operator to remove it, and is never entered. A service that can write `logs/` could otherwise plant a link
+    or a hard link to a file it does not own and have root change it.
 
     systemd opens a log's append target after dropping to `User=`, so a stale owner is `EACCES` and the daemon never
-    starts. A symlink anywhere in the tree is refused: a service that can write `logs/` could plant one for root to chown.
-    On Windows every entry is reset to inherit its ACL from its parent.
+    starts. On Windows `owner` is the service account, which gets modify on the directory, and each entry is reset to
+    inherit from it.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_tree(path)
+        perms_windows.converge_tree(path, owner, root or path.parent)
         return
     with _converged(path, owner, mode) as fd:
-        if owner is not None:
-            _converge_entries(fd, path, owner)
+        _converge_entries(fd, path, owner)
 
 
-def grant_traverse(path: Path, account: Account) -> None:
-    """Let `account` reach what is under `path`: an inheritable read-and-execute ACE on Windows, nothing on POSIX.
+def grant_service_read(root: Path, account: Account) -> None:
+    """Give `account` an inheritable read-and-execute ACE on the repository `root`; nothing on POSIX.
 
-    This is what lets `LocalService` reach a repository cloned under a user profile directory.
+    It covers `bin\\` and `host\\` by inheritance, since only `.env`, `secrets\\` and the token ever break it. Ancestors of
+    `root` get no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository
+    under a user profile is reachable without exposing the profile.
     """
     if sys.platform != "win32":
         return
     from ctl import perms_windows
 
-    perms_windows.grant_traverse(path, account)
+    perms_windows.grant_service_read(root, account)
 
 
 # Inspection ===========================================================================================================
@@ -346,13 +389,20 @@ def _owner_name(uid: int) -> str:
         return str(uid)
 
 
+def _read_acl(path: Path) -> winacl.Acl:
+    try:
+        return winacl.read_acl(path)
+    except OSError as exc:
+        raise PermsError(f"{path}: {exc.strerror or exc}") from exc
+
+
 def principals(path: Path) -> frozenset[str]:
     """Everything `path` grants: its SIDs on Windows, `owner=<name>` and `mode=<octal>` on POSIX.
 
     Doctor compares this against the exact expected set, so an unexpected principal is a failure.
     """
     if sys.platform == "win32":
-        return winacl.read_acl(path).sids
+        return _read_acl(path).sids
     status = os.lstat(path)
     return frozenset({f"owner={_owner_name(status.st_uid)}", f"mode={stat.S_IMODE(status.st_mode):04o}"})
 
@@ -360,7 +410,7 @@ def principals(path: Path) -> frozenset[str]:
 def describe(path: Path) -> str:
     """`principals` for a human."""
     if sys.platform == "win32":
-        acl = winacl.read_acl(path)
+        acl = _read_acl(path)
         inheritance = "inheritance broken" if acl.protected else "inheritance enabled"
         return f"grants {', '.join(sorted(acl.sids))}; {inheritance}"
     status = os.lstat(path)

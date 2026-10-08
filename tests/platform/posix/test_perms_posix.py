@@ -1,11 +1,13 @@
 import os
 import pwd
+import socket
 import stat
 from pathlib import Path
 
 import pytest
 
 from ctl.config import Config, ConfigError, Role
+from ctl import perms
 from ctl.perms import (
     Account,
     AccountMode,
@@ -14,7 +16,7 @@ from ctl.perms import (
     converge_dir,
     converge_tree,
     describe,
-    grant_traverse,
+    grant_service_read,
     harden_file,
     principals,
     resolve_service_account,
@@ -177,6 +179,30 @@ def test_harden_file_tightens_the_mode_and_keeps_the_owner(tmp_path):
     assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
 
 
+def test_harden_file_refuses_a_hard_linked_file_and_leaves_the_other_link_untouched(tmp_path):
+    other = tmp_path / "other"
+    other.write_bytes(b"")
+    other.chmod(0o644)
+    env = tmp_path / ".env"
+    os.link(other, env)
+    with pytest.raises(PermsError) as raised:
+        harden_file(env, None, NO_READERS)
+    assert "hard link" in str(raised.value)
+    assert mode_of(other) == 0o644
+
+
+def test_write_secret_refuses_a_hard_linked_destination(tmp_path):
+    other = tmp_path / "other"
+    other.write_bytes(b"the-old-secret")
+    token = tmp_path / "token"
+    os.link(other, token)
+    with pytest.raises(PermsError) as raised:
+        write_secret(token, b"new", me(), NO_READERS)
+    assert "hard link" in str(raised.value)
+    assert other.read_bytes() == b"the-old-secret"
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["other", "token"]
+
+
 def test_harden_file_refuses_a_directory(tmp_path):
     with pytest.raises(PermsError) as raised:
         harden_file(tmp_path, None, NO_READERS)
@@ -250,8 +276,6 @@ def test_converge_dir_does_not_use_a_path_based_chmod_or_chown(tmp_path, monkeyp
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "frpc.log").write_bytes(b"")
-    (logs / "nested").mkdir()
-    (logs / "nested" / "x.log").write_bytes(b"")
     calls: list[str] = []
     for name in ("fchmod", "fchown"):
         real = getattr(os, name)
@@ -303,11 +327,68 @@ def test_converge_tree_refuses_a_symlink_where_logs_should_be(tmp_path):
     assert str(tmp_path / "logs") in str(raised.value)
 
 
-def test_converge_tree_does_not_open_a_fifo_blocking(tmp_path):
+def test_converge_tree_refuses_a_fifo_without_opening_it(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()
     os.mkfifo(logs / "pipe")
-    converge_tree(logs, me(), 0o750)
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, me(), 0o750)
+    assert str(logs / "pipe") in str(raised.value)
+    assert "remove it" in str(raised.value)
+
+
+def test_converge_tree_refuses_a_socket(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.chdir(logs)  # a socket path must fit in sun_path, which a temporary directory's may not
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind("frpc.sock")
+        with pytest.raises(PermsError) as raised:
+            converge_tree(logs, me(), 0o750)
+    assert str(logs / "frpc.sock") in str(raised.value)
+
+
+def test_converge_tree_refuses_a_subdirectory_and_does_not_enter_it(tmp_path):
+    logs = tmp_path / "logs"
+    (logs / "old").mkdir(parents=True)
+    inner = logs / "old" / "frpc.log.1"
+    inner.write_bytes(b"")
+    inner.chmod(0o664)
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, me(), 0o750)
+    assert str(logs / "old") in str(raised.value)
+    assert "remove it" in str(raised.value)
+    assert mode_of(inner) == 0o664
+
+
+def test_converge_tree_refuses_a_hard_linked_file_and_leaves_the_other_link_untouched(tmp_path):
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"")
+    foreign.chmod(0o640)
+    before = os.stat(foreign)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    os.link(foreign, logs / "frpc.log")
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, me(), 0o750)
+    assert str(logs / "frpc.log") in str(raised.value)
+    assert "hard link" in str(raised.value)
+    after = os.stat(foreign)
+    assert (after.st_mode, after.st_uid, after.st_gid) == (before.st_mode, before.st_uid, before.st_gid)
+
+
+def entry_status(*, mode=stat.S_IFREG | 0o644, device=7, links=1) -> os.stat_result:
+    return os.stat_result((mode, 1, device, links, 0, 0, 0, 0, 0, 0))
+
+
+def test_an_entry_on_another_device_is_refused():
+    with pytest.raises(PermsError) as raised:
+        perms._refuse_entry(Path("logs/frpc.log"), entry_status(device=8), directory_device=7)
+    assert "another filesystem" in str(raised.value)
+
+
+def test_a_single_link_regular_file_on_the_same_device_is_accepted():
+    perms._refuse_entry(Path("logs/frpc.log"), entry_status(), directory_device=7)
 
 
 # Inspection ===========================================================================================================
@@ -336,9 +417,9 @@ def test_describe_names_the_owner_and_mode(tmp_path):
     assert describe(path) == f"owner {me().name}, mode 0600"
 
 
-def test_grant_traverse_is_a_no_op(tmp_path):
+def test_grant_service_read_is_a_no_op(tmp_path):
     before = os.stat(tmp_path)
-    grant_traverse(tmp_path, me())
+    grant_service_read(tmp_path, me())
     assert os.stat(tmp_path).st_mode == before.st_mode
 
 
@@ -379,14 +460,13 @@ def test_converge_tree_reassigns_existing_log_files(tmp_path):
     logs.mkdir()
     log = logs / "frpc.log"
     log.write_bytes(b"history")
-    nested = logs / "old"
-    nested.mkdir()
-    (nested / "frpc.log.1").write_bytes(b"older")
-    for path in (logs, log, nested, nested / "frpc.log.1"):
+    rotated = logs / "frpc.log.1"
+    rotated.write_bytes(b"older")
+    for path in (logs, log, rotated):
         assert stale.uid is not None and stale.gid is not None
         os.chown(path, stale.uid, stale.gid)
     converge_tree(logs, service, 0o750)
-    for path in (logs, log, nested, nested / "frpc.log.1"):
+    for path in (logs, log, rotated):
         assert (os.stat(path).st_uid, os.stat(path).st_gid) == (service.uid, service.gid), path
     assert mode_of(logs) == 0o750
     assert log.read_bytes() == b"history"
@@ -480,3 +560,33 @@ def test_principals_falls_back_to_the_uid_for_an_unnamed_owner(tmp_path):
     path.write_bytes(b"")
     previous_owner(path)
     assert f"owner={OPERATOR_UID}" in principals(path)
+
+
+@pytest.mark.root
+def test_converge_tree_does_not_chown_the_inode_behind_a_hard_link(tmp_path):
+    service = resolve_service_account(TEST_ACCOUNT)
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"private")
+    previous_owner(foreign)
+    foreign.chmod(0o600)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    os.link(foreign, logs / "frpc.log")
+    with pytest.raises(PermsError):
+        converge_tree(logs, service, 0o750)
+    after = os.stat(foreign)
+    assert (after.st_uid, stat.S_IMODE(after.st_mode)) == (OPERATOR_UID, 0o600)
+
+
+@pytest.mark.root
+def test_harden_file_does_not_chmod_or_chown_the_inode_behind_a_hard_link(tmp_path):
+    service = resolve_service_account(TEST_ACCOUNT)
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"")
+    previous_owner(foreign)
+    foreign.chmod(0o644)
+    os.link(foreign, tmp_path / ".env")
+    with pytest.raises(PermsError):
+        harden_file(tmp_path / ".env", service, NO_READERS)
+    after = os.stat(foreign)
+    assert (after.st_uid, stat.S_IMODE(after.st_mode)) == (OPERATOR_UID, 0o644)

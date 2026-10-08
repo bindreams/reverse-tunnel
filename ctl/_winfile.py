@@ -58,10 +58,13 @@ def close_handle(handle: int) -> None:
     _kernel32().CloseHandle(handle)
 
 
-def open_handle(path, *, access: int, disposition: int, directory: bool, error: type[Exception]) -> int:
+def open_handle(
+    path, *, access: int, disposition: int, directory: bool, error: type[Exception], single_link: bool = False
+) -> int:
     """A handle to `path` opened with `access`, or `error` if it is a reparse point or not the expected kind.
 
-    `directory` says whether a directory or a regular file is expected. OS failures are raised as `OSError`.
+    `directory` says whether a directory or a regular file is expected; `single_link` also refuses a file with more than
+    one hard link, whose ACL would change for every name. OS failures are raised as `OSError`.
     """
     kernel32 = _kernel32()
     handle = kernel32.CreateFileW(str(path), access, FILE_SHARE_ALL, None, disposition, FLAGS, None)
@@ -79,6 +82,11 @@ def open_handle(path, *, access: int, disposition: int, directory: bool, error: 
             raise error(f"{path}: not a directory")
         if not directory and (is_directory or kernel32.GetFileType(handle) != FILE_TYPE_DISK):
             raise error(f"{path}: not a regular file")
+        if single_link and not directory and information.nNumberOfLinks > 1:
+            raise error(
+                f"{path}: has {information.nNumberOfLinks} hard links; "
+                "refusing to change a file that is also reachable under another name"
+            )
         return handle
     except BaseException:
         kernel32.CloseHandle(handle)
