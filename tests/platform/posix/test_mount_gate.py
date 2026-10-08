@@ -38,8 +38,9 @@ def test_the_namespace_of_pid_1_fails():
     assert "PID 1" in problem
 
 
-def test_an_unreadable_init_namespace_is_not_a_failure():
-    assert problems(init=None) == []
+def test_an_unreadable_init_namespace_fails_closed():
+    (problem, ) = problems(init=None)
+    assert "PID 1" in problem and "cannot" in problem
 
 
 def test_every_problem_is_reported():

@@ -18,7 +18,7 @@ FIRST_OPTIONAL_FIELD = 6
 def private_namespace_problems(
     environ: Mapping[str, str], mountinfo: str, own_namespace: str, init_namespace: str | None
 ) -> list[str]:
-    """Everything that makes mounting here unsafe; empty when it is safe. `init_namespace` is None when unreadable."""
+    """Everything that makes mounting here unsafe; empty when it is safe. `init_namespace` is None when unreadable, which fails."""
     problems: list[str] = []
     if environ.get(OPT_IN) != "1":
         problems.append(f"{OPT_IN}=1 is not set; start the run with `unshare --mount --propagation private`")
@@ -30,7 +30,11 @@ def private_namespace_problems(
         optional = fields[FIRST_OPTIONAL_FIELD:fields.index(SEPARATOR)]
         if any(field.startswith("shared:") for field in optional):
             problems.append(f"{fields[MOUNT_POINT_FIELD]} is a shared mount, so a mount here propagates to its peers")
-    if init_namespace is not None and own_namespace == init_namespace:
+    if init_namespace is None:
+        problems.append(
+            "cannot read the mount namespace of PID 1, so cannot tell that this one is not the machine's own"
+        )
+    elif own_namespace == init_namespace:
         problems.append("this is the mount namespace of PID 1, so a mount here is the machine's own")
     return problems
 
@@ -43,7 +47,7 @@ def current_problems() -> list[str]:
     except OSError as exc:
         return [f"cannot inspect this process's mount namespace ({exc.strerror or exc}); mount tests need Linux"]
     try:
-        init = os.readlink("/proc/1/ns/mnt")
+        init: str | None = os.readlink("/proc/1/ns/mnt")
     except OSError:
-        init = None
+        init = None  # mount tests run as root, which can read it
     return private_namespace_problems(os.environ, mountinfo, own, init)
