@@ -147,3 +147,81 @@ def test_ci_fetches_every_advertised_ref_before_the_history_scan():
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yaml").read_text()
     assert "+refs/*:refs/fetched/*" in workflow
     assert workflow.index("refs/fetched") < workflow.index("--history")
+
+
+# Signatures ===========================================================================================================
+
+BODY = "A" * 20 + TERM + "B" * 40  # 66 base64 characters, as long as an armour line
+
+
+def pgp(*armour_headers, body=BODY):
+    return "-----BEGIN PGP SIGNATURE-----\n" + "".join(
+        f"{h}\n" for h in armour_headers
+    ) + f"\n{body}\n=abcd\n-----END PGP SIGNATURE-----\n"
+
+
+def folded(key, block):
+    first, *rest = block.rstrip("\n").split("\n")
+    return (f"{key} {first}\n" + "".join(f" {line}\n" for line in rest)).encode()
+
+
+def raw_tag(repo, message: str) -> None:
+    seed(repo)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    content = f"object {head}\ntype commit\ntag v1\ntagger t <t@example.com> 0 +0000\n\n{message}".encode()
+    git(repo, "update-ref", "refs/tags/v1", hash_raw_object(repo, "tag", content))
+
+
+@pytest.mark.parametrize("key", ["gpgsig", "gpgsig-sha256"])
+def test_a_signature_body_in_a_commit_header_is_not_scanned(repo, hashes_file, key):
+    raw_commit(repo, folded(key, pgp()))
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+@pytest.mark.parametrize("key", ["gpgsig", "gpgsig-sha256"])
+def test_an_armour_header_in_a_commit_signature_is_scanned(repo, hashes_file, key):
+    raw_commit(repo, folded(key, pgp(f"Comment: {TERM}")))
+    result = run_script(repo, hashes_file, "--history")
+    assert result.returncode == 1 and TERM not in result.stdout + result.stderr
+
+
+def test_an_ssh_signature_body_is_not_scanned(repo, hashes_file):
+    block = "-----BEGIN SSH SIGNATURE-----\n" + BODY + "\n-----END SSH SIGNATURE-----\n"
+    raw_commit(repo, folded("gpgsig", block))
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+def test_a_short_line_inside_a_signature_block_is_still_scanned(repo, hashes_file):
+    raw_commit(repo, folded("gpgsig", pgp(body=TERM)))
+    assert run_script(repo, hashes_file, "--history").returncode == 1
+
+
+def test_the_signature_of_a_mergetag_is_not_scanned(repo, hashes_file):
+    embedded = b"mergetag object " + b"0" * 40 + b"\n type commit\n tag v1\n tagger t <t@example.com> 0 +0000\n \n"
+    raw_commit(repo, embedded + b"".join(f" {line}\n".encode() for line in pgp().rstrip("\n").split("\n")))
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+def test_a_signature_body_in_a_tag_message_is_not_scanned(repo, hashes_file):
+    raw_tag(repo, "release\n" + pgp())
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+def test_an_armour_header_in_a_tag_signature_is_scanned(repo, hashes_file):
+    raw_tag(repo, "release\n" + pgp(f"Comment: {TERM}"))
+    assert run_script(repo, hashes_file, "--history").returncode == 1
+
+
+def test_text_around_a_tag_signature_is_scanned(repo, hashes_file):
+    raw_tag(repo, f"release {TERM}\n" + pgp())
+    assert run_script(repo, hashes_file, "--history").returncode == 1
+
+
+def test_a_signature_block_in_a_commit_message_is_not_exempt(repo, hashes_file):
+    raw_commit(repo, body=("feat: x\n\n" + pgp()).encode())
+    assert run_script(repo, hashes_file, "--history").returncode == 1
+
+
+def test_a_long_base64_line_outside_a_signature_block_is_scanned(repo, hashes_file):
+    raw_commit(repo, folded("x-note", BODY + "\n"))
+    assert run_script(repo, hashes_file, "--history").returncode == 1

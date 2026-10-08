@@ -74,6 +74,11 @@ BOMS = {
     codecs.BOM_UTF16_BE: "utf-16",
 }
 OPAQUE_HEADER = re.compile(r"(?:(?:tree|parent|object) [0-9a-f]{40,64}|type (?:commit|tree|blob|tag))")
+SIGNATURE_BEGIN = re.compile(r"-----BEGIN (?:PGP SIGNATURE|SSH SIGNATURE|SIGNED MESSAGE)-----")
+SIGNATURE_END = re.compile(r"-----END (?:PGP SIGNATURE|SSH SIGNATURE|SIGNED MESSAGE)-----")
+# An armour line of signature bytes (at most 76 characters in practice) or the `=XXXX` checksum. Short lines are
+# scanned, so a name alone on a line is not hidden.
+SIGNATURE_BYTES = re.compile(r"[A-Za-z0-9+/=]{40,}|=[A-Za-z0-9+/]{4}")
 UTF8_NAMES = {"utf-8", "utf8"}
 
 
@@ -282,13 +287,33 @@ def tree_names(data: bytes, id_size: int) -> list[str]:
     return names
 
 
+def without_signature_bytes(lines: Sequence[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Drop the base64 body of each signature block: those bytes are not author-chosen text.
+
+    The armour's own lines (`Comment:`, `Version:`, the BEGIN and END lines, any short line) are kept.
+    """
+    kept = []
+    inside = False
+    for number, line in lines:
+        if SIGNATURE_BEGIN.search(line):
+            inside = True
+        elif SIGNATURE_END.search(line):
+            inside = False
+        elif inside and SIGNATURE_BYTES.fullmatch(line):
+            continue
+        kept.append((number, line))
+    return kept
+
+
 def header_lines(header: str) -> list[tuple[int, str]]:
     """Header lines with a folded continuation (`mergetag`, `gpgsig`) unfolded into lines of its own."""
     lines = [line[1:] if line.startswith(" ") else line for line in header.split("\n")]
-    return [(number, line) for number, line in enumerate(lines, 1) if not OPAQUE_HEADER.fullmatch(line)]
+    numbered = [(number, line) for number, line in enumerate(lines, 1) if not OPAQUE_HEADER.fullmatch(line)]
+    return without_signature_bytes(numbered)
 
 
-def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes) -> list[Finding]:
+def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes, signed_message: bool = False) -> list[Finding]:
+    """`signed_message` marks a tag, whose message may end in a signature block; a commit message never does."""
     raw_header, _, raw_body = data.partition(b"\n\n")
     findings = []
     texts = {}
@@ -305,7 +330,12 @@ def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes) -> list[Finding
     findings += [
         Finding(f"{source} header", n, k) for n, line in header_lines(texts["header"]) for k in scan_line(line, hashes)
     ]
-    return findings + scan_text(texts["message"], hashes, f"{source} message")
+    message = list(enumerate(texts["message"].split("\n"), 1))
+    if signed_message:
+        message = without_signature_bytes(message)
+    return findings + [
+        Finding(f"{source} message", number, kind) for number, line in message for kind in scan_line(line, hashes)
+    ]
 
 
 def scan_object(name: str, kind: str, data: bytes, hashes: Hashes, path: str = "") -> list[Finding]:
@@ -313,7 +343,7 @@ def scan_object(name: str, kind: str, data: bytes, hashes: Hashes, path: str = "
     if kind == "blob":
         return scan_content(source, data, hashes, path in BINARY_ALLOWED)
     if kind in ("commit", "tag"):
-        return scan_commit_or_tag(source, data, hashes)
+        return scan_commit_or_tag(source, data, hashes, signed_message=kind == "tag")
     if kind == "tree":
         return [Finding(source, 0, k) for entry in tree_names(data, len(name) // 2) for k in scan_line(entry, hashes)]
     return []
