@@ -1,0 +1,52 @@
+"""Shared helpers for the personal-artifact scanner tests."""
+
+import importlib.util
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = REPO_ROOT / "scripts" / "no-personal-artifacts.py"
+TRACKED_HASHES = REPO_ROOT / "scripts" / "personal-artifact-hashes.txt"
+
+# Synthetic stand-in for a real name; the real ones must never appear in this tree.
+TERM = "zzquux"
+GIT_ENV = {
+    **os.environ,
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@example.com",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@example.com",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+}
+
+
+def load_script():
+    spec = importlib.util.spec_from_file_location("no_personal_artifacts", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=cwd, env=GIT_ENV, capture_output=True, text=True, check=True)
+    return result.stdout
+
+
+def run_script(cwd: Path, hashes: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--hashes", str(hashes), *args],
+        cwd=cwd,
+        env=GIT_ENV,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def kinds(text: str, hashes: Path) -> list[str]:
+    module = load_script()
+    return [finding.kind for finding in module.scan_text(text, module.load_hashes(hashes))]

@@ -1,0 +1,6 @@
+# `LENGTH SHA256` of each banned lowercase name, one per line. Add with `no-personal-artifacts.py --hash NAME`.
+12 bee60bad0fd64d6d477694abddaa308d4ceb2b5eef897d4f67dfd57c274b5e86
+10 b4397c12a66810af109f25f7aa6c44151fa3fc9ea05b319d06c7a28a55583a4b
+5 d79dc1b1da17e67a2cd79c7bcf15fdfeac9f8cc7d1703137c924199eb32411b6
+4 57de327a3f7ca833ba44cc4c3141f54034c5aa75f23b8baf4ab0887f340afc70
+10 e8f04d28391daf1ca7860b43d82c24c472e828d63699b411cc9dfb30b666b235

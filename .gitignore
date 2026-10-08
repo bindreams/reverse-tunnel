@@ -1,0 +1,26 @@
+# Operator state and derived artifacts
+.env
+secrets/
+bin/
+logs/
+install.log
+
+# Cache
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Editors
+.vscode/
+.idea/
+
+# Claude Code
+.claude/*.local.*
+CLAUDE.local.md
+
+# Brainstorming / mockup cache produced by the superpowers skill
+/.superpowers/
+
+# Per-worktree Claude Code scratch directory
+.tmp/

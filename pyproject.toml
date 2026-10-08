@@ -1,0 +1,26 @@
+[project]
+name = "reverse-tunnel"
+version = "0.1.0"
+description = "Reverse SSH tunnels over frp and websocat: a bridge, hosts, and clients."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE.md"]
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.uv]
+# `ctl` is run in place (`uv run -m ctl`), never installed.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+
+[dependency-groups]
+dev = [
+    "prek>=0.5.5",
+    "pytest>=9.1.1",
+    "ty>=0.0.85",
+    "yapf>=0.43.0",
+]
