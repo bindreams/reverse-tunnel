@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 
@@ -13,19 +14,25 @@ KEY = re.compile(r"[A-Z][A-Z0-9_]*", re.ASCII)
 BANNED_VALUE_CHARACTERS = frozenset("\"'`$\\#")
 # Go `text/template` ignores whitespace and trim markers around the action, so the match must too.
 GO_TEMPLATE_REFERENCE = re.compile(r"\{\{-?\s*\$?\.Envs\.([A-Z][A-Z0-9_]*)\s*-?\}\}")
-# Any action, including an unterminated one that runs to the end of the text.
-GO_TEMPLATE_ACTION = re.compile(r"\{\{(?:(?!\}\}).)*(?:\}\}|$)", re.DOTALL)
 ENVS_WORD = re.compile(r"\bEnvs\b")
-COMPOSE_REFERENCE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[?-][^}]*)?\}")
-CONFIG_SUFFIXES = frozenset({".toml", ".yaml", ".yml", ".conf"})
+COMPOSE_REFERENCE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[?-][^}$\n]*)?\}")
+# Caddy's own env syntax; a `{{` before the brace marks a Go template variable instead.
+CADDY_PLACEHOLDER = re.compile(r"(?<!\{)\{(?:\$[A-Za-z_]|env\.)")
+CONFIG_SUFFIXES = frozenset({".toml", ".yaml", ".yml", ".json", ".conf", ".ini", ".tmpl", ".service", ".plist"})
 CONFIG_NAMES = frozenset({"Caddyfile"})
+# Workflows are not deployment templates: their `${...}` is shell or Actions syntax, not a `.env` reference.
+EXCLUDED_DIRECTORIES = frozenset({".github"})
+# YAML is where compose and goetia interpolate `${...}`, so a `$` there must be exactly a supported form.
+STRICT_DOLLAR_SUFFIXES = frozenset({".yaml", ".yml"})
 # A rename of any of these must turn the template gates red rather than quietly shrink them.
-KNOWN_MINIMUM = (".github/workflows/ci.yaml", "prek.toml", "pyproject.toml")
+KNOWN_MINIMUM = ("prek.toml", "pyproject.toml")
 
-# `O_NOFOLLOW` is absent on Windows, where `read` refuses a link after opening instead. `O_NONBLOCK` keeps a FIFO at
-# the path from blocking the open; `O_BINARY` stops Windows translating line endings before the dialect sees them.
+# `O_NONBLOCK` keeps a FIFO at the path from blocking the open; `O_BINARY` stops Windows translating line endings
+# before the dialect sees them. Windows has no `O_NOFOLLOW`; it opens through `_open_windows` instead.
 OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+FILE_ATTRIBUTE_DIRECTORY = 0x10
+FILE_TYPE_DISK = 1
 
 
 class EnvError(Exception):
@@ -70,58 +77,158 @@ def parse(text: str, *, source: str) -> dict[str, str]:
 # Reading ==============================================================================================================
 
 
-def read(path: Path) -> dict[str, str]:
-    """Read and parse `path` without following a symlink, so a privileged reader cannot be aimed elsewhere."""
+def read_text(path: Path) -> str:
+    """The UTF-8 text of `path`, opened without following a link so a privileged reader cannot be aimed elsewhere."""
     try:
-        fd = os.open(path, OPEN_FLAGS)
+        fd = _open_windows(path) if sys.platform == "win32" else os.open(path, OPEN_FLAGS)
     except OSError as exc:
-        raise EnvError(_open_failure(path, exc)) from exc
+        raise EnvError(_os_failure(path, exc)) from exc
     try:
-        opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise EnvError(f"{path}: not a regular file")
-        if not OPEN_FLAGS & getattr(os, "O_NOFOLLOW", 0):
-            _refuse_link(path, opened)
         with os.fdopen(fd, "rb", closefd=False) as file:
             data = file.read()
+    except OSError as exc:
+        raise EnvError(_os_failure(path, exc)) from exc
     finally:
         os.close(fd)
     try:
-        text = data.decode("utf-8")
+        return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise EnvError(f"{path}: not valid UTF-8 (byte offset {exc.start})") from exc
-    return parse(text, source=str(path))
 
 
-def _open_failure(path: Path, exc: OSError) -> str:
+def read(path: Path) -> dict[str, str]:
+    """Read and parse `path` without following a symlink."""
+    return parse(read_text(path), source=str(path))
+
+
+def _os_failure(path: Path, exc: OSError) -> str:
     if exc.errno in (errno.ELOOP, errno.EMLINK):
         return f"{path}: is a symlink; refusing to follow it"
     return f"{path}: {exc.strerror or exc}"
 
 
-def _refuse_link(path: Path, opened: os.stat_result) -> None:
-    """Fallback for platforms without `O_NOFOLLOW`: compare the opened file with what the path itself names."""
-    named = os.lstat(path)
-    attributes = getattr(named, "st_file_attributes", 0)
-    if stat.S_ISLNK(named.st_mode) or attributes & FILE_ATTRIBUTE_REPARSE_POINT:
-        raise EnvError(f"{path}: is a symlink or reparse point; refusing to follow it")
-    if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
-        raise EnvError(f"{path}: changed while it was being opened")
+def _open_windows(path: Path) -> int:
+    """Open `path` read-only as a file descriptor, refusing any reparse point before its target is ever opened.
+
+    `FILE_FLAG_OPEN_REPARSE_POINT` opens the link itself, so a symlink or junction (or a name that leads to a pipe or
+    device) is inspected rather than followed; `FILE_FLAG_BACKUP_SEMANTICS` lets the open succeed on a directory so
+    that it is refused here with a clear message.
+    """
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    generic_read, share_all, open_existing = 0x80000000, 0x7, 3
+    flags = 0x00200000 | 0x02000000  # FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+        wintypes.HANDLE
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(FileInformation)]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+    kernel32.GetFileType.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.CreateFileW(str(path), generic_read, share_all, None, open_existing, flags, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        information = FileInformation()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        attributes = information.dwFileAttributes
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise EnvError(f"{path}: is a symlink or other reparse point; refusing to follow it")
+        if attributes & FILE_ATTRIBUTE_DIRECTORY or kernel32.GetFileType(handle) != FILE_TYPE_DISK:
+            raise EnvError(f"{path}: not a regular file")
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
 
 
 # Variable references ==================================================================================================
 
 
-def referenced_variables(text: str, *, source: str = "<text>") -> set[str]:
+def referenced_variables(text: str, *, source: str = "<text>", strict_dollar: bool = False) -> set[str]:
     """Every variable a Go template (`{{ .Envs.X }}`) or compose/goetia (`${X}`) document names.
 
-    A template action that mentions `Envs` in any other form is an error: it could read a variable this scan misses.
+    Fails closed: any `Envs` outside a `{{ .Envs.NAME }}` reference could read a variable this scan would miss, and
+    so could a Caddy placeholder, so both are errors. With `strict_dollar`, every `$` must be a `$$` escape or one of
+    `${NAME}`, `${NAME:?msg}`, `${NAME:-default}`.
     """
-    for action in GO_TEMPLATE_ACTION.finditer(text):
-        if ENVS_WORD.search(action.group()) and not GO_TEMPLATE_REFERENCE.fullmatch(action.group()):
-            line = text.count("\n", 0, action.start()) + 1
-            raise EnvError(f"{source}:{line}: unsupported template action; only `{{{{ .Envs.NAME }}}}` is supported")
-    return set(GO_TEMPLATE_REFERENCE.findall(text)) | set(COMPOSE_REFERENCE.findall(text))
+    go_spans = [match.span() for match in GO_TEMPLATE_REFERENCE.finditer(text)]
+    for word in ENVS_WORD.finditer(text):
+        if not any(start <= word.start() and word.end() <= end for start, end in go_spans):
+            raise _unsupported(
+                text, word.start(), source, "unsupported template syntax; only `{{ .Envs.NAME }}` is supported"
+            )
+    caddy = CADDY_PLACEHOLDER.search(text)
+    if caddy:
+        raise _unsupported(text, caddy.start(), source, "unsupported Caddy env placeholder; write the value literally")
+    names = {match.group(1) for match in GO_TEMPLATE_REFERENCE.finditer(text)}
+    return names | _dollar_references(_blank(text, go_spans), source, strict_dollar)
+
+
+def referenced_in_file(path: Path) -> set[str]:
+    """`referenced_variables` of one tracked file, strict about `$` in YAML."""
+    strict = path.suffix.lower() in STRICT_DOLLAR_SUFFIXES
+    return referenced_variables(read_text(path), source=str(path), strict_dollar=strict)
+
+
+def _dollar_references(text: str, source: str, strict: bool) -> set[str]:
+    names: set[str] = set()
+    position = text.find("$")
+    while position != -1:
+        if text.startswith("$$", position):
+            position += 2
+        elif match := COMPOSE_REFERENCE.match(text, position):
+            names.add(match.group(1))
+            position = match.end()
+        elif strict:
+            raise _unsupported(
+                text, position, source, "unsupported `$`; use `$$`, `${NAME}`, `${NAME:?msg}` or `${NAME:-default}`"
+            )
+        else:
+            position += 1
+        position = text.find("$", position)
+    return names
+
+
+def _blank(text: str, spans: list[tuple[int, int]]) -> str:
+    """`text` with each span replaced by spaces (newlines kept, so line numbers survive)."""
+    pieces, last = [], 0
+    for start, end in spans:
+        pieces.append(text[last:start])
+        pieces.append(re.sub(r"[^\n]", " ", text[start:end]))
+        last = end
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
+def _unsupported(text: str, offset: int, source: str, message: str) -> EnvError:
+    return EnvError(f"{source}:{text.count(chr(10), 0, offset) + 1}: {message}")
 
 
 def tracked_config_files(root: Path, *, minimum: Collection[str] = KNOWN_MINIMUM) -> list[Path]:
@@ -136,7 +243,10 @@ def tracked_config_files(root: Path, *, minimum: Collection[str] = KNOWN_MINIMUM
         detail = getattr(exc, "stderr", b"") or b""
         raise EnvError(f"{root}: cannot list tracked files: {os.fsdecode(detail).strip() or exc}") from exc
     tracked = [PurePosixPath(os.fsdecode(entry)) for entry in listing.split(b"\0") if entry]
-    found = [p for p in tracked if p.suffix.lower() in CONFIG_SUFFIXES or p.name in CONFIG_NAMES]
+    found = [
+        p for p in tracked
+        if (p.suffix.lower() in CONFIG_SUFFIXES or p.name in CONFIG_NAMES) and p.parts[0] not in EXCLUDED_DIRECTORIES
+    ]
     if not found:
         raise EnvError(f"{root}: no tracked config files; the template gates would pass vacuously")
     missing = sorted(set(minimum) - {p.as_posix() for p in found})

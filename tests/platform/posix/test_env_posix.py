@@ -3,7 +3,7 @@ import os
 import pytest
 
 from ctl import env
-from ctl.env import EnvError, read
+from ctl.env import EnvError, read, referenced_in_file
 
 
 def test_read_refuses_a_symlink_without_reading_its_target(tmp_path):
@@ -38,12 +38,11 @@ def test_read_opens_with_nofollow():
     assert env.OPEN_FLAGS & os.O_NOFOLLOW
 
 
-def test_without_nofollow_a_symlink_is_refused(tmp_path, monkeypatch):
-    target = tmp_path / "target.env"
-    target.write_bytes(b"A=1\n")
-    link = tmp_path / ".env"
+def test_referenced_in_file_refuses_a_symlinked_template(tmp_path):
+    target = tmp_path / "target.toml"
+    target.write_text("x = 1\n")
+    link = tmp_path / "frps.toml"
     link.symlink_to(target)
-    monkeypatch.setattr(env, "OPEN_FLAGS", os.O_RDONLY)
     with pytest.raises(EnvError) as raised:
-        read(link)
+        referenced_in_file(link)
     assert "symlink" in str(raised.value)

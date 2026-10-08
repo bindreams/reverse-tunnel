@@ -15,7 +15,7 @@ from ctl.config import (
     ConfigError,
     Role,
 )
-from ctl.env import parse, read, referenced_variables, tracked_config_files
+from ctl.env import read, referenced_in_file, tracked_config_files
 from scanner_support import GIT_ENV, REPO_ROOT
 
 EXAMPLE_ENV = REPO_ROOT / "example.env"
@@ -99,7 +99,7 @@ def test_client_loads_from_the_shipped_example_untouched(tmp_path):
 
 
 def test_example_env_itself_obeys_the_dialect():
-    assert parse(EXAMPLE_ENV.read_text(), source="example.env")
+    assert read(EXAMPLE_ENV)
 
 
 def test_example_env_ships_every_declared_key():
@@ -253,12 +253,42 @@ BAD_HOSTS = [
     "[::1]",
     "2001:db8::1:80:x",
     "::1::",
+    "fe80::1%eth0",
     "a" * 64 + ".example.com",
     ".".join(["a" * 63] * 4 + ["b"]),
+    # Not dotted quads, yet inet_aton (and so getaddrinfo) resolves each to an address.
+    "10.0.0.256",
+    "999.1.1.1",
+    "1.2.3",
+    "127.1",
+    "010.0.0.1",
+    "0x7f.1",
+    "0x7f.0x0.0x0.0x1",
+    "0X7F.0.0.1",
+    "1",
+    "2130706433",
+    "1.2.3.4.5",
+    "127.0.0.1.",
+    "example.0x1",
+    "example.123",
 ]
 GOOD_HOSTS = [
-    "example.com", "a-b.example.com", "A.Example.COM", "localhost", "10.0.0.1", "2001:db8::1", "::1",
-    "xn--bcher-kva.de", "a" * 63 + ".example.com"
+    "example.com",
+    "a-b.example.com",
+    "A.Example.COM",
+    "localhost",
+    "10.0.0.1",
+    "0.0.0.0",
+    "255.255.255.255",
+    "2001:db8::1",
+    "::1",
+    "::ffff:10.0.0.1",
+    "xn--bcher-kva.de",
+    "a" * 63 + ".example.com",
+    "1.example.com",
+    "0x.example.com",
+    "example.c0m",
+    "10.0.0.1.example.com",
 ]
 HOST_KEYS = [
     pytest.param(Role.BRIDGE, "RT_DOMAIN"),
@@ -271,15 +301,19 @@ HOST_KEYS = [
 
 
 @pytest.mark.parametrize(("role", "key"), HOST_KEYS)
+def test_every_hostname_key_is_validated(tmp_path, role, key):
+    assert key in refused(tmp_path, role, **{key: "https://x.example.com"})
+    assert load(tmp_path, role, **{key: "example.com"}).values[key] == "example.com"
+
+
 @pytest.mark.parametrize("bad", BAD_HOSTS)
-def test_hostname_shaped_variables_reject_a_scheme_a_port_and_a_trailing_dot(tmp_path, role, key, bad):
-    assert key in refused(tmp_path, role, **{key: bad})
+def test_a_malformed_hostname_is_rejected(tmp_path, bad):
+    assert "RT_SERVER_ADDR" in refused(tmp_path, Role.HOST, RT_SERVER_ADDR=bad)
 
 
-@pytest.mark.parametrize(("role", "key"), HOST_KEYS)
 @pytest.mark.parametrize("good", GOOD_HOSTS)
-def test_hostname_shaped_variables_accept_a_dns_name_or_ip_literal(tmp_path, role, key, good):
-    assert load(tmp_path, role, **{key: good}).values[key] == good
+def test_a_dns_name_or_strict_ip_literal_is_accepted(tmp_path, good):
+    assert load(tmp_path, Role.HOST, RT_SERVER_ADDR=good).values["RT_SERVER_ADDR"] == good
 
 
 OPTIONAL_PAIRS = [pytest.param(key, id=key) for key in ("RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST")]
@@ -306,19 +340,23 @@ PORT_KEYS = [
     pytest.param(Role.CLIENT, "RT_PUBLIC_PORT"),
 ]
 
-
-@pytest.mark.parametrize(("role", "key"), PORT_KEYS)
-@pytest.mark.parametrize(
-    "bad", ["0", "65536", "99999", "-1", "+80", "08080", "00", "80a", "1e3", "0x50", "8.0", "100000"]
-)
-def test_every_port_is_an_integer_in_range(tmp_path, role, key, bad):
-    assert key in refused(tmp_path, role, **{key: bad})
+BAD_PORTS = ["0", "65536", "99999", "-1", "+80", "08080", "00", "80a", "1e3", "0x50", "8.0", "100000"]
 
 
 @pytest.mark.parametrize(("role", "key"), PORT_KEYS)
-@pytest.mark.parametrize("good", ["1", "80", "65535"])
-def test_every_port_accepts_the_range_ends(tmp_path, role, key, good):
-    assert load(tmp_path, role, **{key: good}).values[key] == good
+def test_every_port_key_is_validated(tmp_path, role, key):
+    assert key in refused(tmp_path, role, **{key: "0"})
+    assert load(tmp_path, role, **{key: "65535"}).values[key] == "65535"
+
+
+@pytest.mark.parametrize("bad", BAD_PORTS)
+def test_a_port_must_be_an_integer_in_range(tmp_path, bad):
+    assert "RT_CONTROL_PORT" in refused(tmp_path, Role.BRIDGE, RT_CONTROL_PORT=bad)
+
+
+@pytest.mark.parametrize("good", ["1", "80", "443", "65535"])
+def test_a_port_accepts_the_range_ends(tmp_path, good):
+    assert load(tmp_path, Role.BRIDGE, RT_CONTROL_PORT=good).values["RT_CONTROL_PORT"] == good
 
 
 @pytest.mark.parametrize("bad", ["Wss", "http", "udp", "ws", "QUIC"])
@@ -435,7 +473,7 @@ def git(root: Path, *args: str) -> None:
 def referenced_by_tracked_files(root: Path, *, minimum=None) -> set[str]:
     files = tracked_config_files(root) if minimum is None else tracked_config_files(root, minimum=minimum)
     assert files
-    return set().union(*(referenced_variables(f.read_text(), source=str(f)) for f in files))
+    return set().union(*(referenced_in_file(f) for f in files))
 
 
 def undeclared(root: Path, declared: set[str], **kwargs) -> set[str]:
@@ -471,9 +509,8 @@ def test_example_env_declares_nothing_unreferenced():
 def test_the_unreferenced_gate_catches_a_stale_key(repo):
     (repo / "frps.toml").write_text("x = ${RT_USED}\n")
     git(repo, "add", "frps.toml")
-    stale = unreferenced(
-        repo, {"RT_USED", "RT_STALE", "RT_CTL", "RT_LATER"}, ctl_only={"RT_CTL"}, pending={"RT_LATER"}, minimum=()
-    )  # fmt: skip
+    declared = {"RT_USED", "RT_STALE", "RT_CTL", "RT_LATER"}
+    stale = unreferenced(repo, declared, ctl_only={"RT_CTL"}, pending={"RT_LATER"}, minimum=())
     assert stale == {"RT_STALE"}
 
 

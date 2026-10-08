@@ -13,7 +13,7 @@ dependencies = []
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/unit"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
 
@@ -24,3 +24,7 @@ dev = [
     "ty>=0.0.85",
     "yapf>=0.43.0",
 ]
+
+[tool.ty.environment]
+# `ctl` has Windows-only code paths (`ctl/env.py`); check them on every platform.
+python-platform = "all"

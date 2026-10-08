@@ -36,4 +36,4 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_command(args)
     except (ConfigError, EnvError) as exc:
         print(f"ctl {args.command}: {exc}", file=sys.stderr)
-        return 2
+        return 1

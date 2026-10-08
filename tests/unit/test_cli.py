@@ -54,13 +54,13 @@ def test_module_entrypoint_propagates_the_exit_code():
 
 
 @pytest.mark.parametrize("error", [EnvError("bad.env:3: nope"), ConfigError("RT_DOMAIN is empty")])
-def test_a_configuration_error_is_a_message_and_exit_2_not_a_traceback(error, monkeypatch, capsys):
+def test_a_configuration_error_is_a_message_and_exit_1_not_a_traceback(error, monkeypatch, capsys):
 
     def fail(args):
         raise error
 
     monkeypatch.setattr(cli, "run_command", fail)
-    assert main(["doctor"]) == 2
+    assert main(["doctor"]) == 1
     err = capsys.readouterr().err
     assert str(error) in err
     assert "Traceback" not in err

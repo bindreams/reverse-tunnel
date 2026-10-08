@@ -1,12 +1,13 @@
+import errno
 import os
-import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from ctl import env
-from ctl.env import EnvError, parse, read, referenced_variables, tracked_config_files
+from ctl.env import EnvError, parse, read, referenced_in_file, referenced_variables, tracked_config_files
 from scanner_support import GIT_ENV, REPO_ROOT
 
 SECRET = "0123456789abcdef"
@@ -33,47 +34,47 @@ def test_empty_text_is_an_empty_mapping():
 
 
 BANNED = [
-    pytest.param("export K=v\n", id="export"),
-    pytest.param("K = v\n", id="spaces-around-equals"),
-    pytest.param("K =v\n", id="space-before-equals"),
-    pytest.param("K= v\n", id="space-after-equals"),
-    pytest.param("k=v\n", id="lowercase-key"),
-    pytest.param("1K=v\n", id="digit-first-key"),
-    pytest.param("K-X=v\n", id="dash-in-key"),
-    pytest.param("=v\n", id="empty-key"),
-    pytest.param("K\n", id="no-equals"),
-    pytest.param(" K=v\n", id="indented-assignment"),
-    pytest.param(" # note\n", id="indented-comment"),
-    pytest.param(" \n", id="whitespace-only-line"),
-    pytest.param("\t\n", id="tab-only-line"),
-    pytest.param('K="v"\n', id="double-quote"),
-    pytest.param("K='v'\n", id="single-quote"),
-    pytest.param("K=`v`\n", id="backtick"),
-    pytest.param("K=a\\b\n", id="backslash"),
-    pytest.param("K=a$B\n", id="dollar"),
-    pytest.param("K=${B}\n", id="interpolation"),
-    pytest.param("K=v # note\n", id="inline-comment"),
-    pytest.param("K=v#note\n", id="hash-without-space"),
-    pytest.param("K=a b\n", id="inner-space"),
-    pytest.param("K=a\tb\n", id="inner-tab"),
-    pytest.param("K=v \n", id="trailing-space"),
-    pytest.param("K=café\n", id="non-ascii-value"),
-    pytest.param("K=a\x7fb\n", id="del"),
-    pytest.param("K=a\x00b\n", id="nul"),
-    pytest.param("K=v\r\n", id="crlf"),
-    pytest.param("K=v\rL=w\n", id="bare-cr"),
-    pytest.param("# note\r\nK=v\n", id="crlf-after-comment"),
-    pytest.param("﻿K=v\n", id="bom"),
-    pytest.param("K=v\nK=w\n", id="duplicate-key"),
-    pytest.param("K=v\n\n# c\nK=\n", id="duplicate-key-with-empty-value"),
+    pytest.param("export K=v\n", 1, id="export"),
+    pytest.param("K = v\n", 1, id="spaces-around-equals"),
+    pytest.param("K =v\n", 1, id="space-before-equals"),
+    pytest.param("K= v\n", 1, id="space-after-equals"),
+    pytest.param("k=v\n", 1, id="lowercase-key"),
+    pytest.param("1K=v\n", 1, id="digit-first-key"),
+    pytest.param("K-X=v\n", 1, id="dash-in-key"),
+    pytest.param("=v\n", 1, id="empty-key"),
+    pytest.param("K\n", 1, id="no-equals"),
+    pytest.param(" K=v\n", 1, id="indented-assignment"),
+    pytest.param(" # note\n", 1, id="indented-comment"),
+    pytest.param(" \n", 1, id="whitespace-only-line"),
+    pytest.param("\t\n", 1, id="tab-only-line"),
+    pytest.param('K="v"\n', 1, id="double-quote"),
+    pytest.param("K='v'\n", 1, id="single-quote"),
+    pytest.param("K=`v`\n", 1, id="backtick"),
+    pytest.param("K=a\\b\n", 1, id="backslash"),
+    pytest.param("K=a$B\n", 1, id="dollar"),
+    pytest.param("K=${B}\n", 1, id="interpolation"),
+    pytest.param("K=v # note\n", 1, id="inline-comment"),
+    pytest.param("K=v#note\n", 1, id="hash-without-space"),
+    pytest.param("K=a b\n", 1, id="inner-space"),
+    pytest.param("K=a\tb\n", 1, id="inner-tab"),
+    pytest.param("K=v \n", 1, id="trailing-space"),
+    pytest.param("K=café\n", 1, id="non-ascii-value"),
+    pytest.param("K=a\x7fb\n", 1, id="del"),
+    pytest.param("K=a\x00b\n", 1, id="nul"),
+    pytest.param("K=v\r\n", 1, id="crlf"),
+    pytest.param("K=v\rL=w\n", 1, id="bare-cr"),
+    pytest.param("# note\r\nK=v\n", 1, id="crlf-after-comment"),
+    pytest.param("﻿K=v\n", 1, id="bom"),
+    pytest.param("K=v\nK=w\n", 2, id="duplicate-key"),
+    pytest.param("K=v\n\n# c\nK=\n", 4, id="duplicate-key-with-empty-value"),
 ]
 
 
-@pytest.mark.parametrize("text", BANNED)
-def test_rejects_each_banned_construct(text):
+@pytest.mark.parametrize(("text", "line"), BANNED)
+def test_rejects_each_banned_construct(text, line):
     with pytest.raises(EnvError) as raised:
         parse(text, source="deploy.env")
-    assert "deploy.env" in str(raised.value)
+    assert f"deploy.env:{line}" in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -184,40 +185,56 @@ def test_read_refuses_a_directory(tmp_path):
     assert str(tmp_path) in str(raised.value)
 
 
-class _Stat:
-
-    def __init__(self, *, mode=stat.S_IFREG, attributes=0, ino=1, dev=1):
-        self.st_mode = mode
-        self.st_file_attributes = attributes
-        self.st_ino = ino
-        self.st_dev = dev
-
-
-def test_without_nofollow_a_reparse_point_is_refused(tmp_path, monkeypatch):
+def test_read_uses_the_windows_open_on_windows(tmp_path, monkeypatch):
     path = tmp_path / ".env"
     path.write_bytes(b"A=1\n")
-    monkeypatch.setattr(env, "OPEN_FLAGS", os.O_RDONLY)
-    monkeypatch.setattr(os, "lstat", lambda p: _Stat(attributes=env.FILE_ATTRIBUTE_REPARSE_POINT))
+    opened = []
+
+    def fake_open(target):
+        opened.append(target)
+        return os.open(target, os.O_RDONLY)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(env, "_open_windows", fake_open)
+    assert read(path) == {"A": "1"}
+    assert opened == [path]
+
+
+def test_a_windows_open_failure_is_an_env_error_naming_the_path(tmp_path, monkeypatch):
+
+    def fake_open(target):
+        raise OSError(errno.EACCES, "Access is denied")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(env, "_open_windows", fake_open)
+    with pytest.raises(EnvError) as raised:
+        read(tmp_path / ".env")
+    assert str(tmp_path / ".env") in str(raised.value)
+
+
+def test_a_windows_refusal_reaches_the_caller_unchanged(tmp_path, monkeypatch):
+
+    def fake_open(target):
+        raise EnvError(f"{target}: reparse point")
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(env, "_open_windows", fake_open)
+    with pytest.raises(EnvError) as raised:
+        read(tmp_path / ".env")
+    assert "reparse point" in str(raised.value)
+
+
+def test_an_os_error_while_reading_is_an_env_error_naming_the_path(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_bytes(b"A=1\n")
+
+    def broken(fd):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "fstat", broken)
     with pytest.raises(EnvError) as raised:
         read(path)
-    assert "symlink" in str(raised.value)
-
-
-def test_without_nofollow_a_path_swapped_after_open_is_refused(tmp_path, monkeypatch):
-    path = tmp_path / ".env"
-    path.write_bytes(b"A=1\n")
-    real = path.stat()
-    monkeypatch.setattr(env, "OPEN_FLAGS", os.O_RDONLY)
-    monkeypatch.setattr(os, "lstat", lambda p: _Stat(ino=real.st_ino + 1, dev=real.st_dev))
-    with pytest.raises(EnvError):
-        read(path)
-
-
-def test_without_nofollow_a_regular_file_is_read(tmp_path, monkeypatch):
-    path = tmp_path / ".env"
-    path.write_bytes(b"A=1\n")
-    monkeypatch.setattr(env, "OPEN_FLAGS", os.O_RDONLY)
-    assert read(path) == {"A": "1"}
+    assert str(path) in str(raised.value)
 
 
 # Referenced variables =================================================================================================
@@ -278,6 +295,12 @@ UNSUPPORTED_ACTIONS = [
     pytest.param("{{ .Envs.X", id="unterminated"),
     pytest.param("{{ .Envs.X }", id="half-closed"),
     pytest.param("{{ .Envs.X\n| quote }}", id="multi-line"),
+    pytest.param('{{ printf "}}" .Envs.X }}', id="closing-braces-in-a-string"),
+    pytest.param("{{ printf `}}` .Envs.X }}", id="closing-braces-in-a-raw-string"),
+    pytest.param('{{ printf "{{ .Envs.X }}" .Envs.Y }}', id="a-reference-inside-a-string-hides-the-real-one"),
+    pytest.param('{{ "}}" }}{{ .Envs.X | quote }}', id="string-then-pipe"),
+    pytest.param("# Envs are expanded here", id="the-word-outside-any-action"),
+    pytest.param("x = .Envs.X", id="a-bare-field-outside-any-action"),
     pytest.param("{{ $.Envs.X }}{{ .Envs.Y | quote }}", id="valid-then-invalid"),
 ]
 
@@ -312,6 +335,107 @@ def test_the_source_defaults_to_a_placeholder_in_the_message():
     assert "<text>:1" in str(raised.value)
 
 
+STRICT_REJECTED = [
+    "$RT_X",
+    "${RT_X-d}",
+    "${RT_X?e}",
+    "${RT_X:+a}",
+    "${RT_X:=a}",
+    "${lower}",
+    "${RT_A:-${RT_B}}",
+    "${RT_X:-a$b}",
+    "${RT_X:?a$$b}",
+    "$$$",
+    "${}",
+    "${RT_X",
+    "${ RT_X }",
+    "$ {RT_X}",
+    "price: $",
+]
+
+
+@pytest.mark.parametrize("form", STRICT_REJECTED)
+def test_strict_interpolation_rejects_every_unsupported_dollar(form):
+    with pytest.raises(EnvError) as raised:
+        referenced_variables(f"a: 1\nb: {form}\n", source="compose.yaml", strict_dollar=True)
+    assert "compose.yaml:2" in str(raised.value)
+
+
+STRICT_ACCEPTED = [
+    ("${A}", {"A"}),
+    ("${B:?msg}", {"B"}),
+    ("${C:-d}", {"C"}),
+    ("${C:-}", {"C"}),
+    ("${D:?a longer message}", {"D"}),
+    ("x: ${A}${B}", {"A", "B"}),
+    ("$${LIT}", set()),
+    ("$$", set()),
+    ("$$$$", set()),
+    ("a $$ b", set()),
+    ("$${LIT} ${A}", {"A"}),
+    ("{{ $.Envs.X }}", {"X"}),
+    ("no dollars", set()),
+]
+
+
+@pytest.mark.parametrize(("text", "names"), STRICT_ACCEPTED)
+def test_strict_interpolation_accepts_the_strict_forms_and_skips_escapes(text, names):
+    assert referenced_variables(text, source="compose.yaml", strict_dollar=True) == names
+
+
+@pytest.mark.parametrize("text", ["$${RT_LIT}", "$RT_X", "${RT_X-d}", "${lower}", "${RT_A:-${RT_B}"])
+def test_lenient_scanning_never_counts_an_escape_or_an_odd_form_as_a_reference(text):
+    assert referenced_variables(text) <= {"RT_B"}
+    assert "RT_LIT" not in referenced_variables(text)
+
+
+CADDY_PLACEHOLDERS = ["{$RT_X}", "{$RT_X:default}", "{env.RT_X}", "x {$HOME}/y", "root {env.ROOT_DIR}"]
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("text", CADDY_PLACEHOLDERS)
+def test_a_caddy_env_placeholder_is_unsupported(text, strict):
+    with pytest.raises(EnvError) as raised:
+        referenced_variables(f"a\n{text}\n", source="Caddyfile", strict_dollar=strict)
+    assert "unsupported Caddy env placeholder" in str(raised.value)
+    assert "Caddyfile:2" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "text", ["{{$x := 1}}", "{{ $x := 1 }}", "{ $x }", '{"env": "x"}', "{environment}", "{{ .Values.env.X }}"]
+)
+def test_text_that_only_resembles_a_caddy_placeholder_is_left_alone(text):
+    assert referenced_variables(text) == set()
+
+
+def test_referenced_in_file_is_strict_for_yaml_only(tmp_path):
+    yaml = tmp_path / "compose.yaml"
+    yaml.write_text("a: $RT_X\n")
+    with pytest.raises(EnvError) as raised:
+        referenced_in_file(yaml)
+    assert f"{yaml}:1" in str(raised.value)
+    toml = tmp_path / "frps.toml"
+    toml.write_text("a = '$RT_X'\nb = '{{ .Envs.RT_B }}'\n")
+    assert referenced_in_file(toml) == {"RT_B"}
+
+
+@pytest.mark.parametrize("name", ["compose.yaml", "goetia.yml", "x.yaml"])
+def test_referenced_in_file_reads_yaml_references(tmp_path, name):
+    path = tmp_path / name
+    path.write_text("a: ${RT_A}\nb: $${LIT}\n")
+    assert referenced_in_file(path) == {"RT_A"}
+
+
+def test_referenced_in_file_reports_a_bad_file_as_an_env_error(tmp_path):
+    path = tmp_path / "x.toml"
+    path.write_bytes(b"\xff")
+    with pytest.raises(EnvError) as raised:
+        referenced_in_file(path)
+    assert str(path) in str(raised.value)
+    with pytest.raises(EnvError):
+        referenced_in_file(tmp_path / "absent.toml")
+
+
 # Tracked config files =================================================================================================
 
 
@@ -320,16 +444,31 @@ def git(root: Path, *args: str) -> None:
 
 
 def test_tracked_config_files_come_from_git(repo):
-    for name in ("a.toml", "b.yaml", "c.yml", "d.conf", "Caddyfile", "e.py", "f.txt", "g.md", "uv.lock", "h.TOML"):
+    names = (
+        "a.toml", "b.yaml", "c.yml", "d.conf", "Caddyfile", "e.py", "f.txt", "g.md", "uv.lock", "h.TOML", "j.json",
+        "k.ini", "l.tmpl", "m.service", "n.plist", "Caddyfile.bak"
+    )
+    for name in names:
         (repo / name).write_text("x\n")
     (repo / "sub").mkdir()
     (repo / "sub" / "i.yaml").write_text("x\n")
     (repo / "untracked.toml").write_text("x\n")
     git(repo, "add", "--", *(p.name for p in repo.iterdir() if p.name not in {".git", "untracked.toml", "sub"}), "sub")
     found = tracked_config_files(repo, minimum=())
-    assert sorted(p.relative_to(repo).as_posix()
-                  for p in found) == ["Caddyfile", "a.toml", "b.yaml", "c.yml", "d.conf", "h.TOML", "sub/i.yaml"]
+    assert sorted(p.relative_to(repo).as_posix() for p in found) == [
+        "Caddyfile", "a.toml", "b.yaml", "c.yml", "d.conf", "h.TOML", "j.json", "k.ini", "l.tmpl", "m.service",
+        "n.plist", "sub/i.yaml"
+    ]
     assert all(p.is_absolute() and p.is_file() for p in found)
+
+
+def test_github_files_are_not_deployment_templates(repo):
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yaml").write_text("run: echo ${{ runner.os }}\n")
+    (repo / ".github" / "dependabot.yml").write_text("x: 1\n")
+    (repo / "a.toml").write_text("x = 1\n")
+    git(repo, "add", "--", ".github", "a.toml")
+    assert [p.relative_to(repo).as_posix() for p in tracked_config_files(repo, minimum=())] == ["a.toml"]
 
 
 def test_a_filename_needing_git_quoting_is_returned_intact(repo):

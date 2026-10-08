@@ -72,6 +72,7 @@ TOKEN = re.compile(r"[0-9a-f]{64}", re.ASCII)
 ADMIN_PASSWORD = re.compile(r"[A-Za-z0-9_-]{16,}", re.ASCII)
 LABEL = re.compile(r"[a-z0-9]([a-z0-9-]*[a-z0-9])?", re.ASCII)
 DNS_LABEL = re.compile(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", re.ASCII)
+NUMERIC_LABEL = re.compile(r"[0-9]+|0[xX][0-9A-Fa-f]*", re.ASCII)
 PORT = re.compile(r"[1-9][0-9]{0,4}", re.ASCII)
 MAX_DNS_NAME_LENGTH = 253
 MAX_PORT = 65535
@@ -92,13 +93,27 @@ def _required_keys(role: Role) -> frozenset[str]:
 
 
 def _is_dns_name_or_ip(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value)
-    except ValueError:
-        pass
-    else:
+    """A strict dotted-quad IPv4, an IPv6 literal, or a DNS name.
+
+    Anything else numeric-looking (`127.1`, `0x7f.1`, `010.0.0.1`) is refused: `getaddrinfo` reads those through
+    `inet_aton` as an address the operator did not write. A DNS name therefore cannot end in a numeric label.
+    """
+    if ":" in value:
+        try:
+            ipaddress.IPv6Address(value)
+        except ValueError:
+            return False
         return "%" not in value  # a scope id is not part of an address another machine can resolve
-    return len(value) <= MAX_DNS_NAME_LENGTH and all(DNS_LABEL.fullmatch(label) for label in value.split("."))
+    if re.fullmatch(r"[0-9.]+", value):
+        try:
+            ipaddress.IPv4Address(value)
+        except ValueError:
+            return False
+        return True
+    labels = value.split(".")
+    if len(value) > MAX_DNS_NAME_LENGTH or not all(DNS_LABEL.fullmatch(label) for label in labels):
+        return False
+    return not NUMERIC_LABEL.fullmatch(labels[-1])
 
 
 def _check_port(value: str) -> bool:
