@@ -382,3 +382,25 @@ def test_archive_format_is_a_string_enum_with_the_four_recorded_values():
     assert issubclass(ArchiveFormat, enum.StrEnum)
     assert [f.value for f in ArchiveFormat] == ["tar.gz", "tar.xz", "zip", "bare"]
     assert binaries.ArchiveFormat is ArchiveFormat
+
+
+@pytest.mark.parametrize("repo", ["attacker/frp", "fatedier/other", "fatedier", "Fatedier/frp", "x/fatedier/frp"])
+def test_load_lock_rejects_a_pin_url_from_another_repository(generated_lock_path, repo):
+
+    def other(document):
+        entry = document["frp"]["linux-x86_64"][0]
+        entry["url"] = entry["url"].replace("fatedier/frp", repo)
+
+    with pytest.raises(BinariesError, match="fatedier/frp|releases/download"):
+        load_lock(edited(generated_lock_path, other))
+
+
+@pytest.mark.parametrize("repo", ["attacker/goetia", "bindreams/other"])
+def test_load_lock_rejects_a_bundle_url_from_another_repository(generated_lock_path, repo):
+
+    def other(document):
+        entry = document["goetia"]["bundle"]
+        entry["url"] = entry["url"].replace("bindreams/goetia", repo)
+
+    with pytest.raises(BinariesError, match="bindreams/goetia"):
+        load_lock(edited(generated_lock_path, other))

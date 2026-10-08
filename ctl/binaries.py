@@ -256,14 +256,19 @@ def _url(entry: dict, where: str, source: str) -> str:
     return url
 
 
-def _check_asset(url: str, expected: str, version: str, where: str, source: str) -> None:
+def _check_asset(url: str, expected: str, version: str, repo: str, where: str, source: str) -> None:
     """A version bump that leaves the old URLs behind must fail here, not at first install.
 
-    A GitHub download URL ends `/releases/download/<tag>/<asset>`: both the asset and the tag must belong to `version`.
+    A GitHub download URL is `/<owner>/<repo>/releases/download/<tag>/<asset>`: the repository must be `repo` and both
+    the asset and the tag must belong to `version`.
     """
     parts = PurePosixPath(unquote(urlsplit(url).path)).parts
-    if len(parts) < 5 or parts[-4:-2] != ("releases", "download"):
-        raise BinariesError(f"{source}: {where}: `url` must end in releases/download/<tag>/<asset> (got {url!r})")
+    if len(parts) != 7 or parts[0] != "/" or parts[3:5] != ("releases", "download"):
+        raise BinariesError(
+            f"{source}: {where}: `url` must be /<owner>/<repo>/releases/download/<tag>/<asset> (got {url!r})"
+        )
+    if "/".join(parts[1:3]) != repo:
+        raise BinariesError(f"{source}: {where}: `url` is from {'/'.join(parts[1:3])!r} but this tool is {repo!r}")
     tag, asset = parts[-2:]
     if asset != expected:
         raise BinariesError(f"{source}: {where}: `url` names {asset!r} but this pin's version needs {expected!r}")
@@ -277,7 +282,7 @@ def _parse_pin(tool: str, version: str, platform: str, entry: dict, source: str)
     if unknown := set(entry) - expected:
         raise BinariesError(f"{source}: {where}: unknown keys {sorted(unknown)}")
     url = _url(entry, where, source)
-    _check_asset(url, TOOLS[tool].asset(version, platform), version, where, source)
+    _check_asset(url, TOOLS[tool].asset(version, platform), version, TOOLS[tool].repo, where, source)
     asset_sha256 = _digest(entry, "asset_sha256", where, source)
     member_sha256 = _digest(entry, "member_sha256", where, source)
     try:
@@ -305,7 +310,7 @@ def _parse_bundle(tool: str, version: str, asset: str, entry: object, source: st
         raise BinariesError(f"{source}: [{where}] must hold exactly `url` and `asset_sha256`")
     digest = _digest(entry, "asset_sha256", where, source)
     url = _url(entry, where, source)
-    _check_asset(url, asset, version, where, source)
+    _check_asset(url, asset, version, TOOLS[tool].repo, where, source)
     return Pin(tool, version, url, digest, digest, ArchiveFormat.BARE, None, asset)
 
 
@@ -336,7 +341,7 @@ def refresh(
             version = _locked_version(document, name, lock_path.name)
             pinned = _pin_tool(name, version, client, downloader, Path(scratch))
             _write_tool(document, name, pinned)
-    _write_atomically(lock_path, tomlkit.dumps(document))
+    write_atomically(lock_path, tomlkit.dumps(document))
 
 
 def _locked_version(document: tomlkit.TOMLDocument, tool: str, source: str) -> str:
@@ -417,7 +422,7 @@ def _write_tool(document: tomlkit.TOMLDocument, tool: str, pinned: dict[str, lis
         table[BUNDLE] = bundle
 
 
-def _write_atomically(path: Path, text: str) -> None:
+def write_atomically(path: Path, text: str) -> None:
     """Replace `path` whole, so a failed write never leaves a half-written lock; keeps the file's mode."""
     mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
     handle, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")

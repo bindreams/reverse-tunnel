@@ -8,3 +8,7 @@ class BinariesError(Exception):
 
 class UpstreamUnavailable(BinariesError):
     """GitHub could not answer: transport failure, rate limit, error status, or an unreadable body."""
+
+
+class AttestationError(BinariesError):
+    """A Sigstore bundle does not vouch for an artifact under the pinned identity."""
