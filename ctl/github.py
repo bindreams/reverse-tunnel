@@ -30,17 +30,23 @@ class Release:
     assets: tuple[Asset, ...]
 
 
-def api_client(base_url: str, token: str | None) -> httpx.Client:
+def api_client(token: str | None, transport: httpx.BaseTransport | None = None) -> httpx.Client:
     """A client for the releases API; the only one that ever carries `token`."""
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    return httpx.Client(base_url=base_url, headers=headers, timeout=NETWORK_TIMEOUT, follow_redirects=True)
+    return httpx.Client(
+        base_url=GITHUB_API,
+        headers=headers,
+        timeout=NETWORK_TIMEOUT,
+        follow_redirects=True,
+        transport=transport,
+    )
 
 
-def download_client() -> httpx.Client:
+def download_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
     """A client for asset downloads. Credential-free: assets are public and their host is not the API."""
-    return httpx.Client(timeout=NETWORK_TIMEOUT, follow_redirects=True)
+    return httpx.Client(timeout=NETWORK_TIMEOUT, follow_redirects=True, transport=transport)
 
 
 def published_releases(client: httpx.Client, repo: str) -> list[Release]:

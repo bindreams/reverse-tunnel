@@ -5,16 +5,16 @@ implementation fails against this oracle rather than agreeing with itself.
 """
 
 import hashlib
-import http.server
 import io
 import json
 import tarfile
-import threading
 import zipfile
+
+import httpx
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
 PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64")
 REPOS = {"frp": "fatedier/frp", "websocat": "vi/websocat", "goetia": "bindreams/goetia"}
@@ -155,7 +155,10 @@ def tool_assets(tool: str, version: str, generation: str = "a") -> dict[str, byt
     return assets
 
 
-# Server ===============================================================================================================
+# Transport ============================================================================================================
+
+API = "https://api.github.com"
+ASSET_HOST = "https://assets.example.test"
 
 
 @dataclass(frozen=True)
@@ -166,30 +169,20 @@ class Request:
 
 
 class Upstream:
-    """Serves `/repos/<owner>/<repo>/releases` (paginated, newest first) and `/dl/<id>/<name>` asset bodies."""
+    """An in-process stand-in for the releases API and the asset host, served through `httpx.MockTransport`.
+
+    Answers `/repos/<owner>/<repo>/releases` (paginated, newest first) and `/dl/<id>/<name>` asset bodies. No sockets.
+    """
 
     def __init__(self, page_size: int = 100) -> None:
         self.page_size = page_size
-        self._lock = threading.Lock()
+        self.transport = httpx.MockTransport(self._handle)
         self._releases: dict[str, list[dict]] = {}
         self._bodies: dict[str, bytes] = {}
         self._failures: dict[str, tuple[int, dict[str, str]]] = {}
         self._hangups: set[str] = set()
         self._requests: list[Request] = []
         self._next_id = 0
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
-        # The interval only bounds how long `shutdown` takes to be noticed; it synchronises nothing.
-        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
-        self.base_url = f"http://127.0.0.1:{self._server.server_address[1]}"
-
-    def __enter__(self) -> "Upstream":
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join()
 
     # Content ----------------------------------------------------------------------------------------------------------
 
@@ -209,109 +202,75 @@ class Upstream:
         """
         digests = digests or {}
         served = served or {}
-        with self._lock:
-            self._next_id += 1
-            release_id = self._next_id
-            listed = []
-            for name, body in assets.items():
-                path = f"/dl/{release_id}/{name}"
-                self._bodies[path] = served.get(name, body)
-                digest = digests[name] if name in digests else f"sha256:{sha256(body)}"
-                listed.append({"name": name, "browser_download_url": self.base_url + path, "digest": digest})
-            self._releases.setdefault(repo, []).append({
-                "tag_name": tag,
-                "draft": draft,
-                "prerelease": False,
-                "assets": listed,
-            })
+        self._next_id += 1
+        listed = []
+        for name, body in assets.items():
+            path = f"/dl/{self._next_id}/{name}"
+            self._bodies[path] = served.get(name, body)
+            digest = digests[name] if name in digests else f"sha256:{sha256(body)}"
+            listed.append({"name": name, "browser_download_url": ASSET_HOST + path, "digest": digest})
+        self._releases.setdefault(repo, []).append({
+            "tag_name": tag,
+            "draft": draft,
+            "prerelease": False,
+            "assets": listed,
+        })
 
     def add_tool(self, tool: str, version: str, generation: str = "a", **kwargs) -> None:
         self.add_release(REPOS[tool], f"v{version}", tool_assets(tool, version, generation), **kwargs)
 
     def duplicate_asset(self, repo: str, name: str) -> None:
         """List the asset `name` of the newest release of `repo` twice."""
-        with self._lock:
-            assets = self._releases[repo][0]["assets"]
-            assets.append(next(a for a in assets if a["name"] == name))
+        assets = self._releases[repo][0]["assets"]
+        assets.append(next(a for a in assets if a["name"] == name))
 
     def fail(self, repo: str, status: int, headers: Mapping[str, str] | None = None) -> None:
-        with self._lock:
-            self._failures[repo] = (status, dict(headers or {}))
+        self._failures[repo] = (status, dict(headers or {}))
 
     def hang_up(self, repo: str) -> None:
-        """Close the connection without answering any request for the releases of `repo`."""
-        with self._lock:
-            self._hangups.add(repo)
+        """Drop the connection without answering any request for the releases of `repo`."""
+        self._hangups.add(repo)
 
     def clear(self) -> None:
-        with self._lock:
-            self._hangups.clear()
-            self._releases.clear()
-            self._bodies.clear()
-            self._failures.clear()
+        self._hangups.clear()
+        self._releases.clear()
+        self._bodies.clear()
+        self._failures.clear()
 
     def asset_url(self, repo: str, tag: str, name: str) -> str:
-        with self._lock:
-            (release, ) = [r for r in self._releases[repo] if r["tag_name"] == tag and not r["draft"]]
-            (asset, ) = [a for a in release["assets"] if a["name"] == name]
-            return asset["browser_download_url"]
+        (release, ) = [r for r in self._releases[repo] if r["tag_name"] == tag and not r["draft"]]
+        (asset, ) = [a for a in release["assets"] if a["name"] == name]
+        return asset["browser_download_url"]
 
     @property
     def requests(self) -> list[Request]:
-        with self._lock:
-            return list(self._requests)
+        return list(self._requests)
 
     # Handler ----------------------------------------------------------------------------------------------------------
 
-    def _handler(self) -> type[http.server.BaseHTTPRequestHandler]:
-        upstream = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-
-            def do_GET(self) -> None:
-                split = urlsplit(self.path)
-                query = parse_qs(split.query)
-                with upstream._lock:
-                    upstream._requests.append(
-                        Request(split.path, query, {k.lower(): v
-                                                    for k, v in self.headers.items()})
-                    )
-                    reply = upstream._respond(split.path, query)
-                if reply is None:
-                    self.close_connection = True
-                    return
-                status, headers, body = reply
-                self.send_response(status)
-                for key, value in headers.items():
-                    self.send_header(key, value)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, format: str, *args: object) -> None:
-                pass
-
-        return Handler
-
-    def _respond(self, path: str, query: dict[str, list[str]]) -> tuple[int, dict[str, str], bytes] | None:
-        """Called with the lock held; `None` means hang up."""
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        query = parse_qs(request.url.query.decode())
+        self._requests.append(Request(path, query, {k.lower(): v for k, v in request.headers.items()}))
         parts = path.strip("/").split("/")
         if len(parts) == 4 and parts[0] == "repos" and parts[3] == "releases":
-            repo = f"{parts[1]}/{parts[2]}"
-            if repo in self._hangups:
-                return None
-            if repo in self._failures:
-                status, headers = self._failures[repo]
-                return status, headers, b'{"message": "failure"}'
-            releases = self._releases.get(repo)
-            if releases is None:
-                return 404, {}, b'{"message": "Not Found"}'
-            page = int(query.get("page", ["1"])[0])
-            start = (page - 1) * self.page_size
-            headers = {"Content-Type": "application/json"}
-            if start + self.page_size < len(releases):
-                headers["Link"] = f'<{self.base_url}/repos/{repo}/releases?per_page=100&page={page + 1}>; rel="next"'
-            return 200, headers, json.dumps(releases[start:start + self.page_size]).encode()
+            return self._releases_page(f"{parts[1]}/{parts[2]}", request, query)
         if path in self._bodies:
-            return 200, {"Content-Type": "application/octet-stream"}, self._bodies[path]
-        return 404, {}, b"not found"
+            return httpx.Response(200, content=self._bodies[path])
+        return httpx.Response(404, content=b"not found")
+
+    def _releases_page(self, repo: str, request: httpx.Request, query: dict[str, list[str]]) -> httpx.Response:
+        if repo in self._hangups:
+            raise httpx.RemoteProtocolError("server disconnected without sending a response", request=request)
+        if repo in self._failures:
+            status, headers = self._failures[repo]
+            return httpx.Response(status, headers=headers, json={"message": "failure"})
+        releases = self._releases.get(repo)
+        if releases is None:
+            return httpx.Response(404, json={"message": "Not Found"})
+        page = int(query.get("page", ["1"])[0])
+        start = (page - 1) * self.page_size
+        headers = {}
+        if start + self.page_size < len(releases):
+            headers["Link"] = f'<{API}/repos/{repo}/releases?per_page=100&page={page + 1}>; rel="next"'
+        return httpx.Response(200, headers=headers, json=releases[start:start + self.page_size])

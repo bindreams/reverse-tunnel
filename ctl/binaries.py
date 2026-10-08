@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
+import httpx
 import tomlkit
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.items import Table
@@ -26,7 +27,6 @@ from ctl.archive import ArchiveFormat, hash_binary, is_safe_member
 from ctl.config import Role
 from ctl.errors import BinariesError, UpstreamUnavailable
 from ctl.github import (
-    GITHUB_API,
     Release,
     api_client,
     asset_named,
@@ -290,7 +290,13 @@ def _parse_bundle(tool: str, version: str, asset: str, entry: object, source: st
 # Refreshing the lock ==================================================================================================
 
 
-def refresh(lock_path: Path, only: Iterable[str] | None, *, api: str = GITHUB_API, token: str | None = None) -> None:
+def refresh(
+    lock_path: Path,
+    only: Iterable[str] | None,
+    *,
+    token: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> None:
     """Re-pin `only` (every tool when `None`) at the versions the lock names; other tools are left byte-for-byte alone.
 
     The lock is rewritten once, after every named tool succeeded. This is the only code that downloads.
@@ -302,7 +308,8 @@ def refresh(lock_path: Path, only: Iterable[str] | None, *, api: str = GITHUB_AP
         document = tomlkit.parse(lock_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, TOMLKitError) as exc:
         raise BinariesError(f"{lock_path.name}: {exc}") from exc
-    with api_client(api, token) as client, download_client() as downloader, tempfile.TemporaryDirectory() as scratch:
+    with api_client(token, transport
+                    ) as client, download_client(transport) as downloader, tempfile.TemporaryDirectory() as scratch:
         for name in names:
             version = _locked_version(document, name, lock_path.name)
             pinned = _pin_tool(name, version, published_releases(client, TOOLS[name].repo), downloader, Path(scratch))
@@ -404,14 +411,14 @@ def _write_atomically(path: Path, text: str) -> None:
 
 def compare_to_upstream(lock: Lock,
                         *,
-                        api: str = GITHUB_API,
-                        token: str | None = None) -> list[tuple[Pin, PinDrift, str]]:
+                        token: str | None = None,
+                        transport: httpx.BaseTransport | None = None) -> list[tuple[Pin, PinDrift, str]]:
     """Check every pin's asset digest against the one GitHub advertises now, without downloading anything.
 
     `UNAVAILABLE` means GitHub could not answer; it is never folded into `MISMATCH`, which means the release changed.
     """
     results: list[tuple[Pin, PinDrift, str]] = []
-    with api_client(api, token) as client:
+    with api_client(token, transport) as client:
         for tool, by_platform in lock.items():
             pins = [pin for pins in by_platform.values() for pin in pins]
             try:

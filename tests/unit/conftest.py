@@ -27,9 +27,8 @@ def repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def upstream():
-    with Upstream() as server:
-        yield server
+def upstream() -> Upstream:
+    return Upstream()
 
 
 @pytest.fixture
@@ -50,5 +49,5 @@ def lock_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def generated_lock_path(published: Upstream, lock_path: Path) -> Path:
-    binaries.refresh(lock_path, None, api=published.base_url)
+    binaries.refresh(lock_path, None, transport=published.transport)
     return lock_path

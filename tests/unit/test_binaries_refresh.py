@@ -32,7 +32,7 @@ def raw(lock_path: Path) -> dict:
 
 
 def run(lock_path: Path, upstream: Upstream, only=None, **kwargs) -> None:
-    refresh(lock_path, only, api=upstream.base_url, **kwargs)
+    refresh(lock_path, only, transport=upstream.transport, **kwargs)
 
 
 def section(text: str, tool: str) -> str:
@@ -233,29 +233,28 @@ def test_refresh_refuses_a_version_that_is_only_a_draft(upstream, lock_path):
 
 
 def test_refresh_follows_pagination_until_the_release_is_found(lock_path):
-    with Upstream(page_size=1) as upstream:
-        upstream.add_release(REPOS["goetia"], "v0.3.0", tool_assets("goetia", "0.3.0"), draft=True)
-        upstream.add_release(REPOS["goetia"], "v0.2.0", tool_assets("goetia", "0.2.0"), draft=True)
-        upstream.add_tool("goetia", "0.1.0")
-        upstream.add_tool("frp", "0.71.0")
-        upstream.add_tool("websocat", "1.14.1")
-        run(lock_path, upstream, only=["goetia"])
-        pages = [
-            r.query["page"] for r in upstream.requests
-            if r.path == "/repos/bindreams/goetia/releases" and "page" in r.query
-        ]
-        assert pages == [["2"], ["3"]]
+    upstream = Upstream(page_size=1)
+    upstream.add_release(REPOS["goetia"], "v0.3.0", tool_assets("goetia", "0.3.0"), draft=True)
+    upstream.add_release(REPOS["goetia"], "v0.2.0", tool_assets("goetia", "0.2.0"), draft=True)
+    upstream.add_tool("goetia", "0.1.0")
+    upstream.add_tool("frp", "0.71.0")
+    upstream.add_tool("websocat", "1.14.1")
+    run(lock_path, upstream, only=["goetia"])
+    pages = [
+        r.query["page"] for r in upstream.requests if r.path == "/repos/bindreams/goetia/releases" and "page" in r.query
+    ]
+    assert pages == [["2"], ["3"]]
     assert raw(lock_path)["goetia"]["version"] == "0.1.0"
 
 
 def test_refresh_reads_every_page_before_giving_up(lock_path):
-    with Upstream(page_size=2) as upstream:
-        for index in range(7):
-            upstream.add_release(REPOS["goetia"], f"v0.9.{index}", {}, draft=index % 2 == 0)
-        with pytest.raises(BinariesError, match="0.1.0"):
-            run(lock_path, upstream, only=["goetia"])
-        pages = [r.query.get("page", ["1"])[0] for r in upstream.requests]
-        assert pages == ["1", "2", "3", "4"]
+    upstream = Upstream(page_size=2)
+    for index in range(7):
+        upstream.add_release(REPOS["goetia"], f"v0.9.{index}", {}, draft=index % 2 == 0)
+    with pytest.raises(BinariesError, match="0.1.0"):
+        run(lock_path, upstream, only=["goetia"])
+    pages = [r.query.get("page", ["1"])[0] for r in upstream.requests]
+    assert pages == ["1", "2", "3", "4"]
 
 
 def test_refresh_accepts_a_tag_without_the_v_prefix(upstream, lock_path):
@@ -477,7 +476,7 @@ def outcomes(results):
 
 
 def test_compare_matches_a_freshly_refreshed_lock(published, generated_lock_path):
-    results = compare_to_upstream(load_lock(generated_lock_path), api=published.base_url)
+    results = compare_to_upstream(load_lock(generated_lock_path), transport=published.transport)
     assert {drift for _, drift, _ in results} == {PinDrift.MATCH}
     assert len(results) == (5 * 2) + 5 + (5 * 2) + 1
 
@@ -489,7 +488,7 @@ def test_compare_reports_match_mismatch_and_unavailable_distinctly(published, ge
     published.add_tool("frp", "0.71.0", digests={changed: "sha256:" + "0" * 64})
     published.add_tool("goetia", "0.1.0")
     published.fail(REPOS["websocat"], 503)
-    results = compare_to_upstream(lock, api=published.base_url)
+    results = compare_to_upstream(lock, transport=published.transport)
     by_tool: dict[str, set[PinDrift]] = {}
     for pin, drift, _ in results:
         by_tool.setdefault(pin.tool, set()).add(drift)
@@ -509,7 +508,7 @@ def test_compare_reports_match_mismatch_and_unavailable_distinctly(published, ge
 @pytest.mark.parametrize("status", [403, 429, 500, 502, 404])
 def test_compare_never_reports_an_api_failure_as_a_mismatch(published, generated_lock_path, status):
     published.fail(REPOS["frp"], status)
-    results = compare_to_upstream(load_lock(generated_lock_path), api=published.base_url)
+    results = compare_to_upstream(load_lock(generated_lock_path), transport=published.transport)
     frp = [drift for pin, drift, _ in results if pin.tool == "frp"]
     assert frp and set(frp) == {PinDrift.UNAVAILABLE}
     assert PinDrift.MISMATCH not in {drift for _, drift, _ in results}
@@ -519,7 +518,7 @@ def test_compare_reports_a_dropped_connection_as_unavailable(published, generate
     lock = load_lock(generated_lock_path)
     for repo in REPOS.values():
         published.hang_up(repo)
-    results = compare_to_upstream(lock, api=published.base_url)
+    results = compare_to_upstream(lock, transport=published.transport)
     assert {drift for _, drift, _ in results} == {PinDrift.UNAVAILABLE}
 
 
@@ -530,7 +529,7 @@ def test_compare_reports_a_vanished_asset_digest_as_a_mismatch(published, genera
     published.add_tool("frp", "0.71.0")
     published.add_tool("goetia", "0.1.0")
     published.add_tool("websocat", "1.14.1", digests={name: None})
-    results = outcomes(compare_to_upstream(lock, api=published.base_url))
+    results = outcomes(compare_to_upstream(lock, transport=published.transport))
     drift, detail = results[("websocat", "websocat", name)]
     assert drift is PinDrift.MISMATCH
     assert "digest" in detail
@@ -545,7 +544,7 @@ def test_compare_reports_a_withdrawn_asset_as_a_mismatch(published, generated_lo
     published.add_tool("frp", "0.71.0")
     published.add_tool("websocat", "1.14.1")
     published.add_release(REPOS["goetia"], "v0.1.0", assets)
-    drift, detail = outcomes(compare_to_upstream(lock, api=published.base_url))[("goetia", "goetia", name)]
+    drift, detail = outcomes(compare_to_upstream(lock, transport=published.transport))[("goetia", "goetia", name)]
     assert drift is PinDrift.MISMATCH
     assert name in detail
 
@@ -556,7 +555,7 @@ def test_compare_ignores_draft_releases(published, generated_lock_path):
     published.add_tool("frp", "0.71.0")
     published.add_tool("websocat", "1.14.1")
     published.add_tool("goetia", "0.1.0", draft=True)
-    results = compare_to_upstream(lock, api=published.base_url)
+    results = compare_to_upstream(lock, transport=published.transport)
     goetia = {drift for pin, drift, _ in results if pin.tool == "goetia"}
     assert goetia == {PinDrift.MISMATCH}
 
@@ -567,7 +566,7 @@ def test_compare_checks_the_bundle(published, generated_lock_path):
     published.add_tool("frp", "0.71.0")
     published.add_tool("websocat", "1.14.1")
     published.add_tool("goetia", "0.1.0", digests={BUNDLE_ASSET: "sha256:" + "1" * 64})
-    results = outcomes(compare_to_upstream(lock, api=published.base_url))
+    results = outcomes(compare_to_upstream(lock, transport=published.transport))
     bundle = bundle_for(lock, "goetia")
     assert bundle is not None
     drift, _ = results[("goetia", bundle.install_name, BUNDLE_ASSET)]
@@ -576,12 +575,12 @@ def test_compare_checks_the_bundle(published, generated_lock_path):
 
 def test_compare_never_downloads_an_asset(published, generated_lock_path):
     before = len([r for r in published.requests if r.path.startswith("/dl/")])
-    compare_to_upstream(load_lock(generated_lock_path), api=published.base_url)
+    compare_to_upstream(load_lock(generated_lock_path), transport=published.transport)
     assert len([r for r in published.requests if r.path.startswith("/dl/")]) == before
 
 
 def test_compare_lists_each_release_once_per_tool(published, generated_lock_path):
     before = len(published.requests)
-    compare_to_upstream(load_lock(generated_lock_path), api=published.base_url)
+    compare_to_upstream(load_lock(generated_lock_path), transport=published.transport)
     paths = [r.path for r in published.requests[before:]]
     assert sorted(paths) == sorted(f"/repos/{repo}/releases" for repo in REPOS.values())
