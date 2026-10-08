@@ -77,3 +77,19 @@ def test_redact_text_leaves_clean_text_alone(hashes_file):
     assert module.redact_text(
         "fatal: not a git repository", module.load_hashes(hashes_file)
     ) == "fatal: not a git repository"
+
+
+def test_argparse_errors_do_not_echo_a_banned_argument(repo, hashes_file):
+    result = run_script(repo, hashes_file, "--tree", f"-{TERM}.txt")
+    assert result.returncode == 2
+    assert TERM not in result.stdout + result.stderr and "Traceback" not in result.stderr
+
+
+def test_argparse_errors_still_say_what_was_wrong(repo, hashes_file):
+    result = run_script(repo, hashes_file, "--bogus-option")
+    assert result.returncode == 2 and "--bogus-option" in result.stderr
+
+
+def test_a_usage_error_is_withheld_when_the_ban_list_cannot_be_read(repo, tmp_path):
+    result = run_script(repo, tmp_path / "missing.txt", f"-{TERM}.txt")
+    assert result.returncode == 2 and TERM not in result.stdout + result.stderr

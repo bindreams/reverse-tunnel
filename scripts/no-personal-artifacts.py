@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from typing import NoReturn
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,7 +53,7 @@ STRUCTURAL = {
     compile(rf"\b(?:sk-)?(?:ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-nistp\d+)(?:@openssh\.com)?\s+{KEY_BLOB}"),
 }
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})")
-EMAIL_ADDRESSES = {"git@github.com"}
+EMAIL_ADDRESSES = {"git@github.com", "noreply@github.com"}
 EMAIL_DOMAINS = {"example.com", "example.org", "example.net", "users.noreply.github.com"}
 # Any run of `/` or `\` separates the parts, which covers JSON-escaped `\/`. Without a drive letter the run must open a
 # path: `src/home/index.html` has a segment named home but is not a home directory.
@@ -65,6 +66,7 @@ HOME_NAMES = {"user", "username", "you", "me", "example", "runner", "operator", 
 # Binary content =======================================================================================================
 
 BINARY = "binary content not allowed"
+INVALID_PATH = "invalid UTF-8 in path"
 # Repo paths of blobs allowed to be binary. `--history` knows only the first path git reports for a blob.
 BINARY_ALLOWED: frozenset[str] = frozenset()
 BOMS = {
@@ -79,6 +81,9 @@ SIGNATURE_END = re.compile(r"-----END (?:PGP SIGNATURE|SSH SIGNATURE|SIGNED MESS
 # An armour line of signature bytes (at most 76 characters in practice) or the `=XXXX` checksum. Short lines are
 # scanned, so a name alone on a line is not hidden.
 SIGNATURE_BYTES = re.compile(r"[A-Za-z0-9+/=]{40,}|=[A-Za-z0-9+/]{4}")
+# Identity lines hold real people's names and e-mail addresses, so only banned terms are looked for there.
+IDENTITY_KEYS = ("author ", "committer ", "tagger ")
+SIGNED_HEADERS = {"gpgsig", "gpgsig-sha256", "mergetag"}
 UTF8_NAMES = {"utf-8", "utf8"}
 
 
@@ -132,10 +137,12 @@ def contains_banned_name(token: str, hashes: Hashes) -> bool:
     )
 
 
-def scan_line(line: str, hashes: Hashes) -> list[str]:
+def scan_line(line: str, hashes: Hashes, banned_only: bool = False) -> list[str]:
     kinds = []
     if any(contains_banned_name(token, hashes) for token in TOKEN.findall(line.lower())):
         kinds.append("banned-term")
+    if banned_only:
+        return kinds
     kinds += [kind for kind, pattern in STRUCTURAL.items() if pattern.search(line)]
     if any(m[0].lower() not in EMAIL_ADDRESSES and m[1].lower() not in EMAIL_DOMAINS for m in EMAIL.finditer(line)):
         kinds.append("email")
@@ -229,7 +236,7 @@ def read_objects(ids: Sequence[str]) -> list[tuple[str, str, bytes]]:
     position = 0
     while position < len(out):
         end = out.index(b"\n", position)
-        header = out[position:end].decode().split(" ")
+        header = out[position:end].decode(errors="replace").split(" ")
         if len(header) != 3:
             raise InputError(f"git cat-file: {' '.join(header)}")
         name, kind, size = header[0], header[1], int(header[2])
@@ -238,10 +245,24 @@ def read_objects(ids: Sequence[str]) -> list[tuple[str, str, bytes]]:
     return objects
 
 
+def as_text(path: str) -> tuple[str, bool]:
+    """A path that came from git bytes as printable text, and whether it was valid UTF-8."""
+    try:
+        path.encode()
+    except UnicodeEncodeError:
+        return path.encode(errors="surrogateescape").decode(errors="replace"), False
+    return path, True
+
+
 def scan_entries(entries: Sequence[tuple[str, str, str]], hashes: Hashes) -> list[Finding]:
     """Scan (mode, blob id, path) triples: the path always, the blob unless it is a submodule commit."""
-    shown = {path: display(path, hashes, f"blob {blob[:12]}") for _, blob, path in entries}
-    findings = [Finding(shown[path], 0, kind) for _, _, path in entries for kind in scan_line(path, hashes)]
+    findings = []
+    shown = {}
+    for _, blob, path in entries:
+        text, valid = as_text(path)
+        shown[path] = display(text, hashes, f"blob {blob[:12]}")
+        findings += [Finding(shown[path], 0, kind) for kind in scan_line(text, hashes)]
+        findings += [] if valid else [Finding(shown[path], 0, INVALID_PATH)]
     blobs = [(blob, path) for mode, blob, path in entries if mode != GITLINK]
     for (_, path), (_, _, data) in zip(blobs, read_objects([blob for blob, _ in blobs])):
         findings += scan_content(shown[path], data, hashes, path in BINARY_ALLOWED)
@@ -252,7 +273,7 @@ def index_entries() -> list[tuple[str, str, str]]:
     entries = []
     for item in git("ls-files", "-s", "-z").split(b"\0"):
         if item:
-            meta, _, path = item.decode().partition("\t")
+            meta, _, path = item.decode(errors="surrogateescape").partition("\t")
             mode, blob, _stage = meta.split(" ")
             entries.append((mode, blob, path))
     return entries
@@ -264,7 +285,7 @@ def staged_entries() -> list[tuple[str, str, str]]:
     for meta, path in zip(fields[0::2], fields[1::2]):
         _old_mode, mode, _old_blob, blob, _status = meta.decode().lstrip(":").split(" ")
         if set(blob) != {"0"}:  # an unmerged path has no blob to read
-            entries.append((mode, blob, path.decode()))
+            entries.append((mode, blob, path.decode(errors="surrogateescape")))
     return entries
 
 
@@ -276,40 +297,61 @@ def scan_tree(hashes: Hashes) -> list[Finding]:
     return scan_entries(index_entries(), hashes)
 
 
-def tree_names(data: bytes, id_size: int) -> list[str]:
+def tree_names(data: bytes, id_size: int) -> list[tuple[str, bool]]:
+    """Entry names of a tree object, each with whether it was valid UTF-8."""
     names = []
     position = 0
     while position < len(data):
         space = data.index(b" ", position)
         nul = data.index(b"\0", space)
-        names.append(data[space + 1:nul].decode(errors="replace"))
+        raw = data[space + 1:nul]
+        try:
+            names.append((raw.decode(), True))
+        except UnicodeDecodeError:
+            names.append((raw.decode(errors="replace"), False))
         position = nul + 1 + id_size
     return names
 
 
-def without_signature_bytes(lines: Sequence[tuple[int, str]]) -> list[tuple[int, str]]:
-    """Drop the base64 body of each signature block: those bytes are not author-chosen text.
+Item = tuple[int, str, int | None]  # line number, text, id of the signed region it belongs to (None: not signed)
 
-    The armour's own lines (`Comment:`, `Version:`, the BEGIN and END lines, any short line) are kept.
+
+def strip_signatures(items: Sequence[Item]) -> tuple[list[tuple[int, str]], bool]:
+    """Drop the base64 body of each signature block inside a signed region; say whether a block was left open.
+
+    Those bytes are not author-chosen text. The armour's own lines (`Comment:`, `Version:`, BEGIN and END, any short
+    line) are kept, and a block opens only in a signed region and cannot run past its end.
     """
     kept = []
     inside = False
-    for number, line in lines:
-        if SIGNATURE_BEGIN.search(line):
-            inside = True
-        elif SIGNATURE_END.search(line):
-            inside = False
-        elif inside and SIGNATURE_BYTES.fullmatch(line):
-            continue
+    unterminated = False
+    region = None
+    for number, line, line_region in items:
+        if line_region != region:
+            unterminated |= inside
+            inside, region = False, line_region
+        if line_region is not None:
+            if SIGNATURE_BEGIN.search(line):
+                inside = True
+            elif SIGNATURE_END.search(line):
+                inside = False
+            elif inside and SIGNATURE_BYTES.fullmatch(line):
+                continue
         kept.append((number, line))
-    return kept
+    return kept, unterminated | inside
 
 
-def header_lines(header: str) -> list[tuple[int, str]]:
+def header_lines(header: str) -> tuple[list[tuple[int, str]], bool]:
     """Header lines with a folded continuation (`mergetag`, `gpgsig`) unfolded into lines of its own."""
-    lines = [line[1:] if line.startswith(" ") else line for line in header.split("\n")]
-    numbered = [(number, line) for number, line in enumerate(lines, 1) if not OPAQUE_HEADER.fullmatch(line)]
-    return without_signature_bytes(numbered)
+    items: list[Item] = []
+    region: int | None = None
+    for number, raw in enumerate(header.split("\n"), 1):
+        if not raw.startswith(" "):
+            region = number if raw.partition(" ")[0] in SIGNED_HEADERS else None
+        line = raw.removeprefix(" ")
+        if not OPAQUE_HEADER.fullmatch(line):
+            items.append((number, line, region))
+    return strip_signatures(items)
 
 
 def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes, signed_message: bool = False) -> list[Finding]:
@@ -323,16 +365,22 @@ def scan_commit_or_tag(source: str, data: bytes, hashes: Hashes, signed_message:
         except UnicodeDecodeError:
             texts[part] = raw.decode(errors="replace")
             findings.append(Finding(source, 0, f"invalid UTF-8 in {part}"))
+        if "\0" in texts[part]:  # UTF-16 text is valid UTF-8 with a NUL between its letters
+            findings.append(Finding(source, 0, f"NUL byte in {part}"))
+            texts[part] = texts[part].replace("\0", "")
     for line in texts["header"].split("\n"):
         encoding = line.removeprefix("encoding ") if line.startswith("encoding ") else None
         if encoding is not None and encoding.strip().lower() not in UTF8_NAMES:
             findings.append(Finding(source, 0, "non-UTF-8 commit encoding"))
+    lines, unterminated = header_lines(texts["header"])
+    message_items = [(n, line, 0 if signed_message else None) for n, line in enumerate(texts["message"].split("\n"), 1)]
+    message, message_unterminated = strip_signatures(message_items)
+    if unterminated or message_unterminated:
+        findings.append(Finding(source, 0, "unterminated signature block"))
     findings += [
-        Finding(f"{source} header", n, k) for n, line in header_lines(texts["header"]) for k in scan_line(line, hashes)
+        Finding(f"{source} header", n, k) for n, line in lines
+        for k in scan_line(line, hashes, banned_only=line.startswith(IDENTITY_KEYS))
     ]
-    message = list(enumerate(texts["message"].split("\n"), 1))
-    if signed_message:
-        message = without_signature_bytes(message)
     return findings + [
         Finding(f"{source} message", number, kind) for number, line in message for kind in scan_line(line, hashes)
     ]
@@ -345,17 +393,26 @@ def scan_object(name: str, kind: str, data: bytes, hashes: Hashes, path: str = "
     if kind in ("commit", "tag"):
         return scan_commit_or_tag(source, data, hashes, signed_message=kind == "tag")
     if kind == "tree":
-        return [Finding(source, 0, k) for entry in tree_names(data, len(name) // 2) for k in scan_line(entry, hashes)]
+        findings = []
+        for entry, valid in tree_names(data, len(name) // 2):
+            findings += [Finding(source, 0, k) for k in scan_line(entry, hashes)]
+            findings += [] if valid else [Finding(source, 0, INVALID_PATH)]
+        return findings
     return []
 
 
 def scan_history(hashes: Hashes) -> list[Finding]:
-    listing = [line.partition(" ") for line in git("rev-list", "--objects", "--all").decode().split("\n") if line]
+    listing = [
+        line.partition(" ") for line in git("rev-list", "--objects", "--all").decode(errors="replace").split("\n")
+        if line
+    ]
     paths = {name: path for name, _, path in listing}
     objects = read_objects([name for name, _, _ in listing])
     findings = [f for name, kind, data in objects for f in scan_object(name, kind, data, hashes, paths[name])]
-    for ref in git("for-each-ref", "--format=%(refname)").decode().split("\n"):
+    for raw_ref in git("for-each-ref", "--format=%(refname)").split(b"\n"):
+        ref, valid = as_text(raw_ref.decode(errors="surrogateescape"))
         findings += [Finding("ref", 0, kind) for kind in scan_line(ref, hashes)]
+        findings += [] if valid else [Finding("ref", 0, "invalid UTF-8 in ref name")]
     return unique(findings)
 
 
@@ -393,8 +450,32 @@ def scan_message(path: str, hashes: Hashes) -> list[Finding]:
 # Entrypoint ===========================================================================================================
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def ban_list_path(argv: Sequence[str] | None) -> Path:
+    """Where `--hashes` points, found without the real parser, which may be the thing that is failing."""
+    probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
+    probe.add_argument("--hashes", type=Path, default=DEFAULT_HASHES)
+    try:
+        return probe.parse_known_args(argv)[0].hashes
+    except argparse.ArgumentError:
+        return DEFAULT_HASHES
+
+
+class RedactingParser(argparse.ArgumentParser):
+    """An argument parser whose errors may echo a bad argument, so they are redacted like every other message."""
+
+    argv: Sequence[str] | None = None
+
+    def error(self, message: str) -> NoReturn:
+        try:
+            safe = redact_text(message, load_hashes(ban_list_path(self.argv)))
+        except (OSError, ValueError):
+            safe = "(details withheld: the ban list could not be read to redact them)"
+        self.print_usage(sys.stderr)
+        self.exit(2, f"{self.prog}: error: {safe}\n")
+
+
+def build_parser() -> RedactingParser:
+    parser = RedactingParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("files", nargs="*", help="working-tree files to scan")
     parser.add_argument("--hashes", type=Path, default=DEFAULT_HASHES, help="ban list (default: %(default)s)")
     modes = parser.add_mutually_exclusive_group()
@@ -408,6 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
+    parser.argv = argv if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
     if args.hash is not None:
         try:
@@ -420,7 +502,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         hashes = load_hashes(args.hashes)
     except (OSError, ValueError) as error:
-        parser.error(f"ban list unreadable: {error}")
+        print(f"error: ban list unreadable: {error}", file=sys.stderr)
+        return 2
     try:
         if args.files:
             findings = scan_files(args.files, hashes)

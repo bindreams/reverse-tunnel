@@ -63,6 +63,7 @@ def test_structural_artifacts_are_found(text, kind, hashes_file):
     "text",
     [
         "git@github.com:org/repo.git",
+        "Co-authored-by: GitHub <" + "noreply@github.com>",
         "alice@example.com",
         "1234+x@users.noreply.github.com",
         "ssh user@host",

@@ -1,7 +1,10 @@
 """Every header of every commit and tag object is content: identities, mergetag, encodings."""
 
+import re
+import shlex
+
 import pytest
-from scanner_support import REPO_ROOT, TERM, git, hash_raw_object, run_script
+from scanner_support import REPO_ROOT, TERM, git, git_bytes, hash_raw_object, run_script
 
 CLEAN_IDENTITY = {"GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "1+dev@users.noreply.github.com"}
 
@@ -74,8 +77,18 @@ def test_a_banned_name_in_an_identity_email_is_found(repo, hashes_file):
     assert run_script(repo, hashes_file, "--history").returncode == 1
 
 
-def test_a_hostname_email_is_found(repo, hashes_file):
-    seed(repo, env={"GIT_COMMITTER_EMAIL": "dev" + "@" + "workstation.local"})
+def test_identities_are_checked_for_banned_terms_only(repo, hashes_file):
+    seed(repo, env={"GIT_AUTHOR_EMAIL": "dev" + "@" + "contributor.invalid", "GIT_COMMITTER_NAME": "Real Name"})
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+def test_a_github_committer_passes(repo, hashes_file):
+    seed(repo, env={"GIT_COMMITTER_NAME": "GitHub", "GIT_COMMITTER_EMAIL": "noreply" + "@" + "github.com"})
+    assert run_script(repo, hashes_file, "--history").returncode == 0
+
+
+def test_a_banned_name_in_an_author_email_domain_still_fails(repo, hashes_file):
+    seed(repo, env={"GIT_AUTHOR_EMAIL": "anna" + "@" + f"{TERM}.local"})
     assert run_script(repo, hashes_file, "--history").returncode == 1
 
 
@@ -143,10 +156,27 @@ def test_history_walks_the_target_of_a_replace_ref(repo, hashes_file):
     assert run_script(repo, hashes_file, "--history").returncode == 1
 
 
-def test_ci_fetches_every_advertised_ref_before_the_history_scan():
+def ci_fetch_command() -> list[str]:
     workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yaml").read_text()
-    assert "+refs/*:refs/fetched/*" in workflow
-    assert workflow.index("refs/fetched") < workflow.index("--history")
+    (command, ) = re.findall(r"- run: (git fetch .*)", workflow)
+    assert workflow.index(command) < workflow.index("--history")
+    return shlex.split(command)
+
+
+def test_ci_fetches_every_ref_but_pull_refs_into_the_history_scan(tmp_path):
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    git(remote, "init", "-q", "-b", "main")
+    git(remote, "commit", "-q", "--allow-empty", "-m", "feat: x")
+    for ref in ("refs/pull/1/head", "refs/custom/x", "refs/notes/commits", "refs/replace/abc"):
+        git(remote, "update-ref", ref, "HEAD")
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", str(remote), str(clone))
+    git(clone, *ci_fetch_command()[1:])
+    fetched = set(git(clone, "for-each-ref", "--format=%(refname)", "refs/fetched/").split())
+    assert fetched == {
+        "refs/fetched/heads/main", "refs/fetched/custom/x", "refs/fetched/notes/commits", "refs/fetched/replace/abc"
+    }
 
 
 # Signatures ===========================================================================================================
@@ -225,3 +255,102 @@ def test_a_signature_block_in_a_commit_message_is_not_exempt(repo, hashes_file):
 def test_a_long_base64_line_outside_a_signature_block_is_scanned(repo, hashes_file):
     raw_commit(repo, folded("x-note", BODY + "\n"))
     assert run_script(repo, hashes_file, "--history").returncode == 1
+
+
+# NUL bytes ============================================================================================================
+
+
+def test_a_nul_in_a_tag_message_is_a_finding_and_the_text_is_still_scanned(repo, hashes_file):
+    raw_tag(repo, "host zzquux\n".encode("utf-16-le").decode("latin-1"))
+    result = run_script(repo, hashes_file, "--history")
+    assert result.returncode == 1 and "NUL byte in message" in result.stderr
+    assert "banned-term" in result.stderr and TERM not in result.stdout + result.stderr
+
+
+def test_a_nul_in_a_commit_message_is_a_finding(repo, hashes_file):
+    raw_commit(repo, body=f"host {TERM}\n".encode("utf-16-le"))
+    result = run_script(repo, hashes_file, "--history")
+    assert result.returncode == 1 and "NUL byte in message" in result.stderr
+
+
+def test_a_nul_in_a_header_is_a_finding(repo, hashes_file):
+    raw_commit(repo, b"x-note a\x00b\n")
+    assert "NUL byte in header" in run_script(repo, hashes_file, "--history").stderr
+
+
+# Where a signature block may open =====================================================================================
+
+
+def test_a_signature_block_opened_in_an_ordinary_header_is_not_exempt(repo, hashes_file):
+    raw_commit(repo, folded("x-note", pgp()))
+    assert run_script(repo, hashes_file, "--history").returncode == 1
+
+
+def test_an_unterminated_signature_block_is_a_finding(repo, hashes_file):
+    raw_commit(repo, folded("gpgsig", pgp().replace("-----END PGP SIGNATURE-----\n", "")))
+    result = run_script(repo, hashes_file, "--history")
+    assert result.returncode == 1 and "unterminated signature block" in result.stderr
+
+
+def test_an_unterminated_block_in_a_tag_message_is_a_finding(repo, hashes_file):
+    raw_tag(repo, "release\n" + pgp().replace("-----END PGP SIGNATURE-----\n", ""))
+    assert "unterminated signature block" in run_script(repo, hashes_file, "--history").stderr
+
+
+def test_a_block_cannot_run_on_into_the_next_header(repo, hashes_file):
+    opened = folded("gpgsig", "-----BEGIN PGP SIGNATURE-----\n")
+    raw_commit(repo, opened + folded("x-note", BODY + "\n"))
+    result = run_script(repo, hashes_file, "--history")
+    assert "unterminated signature block" in result.stderr and "banned-term" in result.stderr
+
+
+# Non-UTF-8 paths ======================================================================================================
+
+BAD_NAME = b"caf\xe9.txt"
+
+
+def index_a_bad_path(repo):
+    blob = hash_raw_object(repo, "blob", b"clean\n")
+    git_bytes(
+        repo, "update-index", "--add", "--index-info", stdin=b"100644 " + blob.encode() + b"\t" + BAD_NAME + b"\n"
+    )
+    return blob
+
+
+@pytest.mark.parametrize("mode", ["--staged", "--tree"])
+def test_a_non_utf8_index_path_is_a_finding_not_a_traceback(repo, hashes_file, mode):
+    index_a_bad_path(repo)
+    result = run_script(repo, hashes_file, mode)
+    assert result.returncode == 1 and "invalid UTF-8 in path" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_non_utf8_path_in_history_is_a_finding(repo, hashes_file):
+    blob = hash_raw_object(repo, "blob", b"clean\n")
+    tree = git_bytes(repo, "mktree", stdin=b"100644 blob " + blob.encode() + b"\t" + BAD_NAME + b"\n")
+    commit = git(repo, "commit-tree", tree, "-m", "feat: x").strip()
+    git(repo, "update-ref", "refs/heads/main", commit)
+    result = run_script(repo, hashes_file, "--history")
+    assert result.returncode == 1 and "invalid UTF-8 in path" in result.stderr
+
+
+def test_a_banned_name_in_a_non_utf8_path_is_not_printed(repo, hashes_file):
+    blob = hash_raw_object(repo, "blob", b"clean\n")
+    git_bytes(
+        repo,
+        "update-index",
+        "--add",
+        "--index-info",
+        stdin=b"100644 " + blob.encode() + b"\t" + TERM.encode() + b"\xe9.txt\n"
+    )
+    result = run_script(repo, hashes_file, "--staged")
+    assert result.returncode == 1 and TERM not in result.stdout + result.stderr
+
+
+def test_a_non_utf8_ref_name_is_a_finding(repo, hashes_file):
+    seed(repo)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    packed = repo / ".git" / "packed-refs"  # a loose ref would need a file system that stores non-UTF-8 names
+    packed.write_bytes(b"# pack-refs with: peeled fully-peeled sorted \n" + head.encode() + b" refs/heads/caf\xe9\n")
+    result = run_script(repo, hashes_file, "--history")
+    assert result.returncode == 1 and "invalid UTF-8 in ref name" in result.stderr and "Traceback" not in result.stderr

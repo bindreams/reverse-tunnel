@@ -28,8 +28,10 @@ jobs:
       - run: uv run prek run --all-files
       # The prek hook only sees staged changes; these cover the whole tree and every ref.
       - run: python3 scripts/no-personal-artifacts.py --tree
-      # checkout fetches heads and tags only; notes, refs/pull/* and custom namespaces are public too.
-      - run: git fetch --no-tags origin '+refs/*:refs/fetched/*'
+      # checkout fetches heads and tags only; notes and custom namespaces are public too. refs/pull/* is excluded: the
+      # owner cannot delete a contributor's PR ref, so one bad PR would fail every later run. The PR under test is
+      # still scanned, because on pull_request the checked-out HEAD is its merge commit.
+      - run: git fetch --no-tags origin '+refs/*:refs/fetched/*' '^refs/pull/*'
       - run: python3 scripts/no-personal-artifacts.py --history
 
   unit:

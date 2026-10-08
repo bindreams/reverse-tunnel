@@ -43,7 +43,7 @@ def git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
 
 def hash_raw_object(cwd: Path, kind: str, content: bytes) -> str:
     """Write an object git itself would not produce, such as a commit with an odd `encoding` header."""
-    result = subprocess.run(["git", "hash-object", "-t", kind, "-w", "--stdin"],
+    result = subprocess.run(["git", "hash-object", "-t", kind, "-w", "--literally", "--stdin"],
                             cwd=cwd,
                             env=GIT_ENV,
                             input=content,
@@ -66,3 +66,8 @@ def run_script(cwd: Path, hashes: Path, *args: str) -> subprocess.CompletedProce
 def kinds(text: str, hashes: Path) -> list[str]:
     module = load_script()
     return [finding.kind for finding in module.scan_text(text, module.load_hashes(hashes))]
+
+
+def git_bytes(cwd: Path, *args: str, stdin: bytes) -> str:
+    result = subprocess.run(["git", *args], cwd=cwd, env=GIT_ENV, input=stdin, capture_output=True, check=True)
+    return result.stdout.decode().strip()
