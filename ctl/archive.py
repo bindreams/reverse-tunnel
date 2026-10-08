@@ -6,6 +6,7 @@ It still refuses the whole archive for one: a link, a special file, an unsafe na
 or Windows extraction would merge. The same scan serves `refresh` and `fetch`, so a pin that is accepted is fetchable.
 """
 
+import contextlib
 import enum
 import hashlib
 import lzma
@@ -74,19 +75,24 @@ def extract_member(path: Path, fmt: ArchiveFormat, member: str, target: Path) ->
         raise BinariesError(f"{target}: the parent must be an existing directory and not a link")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     out = os.fdopen(os.open(target, flags, 0o600), "wb")
+    copied: list[str] = []
+
+    def copy(stream: IO[bytes]) -> str:
+        if copied:
+            raise BinariesError(f"{path.name}: more than one regular file at {member!r}")
+        copied.append(member)
+        return _copy_hashing(stream, out)
+
     try:
-        with out:
-
-            def copy(stream: IO[bytes]) -> str:
-                if out.tell():
-                    raise BinariesError(f"{path.name}: more than one regular file at {member!r}")
-                return _copy_hashing(stream, out)
-
-            _, digest = _find(path, fmt, lambda name: name == member, copy, f"regular file at {member!r}")
-        return digest
+        _, digest = _find(path, fmt, lambda name: name == member, copy, f"regular file at {member!r}")
+        _flush(out)
+        out.close()
     except BaseException:
+        with contextlib.suppress(OSError):
+            out.close()
         target.unlink(missing_ok=True)
         raise
+    return digest
 
 
 def _find(path: Path, fmt: ArchiveFormat, select: Callable[[str], bool], consume: Callable[[IO[bytes]], T],
@@ -174,8 +180,18 @@ def _copy_hashing(stream: IO[bytes], out: IO[bytes]) -> str:
     digest = hashlib.sha256()
     while chunk := stream.read(CHUNK):
         digest.update(chunk)
-        out.write(chunk)
+        try:
+            out.write(chunk)
+        except OSError as exc:
+            raise BinariesError(f"cannot write the extracted file: {exc}") from exc
     return digest.hexdigest()
+
+
+def _flush(out: IO[bytes]) -> None:
+    try:
+        out.flush()
+    except OSError as exc:
+        raise BinariesError(f"cannot write the extracted file: {exc}") from exc
 
 
 def hash_file(path: Path) -> str:

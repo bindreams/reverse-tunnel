@@ -1,6 +1,7 @@
 import enum
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 import tomlkit
@@ -403,4 +404,29 @@ def test_load_lock_rejects_a_bundle_url_from_another_repository(generated_lock_p
         entry["url"] = entry["url"].replace("bindreams/goetia", repo)
 
     with pytest.raises(BinariesError, match="bindreams/goetia"):
+        load_lock(edited(generated_lock_path, other))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://github.com/{path}",
+        "https://example.test/{path}",
+        "https://github.com.example.test/{path}",
+        "https://user"
+        "@"
+        "github.com/{path}",  # userinfo, split so it does not read as an e-mail address
+        "https://github.com:8443/{path}",
+        "https://github.com/{path}?token=1",
+        "https://github.com/{path}#frag",
+        "ftp://github.com/{path}",
+    ],
+)
+def test_load_lock_rejects_a_url_that_is_not_https_github(generated_lock_path, url):
+
+    def other(document):
+        entry = document["frp"]["linux-x86_64"][0]
+        entry["url"] = url.format(path=urlsplit(entry["url"]).path.lstrip("/"))
+
+    with pytest.raises(BinariesError, match="https"):
         load_lock(edited(generated_lock_path, other))

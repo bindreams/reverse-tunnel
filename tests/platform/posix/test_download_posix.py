@@ -23,7 +23,7 @@ def test_a_fetched_bare_binary_is_executable(tmp_path):
     )
     dest = tmp_path / "bin"
     dest.mkdir()
-    path = fetch(pin, dest, transport=serve(body))
+    path = fetch(pin, dest, transport=serve(body)).path
     assert stat.S_IMODE(path.stat().st_mode) == 0o755
     assert os.access(path, os.X_OK)
 
@@ -43,6 +43,6 @@ def test_a_fetched_archive_member_is_executable_whatever_its_archived_mode(tmp_p
     )
     dest = tmp_path / "bin"
     dest.mkdir()
-    path = fetch(pin, dest, transport=serve(body))
+    path = fetch(pin, dest, transport=serve(body)).path
     assert stat.S_IMODE(path.stat().st_mode) == 0o755
     assert os.access(path, os.X_OK)

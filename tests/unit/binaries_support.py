@@ -165,7 +165,7 @@ def tool_assets(tool: str, version: str, generation: str = "a") -> dict[str, byt
 # Transport ============================================================================================================
 
 API = "https://api.github.com"
-ASSET_HOST = "https://assets.example.test"
+ASSET_HOST = "https://github.com"
 DOWNLOADS = "/releases/download/"
 
 

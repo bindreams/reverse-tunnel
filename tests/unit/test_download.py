@@ -21,7 +21,9 @@ from binaries_support import (
 from ctl import download
 from ctl.archive import ArchiveFormat
 from ctl.binaries import Pin, bundle_for, load_lock, pins_for, refresh
-from ctl.download import Fetcher, fetch, read_digests, record_digests
+from sigstore.verify import Verifier
+
+from ctl.download import Fetcher, TrustLevel, fetch, read_digests, record_digests
 from ctl.errors import AttestationError, BinariesError, UpstreamUnavailable
 
 SHAPES = [("frp", "linux-x86_64"), ("goetia", "linux-x86_64"), ("frp", "windows-x86_64"), ("goetia", "windows-x86_64")]
@@ -144,7 +146,7 @@ def test_fetch_replaces_an_existing_binary_and_touches_nothing_else(published, l
     (dest / "frpc").write_bytes(b"old")
     (dest / "frps").write_bytes(b"neighbour")
     pin = the_pin(lock, "frp", "linux-x86_64", "frpc")
-    path = fetch(pin, dest, transport=published.transport)
+    path = fetch(pin, dest, transport=published.transport).path
     assert path == dest / "frpc"
     assert path.read_bytes() == member_content("frp", VERSIONS["frp"], "linux-x86_64", "frpc")
     assert (dest / "frps").read_bytes() == b"neighbour"
@@ -171,7 +173,7 @@ def test_fetch_refuses_an_install_name_that_is_not_a_bare_file_name(published, l
 @pytest.mark.parametrize(("tool", "platform"), SHAPES)
 def test_fetch_extracts_the_named_member_from_each_archive_format(published, lock, dest, attest, tool, platform):
     for pin in pins_for(lock, tool, platform):
-        path = fetch(pin, dest, bundle=bundle_for(lock, tool), transport=published.transport, attest=attest)
+        path = fetch(pin, dest, bundle=bundle_for(lock, tool), transport=published.transport, attest=attest).path
         binary = pin.install_name.removesuffix(".exe")
         assert path == dest / pin.install_name
         assert path.read_bytes() == member_content(tool, VERSIONS[tool], platform, binary)
@@ -180,7 +182,7 @@ def test_fetch_extracts_the_named_member_from_each_archive_format(published, loc
 def test_fetch_extracts_a_member_from_under_a_top_level_directory(published, lock, dest, attest):
     pin = the_pin(lock, "goetia", "linux-x86_64", "goetia")
     assert pin.archive_member == "goetia-x86_64-unknown-linux-musl/goetia"
-    path = fetch(pin, dest, bundle=the_bundle(lock), transport=published.transport, attest=attest)
+    path = fetch(pin, dest, bundle=the_bundle(lock), transport=published.transport, attest=attest).path
     assert path.read_bytes() == member_content("goetia", VERSIONS["goetia"], "linux-x86_64", "goetia")
     assert [p.name for p in dest.iterdir()] == ["goetia"]
 
@@ -194,12 +196,12 @@ def test_fetch_dispatches_on_the_recorded_format_and_not_the_url_extension(tmp_p
     upstream = Upstream()
     url = serve(upstream, served_as, body)
     pin = Pin("frp", VERSIONS["frp"], url, sha256(body), sha256(b"payload"), fmt, "top/frpc", "frpc")
-    assert fetch(pin, dest, transport=upstream.transport).read_bytes() == b"payload"
+    assert fetch(pin, dest, transport=upstream.transport).path.read_bytes() == b"payload"
 
 
 def test_a_bare_binary_needs_no_extraction(published, lock, dest, extractions):
     pin = the_pin(lock, "websocat", "linux-x86_64")
-    path = fetch(pin, dest, transport=published.transport)
+    path = fetch(pin, dest, transport=published.transport).path
     assert path.read_bytes() == member_content("websocat", VERSIONS["websocat"], "linux-x86_64", "websocat")
     assert extractions == []
 
@@ -329,13 +331,40 @@ def test_a_refused_attestation_installs_nothing_and_extracts_nothing(published, 
     assert extractions == []
 
 
-def test_the_default_attestation_is_a_real_verification(published, lock, dest, extractions):
+def test_the_default_attestation_is_a_real_verification(published, lock, dest, extractions, verifier):
     """The fixture bundle is not a Sigstore bundle at all, so only a real verifier can be the one refusing it."""
     pin = the_pin(lock, "goetia", "linux-x86_64", "goetia")
     with pytest.raises(AttestationError, match="bundle"):
-        fetch(pin, dest, bundle=the_bundle(lock), transport=published.transport)
+        fetch(pin, dest, bundle=the_bundle(lock), transport=published.transport, verifier=verifier)
     assert list(dest.iterdir()) == []
     assert extractions == []
+
+
+def test_a_default_fetcher_verifies_against_the_production_trust_root(published, lock, dest, verifier, monkeypatch):
+    asked = []
+    monkeypatch.setattr(Verifier, "production", classmethod(lambda cls: asked.append(cls) or verifier))
+    pin = the_pin(lock, "goetia", "linux-x86_64", "goetia")
+    with pytest.raises(AttestationError):
+        fetch(pin, dest, bundle=the_bundle(lock), transport=published.transport)
+    assert asked == [Verifier]
+
+
+def test_the_production_trust_root_is_obtained_once_per_fetcher(published, lock, dest, verifier, monkeypatch):
+    asked = []
+    monkeypatch.setattr(Verifier, "production", classmethod(lambda cls: asked.append(cls) or verifier))
+    with Fetcher(transport=published.transport) as fetcher:
+        for pin in pins_for(lock, "goetia", "linux-x86_64"):
+            with pytest.raises(AttestationError):
+                fetcher.fetch(pin, dest, the_bundle(lock))
+    assert len(asked) == 1
+
+
+def test_a_tool_with_a_bundle_but_no_identity_policy_is_an_error(published, lock, dest, attest, monkeypatch):
+    monkeypatch.setattr(download, "POLICIES", {})
+    pin = the_pin(lock, "goetia", "linux-x86_64", "goetia")
+    with pytest.raises(BinariesError, match="identity policy"):
+        fetch(pin, dest, bundle=the_bundle(lock), transport=published.transport, attest=attest)
+    assert list(dest.iterdir()) == []
 
 
 def test_a_bundle_whose_digest_is_wrong_is_refused_before_it_is_read(published, lock, dest, attest):
@@ -345,6 +374,45 @@ def test_a_bundle_whose_digest_is_wrong_is_refused_before_it_is_read(published, 
         fetch(pin, dest, bundle=bundle, transport=published.transport, attest=attest)
     assert attest.calls == []
     assert list(dest.iterdir()) == []
+
+
+# Trust levels =========================================================================================================
+
+
+def test_a_digest_pinned_tool_is_reported_digest_only(published, lock, dest):
+    for tool, platform in [("frp", "linux-x86_64"), ("websocat", "linux-x86_64")]:
+        for pin in pins_for(lock, tool, platform):
+            assert fetch(pin, dest, transport=published.transport).trust is TrustLevel.DIGEST_ONLY
+
+
+def test_goetia_is_reported_attested_for_every_binary_even_when_the_attestation_was_cached(
+    published, lock, dest, attest
+):
+    with Fetcher(transport=published.transport, attest=attest) as fetcher:
+        levels = [fetcher.fetch(pin, dest, the_bundle(lock)).trust for pin in pins_for(lock, "goetia", "linux-x86_64")]
+    assert levels == [TrustLevel.ATTESTED, TrustLevel.ATTESTED]
+    assert len(attest.calls) == 1
+
+
+def test_trust_levels_print_as_words():
+    assert [str(TrustLevel.DIGEST_ONLY), str(TrustLevel.ATTESTED)] == ["digest-only", "attested"]
+
+
+# The fetcher and its destination ======================================================================================
+
+
+def test_a_fetcher_used_without_with_says_so(published, lock, dest):
+    fetcher = Fetcher(transport=published.transport)
+    with pytest.raises(RuntimeError, match="with"):
+        fetcher.fetch(the_pin(lock, "frp", "linux-x86_64", "frpc"), dest)
+
+
+def test_a_cached_download_is_keyed_by_its_pinned_digest_as_well_as_its_url(published, lock, dest):
+    pin = the_pin(lock, "frp", "linux-x86_64", "frpc")
+    with Fetcher(transport=published.transport) as fetcher:
+        fetcher.fetch(pin, dest)
+        with pytest.raises(BinariesError, match="sha256"):
+            fetcher.fetch(dataclasses.replace(pin, asset_sha256="0" * 64), dest)
 
 
 # Asset selection ======================================================================================================
@@ -364,7 +432,7 @@ def test_release_assets_are_selected_by_name(generated_lock_path, dest, attest):
     assert generated_lock_path.read_text() == before
     lock = load_lock(generated_lock_path)
     pin = the_pin(lock, "goetia", "linux-x86_64", "goetia")
-    fetched = fetch(pin, dest, bundle=the_bundle(lock), transport=reordered.transport, attest=attest)
+    fetched = fetch(pin, dest, bundle=the_bundle(lock), transport=reordered.transport, attest=attest).path
     assert fetched.read_bytes() == member_content("goetia", VERSIONS["goetia"], "linux-x86_64", "goetia")
 
 
@@ -406,7 +474,11 @@ def test_reading_digests_from_a_bin_with_no_record_is_empty(dest):
 
 @pytest.mark.parametrize(
     "text",
-    ["", "{", "[]", '{"frpc": 1}', '{"frpc": "nothex"}', '{"frpc": "' + "A" * 64 + '"}', '{"a/b": "' + "a" * 64 + '"}'],
+    [
+        "", "{", "[]", '{"frpc": 1}', '{"frpc": "nothex"}', '{"frpc": "' + "A" * 64 + '"}',
+        '{"a/b": "' + "a" * 64 + '"}', '{".": "' + "a" * 64 + '"}', '{"..": "' + "a" * 64 + '"}',
+        '{"": "' + "a" * 64 + '"}', '{"frpc": "' + "a" * 64 + '", "frpc": "' + "b" * 64 + '"}'
+    ],
 )
 def test_a_malformed_digest_record_is_an_error_and_never_empty(dest, text):
     (dest / ".digests.json").write_text(text)

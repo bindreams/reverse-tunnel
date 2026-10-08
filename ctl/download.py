@@ -3,11 +3,11 @@
 
 import contextlib
 import dataclasses
+import enum
 import functools
 import json
 import os
-import re
-import shutil
+import stat
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
@@ -15,12 +15,15 @@ from types import TracebackType
 from typing import Self
 
 import httpx
-from sigstore.errors import Error, TUFError
+from sigstore.dsse import Statement
+from sigstore.hashes import Hashed
 from sigstore.models import Bundle
 from sigstore.verify import Verifier, policy
+from sigstore_models.common.v1 import HashAlgorithm
 
-from ctl.archive import CHUNK, ArchiveFormat, extract_member, hash_file, is_safe_member
-from ctl.binaries import TOOLS, Pin, write_atomically
+from ctl.archive import ArchiveFormat, extract_member, hash_file, is_safe_member
+from ctl.atomic import is_link, replace_file, require_directory
+from ctl.binaries import HEX64, TOOLS, Pin, write_atomically
 from ctl.errors import AttestationError, BinariesError, UpstreamUnavailable
 from ctl.github import download, download_client
 
@@ -28,6 +31,7 @@ from ctl.github import download, download_client
 
 GITHUB_ACTIONS_ISSUER = "https://token.actions.githubusercontent.com"
 IN_TOTO_PAYLOAD = "application/vnd.in-toto+json"
+SLSA_PROVENANCE = "https://slsa.dev/provenance/v1"
 
 # Measured against the v0.1.0 release certificate: its SAN, its workflow name (OID 1.3.6.1.4.1.57264.1.4), and its
 # trigger (.1.2). goetia releases by hand from `main`, so the certificate records a branch rather than a tag and
@@ -71,8 +75,8 @@ def production_verifier() -> Verifier:
     """A verifier rooted in Sigstore's public-good trusted root, refreshed from its TUF repository."""
     try:
         return Verifier.production()
-    except TUFError as exc:
-        raise UpstreamUnavailable(f"cannot refresh Sigstore's trusted root over TUF: {exc}") from exc
+    except Exception as exc:
+        raise UpstreamUnavailable(f"cannot obtain Sigstore's trusted root (TUF): {type(exc).__name__}: {exc}") from exc
 
 
 def verify_attestation(
@@ -80,11 +84,12 @@ def verify_attestation(
 ) -> None:
     """Raise `AttestationError` unless `bundle` is a Sigstore attestation under `policy` that covers `artifact`'s bytes."""
     try:
+        digest = hash_file(artifact)
         raw = bundle.read_bytes()
     except OSError as exc:
-        raise AttestationError(f"{artifact.name}: cannot read the Sigstore bundle: {exc}") from exc
+        raise AttestationError(f"{artifact.name}: cannot read the artifact or its Sigstore bundle: {exc}") from exc
     try:
-        verify_attestation_digest(hash_file(artifact), raw, policy, verifier=verifier)
+        verify_attestation_digest(digest, raw, policy, verifier=verifier)
     except AttestationError as exc:
         raise AttestationError(f"{artifact.name}: {exc}") from exc
 
@@ -94,28 +99,32 @@ def verify_attestation_digest(
 ) -> None:
     """As `verify_attestation`, for an artifact known only by its sha256 hex `digest`.
 
-    The bundle must carry a DSSE in-toto statement, whose signature, certificate chain, transparency log entry and
-    identity are all checked, and one of whose subjects must be `digest`. A bundle may cover many artifacts.
+    The bundle must carry a DSSE in-toto statement of SLSA provenance, whose signature, certificate chain, transparency
+    log entry and identity are all checked, and one of whose subjects must be `digest`. A bundle may cover many artifacts.
+    Whatever goes wrong while checking, including an exception from a parser underneath, is an `AttestationError`.
     """
     try:
         parsed = Bundle.from_json(bundle)
-    except Error as exc:
-        raise AttestationError(f"unreadable Sigstore bundle: {exc}") from exc
+    except Exception as exc:
+        raise AttestationError(f"unreadable Sigstore bundle: {_describe(exc)}") from exc
     verifier = verifier or production_verifier()
     try:
         kind, payload = verifier.verify_dsse(parsed, policy.checks())
-    except Error as exc:
-        raise AttestationError(f"attestation rejected: {exc}") from exc
-    if kind != IN_TOTO_PAYLOAD or digest not in _subject_digests(payload):
-        raise AttestationError(f"the attestation has no subject with sha256 {digest}")
+        if kind != IN_TOTO_PAYLOAD:
+            raise AttestationError(f"the attestation's payload is {kind}, not an in-toto statement")
+        statement = Statement(payload)  # schema-checked; its `_type` can only be in-toto v1
+        if statement._inner.predicate_type != SLSA_PROVENANCE:
+            raise AttestationError(f"the attestation is {statement._inner.predicate_type}, not SLSA provenance")
+        if not statement._matches_digest(Hashed(algorithm=HashAlgorithm.SHA2_256, digest=bytes.fromhex(digest))):
+            raise AttestationError(f"the attestation has no subject with sha256 {digest}")
+    except AttestationError:
+        raise
+    except Exception as exc:
+        raise AttestationError(f"attestation rejected: {_describe(exc)}") from exc
 
 
-def _subject_digests(payload: bytes) -> set[str]:
-    try:
-        statement = json.loads(payload)
-        return {subject["digest"]["sha256"] for subject in statement["subject"]}
-    except (ValueError, KeyError, TypeError) as exc:
-        raise AttestationError(f"the attestation's statement is malformed: {exc!r}") from exc
+def _describe(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
 
 POLICIES: Mapping[str, IdentityPolicy] = {"goetia": GOETIA_IDENTITY}
@@ -123,6 +132,19 @@ Attestor = Callable[[Path, Path, IdentityPolicy], None]
 EXECUTABLE = 0o755
 
 # Fetching =============================================================================================================
+
+
+class TrustLevel(enum.StrEnum):
+    """What vouches for an installed binary: its pinned digest alone, or a Sigstore attestation as well."""
+
+    DIGEST_ONLY = "digest-only"
+    ATTESTED = "attested"
+
+
+@dataclasses.dataclass(frozen=True)
+class Installed:
+    path: Path
+    trust: TrustLevel
 
 
 class Fetcher:
@@ -144,8 +166,10 @@ class Fetcher:
         self._verifier = verifier
         self._attest = attest
         self._stack = contextlib.ExitStack()
-        self._assets: dict[str, Path] = {}
-        self._attested: set[tuple[str, str]] = set()
+        self._client: httpx.Client | None = None
+        self._scratch: Path | None = None
+        self._assets: dict[tuple[str, str], Path] = {}
+        self._attested: set[tuple[tuple[str, str], tuple[str, str]]] = set()
 
     def __enter__(self) -> Self:
         self._client = self._stack.enter_context(download_client(self._transport))
@@ -156,14 +180,17 @@ class Fetcher:
         self, kind: type[BaseException] | None, error: BaseException | None, trace: TracebackType | None
     ) -> None:
         self._stack.close()
+        self._client = self._scratch = None
 
-    def fetch(self, pin: Pin, dest_dir: Path, bundle: Pin | None = None) -> Path:
-        """Install `pin` as `dest_dir/<install_name>` and return that path.
+    def fetch(self, pin: Pin, dest_dir: Path, bundle: Pin | None = None) -> Installed:
+        """Install `pin` as `dest_dir/<install_name>`, reporting how far it is trusted.
 
         Nothing is written to `dest_dir` until the asset's digest, its attestation (when the tool has one) and the
         extracted file's digest have all passed. `bundle` is the tool's pinned Sigstore bundle, required exactly when
         the tool publishes one.
         """
+        if self._client is None or self._scratch is None:
+            raise RuntimeError("a Fetcher must be used in a `with` block")
         context = f"{pin.tool} {pin.version}: {pin.install_name}"
         self._check(pin, dest_dir, bundle, context)
         archive = self._asset(pin, context)
@@ -177,16 +204,16 @@ class Fetcher:
             digest = extract_member(archive, pin.archive_format, pin.archive_member, source)
         if digest != pin.member_sha256:
             raise BinariesError(f"{context}: member sha256 is {digest} but the lock pins {pin.member_sha256}")
-        return _install(source, dest_dir / pin.install_name)
+        with source.open("rb") as stream:
+            path = replace_file(dest_dir, pin.install_name, stream, EXECUTABLE)
+        return Installed(path, TrustLevel.DIGEST_ONLY if bundle is None else TrustLevel.ATTESTED)
 
     def _check(self, pin: Pin, dest_dir: Path, bundle: Pin | None, context: str) -> None:
         if pin.tool not in TOOLS:
             raise BinariesError(f"{context}: unknown tool {pin.tool!r}")
-        if not dest_dir.is_dir():
-            raise BinariesError(f"{context}: {dest_dir} is not an existing directory")
-        name = pin.install_name
-        if not is_safe_member(name) or PurePosixPath(name).name != name or name in (".", ".."):
-            raise BinariesError(f"{context}: install name {name!r} is not a plain file name")
+        require_directory(dest_dir)
+        if not is_plain_name(pin.install_name):
+            raise BinariesError(f"{context}: install name {pin.install_name!r} is not a plain file name")
         wanted = TOOLS[pin.tool].bundle_asset
         if wanted is None and bundle is not None:
             raise BinariesError(f"{context}: {pin.tool} publishes no attestation, so there is no bundle to check")
@@ -200,21 +227,25 @@ class Fetcher:
                     f"{context}: the bundle is {bundle.tool} {bundle.version} {bundle.install_name}, "
                     f"not {pin.tool} {pin.version} {wanted}"
                 )
+            if pin.tool not in POLICIES:
+                raise BinariesError(f"{context}: no identity policy is pinned for {pin.tool}")
 
     def _asset(self, pin: Pin, context: str) -> Path:
         """The release asset `pin` names, downloaded and checked against its pinned digest."""
-        if pin.url not in self._assets:
+        assert self._client is not None and self._scratch is not None
+        key = (pin.url, pin.asset_sha256)
+        if key not in self._assets:
             path = Path(tempfile.mkdtemp(dir=self._scratch, prefix="asset-")) / "asset"
             got = download(self._client, pin.url, path)
             if got != pin.asset_sha256:
                 raise BinariesError(
                     f"{context}: {pin.url} downloaded as sha256 {got} but the lock pins {pin.asset_sha256}"
                 )
-            self._assets[pin.url] = path
-        return self._assets[pin.url]
+            self._assets[key] = path
+        return self._assets[key]
 
     def _attest_once(self, pin: Pin, archive: Path, bundle: Pin, context: str) -> None:
-        key = (pin.url, bundle.url)
+        key = ((pin.url, pin.asset_sha256), (bundle.url, bundle.asset_sha256))
         if key not in self._attested:
             bundle_path = self._asset(bundle, context)
             attest = self._attest or functools.partial(verify_attestation, verifier=self._production_verifier())
@@ -227,20 +258,6 @@ class Fetcher:
         return self._verifier
 
 
-def _install(source: Path, target: Path) -> Path:
-    """Copy `source` to `target` as one atomic replacement, executable; nothing is left behind on failure."""
-    handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
-    try:
-        with os.fdopen(handle, "wb") as out, source.open("rb") as stream:
-            shutil.copyfileobj(stream, out, CHUNK)
-        os.chmod(temporary, EXECUTABLE)
-        os.replace(temporary, target)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
-    return target
-
-
 def fetch(
     pin: Pin,
     dest_dir: Path,
@@ -249,7 +266,7 @@ def fetch(
     transport: httpx.BaseTransport | None = None,
     verifier: Verifier | None = None,
     attest: Attestor | None = None,
-) -> Path:
+) -> Installed:
     """Download, verify and install one pinned binary; see `Fetcher.fetch`."""
     with Fetcher(transport=transport, verifier=verifier, attest=attest) as fetcher:
         return fetcher.fetch(pin, dest_dir, bundle)
@@ -258,7 +275,11 @@ def fetch(
 # Recorded digests =====================================================================================================
 
 DIGESTS = ".digests.json"
-HEX64 = re.compile(r"[0-9a-f]{64}", re.ASCII)
+
+
+def is_plain_name(name: str) -> bool:
+    """A single file name: nothing that could name another directory or the current one."""
+    return is_safe_member(name) and PurePosixPath(name).name == name and name not in (".", "..")
 
 
 def record_digests(bin_dir: Path, pins: Iterable[Pin]) -> None:
@@ -274,18 +295,30 @@ def read_digests(bin_dir: Path) -> dict[str, str]:
     """What `record_digests` wrote; `{}` when nothing was ever recorded, an error when the record cannot be trusted."""
     path = bin_dir / DIGESTS
     try:
-        text = path.read_text(encoding="utf-8")
+        if is_link(os.lstat(path)):
+            raise BinariesError(f"{path}: digests must be a regular file, not a link")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise BinariesError(f"{path}: digests must be a regular file")
+            text = stream.read().decode("utf-8")
     except FileNotFoundError:
         return {}
     except (OSError, UnicodeDecodeError) as exc:
         raise BinariesError(f"{path}: digests unreadable: {exc}") from exc
     try:
-        document = json.loads(text)
+        document = json.loads(text, object_pairs_hook=_unique_keys)
     except ValueError as exc:
         raise BinariesError(f"{path}: digests are not JSON: {exc}") from exc
     if not isinstance(document, dict) or not all(
-        isinstance(name, str) and is_safe_member(name) and "/" not in name and isinstance(digest, str)
-        and HEX64.fullmatch(digest) for name, digest in document.items()
+        is_plain_name(name) and isinstance(digest, str) and HEX64.fullmatch(digest) for name, digest in document.items()
     ):
         raise BinariesError(f"{path}: digests must map plain file names to sha256 hex digests")
     return document
+
+
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    names = [name for name, _ in pairs]
+    if len(names) != len(set(names)):
+        raise ValueError("a name is recorded twice")
+    return dict(pairs)

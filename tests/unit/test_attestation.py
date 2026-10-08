@@ -38,11 +38,6 @@ TRUSTED_ROOT = FIXTURES / "sigstore-trusted-root.json"
 
 
 @pytest.fixture(scope="module")
-def verifier() -> Verifier:
-    return Verifier(trusted_root=TrustedRoot.from_file(str(TRUSTED_ROOT)))
-
-
-@pytest.fixture(scope="module")
 def lock():
     return load_lock(binaries.LOCK_PATH)
 
@@ -205,3 +200,88 @@ def test_an_unreachable_trust_root_is_an_upstream_failure_and_never_a_pass(tmp_p
     monkeypatch.setattr(Verifier, "production", classmethod(unreachable))
     with pytest.raises(UpstreamUnavailable, match="TUF"):
         verify_attestation_digest(archive_digests["linux-x86_64"], BUNDLE.read_bytes(), GOETIA_IDENTITY)
+
+
+# Every failure is a taxonomy error ====================================================================================
+
+DIGEST = "ab" * 32
+STATEMENT = {
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [{"name": "a", "digest": {"sha256": DIGEST}}],
+    "predicateType": "https://slsa.dev/provenance/v1",
+    "predicate": {},
+}
+
+
+class Scripted:
+    """A verifier that vouches for whatever statement it is given, so only our own statement checks are exercised."""
+
+    def __init__(self, payload: bytes | Exception, kind: str = "application/vnd.in-toto+json") -> None:
+        self.payload, self.kind = payload, kind
+
+    def verify_dsse(self, bundle, policy):
+        if isinstance(self.payload, Exception):
+            raise self.payload
+        return self.kind, self.payload
+
+
+def check(verifier, digest: str = DIGEST) -> None:
+    verify_attestation_digest(digest, BUNDLE.read_bytes(), GOETIA_IDENTITY, verifier=verifier)
+
+
+def statement(**changes) -> bytes:
+    return json.dumps({**STATEMENT, **changes}).encode()
+
+
+def test_a_well_formed_statement_for_the_digest_passes_the_statement_checks():
+    check(Scripted(statement()))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        statement(_type="https://in-toto.io/Statement/v0.1"),
+        statement(predicateType="https://example.test/other/v1"),
+        statement(subject=[]),
+        statement(subject=[{"name": "a", "digest": {"sha256": "cd" * 32}}]),
+        statement(subject=[{"name": "a", "digest": {"sha512": DIGEST}}]),
+        b"[]",
+        b"not json",
+    ],
+    ids=["old-type", "other-predicate", "no-subjects", "other-digest", "other-algorithm", "array", "not-json"],
+)
+def test_a_statement_that_is_not_the_pinned_provenance_for_the_digest_is_rejected(payload):
+    with pytest.raises(AttestationError):
+        check(Scripted(payload))
+
+
+def test_a_payload_of_another_type_is_rejected():
+    with pytest.raises(AttestationError):
+        check(Scripted(statement(), kind="text/plain"))
+
+
+@pytest.mark.parametrize("exc", [ValueError("bad asn1"), KeyError("x"), TypeError("t"), RuntimeError("r")])
+def test_any_failure_inside_verification_is_an_attestation_error(exc):
+    with pytest.raises(AttestationError, match=type(exc).__name__):
+        check(Scripted(exc))
+
+
+def test_any_failure_parsing_the_bundle_is_an_attestation_error(monkeypatch):
+
+    def explode(raw):
+        raise ValueError("raw parser failure")
+
+    monkeypatch.setattr(download.Bundle, "from_json", explode)
+    with pytest.raises(AttestationError, match="raw parser failure"):
+        check(Scripted(statement()))
+
+
+@pytest.mark.parametrize("exc", [TUFError("tuf"), ValueError("v"), OSError("cache dir"), RuntimeError("r")])
+def test_any_failure_obtaining_the_production_trust_root_is_an_upstream_failure(monkeypatch, exc):
+
+    def failing(cls):
+        raise exc
+
+    monkeypatch.setattr(Verifier, "production", classmethod(failing))
+    with pytest.raises(UpstreamUnavailable, match="trusted root"):
+        check(None)

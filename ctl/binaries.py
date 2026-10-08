@@ -8,10 +8,9 @@ own download.
 
 import dataclasses
 import enum
-import os
+import io
 import platform as host
 import re
-import stat
 import tempfile
 import tomllib
 from collections.abc import Callable, Iterable, Mapping
@@ -24,6 +23,7 @@ from tomlkit.exceptions import TOMLKitError
 from tomlkit.items import Table
 
 from ctl.archive import ArchiveFormat, hash_binary, is_safe_member
+from ctl.atomic import replace_file
 from ctl.config import Role
 from ctl.errors import BinariesError, UpstreamUnavailable
 from ctl.github import (
@@ -251,21 +251,26 @@ def _digest(entry: dict, key: str, where: str, source: str) -> str:
 
 def _url(entry: dict, where: str, source: str) -> str:
     url = _field(entry, "url", where, source)
-    if urlsplit(url).scheme not in ("http", "https"):
-        raise BinariesError(f"{source}: {where}: `url` must be http(s) (got {url!r})")
+    if urlsplit(url).scheme != "https":
+        raise BinariesError(f"{source}: {where}: `url` must be https (got {url!r})")
     return url
 
 
 def _check_asset(url: str, expected: str, version: str, repo: str, where: str, source: str) -> None:
     """A version bump that leaves the old URLs behind must fail here, not at first install.
 
-    A GitHub download URL is `/<owner>/<repo>/releases/download/<tag>/<asset>`: the repository must be `repo` and both
-    the asset and the tag must belong to `version`.
+    A GitHub download URL is `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`: the repository must
+    be `repo` and both the asset and the tag must belong to `version`.
     """
-    parts = PurePosixPath(unquote(urlsplit(url).path)).parts
-    if len(parts) != 7 or parts[0] != "/" or parts[3:5] != ("releases", "download"):
+    split = urlsplit(url)
+    parts = PurePosixPath(unquote(split.path)).parts
+    if (
+        split.scheme != "https" or split.netloc != "github.com" or split.query or split.fragment or len(parts) != 7
+        or parts[0] != "/" or parts[3:5] != ("releases", "download")
+    ):
         raise BinariesError(
-            f"{source}: {where}: `url` must be /<owner>/<repo>/releases/download/<tag>/<asset> (got {url!r})"
+            f"{source}: {where}: `url` must be https://github.com/<owner>/<repo>/releases/download/<tag>/<asset> "
+            f"(got {url!r})"
         )
     if "/".join(parts[1:3]) != repo:
         raise BinariesError(f"{source}: {where}: `url` is from {'/'.join(parts[1:3])!r} but this tool is {repo!r}")
@@ -363,8 +368,12 @@ def _pin_tool(tool: str, version: str, client: httpx.Client, downloader: httpx.C
         )
     # Resolve every asset and its digest first, so a missing digest fails before any download starts.
     wanted = {platform: asset_named(release, spec.asset(version, platform), context) for platform in PLATFORMS}
+    for platform, asset in wanted.items():
+        _check_asset(asset.url, asset.name, version, spec.repo, f"{tool}.{platform}", "release")
     digests = {platform: sha256_of(asset, context) for platform, asset in wanted.items()}
     bundle = asset_named(release, spec.bundle_asset, context) if spec.bundle_asset else None
+    if bundle:
+        _check_asset(bundle.url, bundle.name, version, spec.repo, f"{tool}.{BUNDLE}", "release")
     bundle_digest = sha256_of(bundle, context) if bundle else None
     pinned: dict[str, list[Pin]] = {}
     for platform, asset in wanted.items():
@@ -423,17 +432,8 @@ def _write_tool(document: tomlkit.TOMLDocument, tool: str, pinned: dict[str, lis
 
 
 def write_atomically(path: Path, text: str) -> None:
-    """Replace `path` whole, so a failed write never leaves a half-written lock; keeps the file's mode."""
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
-    handle, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(handle, "wb") as out:
-            out.write(text.encode("utf-8"))
-        os.chmod(temp, mode)
-        os.replace(temp, path)
-    except BaseException:
-        Path(temp).unlink(missing_ok=True)
-        raise
+    """Replace `path` whole, so a failed write never leaves a half-written file; keeps the file's mode, never follows a link."""
+    replace_file(path.parent, path.name, io.BytesIO(text.encode("utf-8")), None)
 
 
 # Comparing to upstream ================================================================================================

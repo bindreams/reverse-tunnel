@@ -1,4 +1,6 @@
 import hashlib
+import io
+import os
 import re
 import tarfile
 import zipfile
@@ -7,6 +9,7 @@ from pathlib import PurePosixPath
 import pytest
 from archive_support import other, regular, write_archive, write_tar, write_zip, zip_link
 
+from ctl import archive
 from ctl.archive import ArchiveFormat, extract_member, hash_binary
 from ctl.errors import BinariesError
 
@@ -262,4 +265,29 @@ def test_extract_member_reports_a_corrupt_archive_and_leaves_nothing(tmp_path, t
     path.write_bytes(b"not an archive at all")
     with pytest.raises(BinariesError, match=name):
         extract_member(path, fmt, "top/tool", target)
+    assert list(target.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("data", [b"abc", b"x" * (3 << 20)], ids=["small", "larger-than-a-chunk"])
+def test_extract_member_reports_a_failed_write_as_a_write_failure_and_leaves_nothing(
+    tmp_path, target, monkeypatch, data
+):
+    path = write_archive(tmp_path / "a.tar.xz", ArchiveFormat.TAR_XZ, [("top/tool", data)])
+
+    class Full(io.RawIOBase):
+
+        def writable(self):
+            return True
+
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+
+    def full_disk(fd, mode):
+        os.close(fd)
+        return io.BufferedWriter(Full())
+
+    monkeypatch.setattr(archive.os, "fdopen", full_disk)
+    with pytest.raises(BinariesError, match="cannot write") as raised:
+        extract_member(path, ArchiveFormat.TAR_XZ, "top/tool", target)
+    assert "readable" not in str(raised.value)
     assert list(target.parent.iterdir()) == []

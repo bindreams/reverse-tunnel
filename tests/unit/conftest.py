@@ -1,9 +1,13 @@
 import hashlib
+import socket
 from pathlib import Path
 
 import pytest
 from binaries_support import SEED_LOCK, VERSIONS, Upstream
 from scanner_support import TERM, git
+
+from sigstore.models import TrustedRoot
+from sigstore.verify import Verifier
 
 from ctl import binaries
 
@@ -21,6 +25,20 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     git(root, "init", "-q", "-b", "main")
     return root
+
+
+# No network ===========================================================================================================
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Unit tests are offline: any socket connection fails the test, so a live call cannot slip in unnoticed."""
+
+    def refuse(self, address, *args, **kwargs):
+        pytest.fail(f"unit tests must not touch the network (connect to {address!r})", pytrace=False)
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
 
 
 # Pinned binaries ======================================================================================================
@@ -51,3 +69,14 @@ def lock_path(tmp_path: Path) -> Path:
 def generated_lock_path(published: Upstream, lock_path: Path) -> Path:
     binaries.refresh(lock_path, None, transport=published.transport)
     return lock_path
+
+
+# Sigstore =============================================================================================================
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(scope="session")
+def verifier() -> Verifier:
+    """A verifier rooted in a committed snapshot of Sigstore's trusted root, so no test refreshes it over TUF."""
+    return Verifier(trusted_root=TrustedRoot.from_file(str(FIXTURES / "sigstore-trusted-root.json")))

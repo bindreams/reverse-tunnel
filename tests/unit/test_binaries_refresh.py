@@ -4,6 +4,7 @@ import tomllib
 import zipfile
 from pathlib import Path
 
+import binaries_support
 import pytest
 from binaries_support import (
     BINARIES,
@@ -628,3 +629,13 @@ def test_compare_reports_a_prerelease_as_a_mismatch(published, generated_lock_pa
     goetia = [(drift, detail) for pin, drift, detail in results if pin.tool == "goetia"]
     assert {drift for drift, _ in goetia} == {PinDrift.MISMATCH}
     assert all("prerelease" in detail for _, detail in goetia)
+
+
+def test_refresh_refuses_an_asset_the_api_places_on_another_host(lock_path, monkeypatch):
+    monkeypatch.setattr(binaries_support, "ASSET_HOST", "https://evil.example.test")
+    upstream = Upstream()
+    upstream.add_tool("websocat", VERSIONS["websocat"])
+    before = lock_path.read_text()
+    with pytest.raises(BinariesError, match="https://github.com"):
+        refresh(lock_path, ["websocat"], transport=upstream.transport)
+    assert lock_path.read_text() == before
