@@ -39,10 +39,19 @@ FLAT = "; remove it, this directory holds regular files only"
 RETRY = "remove it, or close the process holding it, then rerun"
 
 
-def _listed(names: list[str], wanted: tuple[str, ...]) -> dict[str, str]:
-    """For each of `wanted` present in `names` (compared case-insensitively), the name as the directory lists it."""
-    by_folded = {name.casefold(): name for name in names}
-    return {name: by_folded[name.casefold()] for name in wanted if name.casefold() in by_folded}
+def _listed(names: list[str], wanted: tuple[str, ...], where: Path) -> dict[str, str]:
+    """For each of `wanted` present in `names` (compared case-insensitively), the name as the directory lists it.
+
+    A case-sensitive directory may hold `bin` and `Bin` at once; which one is meant cannot be told, so it is refused.
+    """
+    found: dict[str, str] = {}
+    for name in wanted:
+        spellings = [listed for listed in names if listed.casefold() == name.casefold()]
+        if len(spellings) > 1:
+            raise PermsError(f"{where}: holds {' and '.join(sorted(spellings))}; ambiguous, remove all but one")
+        if spellings:
+            found[name] = spellings[0]
+    return found
 
 
 def _unopenable(label: Path, exc: OSError) -> PermsError:
@@ -209,6 +218,7 @@ def converge_dir(
     operator = _operator(owner, root)
     with _errors(path):
         parent = [] if isolate else _parent_entries(path.parent)
+        winacl.refuse_unsupported(parent, str(path.parent))  # before the directory is created
         with _handle(path, directory=True, create=True) as handle:
             wanted = winacl.apply(
                 handle,
@@ -255,6 +265,7 @@ def converge_tree(path: Path, owner: Account | None, root: Path) -> None:
     operator = _operator(owner, root)
     with _errors(path), ExitStack() as stack:
         parent = _parent_entries(path.parent)
+        winacl.refuse_unsupported(parent, str(path.parent))  # before the directory is created
         held = stack.enter_context(
             _handle(
                 path,
@@ -265,23 +276,31 @@ def converge_tree(path: Path, owner: Account | None, root: Path) -> None:
             )
         )
         entries = _open_entries(stack, held, path)
-        wanted = winacl.apply(
-            held,
+        # Everything that can be refused is computed before the first write.
+        owner_sid, group_sid = winacl.owner_and_group(held)
+        planned, wanted = winacl.plan(
             directory=True,
             operator=operator,
             readers=frozenset(),
             writers=writers,
             isolate=False,
             parent=parent,
+            owner=owner_sid,
+            group=group_sid,
             parent_label=str(path.parent)
         )
-        _verify(held, path, wanted, isolate=False)
-        new_entries = winacl.read_entries(held)[0]  # as they are on disk
+        writes = []
         for handle, label in entries:
-            owner_sid, group_sid = winacl.owner_and_group(handle)
-            inherited = winacl.inherited_for(
-                new_entries, directory=False, owner=owner_sid, group=group_sid, parent_label=str(path)
-            )
+            entry_owner, entry_group = winacl.owner_and_group(handle)
+            writes.append((
+                handle, label,
+                winacl.inherited_for(
+                    planned, directory=False, owner=entry_owner, group=entry_group, parent_label=str(path)
+                )
+            ))
+        winacl.set_dacl(held, planned, protected=False)
+        _verify(held, path, wanted, isolate=False)
+        for handle, label, inherited in writes:
             winacl.set_dacl(handle, inherited, protected=False)
             if winacl.read_acl_handle(handle).protected:
                 raise PermsError(f"{label}: inheritance is still broken after the reset")
@@ -313,7 +332,7 @@ def grant_service_read(root: Path, account: Account) -> None:
         top = _Target(root_handle, root, True, [])
         targets: list[_Target] = []
         # A directory missing from the listing is absent, not unopenable: whatever is created there inherits normally.
-        for name in _listed(winfile.list_names(root_handle), ("bin", "host")).values():
+        for name in _listed(winfile.list_names(root_handle), ("bin", "host"), root).values():
             label = root / name
             try:
                 handle = winfile.open_relative(
@@ -348,8 +367,10 @@ def grant_service_read(root: Path, account: Account) -> None:
             e for e in top.entries
             if e.flags & winacl.INHERITED_ACE or e.sid != sid or e.ace_type != winacl.ACCESS_ALLOWED_ACE_TYPE
         ]
-        top.entries = winacl.canonical(kept + [service])  # the order it will have on disk
-        winacl.set_dacl(root_handle, top.entries, protected=root_protected)
+        # Compute every object's resulting ACL, in the order it will have on disk, before writing any of them: a
+        # refusal (an unsupported inheritable ACE anywhere) then leaves nothing changed.
+        top.entries = winacl.canonical(kept + [service])
+        writes = [(root_handle, top.entries, root_protected)]
         for target in targets:
             assert target.parent is not None
             owner_sid, group_sid = winacl.owner_and_group(target.handle)
@@ -362,7 +383,9 @@ def grant_service_read(root: Path, account: Account) -> None:
                     parent_label=str(target.parent.label)
                 )
             )
-            winacl.set_dacl(target.handle, target.entries, protected=False)
+            writes.append((target.handle, target.entries, False))
+        for handle, entries, protected in writes:
+            winacl.set_dacl(handle, entries, protected=protected)
         for target in [top, *targets]:
             if sid not in winacl.read_acl_handle(target.handle).sids:
                 raise PermsError(f"{target.label}: the service still has no access after the grant")

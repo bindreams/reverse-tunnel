@@ -609,22 +609,83 @@ def test_inherited_for_reproduces_the_ordered_acl_ntfs_computes(tmp_path):
             assert ordered(winacl.read_entries(handle)[0]) == by_ntfs, path
 
 
-def test_a_creator_owner_server_ace_on_the_parent_is_refused_naming_the_sid_and_the_parent(tmp_path):
+def snapshot(root: Path) -> dict[Path, tuple[list[winacl.Entry], bool]]:
+    """Every ACE, in stored order, and the inheritance state of `root` and everything under it."""
+    result = {}
+    for path in [root, *root.rglob("*")]:
+        with perms_windows._handle(path, directory=path.is_dir(), access=perms_windows.winfile.READ_CONTROL) as handle:
+            result[path] = winacl.read_entries(handle)
+    return result
+
+
+def test_a_creator_owner_server_ace_on_the_parent_is_refused_and_nothing_is_created_or_changed(tmp_path):
     parent = tmp_path / "parent"
     parent.mkdir()
     icacls(str(parent), "/grant:r", "*S-1-3-2:(OI)(CI)(F)")
+    before = snapshot(parent)
     with pytest.raises(PermsError) as raised:
         converge_tree(parent / "logs", LOCAL_SERVICE, 0o750, root=parent)
     assert "S-1-3-2" in str(raised.value)
     assert str(parent) in str(raised.value)
+    assert not (parent / "logs").exists()
+    assert snapshot(parent) == before
+
+
+def test_converge_dir_refused_for_an_unsupported_parent_ace_creates_nothing(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    icacls(str(parent), "/grant:r", "*S-1-3-3:(OI)(CI)(F)")
+    with pytest.raises(PermsError) as raised:
+        converge_dir(parent / "logs", LOCAL_SERVICE, 0o750, NO_READERS, isolate=False, root=parent)
+    assert "S-1-3-3" in str(raised.value)
+    assert not (parent / "logs").exists()
+
+
+def test_grant_service_read_refuses_an_unsupported_ace_on_the_root_and_writes_nothing(tmp_path):
+    repo = repo_with(tmp_path)
+    icacls(str(repo), "/grant:r", "*S-1-3-2:(OI)(CI)(F)")
+    before = snapshot(repo)
+    with pytest.raises(PermsError) as raised:
+        grant_service_read(repo, LOCAL_SERVICE)
+    assert "S-1-3-2" in str(raised.value)
+    assert snapshot(repo) == before
+
+
+def test_grant_service_read_refuses_an_unsupported_ace_on_bin_and_writes_nothing(tmp_path):
+    repo = repo_with(tmp_path)
+    icacls(str(repo / "bin"), "/grant:r", "*S-1-3-2:(OI)(R)")
+    before = snapshot(repo)
+    with pytest.raises(PermsError) as raised:
+        grant_service_read(repo, LOCAL_SERVICE)
+    assert "S-1-3-2" in str(raised.value)
+    assert snapshot(repo) == before
+
+
+def case_sensitive_repo(tmp_path: Path) -> Path:
+    """An empty directory whose names are matched case-sensitively, so `bin` and `Bin` are different entries."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["fsutil", "file", "setCaseSensitiveInfo", str(repo), "enable"], check=True, capture_output=True)
+    return repo
 
 
 def test_grant_service_read_opens_a_directory_by_the_name_the_listing_gives(tmp_path):
-    repo = tmp_path / "repo"
-    (repo / "Bin").mkdir(parents=True)
+    repo = case_sensitive_repo(tmp_path)
+    (repo / "Bin").mkdir()
     (repo / "Bin" / "frpc.exe").write_bytes(b"")
     grant_service_read(repo, LOCAL_SERVICE)
     assert SID_LOCAL_SERVICE in principals(repo / "Bin" / "frpc.exe")
+
+
+def test_grant_service_read_refuses_bin_and_Bin_together_as_ambiguous(tmp_path):
+    repo = case_sensitive_repo(tmp_path)
+    (repo / "bin").mkdir()
+    (repo / "Bin").mkdir()
+    before = snapshot(repo)
+    with pytest.raises(PermsError) as raised:
+        grant_service_read(repo, LOCAL_SERVICE)
+    assert "ambiguous" in str(raised.value)
+    assert snapshot(repo) == before
 
 
 # Inspection ===========================================================================================================

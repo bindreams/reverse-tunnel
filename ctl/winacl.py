@@ -92,6 +92,19 @@ class Acl:
 # Inheritance ==========================================================================================================
 
 
+def refuse_unsupported(parent: Iterable[Entry], parent_label: str) -> None:
+    """Raise `UnsupportedInheritance` if `parent` holds an inheritable ACE whose inherited form is not modelled.
+
+    Callable before anything is created or written, so a refusal leaves nothing behind.
+    """
+    for ace in parent:
+        if ace.flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) and ace.sid in SERVER_CREATOR_SIDS:
+            raise UnsupportedInheritance(
+                f"{parent_label}: grants {ace.sid}, which is inherited with server semantics this tool does not "
+                "model; remove that ACE"
+            )
+
+
 def _effective(ace: Entry, owner: str | None, group: str | None) -> Entry:
     """`ace` as it applies to a child: the creator SIDs become the child's owner and group, generic rights are mapped."""
     sid, mask = ace.sid, ace.mask
@@ -127,14 +140,11 @@ def inherited_for(
     included, as they are on disk. An inheritable CREATOR OWNER SERVER or CREATOR GROUP SERVER ACE raises
     `UnsupportedInheritance` naming `parent_label`.
     """
+    parent = list(parent)
+    refuse_unsupported(parent, parent_label)
     result = []
     for ace in parent:
         flags = ace.flags
-        if flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) and ace.sid in SERVER_CREATOR_SIDS:
-            raise UnsupportedInheritance(
-                f"{parent_label}: grants {ace.sid}, which is inherited with server semantics this tool does not "
-                "model; remove that ACE"
-            )
         if not directory:
             if flags & OBJECT_INHERIT_ACE:
                 result.append(_effective(ace, owner, group))
@@ -324,6 +334,32 @@ def grants(
     return wanted
 
 
+def plan(
+    *,
+    directory: bool,
+    operator: str | None,
+    readers: Collection[str],
+    writers: Collection[str],
+    isolate: bool,
+    parent: Iterable[Entry] = (),
+    owner: str | None = None,
+    group: str | None = None,
+    parent_label: str = "<parent>",
+) -> tuple[list[Entry], frozenset[str]]:
+    """The DACL an object should end up with, and the SIDs it grants explicitly. Nothing is written.
+
+    The explicit ACEs are the `grants`, inheritable by children if it is a directory. With `isolate`, inheritance
+    from the parent is broken, so they are the whole ACL. Without it, the ACEs `parent` (all of the parent's ACEs, as
+    on disk) passes down to an object owned by `owner` with primary group `group` follow them, inherited.
+    """
+    wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers)
+    inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
+    entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()]
+    if not isolate:
+        entries += inherited_for(parent, directory=directory, owner=owner, group=group, parent_label=parent_label)
+    return canonical(entries), frozenset(wanted)
+
+
 def apply(
     handle: int,
     *,
@@ -335,17 +371,18 @@ def apply(
     parent: Iterable[Entry] = (),
     parent_label: str = "<parent>",
 ) -> frozenset[str]:
-    """Make the explicit ACEs of the object exactly the `grants`, inheritable by children if it is a directory.
-
-    With `isolate`, inheritance from the parent is broken, so the result is the whole ACL. Without it the ACEs
-    `parent` (all of the parent's ACEs) passes down are included as inherited. Returns the SIDs granted explicitly.
-    `handle` needs WRITE_DAC.
-    """
-    wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers)
-    inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
-    entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()]
-    if not isolate:
-        owner, group = owner_and_group(handle)
-        entries += inherited_for(parent, directory=directory, owner=owner, group=group, parent_label=parent_label)
+    """`plan` the DACL of the object behind `handle` (WRITE_DAC, READ_CONTROL) and write it. Returns the grants."""
+    owner, group = owner_and_group(handle) if not isolate else (None, None)
+    entries, wanted = plan(
+        directory=directory,
+        operator=operator,
+        readers=readers,
+        writers=writers,
+        isolate=isolate,
+        parent=parent,
+        owner=owner,
+        group=group,
+        parent_label=parent_label
+    )
     set_dacl(handle, entries, protected=isolate)
-    return frozenset(wanted)
+    return wanted

@@ -244,3 +244,41 @@ def test_a_delete_pending_status_says_so():
 
     error = _winfile._status_error(None, 0xC0000056 - (1 << 32))
     assert "being deleted" in str(error)
+
+
+def test_refuse_unsupported_can_be_asked_before_anything_exists():
+    winacl.refuse_unsupported([entry(OI | CI, sid="S-1-5-19")], "C:/repo")
+    with pytest.raises(OSError) as raised:
+        winacl.refuse_unsupported([entry(OI | CI, sid="S-1-5-19"), entry(CI, sid="S-1-3-3")], "C:/repo")
+    assert "S-1-3-3" in str(raised.value)
+
+
+def test_plan_computes_the_whole_acl_without_a_handle():
+    parent = [entry(OI | CI, mask=0x1200A9, sid="S-1-5-18")]
+    acl, wanted = winacl.plan(
+        directory=True,
+        operator=None,
+        readers=(),
+        writers=("S-1-5-19", ),
+        isolate=False,
+        parent=parent,
+        owner=OWNER,
+        group=GROUP
+    )
+    assert wanted == {"S-1-5-32-544", "S-1-5-19"}
+    assert [e.sid for e in acl] == ["S-1-5-32-544", "S-1-5-19", "S-1-5-18"]
+    assert acl[-1].flags == ID | OI | CI
+
+
+def test_plan_refuses_an_unsupported_parent_ace_before_returning_anything():
+    with pytest.raises(OSError):
+        winacl.plan(
+            directory=True,
+            operator=None,
+            readers=(),
+            writers=(),
+            isolate=False,
+            parent=[entry(OI, sid="S-1-3-2")],
+            owner=OWNER,
+            group=GROUP
+        )

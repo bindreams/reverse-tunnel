@@ -35,7 +35,6 @@ FILE_TYPE_DISK = 1
 FILE_OPEN = 1
 FILE_OPEN_REPARSE_POINT = 0x00200000
 FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
-OBJ_CASE_INSENSITIVE = 0x40
 FILE_NAMES_INFORMATION = 12
 STATUS_NO_MORE_FILES = 0x80000006
 STATUS_NO_SUCH_FILE = 0xC000000F
@@ -189,7 +188,9 @@ def open_relative(
 ) -> int:
     """A handle to the entry `name` of the directory held by `parent`, opened relative to it and vetted like `open_handle`.
 
-    `label` is the path to name in messages. A `name` containing a separator is refused: it must be one entry.
+    `label` is the path to name in messages. A `name` containing a separator is refused: it must be one entry. The name
+    is matched exactly (no `OBJ_CASE_INSENSITIVE`), so it must be a name as `list_names` returned it; in a
+    case-sensitive directory a different spelling is a different entry.
     `NtCreateFile` adds no rights of its own, unlike `CreateFileW`, so SYNCHRONIZE and FILE_READ_ATTRIBUTES (which the
     vetting needs) are requested here.
     """
@@ -201,9 +202,7 @@ def open_relative(
     encoded = name.encode("utf-16-le", "surrogatepass")
     buffer = ctypes.create_string_buffer(encoded + b"\0\0")
     text = _UnicodeString(len(encoded), len(encoded) + 2, ctypes.addressof(buffer))
-    attributes = _ObjectAttributes(
-        ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(text), OBJ_CASE_INSENSITIVE, None, None
-    )
+    attributes = _ObjectAttributes(ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(text), 0, None, None)
     handle, status_block = ctypes.c_void_p(), _IoStatusBlock()
     status = ntdll.NtCreateFile(
         ctypes.byref(handle), access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, ctypes.byref(attributes),
