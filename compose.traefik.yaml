@@ -1,0 +1,32 @@
+# Overlay for a Traefik that shares a Docker network with this stack:
+#   docker compose -f compose.yaml -f compose.traefik.yaml up --wait
+# Set the entrypoints and TLS of the two routers on Traefik's side (for example `entryPoints.<name>.http.tls`).
+services:
+  frps:
+    # `!override` replaces the whole list, so the control and admin publishes are declared again; only the vhost
+    # publish is dropped, because Traefik reaches it over the shared network.
+    ports: !override
+      - "${RT_CONTROL_PORT:?set RT_CONTROL_PORT in .env}:8001/tcp"
+      - "${RT_CONTROL_PORT:?set RT_CONTROL_PORT in .env}:8001/udp"
+      - "127.0.0.1:${RT_ADMIN_PORT:?set RT_ADMIN_PORT in .env}:7500/tcp"
+    # Attached to two networks, so Traefik needs `traefik.docker.network` to pick the shared one.
+    networks:
+      - default
+      - proxy
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${RT_PROXY_NETWORK:?set RT_PROXY_NETWORK in .env}
+      # Tunnels: <label>.RT_DOMAIN. frps routes on Host, so it must reach the container unchanged.
+      traefik.http.routers.rt-vhost.rule: 'HostRegexp(`^[a-z0-9-]+\.${RT_DOMAIN:?set RT_DOMAIN in .env}$$`)'
+      traefik.http.routers.rt-vhost.service: rt-vhost
+      traefik.http.services.rt-vhost.loadbalancer.server.port: "8080"
+      traefik.http.services.rt-vhost.loadbalancer.passhostheader: "true"
+      # The control connection of RT_PROTOCOL=wss: `GET /~!frp` with `Upgrade: websocket` on bindPort.
+      traefik.http.routers.rt-control.rule: 'Host(`${RT_CONTROL_HOST:?set RT_CONTROL_HOST in .env}`)'
+      traefik.http.routers.rt-control.service: rt-control
+      traefik.http.services.rt-control.loadbalancer.server.port: "8001"
+
+networks:
+  proxy:
+    name: ${RT_PROXY_NETWORK:?set RT_PROXY_NETWORK in .env}
+    external: true

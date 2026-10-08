@@ -1,0 +1,10 @@
+bindPort = 8001
+quicBindPort = 8001
+vhostHTTPPort = 8080
+subDomainHost = "{{ .Envs.RT_DOMAIN }}"
+auth.method = "token"
+auth.tokenSource = { type = "file", file = { path = "secrets/token" } }
+webServer.addr = "0.0.0.0"
+webServer.port = 7500
+webServer.password = "{{ .Envs.RT_ADMIN_PASSWORD }}"
+log.disablePrintColor = true

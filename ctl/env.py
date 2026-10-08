@@ -30,7 +30,7 @@ EXCLUDED_DIRECTORIES = frozenset({".github"})
 LENIENT_DOLLAR_SUFFIXES = frozenset({".conf"})
 LENIENT_DOLLAR_NAMES = frozenset({"Caddyfile"})
 # A rename of any of these must turn the template gates red rather than quietly shrink them.
-KNOWN_MINIMUM = ("prek.toml", "pyproject.toml")
+KNOWN_MINIMUM = ("prek.toml", "pyproject.toml", "compose.yaml", "compose.traefik.yaml", "bridge/frps.toml")
 
 # `O_NONBLOCK` keeps a FIFO at the path from blocking the open; `O_BINARY` stops Windows translating line endings
 # before the dialect sees them. Windows has no `O_NOFOLLOW`; it opens through `_open_windows` instead.

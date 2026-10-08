@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import subprocess
 import sys
@@ -239,22 +240,15 @@ def test_an_os_error_while_reading_is_an_env_error_naming_the_path(tmp_path, mon
 
 # Referenced variables =================================================================================================
 
+# One corpus, read by the entrypoint's shell scan too (tests/e2e/bridge), so the two gates cannot drift apart.
+CORPUS = json.loads((REPO_ROOT / "tests" / "go_template.corpus").read_text(encoding="utf-8"))
+ACCEPTED = [pytest.param(case["text"], set(case["names"]), id=case["id"]) for case in CORPUS["accepted"]]
+REJECTED = [pytest.param(case["text"], case["line"], id=case["id"]) for case in CORPUS["rejected"]]
 
-@pytest.mark.parametrize(
-    "template",
-    [
-        "{{.Envs.X}}",
-        "{{ .Envs.X }}",
-        "{{  .Envs.X  }}",
-        "{{ $.Envs.X }}",
-        "{{- .Envs.X -}}",
-        "{{-.Envs.X}}",
-        "{{\t.Envs.X\n}}",
-        'x = "{{ .Envs.X }}"',
-    ],
-)
-def test_referenced_variables_tolerates_go_template_whitespace(template):
-    assert referenced_variables(template) == {"X"}
+
+@pytest.mark.parametrize(("text", "names"), ACCEPTED)
+def test_referenced_variables_accepts_the_corpus(text, names):
+    assert referenced_variables(text) == names
 
 
 def test_referenced_variables_finds_compose_syntax():
@@ -280,55 +274,13 @@ def test_referenced_variables_ignores_non_references(text):
     assert referenced_variables(text) == set()
 
 
-UNSUPPORTED_ACTIONS = [
-    pytest.param('{{ .Envs.X | default "y" }}', id="pipe"),
-    pytest.param("{{ (.Envs.X) }}", id="parenthesised"),
-    pytest.param('{{ index .Envs "X" }}', id="index"),
-    pytest.param("{{ with .Envs }}{{ .X }}{{ end }}", id="with"),
-    pytest.param("{{ .Envs }}", id="whole-map"),
-    pytest.param("{{ .Envs.x }}", id="lowercase-name"),
-    pytest.param("{{ .Envs.X.Y }}", id="field-of-value"),
-    pytest.param("{{ if .Envs.X }}", id="condition"),
-    pytest.param("{{ $x := .Envs.X }}", id="assignment"),
-    pytest.param("{{ printf \"%s\" .Envs.X }}", id="function-call"),
-    pytest.param("{{/* .Envs.X */}}", id="comment"),
-    pytest.param("{{ .Envs.X", id="unterminated"),
-    pytest.param("{{ .Envs.X }", id="half-closed"),
-    pytest.param("{{ .Envs.X\n| quote }}", id="multi-line"),
-    pytest.param('{{ printf "}}" .Envs.X }}', id="closing-braces-in-a-string"),
-    pytest.param("{{ printf `}}` .Envs.X }}", id="closing-braces-in-a-raw-string"),
-    pytest.param('{{ printf "{{ .Envs.X }}" .Envs.Y }}', id="a-reference-inside-a-string-hides-the-real-one"),
-    pytest.param('{{ "}}" }}{{ .Envs.X | quote }}', id="string-then-pipe"),
-    pytest.param('{{ index . (printf "En%s" "vs") }}', id="envs-built-at-run-time"),
-    pytest.param("{{ range $k, $v := . }}{{ $v.RT_X }}{{ end }}", id="range-over-the-root"),
-    pytest.param("{{ .Values.X }}", id="any-other-action"),
-    pytest.param("{{ $x := 1 }}", id="variable-assignment"),
-    pytest.param("{{{ .Envs.X }}", id="extra-opening-brace"),
-    pytest.param("{{ .Envs.X }}{{", id="trailing-opening-braces"),
-    pytest.param("# Envs are expanded here", id="the-word-outside-any-action"),
-    pytest.param("x = .Envs.X", id="a-bare-field-outside-any-action"),
-    pytest.param("{{ $.Envs.X }}{{ .Envs.Y | quote }}", id="valid-then-invalid"),
-]
-
-
-@pytest.mark.parametrize("template", UNSUPPORTED_ACTIONS)
-def test_an_unsupported_envs_action_is_an_error_not_a_miss(template):
+@pytest.mark.parametrize(("text", "line"), REJECTED)
+def test_an_unsupported_envs_action_is_an_error_not_a_miss(text, line):
     with pytest.raises(EnvError) as raised:
-        referenced_variables(f"a = 1\nb = {template}\n", source="frps.toml")
+        referenced_variables(text, source="frps.toml")
     message = str(raised.value)
-    assert "frps.toml:2" in message
+    assert f"frps.toml:{line}" in message
     assert "{{ .Envs.NAME }}" in message
-
-
-def test_the_error_line_counts_from_the_unsupported_action():
-    text = "{{ .Envs.A }}\n\n\n{{ .Envs.B }} {{ index .Envs \"C\" }}\n"
-    with pytest.raises(EnvError) as raised:
-        referenced_variables(text, source="x.toml")
-    assert "x.toml:4" in str(raised.value)
-
-
-def test_text_without_any_template_action_is_left_alone():
-    assert referenced_variables("a = { b = 1 }\nc = '}}'\n") == set()
 
 
 def test_the_strict_pattern_is_one_exported_constant():
@@ -552,3 +504,7 @@ def test_tracked_config_files_of_this_repository_include_the_known_minimum():
     found = {p.relative_to(REPO_ROOT).as_posix() for p in tracked_config_files(REPO_ROOT)}
     assert found
     assert set(env.KNOWN_MINIMUM) <= found
+
+
+def test_the_known_minimum_names_the_bridge_files():
+    assert {"compose.yaml", "compose.traefik.yaml", "bridge/frps.toml"} <= set(env.KNOWN_MINIMUM)

@@ -1,0 +1,247 @@
+{
+  "accepted": [
+    {
+      "id": "bare",
+      "text": "a = 1\nb = {{.Envs.X}}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "spaced",
+      "text": "a = 1\nb = {{ .Envs.X }}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "wide-spaces",
+      "text": "a = 1\nb = {{  .Envs.X  }}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "root-dollar",
+      "text": "a = 1\nb = {{ $.Envs.X }}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "trim-markers",
+      "text": "a = 1\nb = {{- .Envs.X -}}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "trim-no-space",
+      "text": "a = 1\nb = {{-.Envs.X}}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "tab-and-newline",
+      "text": "a = 1\nb = {{\t.Envs.X\n}}\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "quoted",
+      "text": "a = 1\nb = x = \"{{ .Envs.X }}\"\n",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "two-names-one-repeated",
+      "text": "a = \"{{ .Envs.RT_DOMAIN }}\"\nb = '{{ .Envs.RT_VHOST_PORT }}'\nc = \"{{ .Envs.RT_DOMAIN }}\"\n",
+      "names": [
+        "RT_VHOST_PORT",
+        "RT_DOMAIN"
+      ]
+    },
+    {
+      "id": "two-on-a-line",
+      "text": "a = \"{{ .Envs.A }}.{{- $.Envs.B_2 }}\"\n",
+      "names": [
+        "A",
+        "B_2"
+      ]
+    },
+    {
+      "id": "no-actions-at-all",
+      "text": "a = { b = 1 }\nc = '}}'\n",
+      "names": []
+    },
+    {
+      "id": "single-braces-and-dollars",
+      "text": "a = { b = '{x}' }\nc = '$HOME'\n",
+      "names": []
+    },
+    {
+      "id": "no-trailing-newline",
+      "text": "a = \"{{ .Envs.X }}\"",
+      "names": [
+        "X"
+      ]
+    },
+    {
+      "id": "carriage-returns",
+      "text": "a = 1\r\nb = \"{{ .Envs.X }}\"\r\n",
+      "names": [
+        "X"
+      ]
+    }
+  ],
+  "rejected": [
+    {
+      "id": "pipe",
+      "text": "a = 1\nb = {{ .Envs.X | default \"y\" }}\n",
+      "line": 2
+    },
+    {
+      "id": "parenthesised",
+      "text": "a = 1\nb = {{ (.Envs.X) }}\n",
+      "line": 2
+    },
+    {
+      "id": "index",
+      "text": "a = 1\nb = {{ index .Envs \"X\" }}\n",
+      "line": 2
+    },
+    {
+      "id": "with",
+      "text": "a = 1\nb = {{ with .Envs }}{{ .X }}{{ end }}\n",
+      "line": 2
+    },
+    {
+      "id": "whole-map",
+      "text": "a = 1\nb = {{ .Envs }}\n",
+      "line": 2
+    },
+    {
+      "id": "lowercase-name",
+      "text": "a = 1\nb = {{ .Envs.x }}\n",
+      "line": 2
+    },
+    {
+      "id": "field-of-value",
+      "text": "a = 1\nb = {{ .Envs.X.Y }}\n",
+      "line": 2
+    },
+    {
+      "id": "condition",
+      "text": "a = 1\nb = {{ if .Envs.X }}\n",
+      "line": 2
+    },
+    {
+      "id": "assignment",
+      "text": "a = 1\nb = {{ $x := .Envs.X }}\n",
+      "line": 2
+    },
+    {
+      "id": "function-call",
+      "text": "a = 1\nb = {{ printf \"%s\" .Envs.X }}\n",
+      "line": 2
+    },
+    {
+      "id": "comment",
+      "text": "a = 1\nb = {{/* .Envs.X */}}\n",
+      "line": 2
+    },
+    {
+      "id": "unterminated",
+      "text": "a = 1\nb = {{ .Envs.X\n",
+      "line": 2
+    },
+    {
+      "id": "half-closed",
+      "text": "a = 1\nb = {{ .Envs.X }\n",
+      "line": 2
+    },
+    {
+      "id": "multi-line",
+      "text": "a = 1\nb = {{ .Envs.X\n| quote }}\n",
+      "line": 2
+    },
+    {
+      "id": "closing-braces-in-a-string",
+      "text": "a = 1\nb = {{ printf \"}}\" .Envs.X }}\n",
+      "line": 2
+    },
+    {
+      "id": "closing-braces-in-a-raw-string",
+      "text": "a = 1\nb = {{ printf `}}` .Envs.X }}\n",
+      "line": 2
+    },
+    {
+      "id": "a-reference-inside-a-string-hides-the-real-one",
+      "text": "a = 1\nb = {{ printf \"{{ .Envs.X }}\" .Envs.Y }}\n",
+      "line": 2
+    },
+    {
+      "id": "string-then-pipe",
+      "text": "a = 1\nb = {{ \"}}\" }}{{ .Envs.X | quote }}\n",
+      "line": 2
+    },
+    {
+      "id": "envs-built-at-run-time",
+      "text": "a = 1\nb = {{ index . (printf \"En%s\" \"vs\") }}\n",
+      "line": 2
+    },
+    {
+      "id": "range-over-the-root",
+      "text": "a = 1\nb = {{ range $k, $v := . }}{{ $v.RT_X }}{{ end }}\n",
+      "line": 2
+    },
+    {
+      "id": "any-other-action",
+      "text": "a = 1\nb = {{ .Values.X }}\n",
+      "line": 2
+    },
+    {
+      "id": "variable-assignment",
+      "text": "a = 1\nb = {{ $x := 1 }}\n",
+      "line": 2
+    },
+    {
+      "id": "extra-opening-brace",
+      "text": "a = 1\nb = {{{ .Envs.X }}\n",
+      "line": 2
+    },
+    {
+      "id": "trailing-opening-braces",
+      "text": "a = 1\nb = {{ .Envs.X }}{{\n",
+      "line": 2
+    },
+    {
+      "id": "the-word-outside-any-action",
+      "text": "a = 1\nb = # Envs are expanded here\n",
+      "line": 2
+    },
+    {
+      "id": "a-bare-field-outside-any-action",
+      "text": "a = 1\nb = x = .Envs.X\n",
+      "line": 2
+    },
+    {
+      "id": "valid-then-invalid",
+      "text": "a = 1\nb = {{ $.Envs.X }}{{ .Envs.Y | quote }}\n",
+      "line": 2
+    },
+    {
+      "id": "error-line-counts-from-the-bad-action",
+      "text": "{{ .Envs.A }}\n\n\n{{ .Envs.B }} {{ index .Envs \"C\" }}\n",
+      "line": 4
+    },
+    {
+      "id": "bad-action-after-a-multi-line-valid-one",
+      "text": "a = \"{{\n.Envs.A\n}}\"\nb = {{ .Envs.B | quote }}\n",
+      "line": 4
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+# The bridge: frps in a container. `.env` supplies every variable; the token reaches frps as a mounted file, never as
+# an environment variable, so it is absent from `docker inspect`.
+services:
+  frps:
+    build:
+      context: bridge
+    container_name: frps
+    # `no` is compose's default and would leave the bridge down after a reboot; `always` would undo a deliberate stop.
+    restart: unless-stopped
+    environment:
+      RT_DOMAIN: ${RT_DOMAIN:?set RT_DOMAIN in .env}
+      RT_ADMIN_PASSWORD: ${RT_ADMIN_PASSWORD:?set RT_ADMIN_PASSWORD in .env}
+    ports:
+      # Hosts connect over QUIC (udp) or tcp; a short-syntax publish is tcp only.
+      - "${RT_CONTROL_PORT:?set RT_CONTROL_PORT in .env}:8001/tcp"
+      - "${RT_CONTROL_PORT:?set RT_CONTROL_PORT in .env}:8001/udp"
+      - "${RT_VHOST_BIND:?set RT_VHOST_BIND in .env}:${RT_VHOST_PORT:?set RT_VHOST_PORT in .env}:8080/tcp"
+      # The publish's loopback address is the boundary; frps itself binds every interface of the container.
+      - "127.0.0.1:${RT_ADMIN_PORT:?set RT_ADMIN_PORT in .env}:7500/tcp"
+    volumes:
+      # `create_host_path: false` makes compose refuse a missing source instead of creating a root-owned directory.
+      - type: bind
+        source: ./secrets/token
+        target: /rt/secrets/token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./bridge/frps.toml
+        target: /rt/bridge/frps.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      # /healthz sits outside frps's authentication.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7500/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s

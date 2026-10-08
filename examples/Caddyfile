@@ -1,0 +1,13 @@
+# Front for the bridge on the same machine, in the default no-overlay stack. Replace example.com with your RT_DOMAIN
+# and RT_CONTROL_HOST, and the ports with RT_VHOST_PORT and RT_CONTROL_PORT. Caddy forwards the Host header and
+# WebSocket upgrades by default. A wildcard certificate needs the DNS challenge of a Caddy build with your DNS provider.
+
+# Tunnels: <label>.tunnel.example.com -> the vhost port.
+*.tunnel.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Control connection of RT_PROTOCOL=wss -> the control port. Not needed for quic or tcp.
+bridge.example.com {
+	reverse_proxy 127.0.0.1:7000
+}

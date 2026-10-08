@@ -26,17 +26,9 @@ GOOD_LABEL = "alpha"
 # Keys the ctl process consumes itself, which no tracked template references. Permanent.
 CTL_ONLY = frozenset({"ROLE", "RT_TOKEN", "RT_SCHEME", "RT_PUBLIC_PORT", "RT_PUBLIC_HOST"})
 
-# TEMPORARY: keys whose referencing template has not landed yet. Task 6 (frps.toml, compose files) and Task 8
-# (frpc.toml, goetia.yaml) remove their keys from this set as they add the templates; Task 8 deletes the set.
+# TEMPORARY: keys whose referencing template has not landed yet. Task 8 (frpc.toml, goetia.yaml) removes its keys
+# from this set as it adds the templates, then deletes the set.
 PENDING_TEMPLATE_KEYS = frozenset({
-    "RT_DOMAIN",
-    "RT_ADMIN_PASSWORD",
-    "RT_CONTROL_PORT",
-    "RT_VHOST_BIND",
-    "RT_VHOST_PORT",
-    "RT_ADMIN_PORT",
-    "RT_CONTROL_HOST",
-    "RT_PROXY_NETWORK",
     "RT_LABEL",
     "RT_SERVER_ADDR",
     "RT_SERVER_PORT",
