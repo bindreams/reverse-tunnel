@@ -35,8 +35,8 @@ from ctl.winacl import (
 
 SECRET_MODE = 0o600
 LOCAL_SERVICE = "LocalService"
-# `O_NONBLOCK` keeps a FIFO at the path from blocking the open; `O_BINARY` stops Windows translating line endings.
-NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+# `O_NONBLOCK` keeps a FIFO at the path from blocking the open and `O_NOCTTY` a terminal from becoming ours; `O_BINARY` stops Windows translating line endings.
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
 O_BINARY = getattr(os, "O_BINARY", 0)
 
 
@@ -113,6 +113,8 @@ def _failure(path: Path, exc: OSError, *, dir_fd: int | None = None, name: str |
         return PermsError(f"{path}: is a symlink; refusing to follow it")
     if exc.errno == errno.ENOTDIR:
         return PermsError(f"{path}: not a directory")
+    if exc.errno == errno.ENXIO:  # a socket, or a FIFO with no reader, swapped in after the check
+        return PermsError(f"{path}: not a regular file")
     return PermsError(f"{path}: {exc.strerror or exc}")
 
 
@@ -243,9 +245,7 @@ def temporary_name(path: Path) -> str:
     return f".{path.name}.{secrets.token_hex(8)}.tmp"
 
 
-def write_secret(
-    path: Path, data: bytes, owner: Account | None, readers: frozenset[str], *, root: Path | None = None
-) -> None:
+def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozenset[str], *, root: Path) -> None:
     """Replace `path` with `data`, atomically and never readable by anyone the final mode excludes, even for an instant.
 
     The secret is written to a temporary file beside `path`, created `0600` with `O_EXCL|O_NOFOLLOW`, so there is no
@@ -257,7 +257,7 @@ def write_secret(
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.write_secret(path, data, owner, readers, root or path.parent)
+        perms_windows.write_secret(path, data, owner, readers, root)
         return
     directory_fd = _open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -295,7 +295,7 @@ def write_secret(
         os.close(directory_fd)
 
 
-def harden_file(path: Path, owner: Account | None, readers: frozenset[str], *, root: Path | None = None) -> None:
+def harden_file(path: Path, owner: Account | None, readers: frozenset[str], *, root: Path) -> None:
     """Make `path` owner-only (`0600`, or on Windows an ACL of exactly the operator, Administrators and `readers`).
 
     Refuses a symlink: the guarantee would otherwise be made about a different file than the one the operator hardened.
@@ -303,7 +303,7 @@ def harden_file(path: Path, owner: Account | None, readers: frozenset[str], *, r
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.harden_file(path, owner, readers, root or path.parent)
+        perms_windows.harden_file(path, owner, readers, root)
         return
     fd = _open(path, os.O_RDONLY)
     try:
@@ -325,7 +325,7 @@ def converge_dir(
     *,
     writers: frozenset[str] = frozenset(),
     isolate: bool = True,
-    root: Path | None = None,
+    root: Path,
 ) -> None:
     """Create `path` if absent and reassert its owner and mode, whatever state it was left in.
 
@@ -336,13 +336,13 @@ def converge_dir(
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_dir(path, owner, readers, writers, isolate, root or path.parent)
+        perms_windows.converge_dir(path, owner, readers, writers, isolate, root)
         return
     with _converged(path, owner, mode):
         pass
 
 
-def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path | None = None) -> None:
+def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -> None:
     """`converge_dir` for `path`, then the same for each of its direct entries, keeping each entry's own mode.
 
     The directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a symlink or
@@ -357,18 +357,19 @@ def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path | 
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_tree(path, owner, root or path.parent)
+        perms_windows.converge_tree(path, owner, root)
         return
     with _converged(path, owner, mode) as fd:
         _converge_entries(fd, path, owner)
 
 
 def grant_service_read(root: Path, account: Account) -> None:
-    """Give `account` an inheritable read-and-execute ACE on the repository `root`; nothing on POSIX.
+    """Give `account` read-and-execute on the repository `root`, `bin`, `host` and their direct files; POSIX: nothing.
 
-    It covers `bin\\` and `host\\` by inheritance, since only `.env`, `secrets\\` and the token ever break it. Ancestors of
-    `root` get no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository
-    under a user profile is reachable without exposing the profile.
+    `root` gets an inheritable ACE and each of the others the ACE it would inherit, written to it directly: nothing is
+    propagated by the OS, so nothing unvetted is touched. A subdirectory, reparse point or hard-linked file inside `bin`
+    or `host` is refused. Ancestors of `root` get no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses
+    traverse checking, so a repository under a user profile is reachable without exposing the profile.
     """
     if sys.platform != "win32":
         return
