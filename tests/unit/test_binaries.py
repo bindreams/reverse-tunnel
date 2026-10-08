@@ -158,6 +158,38 @@ def test_load_lock_rejects_a_lock_that_does_not_match_the_tool_table(generated_l
         load_lock(edited(generated_lock_path, edit))
 
 
+def test_load_lock_rejects_urls_that_do_not_belong_to_the_version(generated_lock_path):
+    text = generated_lock_path.read_text()
+    bumped = text.replace(
+        '[frp]\n# renovate: datasource=github-releases depName=fatedier/frp\nversion = "0.71.0"',
+        '[frp]\n# renovate: datasource=github-releases depName=fatedier/frp\nversion = "0.72.0"'
+    )
+    assert bumped != text
+    stale = generated_lock_path.with_name("stale.lock.toml")
+    stale.write_text(bumped)
+    with pytest.raises(BinariesError) as raised:
+        load_lock(stale)
+    message = str(raised.value)
+    assert "frp.linux-x86_64" in message
+    assert "frp_0.72.0_linux_amd64.tar.gz" in message
+    assert "frp_0.71.0_linux_amd64.tar.gz" in message
+
+
+@pytest.mark.parametrize(
+    ("tool", "platform"),
+    [("websocat", "macos-x86_64"), ("goetia", "windows-x86_64"), ("goetia", "bundle")],
+)
+def test_load_lock_rejects_a_url_naming_a_different_asset(generated_lock_path, tool, platform):
+
+    def swap(document):
+        entry = document[tool][platform]
+        entry = entry if platform == "bundle" else entry[0]
+        entry["url"] = entry["url"].rsplit("/", 1)[0] + "/some-other-asset"
+
+    with pytest.raises(BinariesError, match="some-other-asset"):
+        load_lock(edited(generated_lock_path, swap))
+
+
 def test_load_lock_rejects_the_seed_with_no_pins(lock_path):
     with pytest.raises(BinariesError):
         load_lock(lock_path)

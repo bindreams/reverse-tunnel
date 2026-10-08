@@ -8,6 +8,7 @@ import stat
 import tarfile
 import zipfile
 import zlib
+from collections import Counter
 from typing import IO, Literal
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -40,12 +41,13 @@ def is_safe_member(name: str) -> bool:
 def hash_binary(path: Path, fmt: ArchiveFormat, filename: str) -> tuple[str, str]:
     """The full in-archive path and sha256 of the one regular file named `filename`.
 
-    Streams the member and writes nothing. Links and directories never count as a match.
+    Streams the member and writes nothing. Links and directories never count as a match, and a match is refused if
+    any other entry of any type shares its path, so extraction cannot land on something other than what was hashed.
     """
     if fmt is ArchiveFormat.BARE:
         raise ValueError("a bare binary has no archive to read")
     try:
-        matches = _zip_matches(path, filename) if fmt is ArchiveFormat.ZIP else _tar_matches(path, fmt, filename)
+        matches, entries = _zip_scan(path, filename) if fmt is ArchiveFormat.ZIP else _tar_scan(path, fmt, filename)
     except (tarfile.TarError, zipfile.BadZipFile, lzma.LZMAError, zlib.error, EOFError, OSError) as exc:
         raise BinariesError(f"{path.name}: not a readable {fmt} archive: {exc}") from exc
     if not matches:
@@ -57,29 +59,35 @@ def hash_binary(path: Path, fmt: ArchiveFormat, filename: str) -> tuple[str, str
     ((member, digest), ) = matches
     if not is_safe_member(member):
         raise BinariesError(f"{path.name}: unsafe member path {member!r} for {filename}")
+    if entries[PurePosixPath(member).parts] > 1:
+        raise BinariesError(f"{path.name}: more than one entry at {member!r}")
     return member, digest
 
 
-def _tar_matches(path: Path, fmt: ArchiveFormat, filename: str) -> list[tuple[str, str]]:
+def _tar_scan(path: Path, fmt: ArchiveFormat, filename: str) -> tuple[list[tuple[str, str]], Counter[tuple[str, ...]]]:
     matches = []
+    entries: Counter[tuple[str, ...]] = Counter()
     with tarfile.open(path, TAR_MODES[fmt]) as archive:
         for info in archive:
+            entries[PurePosixPath(info.name).parts] += 1
             if info.isreg() and PurePosixPath(info.name).name == filename:
                 stream = archive.extractfile(info)
                 assert stream is not None
                 matches.append((info.name, _sha256(stream)))
-    return matches
+    return matches, entries
 
 
-def _zip_matches(path: Path, filename: str) -> list[tuple[str, str]]:
+def _zip_scan(path: Path, filename: str) -> tuple[list[tuple[str, str]], Counter[tuple[str, ...]]]:
     matches = []
+    entries: Counter[tuple[str, ...]] = Counter()
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
+            entries[PurePosixPath(info.filename).parts] += 1
             is_link = stat.S_ISLNK(info.external_attr >> 16)
             if not info.is_dir() and not is_link and PurePosixPath(info.filename).name == filename:
                 with archive.open(info) as stream:
                     matches.append((info.filename, _sha256(stream)))
-    return matches
+    return matches, entries
 
 
 def _sha256(stream: IO[bytes]) -> str:

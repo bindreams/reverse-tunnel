@@ -4,6 +4,7 @@ Asset names and archive layouts are written out here independently of `ctl.binar
 implementation fails against this oracle rather than agreeing with itself.
 """
 
+import gzip
 import hashlib
 import io
 import json
@@ -111,20 +112,26 @@ def member_content(tool: str, version: str, platform: str, binary: str, generati
 
 
 def build_archive(fmt: str, members: Mapping[str, bytes], *, executable: bool = True) -> bytes:
-    """An archive holding `members` (full in-archive path -> content); directories are implied, as in a zip."""
+    """An archive holding `members` (full in-archive path -> content); directories are implied, as in a zip.
+
+    Byte-for-byte reproducible: no clock value reaches the archive, so equal inputs always hash equal.
+    """
     buffer = io.BytesIO()
     if fmt == "zip":
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, data in members.items():
-                archive.writestr(name, data)
+                archive.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), data)
     else:
-        mode: Literal["w:gz", "w:xz"] = "w:gz" if fmt == "tar.gz" else "w:xz"
-        with tarfile.open(fileobj=buffer, mode=mode) as archive:
+        mode: Literal["w:xz", "w"] = "w:xz" if fmt == "tar.xz" else "w"
+        compressed = gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) if fmt == "tar.gz" else None
+        with tarfile.open(fileobj=compressed or buffer, mode=mode) as archive:
             for name, data in members.items():
                 info = tarfile.TarInfo(name)
                 info.size = len(data)
                 info.mode = 0o755 if executable else 0o644
                 archive.addfile(info, io.BytesIO(data))
+        if compressed:
+            compressed.close()
     return buffer.getvalue()
 
 
@@ -171,11 +178,12 @@ class Request:
 class Upstream:
     """An in-process stand-in for the releases API and the asset host, served through `httpx.MockTransport`.
 
-    Answers `/repos/<owner>/<repo>/releases` (paginated, newest first) and `/dl/<id>/<name>` asset bodies. No sockets.
+    Answers `/repos/<owner>/<repo>/releases/tags/<tag>` and `/dl/<id>/<name>` asset bodies. There is deliberately no
+    release listing: a client that enumerates releases gets a 404. Unlike GitHub, the tag endpoint also serves drafts,
+    so the client's own draft check is what the tests exercise. No sockets.
     """
 
-    def __init__(self, page_size: int = 100) -> None:
-        self.page_size = page_size
+    def __init__(self) -> None:
         self.transport = httpx.MockTransport(self._handle)
         self._releases: dict[str, list[dict]] = {}
         self._bodies: dict[str, bytes] = {}
@@ -193,10 +201,11 @@ class Upstream:
         assets: Mapping[str, bytes],
         *,
         draft: bool = False,
+        prerelease: bool = False,
         digests: Mapping[str, str | None] | None = None,
         served: Mapping[str, bytes] | None = None,
     ) -> None:
-        """Append a release behind the ones already added, so call newest first.
+        """Add a release of `repo`.
 
         `digests` overrides the advertised digest of an asset (`None` omits it); `served` overrides the body.
         """
@@ -212,7 +221,7 @@ class Upstream:
         self._releases.setdefault(repo, []).append({
             "tag_name": tag,
             "draft": draft,
-            "prerelease": False,
+            "prerelease": prerelease,
             "assets": listed,
         })
 
@@ -253,24 +262,20 @@ class Upstream:
         query = parse_qs(request.url.query.decode())
         self._requests.append(Request(path, query, {k.lower(): v for k, v in request.headers.items()}))
         parts = path.strip("/").split("/")
-        if len(parts) == 4 and parts[0] == "repos" and parts[3] == "releases":
-            return self._releases_page(f"{parts[1]}/{parts[2]}", request, query)
+        if len(parts) == 6 and parts[0] == "repos" and parts[3:5] == ["releases", "tags"]:
+            return self._release_by_tag(f"{parts[1]}/{parts[2]}", parts[5], request)
         if path in self._bodies:
             return httpx.Response(200, content=self._bodies[path])
         return httpx.Response(404, content=b"not found")
 
-    def _releases_page(self, repo: str, request: httpx.Request, query: dict[str, list[str]]) -> httpx.Response:
+    def _release_by_tag(self, repo: str, tag: str, request: httpx.Request) -> httpx.Response:
         if repo in self._hangups:
             raise httpx.RemoteProtocolError("server disconnected without sending a response", request=request)
         if repo in self._failures:
             status, headers = self._failures[repo]
             return httpx.Response(status, headers=headers, json={"message": "failure"})
-        releases = self._releases.get(repo)
-        if releases is None:
+        tagged = [r for r in self._releases.get(repo, []) if r["tag_name"] == tag]
+        if not tagged:
             return httpx.Response(404, json={"message": "Not Found"})
-        page = int(query.get("page", ["1"])[0])
-        start = (page - 1) * self.page_size
-        headers = {}
-        if start + self.page_size < len(releases):
-            headers["Link"] = f'<{API}/repos/{repo}/releases?per_page=100&page={page + 1}>; rel="next"'
-        return httpx.Response(200, headers=headers, json=releases[start:start + self.page_size])
+        # A published release wins over a draft that happens to share its tag.
+        return httpx.Response(200, json=sorted(tagged, key=lambda r: r["draft"])[0])

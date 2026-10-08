@@ -27,13 +27,12 @@ from ctl.archive import ArchiveFormat, hash_binary, is_safe_member
 from ctl.config import Role
 from ctl.errors import BinariesError, UpstreamUnavailable
 from ctl.github import (
-    Release,
     api_client,
     asset_named,
     download,
     download_client,
+    Release,
     find_release,
-    published_releases,
     sha256_of,
 )
 
@@ -120,6 +119,11 @@ ROLE_TOOLS: Mapping[Role, tuple[str, ...]] = {
     Role.CLIENT: ("websocat", ),
     Role.BRIDGE: (),
 }
+
+
+def asset_name_of(url: str) -> str:
+    """The release asset a download URL names: its last path segment."""
+    return unquote(PurePosixPath(urlsplit(url).path).name)
 
 
 def install_names(tool: str, platform: str) -> list[str]:
@@ -252,12 +256,21 @@ def _url(entry: dict, where: str, source: str) -> str:
     return url
 
 
+def _check_asset(url: str, expected: str, where: str, source: str) -> None:
+    """A version bump that leaves the old URLs behind must fail here, not at first install."""
+    if asset_name_of(url) != expected:
+        raise BinariesError(
+            f"{source}: {where}: `url` names {asset_name_of(url)!r} but this pin's version needs {expected!r}"
+        )
+
+
 def _parse_pin(tool: str, version: str, platform: str, entry: dict, source: str) -> Pin:
     where = f"{tool}.{platform}"
     expected = {"url", "asset_sha256", "member_sha256", "archive_format", "archive_member", "install_name"}
     if unknown := set(entry) - expected:
         raise BinariesError(f"{source}: {where}: unknown keys {sorted(unknown)}")
     url = _url(entry, where, source)
+    _check_asset(url, TOOLS[tool].asset(version, platform), where, source)
     asset_sha256 = _digest(entry, "asset_sha256", where, source)
     member_sha256 = _digest(entry, "member_sha256", where, source)
     try:
@@ -284,7 +297,9 @@ def _parse_bundle(tool: str, version: str, asset: str, entry: object, source: st
     if not isinstance(entry, dict) or set(entry) != {"url", "asset_sha256"}:
         raise BinariesError(f"{source}: [{where}] must hold exactly `url` and `asset_sha256`")
     digest = _digest(entry, "asset_sha256", where, source)
-    return Pin(tool, version, _url(entry, where, source), digest, digest, ArchiveFormat.BARE, None, asset)
+    url = _url(entry, where, source)
+    _check_asset(url, asset, where, source)
+    return Pin(tool, version, url, digest, digest, ArchiveFormat.BARE, None, asset)
 
 
 # Refreshing the lock ==================================================================================================
@@ -312,7 +327,7 @@ def refresh(
                     ) as client, download_client(transport) as downloader, tempfile.TemporaryDirectory() as scratch:
         for name in names:
             version = _locked_version(document, name, lock_path.name)
-            pinned = _pin_tool(name, version, published_releases(client, TOOLS[name].repo), downloader, Path(scratch))
+            pinned = _pin_tool(name, version, client, downloader, Path(scratch))
             _write_tool(document, name, pinned)
     _write_atomically(lock_path, tomlkit.dumps(document))
 
@@ -325,12 +340,15 @@ def _locked_version(document: tomlkit.TOMLDocument, tool: str, source: str) -> s
     return str(version)
 
 
-def _pin_tool(tool: str, version: str, releases: list[Release], downloader, scratch: Path) -> dict[str, list[Pin]]:
+def _pin_tool(tool: str, version: str, client: httpx.Client, downloader: httpx.Client,
+              scratch: Path) -> dict[str, list[Pin]]:
     spec = TOOLS[tool]
     context = f"{tool} {version}"
-    release = find_release(releases, spec.repo, version)
+    release = find_release(client, spec.repo, version)
     if release is None:
-        raise BinariesError(f"{context}: {spec.repo} has no published release {version} (drafts are ignored)")
+        raise BinariesError(
+            f"{context}: {spec.repo} has no published release v{version} or {version} (drafts are ignored)"
+        )
     # Resolve every asset and its digest first, so a missing digest fails before any download starts.
     wanted = {platform: asset_named(release, spec.asset(version, platform), context) for platform in PLATFORMS}
     digests = {platform: sha256_of(asset, context) for platform, asset in wanted.items()}
@@ -421,24 +439,29 @@ def compare_to_upstream(lock: Lock,
     with api_client(token, transport) as client:
         for tool, by_platform in lock.items():
             pins = [pin for pins in by_platform.values() for pin in pins]
+            version = pins[0].version
             try:
-                releases = published_releases(client, TOOLS[tool].repo)
+                release = find_release(client, TOOLS[tool].repo, version)
             except UpstreamUnavailable as exc:
                 results += [(pin, PinDrift.UNAVAILABLE, str(exc)) for pin in pins]
                 continue
+            except BinariesError as exc:
+                results += [(pin, PinDrift.MISMATCH, str(exc)) for pin in pins]
+                continue
+            if release is None:
+                detail = f"{tool} {version}: no published release v{version} or {version} (drafts are ignored)"
+                results += [(pin, PinDrift.MISMATCH, detail) for pin in pins]
+                continue
             for pin in pins:
-                drift, detail = _compare_pin(pin, releases)
+                drift, detail = _compare_pin(pin, release)
                 results.append((pin, drift, detail))
     return results
 
 
-def _compare_pin(pin: Pin, releases: list[Release]) -> tuple[PinDrift, str]:
-    name = unquote(PurePosixPath(urlsplit(pin.url).path).name)
+def _compare_pin(pin: Pin, release: Release) -> tuple[PinDrift, str]:
+    name = asset_name_of(pin.url)
     context = f"{pin.tool} {pin.version}"
     try:
-        release = find_release(releases, TOOLS[pin.tool].repo, pin.version)
-        if release is None:
-            return PinDrift.MISMATCH, f"{context}: no published release {pin.version} (drafts are ignored)"
         advertised = sha256_of(asset_named(release, name, context), context)
     except BinariesError as exc:
         return PinDrift.MISMATCH, str(exc)
