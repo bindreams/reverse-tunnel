@@ -112,10 +112,10 @@ def test_traefik_overlay_routes_the_vhost_and_the_control_connection(config_proj
     assert labels["traefik.http.services.rt-control.loadbalancer.server.port"] == "8001"
 
 
-def test_traefik_vhost_rule_quotes_the_domain_so_its_dots_are_literal(config_project: Project):
+def test_traefik_vhost_rule_is_case_insensitive_and_quotes_the_domain(config_project: Project):
     rule = config_project.config(overlay=True)["services"]["frps"]["labels"]["traefik.http.routers.rt-vhost.rule"]
     # `config` prints a literal `$` as `$$`, the escape the file itself uses.
-    assert rule == r"HostRegexp(`^[a-z0-9-]+\.\Qtunnel.example.com\E$$`)"
+    assert rule == r"HostRegexp(`(?i)^[a-z0-9-]+\.\Qtunnel.example.com\E$$`)"
 
 
 def test_traefik_overlay_attaches_frps_to_the_external_proxy_network(config_project: Project):

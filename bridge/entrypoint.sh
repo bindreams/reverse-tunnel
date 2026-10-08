@@ -3,26 +3,27 @@
 # then records what frps loaded. The checks live here so they hold for a bare `docker compose up` as well as for `ctl`.
 set -eu
 
-# Byte-wise matching: the patterns below are ASCII rules.
-LC_ALL=C
-export LC_ALL
+# Every name this script defines is lowercase and nothing is exported: an uppercase name belongs to the operator, and
+# frps must see exactly the environment it was given.
+newline='
+'
 
-EXAMPLE_TOKEN=0000000000000000000000000000000000000000000000000000000000000000
-EXAMPLE_ADMIN_PASSWORD=example-admin-password
+example_token=0000000000000000000000000000000000000000000000000000000000000000
+example_admin_password=example-admin-password
 
-# These mirror ctl/config.py (ADMIN_PASSWORD, DNS_LABEL, NUMERIC_LABEL, MAX_DNS_NAME_LENGTH); a unit test pins them.
-ADMIN_PASSWORD_PATTERN='^[A-Za-z0-9_-]{16,}$'
-DNS_LABEL_PATTERN='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
-NUMERIC_LABEL_PATTERN='^([0-9]+$|0[xX])'
-MAX_DNS_NAME_LENGTH=253
+# These mirror ctl/config.py (ADMIN_PASSWORD, DNS_LABEL, NUMERIC_LABEL, max_dns_name_length); a unit test pins them.
+admin_password_pattern='^[A-Za-z0-9_-]{16,}$'
+dns_label_pattern='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+numeric_label_pattern='^([0-9]+$|0[xX])'
+max_dns_name_length=253
 
-MOUNTED_TOKEN=/rt/secrets/token
-MOUNTED_CONFIG=/rt/bridge/frps.toml
+mounted_token=/rt/secrets/token
+mounted_config=/rt/bridge/frps.toml
 # A tmpfs, so the token copy never reaches the container's writable layer.
-STATE=/run/rt
+state_dir=/run/rt
 # frps runs in a private copy of the two files: the bytes validated and hashed here are the bytes it loads, even if
 # the host files change in between.
-WORK=$STATE/work
+work_dir=$state_dir/work
 
 fail() {
 	printf 'bridge: %s\n' "$*" >&2
@@ -47,6 +48,18 @@ copy_file() {
 	fi
 }
 
+# Sets environment_value to the value of the environment variable $1 (trailing newlines included), or to nothing when it
+# is not in the environment. A shell variable of that name does not count, which is why this reads through `printenv`.
+# The `x` keeps `$(...)` from dropping trailing newlines; the newline `printenv` adds goes with it. A statement, not a
+# condition, so `set -e` stays in force.
+environment_value=
+read_environment() {
+	environment_value=
+	if raw=$(printenv "$1" && printf x); then
+		environment_value=${raw%"$newline"x}
+	fi
+}
+
 # Sets unsafe_found to 1 when $1 holds a character that would break out of a TOML basic string: a double quote, a
 # backslash or a control character (a newline included). A statement, not a condition, so `set -e` stays in force.
 unsafe_found=0
@@ -60,7 +73,7 @@ find_unsafe_characters() {
 # Prints the variable of each `{{ .Envs.NAME }}` reference in $1. It applies ctl.env's rules, so the two cannot
 # drift (tests/go_template.corpus): every `{{` must begin a strict reference, and `Envs` may appear only inside one.
 scan_template() {
-	awk -v file="$MOUNTED_CONFIG" '
+	LC_ALL=C awk -v file="$mounted_config" '
 	function fail(offset,   head) {
 		head = substr(text, 1, offset - 1)
 		printf "bridge: %s:%d: unsupported template syntax; only `{{ .Envs.NAME }}` is supported\n", \
@@ -107,30 +120,33 @@ check_state_directory() {
 	filesystem=
 	while read -r _ mount_point fs_type _; do
 		# The last entry for a mount point is the one in effect.
-		if [ "$mount_point" = "$STATE" ]; then
+		if [ "$mount_point" = "$state_dir" ]; then
 			filesystem=$fs_type
 		fi
+		case $mount_point in
+		"$state_dir"/*) fail "$mount_point is a mount inside $state_dir; clearing $state_dir would reach into it" ;;
+		esac
 	done < /proc/mounts
 	if [ "$filesystem" != tmpfs ]; then
-		fail "$STATE is not a tmpfs; the token copy would land in the container's writable layer. Run the container through compose.yaml, or pass --tmpfs $STATE:mode=0700"
+		fail "$state_dir is not a tmpfs; the token copy would land in the container's writable layer. Run the container through compose.yaml, or pass --tmpfs $state_dir:mode=0700"
 	fi
 	# Clear the contents, not the mount point itself.
-	find "$STATE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-	chmod 0700 "$STATE"
-	mkdir -p "$WORK/secrets" "$WORK/bridge"
+	find "$state_dir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+	chmod 0700 "$state_dir"
+	mkdir -p "$work_dir/secrets" "$work_dir/bridge"
 }
 
 check_token() {
-	require_regular_file "$MOUNTED_TOKEN" "run \`uv run -m ctl install\` before \`docker compose up\`; if \`./secrets\` is a directory Docker made, remove it first with \`sudo rm -rf ./secrets\`"
-	copy_file "$MOUNTED_TOKEN" "$WORK/secrets/token"
+	require_regular_file "$mounted_token" "run \`uv run -m ctl install\` before \`docker compose up\`; if \`./secrets\` is a directory Docker made, remove it first with \`sudo rm -rf ./secrets\`"
+	copy_file "$mounted_token" "$work_dir/secrets/token"
 
 	# `$(...)` drops trailing newlines; the two expansions trim the remaining surrounding whitespace.
-	token=$(cat "$WORK/secrets/token")
+	token=$(cat "$work_dir/secrets/token")
 	token=${token#"${token%%[![:space:]]*}"}
 	token=${token%"${token##*[![:space:]]}"}
 	# A NUL byte is dropped by the shell, so compare byte counts to see one.
-	size=$(wc -c < "$WORK/secrets/token")
-	size_without_nul=$(tr -d '\000' < "$WORK/secrets/token" | wc -c)
+	size=$(wc -c < "$work_dir/secrets/token")
+	size_without_nul=$(tr -d '\000' < "$work_dir/secrets/token" | wc -c)
 	if [ "$size" -ne "$size_without_nul" ]; then
 		token=
 	fi
@@ -138,40 +154,42 @@ check_token() {
 	*[!0-9a-f]*) token= ;;
 	esac
 	if [ "${#token}" -ne 64 ]; then
-		fail "$MOUNTED_TOKEN must hold 64 lowercase hexadecimal characters (surrounding whitespace is ignored); regenerate it with \`uv run -m ctl install\`"
+		fail "$mounted_token must hold 64 lowercase hexadecimal characters (surrounding whitespace is ignored); regenerate it with \`uv run -m ctl install\`"
 	fi
-	if [ "$token" = "$EXAMPLE_TOKEN" ]; then
-		fail "$MOUNTED_TOKEN is the example token from example.env; set your own RT_TOKEN and run \`uv run -m ctl install\`"
+	if [ "$token" = "$example_token" ]; then
+		fail "$mounted_token is the example token from example.env; set your own RT_TOKEN and run \`uv run -m ctl install\`"
 	fi
 }
 
 check_admin_password() {
-	if [ -z "${RT_ADMIN_PASSWORD:-}" ]; then
+	read_environment RT_ADMIN_PASSWORD
+	if [ -z "$environment_value" ]; then
 		fail "RT_ADMIN_PASSWORD is empty; set it in .env"
 	fi
-	find_unsafe_characters "$RT_ADMIN_PASSWORD"
-	if [ "$unsafe_found" -eq 1 ] || ! printf '%s\n' "$RT_ADMIN_PASSWORD" | grep -Eq "$ADMIN_PASSWORD_PATTERN"; then
+	find_unsafe_characters "$environment_value"
+	if [ "$unsafe_found" -eq 1 ] || ! printf '%s\n' "$environment_value" | LC_ALL=C grep -Eq "$admin_password_pattern"; then
 		fail "RT_ADMIN_PASSWORD must be at least 16 characters from A-Z, a-z, 0-9, \`_\` and \`-\`; choose another in .env"
 	fi
-	if [ "$RT_ADMIN_PASSWORD" = "$EXAMPLE_ADMIN_PASSWORD" ]; then
+	if [ "$environment_value" = "$example_admin_password" ]; then
 		fail "RT_ADMIN_PASSWORD is the example password from example.env; choose your own in .env"
 	fi
 }
 
 # The rule of ctl.config.is_dns_name: dot-separated labels, and a last label that is neither all digits nor `0x…`.
 check_domain() {
-	if [ -z "${RT_DOMAIN:-}" ]; then
+	read_environment RT_DOMAIN
+	if [ -z "$environment_value" ]; then
 		fail "RT_DOMAIN is unset or empty; set it in .env"
 	fi
 	message="RT_DOMAIN must be a DNS name (not an IP address) of letters, digits and inner hyphens, such as tunnel.example.com"
-	find_unsafe_characters "$RT_DOMAIN"
-	if [ "$unsafe_found" -eq 1 ] || [ "${#RT_DOMAIN}" -gt "$MAX_DNS_NAME_LENGTH" ]; then
+	find_unsafe_characters "$environment_value"
+	if [ "$unsafe_found" -eq 1 ] || [ "${#environment_value}" -gt "$max_dns_name_length" ]; then
 		fail "$message"
 	fi
-	if ! printf '%s\n' "$RT_DOMAIN" | grep -Eq "^($DNS_LABEL_PATTERN)(\\.($DNS_LABEL_PATTERN))*\$"; then
+	if ! printf '%s\n' "$environment_value" | LC_ALL=C grep -Eq "^($dns_label_pattern)(\\.($dns_label_pattern))*\$"; then
 		fail "$message"
 	fi
-	if printf '%s\n' "${RT_DOMAIN##*.}" | grep -Eq "$NUMERIC_LABEL_PATTERN"; then
+	if printf '%s\n' "${environment_value##*.}" | LC_ALL=C grep -Eq "$numeric_label_pattern"; then
 		fail "$message"
 	fi
 }
@@ -179,21 +197,19 @@ check_domain() {
 # An unset variable renders as the text `<no value>` and frps starts healthy, so every reference is checked up front.
 # The values are written into TOML basic strings, so each must be free of quotes, backslashes and control characters.
 check_config() {
-	require_regular_file "$MOUNTED_CONFIG" "restore it with \`git restore bridge/frps.toml\`"
-	copy_file "$MOUNTED_CONFIG" "$WORK/bridge/frps.toml"
+	require_regular_file "$mounted_config" "restore it with \`git restore bridge/frps.toml\`"
+	copy_file "$mounted_config" "$work_dir/bridge/frps.toml"
 
-	names=$(scan_template "$WORK/bridge/frps.toml")
+	names=$(scan_template "$work_dir/bridge/frps.toml")
 	while IFS= read -r name; do
 		if [ -z "$name" ]; then
 			continue
 		fi
-		# `name` is a scanned `[A-Z][A-Z0-9_]*`, so the eval can reach nothing but that variable. Unlike `$(printenv)`,
-		# it keeps trailing newlines.
-		eval "value=\${$name-}"
-		if [ -z "$value" ]; then
-			fail "$name is unset or empty, but $MOUNTED_CONFIG references it; set it in .env and pass it through compose.yaml"
+		read_environment "$name"
+		if [ -z "$environment_value" ]; then
+			fail "$name is unset or empty, but $mounted_config references it; set it in .env and pass it through compose.yaml"
 		fi
-		find_unsafe_characters "$value"
+		find_unsafe_characters "$environment_value"
 		if [ "$unsafe_found" -eq 1 ]; then
 			fail "$name contains a double quote, a backslash or a control character, which would break the TOML string it is written into"
 		fi
@@ -215,8 +231,8 @@ check_config
 
 # frps reads the token once at startup and has no reload, so a digest that no longer matches the host file means the
 # running server holds an outdated token or config.
-sha256sum "$WORK/secrets/token" > "$STATE/token.sha256"
-sha256sum "$WORK/bridge/frps.toml" > "$STATE/config.sha256"
+sha256sum "$work_dir/secrets/token" > "$state_dir/token.sha256"
+sha256sum "$work_dir/bridge/frps.toml" > "$state_dir/config.sha256"
 
-cd "$WORK"
+cd "$work_dir"
 exec "$@"
