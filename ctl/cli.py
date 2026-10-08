@@ -5,6 +5,9 @@ import argparse
 import sys
 from collections.abc import Sequence
 
+from ctl.config import ConfigError
+from ctl.env import EnvError
+
 COMMANDS = {
     "install": "Install or update this deployment.",
     "uninstall": "Remove what `install` created.",
@@ -22,7 +25,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def run_command(args: argparse.Namespace) -> int:
     print(f"ctl {args.command}: not implemented yet", file=sys.stderr)
     return 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return run_command(args)
+    except (ConfigError, EnvError) as exc:
+        print(f"ctl {args.command}: {exc}", file=sys.stderr)
+        return 2

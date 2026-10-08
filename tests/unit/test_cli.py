@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from ctl import cli
 from ctl.cli import build_parser, main
+from ctl.config import ConfigError
+from ctl.env import EnvError
 
 SPEC_SUBCOMMANDS = {"install", "uninstall", "doctor", "client-config", "pin"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -48,3 +51,16 @@ def test_module_entrypoint_propagates_the_exit_code():
     )
     assert result.returncode != 0
     assert "doctor" in result.stderr
+
+
+@pytest.mark.parametrize("error", [EnvError("bad.env:3: nope"), ConfigError("RT_DOMAIN is empty")])
+def test_a_configuration_error_is_a_message_and_exit_2_not_a_traceback(error, monkeypatch, capsys):
+
+    def fail(args):
+        raise error
+
+    monkeypatch.setattr(cli, "run_command", fail)
+    assert main(["doctor"]) == 2
+    err = capsys.readouterr().err
+    assert str(error) in err
+    assert "Traceback" not in err
