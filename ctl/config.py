@@ -75,6 +75,7 @@ DNS_LABEL = re.compile(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?", re.ASCII)
 NUMERIC_LABEL = re.compile(r"(?:[0-9]+$|0[xX])", re.ASCII)
 PORT = re.compile(r"[1-9][0-9]{0,4}", re.ASCII)
 MAX_DNS_NAME_LENGTH = 253
+MAX_DNS_LABEL_LENGTH = 63
 MAX_PORT = 65535
 HOST_KEYS = frozenset({"RT_SERVER_ADDR", "RT_CONTROL_HOST", "RT_PUBLIC_HOST"})
 
@@ -143,6 +144,8 @@ def _check_shape(key: str, value: str) -> str | None:
     elif key == "RT_LABEL":
         if not LABEL.fullmatch(value):
             return "must be lowercase letters, digits and `-`, starting and ending with a letter or digit"
+        if len(value) > MAX_DNS_LABEL_LENGTH:
+            return f"must be at most {MAX_DNS_LABEL_LENGTH} characters, the longest a DNS label can be"
         if value == EXAMPLE_LABEL:
             return "is still the example label from example.env; pick one unique to this host"
     elif key == "RT_PROTOCOL":
@@ -161,6 +164,13 @@ def _check_shape(key: str, value: str) -> str | None:
     elif key.endswith("_PORT") and not _check_port(value):
         return f"must be an integer from 1 to {MAX_PORT}"
     return None
+
+
+def validate_label(label: str) -> None:
+    """Raise `ConfigError` unless `label` could name a host: what `RT_LABEL` accepts, for a label given as an argument."""
+    problem = _check_shape("RT_LABEL", label) if label else "must not be empty"
+    if problem:
+        raise ConfigError(f"label {problem}")
 
 
 def _validate(role: Role, values: Mapping[str, str]) -> None:

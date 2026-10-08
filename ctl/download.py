@@ -144,6 +144,14 @@ class Installed:
     trust: TrustLevel
 
 
+def describe_install(pin: Pin, installed: Installed) -> str:
+    """One line saying what was installed under `bin/` and what vouches for it."""
+    what = f"installed bin/{installed.path.name} ({pin.tool} {pin.version}): {installed.trust}, "
+    if installed.trust is TrustLevel.ATTESTED:
+        return what + "pinned SHA-256 and Sigstore attestation verified"
+    return what + f"pinned SHA-256 verified; {pin.tool} publishes no Sigstore attestation"
+
+
 class Fetcher:
     """Downloads pinned binaries into a directory, verifying everything before any byte reaches it.
 

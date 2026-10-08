@@ -1,5 +1,5 @@
 # This file is part of reverse-tunnel, licensed under AGPL-3.0-or-later; see LICENSE.md.
-"""Errors for pinned binaries and the upstream releases they come from."""
+"""Errors for pinned binaries and the upstream releases they come from, and for installing them."""
 
 
 class BinariesError(Exception):
@@ -12,3 +12,7 @@ class UpstreamUnavailable(BinariesError):
 
 class AttestationError(BinariesError):
     """A Sigstore bundle does not vouch for an artifact under the pinned identity."""
+
+
+class InstallError(Exception):
+    """An install or uninstall cannot proceed; the message names what to change."""

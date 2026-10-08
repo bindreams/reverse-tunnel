@@ -8,12 +8,13 @@ import pytest
 from ctl import binaries, cli
 from ctl.cli import build_parser, main
 from ctl.config import ConfigError
-from ctl.errors import BinariesError
+from ctl.errors import BinariesError, InstallError
+from ctl.perms import PermsError
 from ctl.env import EnvError
 
 SPEC_SUBCOMMANDS = {"install", "uninstall", "doctor", "client-config", "pin"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
-UNIMPLEMENTED_SUBCOMMANDS = SPEC_SUBCOMMANDS - {"pin"}
+UNIMPLEMENTED_SUBCOMMANDS = {"doctor"}
 
 
 def declared_subcommands() -> set[str]:
@@ -140,3 +141,65 @@ def test_pin_update_failure_is_a_message_and_exit_1(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "asset frp.tar.gz has no digest" in err
     assert "Traceback" not in err
+
+
+# install, uninstall, client-config ====================================================================================
+
+CLIENT_ENV = "ROLE=client\nRT_DOMAIN=tunnel.example.com\nRT_SCHEME=ws\nRT_PUBLIC_PORT=8080\n"
+
+
+@pytest.fixture
+def deployment(tmp_path) -> Path:
+    (tmp_path / ".env").write_bytes(CLIENT_ENV.encode())
+    return tmp_path
+
+
+def test_client_config_prints_the_block_for_the_label_it_is_given(deployment, capsys):
+    assert main(["client-config", "alpha"], root=deployment) == 0
+    out = capsys.readouterr().out
+    assert "HostName alpha.tunnel.example.com" in out
+    assert "ws://%h:8080/" in out
+
+
+def test_client_config_without_a_label_is_a_usage_error(deployment, capsys):
+    with pytest.raises(SystemExit) as raised:
+        main(["client-config"], root=deployment)
+    assert raised.value.code == 2
+
+
+def test_client_config_with_a_bad_label_is_a_message_and_exit_1(deployment, capsys):
+    assert main(["client-config", "Not A Label"], root=deployment) == 1
+    assert "client-config" in capsys.readouterr().err
+
+
+def test_install_accepts_allow_self_disconnect(deployment, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        cli, "install", lambda config, *, allow_self_disconnect=False: seen.append(allow_self_disconnect) or 0
+    )
+    assert main(["install", "--allow-self-disconnect"], root=deployment) == 0
+    assert main(["install"], root=deployment) == 0
+    assert seen == [True, False]
+
+
+def test_allow_self_disconnect_belongs_to_install_only(deployment):
+    with pytest.raises(SystemExit) as raised:
+        main(["uninstall", "--allow-self-disconnect"], root=deployment)
+    assert raised.value.code == 2
+
+
+def test_install_without_an_env_file_names_it(tmp_path, capsys):
+    assert main(["install"], root=tmp_path) == 1
+    assert ".env" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("error", [InstallError("secrets/token is a directory"), PermsError("secrets: is a symlink")])
+def test_an_install_failure_is_a_message_and_exit_1_not_a_traceback(error, deployment, monkeypatch, capsys):
+
+    def fail(config, **kwargs):
+        raise error
+
+    monkeypatch.setattr(cli, "uninstall", fail)
+    assert main(["uninstall"], root=deployment) == 1
+    err = capsys.readouterr().err
+    assert str(error) in err and "Traceback" not in err

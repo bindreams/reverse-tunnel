@@ -6,10 +6,17 @@ import os
 import sys
 from collections.abc import Sequence
 
+from pathlib import Path
+
 from ctl import binaries
-from ctl.config import ConfigError
+from ctl.client import render_ssh_config
+from ctl.config import Config, ConfigError
 from ctl.env import EnvError
-from ctl.errors import BinariesError
+from ctl.errors import BinariesError, InstallError
+from ctl.install import install, uninstall
+from ctl.perms import PermsError
+
+ROOT = Path(__file__).resolve().parent.parent
 
 COMMANDS = {
     "install": "Install or update this deployment.",
@@ -25,6 +32,14 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     for name, summary in COMMANDS.items():
         subparser = commands.add_parser(name, help=summary, description=summary)
+        if name == "install":
+            subparser.add_argument(
+                "--allow-self-disconnect",
+                action="store_true",
+                help="host role: restart websocat even though this session may be running over the tunnel",
+            )
+        if name == "client-config":
+            subparser.add_argument("label", help="the host to reach: its RT_LABEL")
         if name == "pin":
             subparser.add_argument("--update", action="store_true", help="re-pin from the published releases")
             subparser.add_argument("tools", nargs="*", metavar="TOOL", help="with --update: only these tools")
@@ -53,14 +68,24 @@ def pin_command(args: argparse.Namespace) -> int:
 def run_command(args: argparse.Namespace) -> int:
     if args.command == "pin":
         return pin_command(args)
+    if args.command in {"install", "uninstall", "client-config"}:
+        config = Config.load(args.root)
+        if args.command == "install":
+            return install(config, allow_self_disconnect=args.allow_self_disconnect)
+        if args.command == "uninstall":
+            return uninstall(config)
+        print(render_ssh_config(config, args.label), end="")
+        return 0
     print(f"ctl {args.command}: not implemented yet", file=sys.stderr)
     return 1
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
+    """Run a command against the deployment in `root`, which is this checkout unless a test says otherwise."""
     args = build_parser().parse_args(argv)
+    args.root = root
     try:
         return run_command(args)
-    except (ConfigError, EnvError, BinariesError) as exc:
+    except (ConfigError, EnvError, BinariesError, InstallError, PermsError) as exc:
         print(f"ctl {args.command}: {exc}", file=sys.stderr)
         return 1

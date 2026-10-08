@@ -377,12 +377,12 @@ def test_rt_scheme_accepts_ws_and_wss(tmp_path, good):
     assert load(tmp_path, Role.HOST, RT_SCHEME=good).values["RT_SCHEME"] == good
 
 
-@pytest.mark.parametrize("bad", ["a.b", "a*", "-a", "a-", "A", "a_b", "a/b", "."])
+@pytest.mark.parametrize("bad", ["a.b", "a*", "-a", "a-", "A", "a_b", "a/b", ".", "a" * 64])
 def test_invalid_label_is_rejected(tmp_path, bad):
     assert "RT_LABEL" in refused(tmp_path, Role.HOST, RT_LABEL=bad)
 
 
-@pytest.mark.parametrize("good", ["a", "a1", "a-b", "0", "alpha-2-x"])
+@pytest.mark.parametrize("good", ["a", "a1", "a-b", "0", "alpha-2-x", "a" * 63])
 def test_valid_labels_are_accepted(tmp_path, good):
     assert load(tmp_path, Role.HOST, RT_LABEL=good).values["RT_LABEL"] == good
 

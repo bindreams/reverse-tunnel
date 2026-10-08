@@ -1,0 +1,12 @@
+# What `uv run -m ctl client-config alpha` prints for a client whose .env says RT_DOMAIN=tunnel.example.com,
+# RT_SCHEME=wss and RT_PUBLIC_PORT=443. Paste the block into ~/.ssh/config, then `ssh alpha`.
+#
+# The command is the source of truth. It adds `:<port>` to the ProxyCommand URL when RT_PUBLIC_PORT is not the
+# scheme's default (80 for ws, 443 for wss), and it names the websocat that `ctl install` put in bin/ once there is one.
+#
+# Reaching a host needs no account on the bridge: your ssh key on the host is what authorises you.
+Host alpha
+  HostName alpha.tunnel.example.com
+  ProxyCommand websocat --binary wss://%h/
+  # Required, not cosmetic: the front proxy and frps on the path can each drop a session that sits idle.
+  ServerAliveInterval 10
