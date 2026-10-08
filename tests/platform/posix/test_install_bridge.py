@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ctl import download, perms
+from ctl import install as installer
 from ctl.config import Config, Role
 from ctl.errors import InstallError
 from ctl.install import Services, install, uninstall
@@ -316,3 +317,31 @@ def test_no_recreate_notice_when_the_write_failed_and_the_old_token_stands(root,
         install(changed, services=services)
     assert "recreate" not in capsys.readouterr().err
     assert (root / "secrets" / "token").read_text() == GOOD_TOKEN + "\n"
+
+
+def test_the_notice_says_so_when_it_cannot_tell_whether_the_token_changed(root, config, services, capsys, monkeypatch):
+    assert install(config, services=services) == 0
+    capsys.readouterr()
+    changed = write_env(root, Role.BRIDGE, RT_TOKEN=OTHER_TOKEN)
+    real = installer.read_file
+    reads = []
+
+    def read_once_then_fail(*args, **kwargs):
+        reads.append(args)
+        if len(reads) > 1:
+            raise OSError(5, "I/O error")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(installer, "read_file", read_once_then_fail)
+    assert install(changed, services=services) == 1
+    err = capsys.readouterr().err
+    assert "may now hold the new RT_TOKEN (could not re-read it)" in err
+    assert "drops every connected tunnel" in err
+
+
+def test_the_notice_says_now_holds_when_it_re_read_the_new_token(root, config, services, capsys):
+    assert install(config, services=services) == 0
+    capsys.readouterr()
+    assert install(write_env(root, Role.BRIDGE, RT_TOKEN=OTHER_TOKEN), services=services) == 1
+    err = capsys.readouterr().err
+    assert "now holds the new RT_TOKEN" in err and "could not re-read" not in err

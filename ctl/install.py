@@ -150,12 +150,12 @@ def _lstat(path: Path) -> os.stat_result | None:
         raise InstallError(f"{path}: {exc.strerror or exc}") from exc
 
 
-def _token_landed(secrets_dir: Path, token: bytes) -> bool:
-    """Whether `secrets/token` now holds `token`; when that cannot be read, assume it does."""
+def _token_landed(secrets_dir: Path, token: bytes) -> bool | None:
+    """Whether `secrets/token` now holds `token`; None when it cannot be read."""
     try:
         return (read_file(secrets_dir, "token") or b"").strip() == token
     except (OSError, BinariesError):
-        return True
+        return None
 
 
 def _install_bridge(config: Config) -> int:
@@ -175,10 +175,13 @@ def _install_bridge(config: Config) -> int:
         perms.harden_file(root / ".env", None, NO_READERS, root=root)
     finally:
         # Whatever failed after the token changed, the running frps still holds the old one and the operator must hear it.
-        if changed and _token_landed(secrets_dir, token):
+        landed = _token_landed(secrets_dir, token) if changed else False
+        if landed is not False:
+            holds = "now holds" if landed else "may now hold"
+            unread = "" if landed else " (could not re-read it)"
             print(
-                "secrets/token now holds the new RT_TOKEN, but a running frps still holds the old one: it reads the "
-                f"token once at startup and cannot reload it. Recreate the container to apply the change (`{RECREATE}`). "
+                f"secrets/token {holds} the new RT_TOKEN{unread}, but a running frps still holds the old one: it reads "
+                f"the token once at startup and cannot reload it. Recreate the container to apply the change (`{RECREATE}`). "
                 "Recreating drops every connected tunnel, and a host that does not hold the new token will not reconnect.",
                 file=sys.stderr,
             )

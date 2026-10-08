@@ -222,7 +222,7 @@ def test_force_is_documented_in_the_help(capsys):
 def test_install_and_uninstall_refuse_to_run_as_root_for_these_roles(tmp_path, monkeypatch, capsys, command, role):
     """Root would leave `secrets/` or `bin/` that the operator can no longer replace, which is how the hazard starts."""
     write_env(tmp_path, role)
-    monkeypatch.setattr(cli, "effective_uid", lambda: 0)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
     monkeypatch.setattr(cli, "install", lambda *a, **k: pytest.fail("must not install as root"))
     monkeypatch.setattr(cli, "uninstall", lambda *a, **k: pytest.fail("must not uninstall as root"))
     assert main([command], root=tmp_path) == 1
@@ -266,3 +266,20 @@ def test_an_install_failure_is_a_message_and_exit_1_not_a_traceback(error, deplo
     assert main(["uninstall"], root=deployment) == 1
     err = capsys.readouterr().err
     assert str(error) in err and "Traceback" not in err
+
+
+def test_a_host_is_not_refused_when_elevated(tmp_path, monkeypatch):
+    """The host role is installed with elevation; goetia needs root."""
+    write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
+    seen = []
+    monkeypatch.setattr(cli, "install", lambda config, **kwargs: seen.append(config.role) or 0)
+    assert main(["install"], root=tmp_path) == 0
+    assert seen == [Role.HOST]
+
+
+def test_the_refusal_names_root_and_an_elevated_administrator(tmp_path, monkeypatch, capsys):
+    write_env(tmp_path, Role.CLIENT)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
+    assert main(["install"], root=tmp_path) == 1
+    assert "Administrator" in capsys.readouterr().err

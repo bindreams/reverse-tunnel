@@ -72,17 +72,22 @@ def pin_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def effective_uid() -> int | None:
-    """The uid this process acts as; None where there is no such thing (Windows)."""
-    return os.geteuid() if hasattr(os, "geteuid") else None
+def is_elevated() -> bool:
+    """Whether this process is root, or on Windows runs with an elevated (Administrator) token."""
+    if sys.platform == "win32":
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    return os.geteuid() == 0
 
 
 def refuse_root(command: str, config: Config) -> None:
     """The bridge and the client run as the operator: what root creates in this directory the operator cannot replace."""
-    if config.role in (Role.BRIDGE, Role.CLIENT) and effective_uid() == 0:
+    if config.role in (Role.BRIDGE, Role.CLIENT) and is_elevated():
         raise InstallError(
-            f"ROLE={config.role} must not run `{command}` as root (sudo): the files root creates in this directory "
-            "(secrets/, bin/) are ones you can no longer replace. Rerun as yourself"
+            f"ROLE={config.role} must not run `{command}` as root (sudo) or from an elevated Administrator prompt: the "
+            "files an elevated process creates in this directory (secrets/, bin/) are ones you can no longer replace. "
+            "Rerun as yourself"
         )
 
 
