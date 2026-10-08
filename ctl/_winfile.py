@@ -16,6 +16,7 @@ from ctypes import wintypes
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 FILE_LIST_DIRECTORY = 0x00000001
+FILE_READ_ATTRIBUTES = 0x00000080
 READ_CONTROL = 0x00020000
 WRITE_DAC = 0x00040000
 SYNCHRONIZE = 0x00100000
@@ -156,7 +157,7 @@ def open_handle(
     raised as `OSError`.
     """
     kernel32 = _kernel32()
-    handle = kernel32.CreateFileW(str(path), access, share, None, disposition, FLAGS, None)
+    handle = kernel32.CreateFileW(str(path), access | FILE_READ_ATTRIBUTES, share, None, disposition, FLAGS, None)
     if handle is None or handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -181,19 +182,25 @@ def open_relative(
     """A handle to the entry `name` of the directory held by `parent`, opened relative to it and vetted like `open_handle`.
 
     `label` is the path to name in messages. A `name` containing a separator is refused: it must be one entry.
+    `NtCreateFile` adds no rights of its own, unlike `CreateFileW`, so SYNCHRONIZE and FILE_READ_ATTRIBUTES (which the
+    vetting needs) are requested here.
     """
     if not name or "\\" in name or "/" in name or ":" in name:
         raise error(f"{label}: not a single directory entry name")
     kernel32, ntdll = _kernel32(), _ntdll()
-    buffer = ctypes.create_unicode_buffer(name)
-    text = _UnicodeString(len(name) * 2, len(name) * 2 + 2, ctypes.addressof(buffer))
+    # UNICODE_STRING counts bytes of UTF-16, so a name outside the BMP (two units a character) is twice as long as its
+    # code points; a lone surrogate is a legal NTFS name and passes through.
+    encoded = name.encode("utf-16-le", "surrogatepass")
+    buffer = ctypes.create_string_buffer(encoded + b"\0\0")
+    text = _UnicodeString(len(encoded), len(encoded) + 2, ctypes.addressof(buffer))
     attributes = _ObjectAttributes(
         ctypes.sizeof(_ObjectAttributes), parent, ctypes.pointer(text), OBJ_CASE_INSENSITIVE, None, None
     )
     handle, status_block = ctypes.c_void_p(), _IoStatusBlock()
     status = ntdll.NtCreateFile(
-        ctypes.byref(handle), access | SYNCHRONIZE, ctypes.byref(attributes), ctypes.byref(status_block), None, 0,
-        share, FILE_OPEN, FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, None, 0
+        ctypes.byref(handle), access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, ctypes.byref(attributes),
+        ctypes.byref(status_block), None, 0, share, FILE_OPEN, FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+        None, 0
     )
     if status < 0:
         _raise_status(ntdll, status)

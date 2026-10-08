@@ -87,7 +87,8 @@ def _verify(handle: int, path: Path, wanted: frozenset[str], *, isolate: bool) -
     """Fail loudly if the ACL is not what was meant: the whole ACL when isolated, at least the grants otherwise."""
     acl = winacl.read_acl_handle(handle)
     if acl.protected != isolate:
-        raise PermsError(f"{path}: inheritance is {'enabled' if acl.protected else 'broken'}, expected the opposite")
+        found, expected = ("broken", "enabled") if acl.protected else ("enabled", "broken")
+        raise PermsError(f"{path}: inheritance is {found}, expected {expected}")
     if isolate and acl.sids != wanted:
         raise PermsError(f"{path}: the ACL grants {sorted(acl.sids)}, expected {sorted(wanted)}")
     if not wanted <= acl.sids:
@@ -222,12 +223,10 @@ def _open_entries(stack: ExitStack, directory: int, where: Path) -> list[tuple[i
             handle = winfile.open_relative(
                 directory, name, label=label, access=ACL_ACCESS, directory=False, single_link=True, error=PermsError
             )
-        except FileNotFoundError:
-            continue
         except PermsError as exc:
             raise PermsError(f"{exc}{FLAT}") from exc
-        except OSError as exc:
-            raise PermsError(f"{label}: {exc.strerror or exc}") from exc
+        except OSError as exc:  # a name just listed that cannot be opened is not skipped: fail closed
+            raise PermsError(f"{label}: listed but cannot be opened: {exc.strerror or exc}") from exc
         stack.callback(winfile.close_handle, handle)
         entries.append((handle, label))
     return entries
@@ -258,8 +257,10 @@ def converge_tree(path: Path, owner: Account | None, root: Path) -> None:
             held, directory=True, operator=operator, readers=frozenset(), writers=writers, isolate=False, parent=parent
         )
         _verify(held, path, wanted, isolate=False)
-        inherited = winacl.inherited_for(winacl.read_entries(held)[0], directory=False)
+        new_entries = winacl.read_entries(held)[0]
         for handle, label in entries:
+            owner_sid, group_sid = winacl.owner_and_group(handle)
+            inherited = winacl.inherited_for(new_entries, directory=False, owner=owner_sid, group=group_sid)
             winacl.set_dacl(handle, inherited, protected=False)
             if winacl.read_acl_handle(handle).protected:
                 raise PermsError(f"{label}: inheritance is still broken after the reset")
@@ -290,20 +291,20 @@ def grant_service_read(root: Path, account: Account) -> None:
         )
         top = _Target(root_handle, root, True, [])
         targets: list[_Target] = []
+        present = {name.casefold() for name in winfile.list_names(root_handle)}
         for name in ("bin", "host"):
-            label = root / name
-            try:
-                handle = winfile.open_relative(
-                    root_handle,
-                    name,
-                    label=label,
-                    access=listing,
-                    directory=True,
-                    error=PermsError,
-                    share=winfile.FILE_SHARE_READ_WRITE
-                )
-            except FileNotFoundError:
+            if name not in present:  # absent, not unopenable: whatever is created there later inherits normally
                 continue
+            label = root / name
+            handle = winfile.open_relative(
+                root_handle,
+                name,
+                label=label,
+                access=listing,
+                directory=True,
+                error=PermsError,
+                share=winfile.FILE_SHARE_READ_WRITE
+            )
             stack.callback(winfile.close_handle, handle)
             directory = _Target(handle, label, True, [], top)
             targets.append(directory)
@@ -320,14 +321,19 @@ def grant_service_read(root: Path, account: Account) -> None:
             winacl.READ_EXECUTE,
             sid,
         )
-        replaced = [e for e in top.entries if e.flags & winacl.INHERITED_ACE or e.sid != sid]
-        top.entries = replaced + [service]
+        # Only an earlier explicit allow for the service is replaced; a deny for it, or an inherited ACE, stays.
+        kept = [
+            e for e in top.entries
+            if e.flags & winacl.INHERITED_ACE or e.sid != sid or e.ace_type != winacl.ACCESS_ALLOWED_ACE_TYPE
+        ]
+        top.entries = kept + [service]
         winacl.set_dacl(root_handle, top.entries, protected=root_protected)
         for target in targets:
             assert target.parent is not None
-            target.entries = winacl.explicit(
-                target.entries
-            ) + winacl.inherited_for(target.parent.entries, directory=target.directory)
+            owner_sid, group_sid = winacl.owner_and_group(target.handle)
+            target.entries = winacl.explicit(target.entries) + winacl.inherited_for(
+                target.parent.entries, directory=target.directory, owner=owner_sid, group=group_sid
+            )
             winacl.set_dacl(target.handle, target.entries, protected=False)
         for target in [top, *targets]:
             if sid not in winacl.read_acl_handle(target.handle).sids:

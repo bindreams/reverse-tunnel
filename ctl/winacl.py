@@ -24,6 +24,8 @@ SID_AUTHENTICATED_USERS = "S-1-5-11"
 SID_LOCAL_SERVICE = "S-1-5-19"
 SID_ADMINISTRATORS = "S-1-5-32-544"
 SID_USERS = "S-1-5-32-545"
+SID_CREATOR_OWNER = "S-1-3-0"
+SID_CREATOR_GROUP = "S-1-3-1"
 
 # The access masks `icacls` means by F, M, RX, R and R,W.
 FULL = 0x1F01FF
@@ -31,6 +33,14 @@ MODIFY = 0x1301BF
 READ_EXECUTE = 0x1200A9
 READ = 0x120089
 READ_WRITE = 0x12019F
+
+# Generic rights and what they mean for a file.
+GENERIC_READ = 0x80000000
+GENERIC_WRITE = 0x40000000
+GENERIC_EXECUTE = 0x20000000
+GENERIC_ALL = 0x10000000
+GENERIC_RIGHTS = ((GENERIC_READ, 0x120089), (GENERIC_WRITE, 0x120116), (GENERIC_EXECUTE, 0x1200A0), (GENERIC_ALL, FULL))
+GENERIC_MASK = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL
 
 OBJECT_INHERIT_ACE = 0x1
 CONTAINER_INHERIT_ACE = 0x2
@@ -76,22 +86,50 @@ class Acl:
 # Inheritance ==========================================================================================================
 
 
-def inherited_for(parent: Iterable[Entry], *, directory: bool) -> list[Entry]:
-    """The ACEs a new child of `parent` inherits, as NTFS computes them.
+def _effective(ace: Entry, owner: str | None, group: str | None) -> Entry:
+    """`ace` as it applies to a child: the creator SIDs become the child's owner and group, generic rights are mapped."""
+    sid, mask = ace.sid, ace.mask
+    if sid in (SID_CREATOR_OWNER, SID_CREATOR_GROUP):
+        principal = owner if sid == SID_CREATOR_OWNER else group
+        if principal is None:
+            raise ValueError(f"{sid} is inherited, so the child's owner and primary group are needed")
+        sid = principal
+    if mask & GENERIC_MASK:
+        mapped = 0
+        for generic, specific in GENERIC_RIGHTS:
+            if mask & generic:
+                mapped |= specific
+        mask = mask & ~GENERIC_MASK | mapped
+    return ace._replace(sid=sid, mask=mask, flags=INHERITED_ACE)
 
-    A file takes every object-inheritable ACE. A directory takes a container-inheritable one as it stands (still
-    inheritable unless it is no-propagate), and an object-only one as an inherit-only ACE for its own files. Every
-    result carries INHERITED_ACE. `parent` holds all of the parent's ACEs, its own inherited ones included.
+
+def inherited_for(parent: Iterable[Entry],
+                  *,
+                  directory: bool,
+                  owner: str | None = None,
+                  group: str | None = None) -> list[Entry]:
+    """The ACEs a new child of `parent` inherits, as NTFS computes them. `owner` and `group` are the child's.
+
+    A file takes every object-inheritable ACE. A directory takes a container-inheritable one, and an object-only one
+    as an inherit-only ACE for its own files. Every result carries INHERITED_ACE. The effective ACE for the child maps
+    CREATOR OWNER and CREATOR GROUP to `owner` and `group` and generic rights to file rights. A directory that passes
+    such an ACE on keeps the original, unmapped, as a second inherit-only ACE. `parent` holds all of the parent's ACEs,
+    its own inherited ones included.
     """
     result = []
     for ace in parent:
         flags = ace.flags
         if not directory:
             if flags & OBJECT_INHERIT_ACE:
-                result.append(ace._replace(flags=INHERITED_ACE))
+                result.append(_effective(ace, owner, group))
         elif flags & CONTAINER_INHERIT_ACE:
             propagate = 0 if flags & NO_PROPAGATE_INHERIT_ACE else flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
-            result.append(ace._replace(flags=INHERITED_ACE | propagate))
+            effective = _effective(ace, owner, group)
+            if propagate and (ace.sid in (SID_CREATOR_OWNER, SID_CREATOR_GROUP) or ace.mask & GENERIC_MASK):
+                result.append(effective)
+                result.append(ace._replace(flags=INHERITED_ACE | INHERIT_ONLY_ACE | propagate))
+            else:
+                result.append(effective._replace(flags=INHERITED_ACE | propagate))
         elif flags & OBJECT_INHERIT_ACE and not flags & NO_PROPAGATE_INHERIT_ACE:
             result.append(ace._replace(flags=INHERITED_ACE | OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE))
     return result
@@ -127,6 +165,22 @@ def owner_sid(handle: int) -> str:
         handle, win32security.SE_FILE_OBJECT, win32security.OWNER_SECURITY_INFORMATION
     )
     return win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())
+
+
+def owner_and_group(handle: int) -> tuple[str, str]:
+    """The owner and primary group SIDs of the object behind `handle` (READ_CONTROL)."""
+    import win32security
+
+    descriptor = win32security.GetSecurityInfo(
+        handle, win32security.SE_FILE_OBJECT,
+        win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
+    )
+    # pywin32 has GetSecurityDescriptorGroup; its stubs omit it.
+    group = descriptor.GetSecurityDescriptorGroup()  # ty: ignore[unresolved-attribute]
+    return (
+        win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()),
+        win32security.ConvertSidToStringSid(group),
+    )
 
 
 def read_entries(handle: int) -> tuple[list[Entry], bool]:
@@ -268,6 +322,7 @@ def apply(
     inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
     entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()]
     if not isolate:
-        entries += inherited_for(parent, directory=directory)
+        owner, group = owner_and_group(handle)
+        entries += inherited_for(parent, directory=directory, owner=owner, group=group)
     set_dacl(handle, entries, protected=isolate)
     return frozenset(wanted)

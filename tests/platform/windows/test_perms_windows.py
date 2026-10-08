@@ -59,6 +59,7 @@ def privilege(name: str):
     import win32api
     import win32con
     import win32security
+    import winerror
 
     token = win32security.OpenProcessToken(
         win32api.GetCurrentProcess(), win32con.TOKEN_ADJUST_PRIVILEGES | win32con.TOKEN_QUERY
@@ -67,7 +68,11 @@ def privilege(name: str):
         # pywin32 takes None for the local machine and a list of pairs; its stubs say otherwise.
         luid = win32security.LookupPrivilegeValue(None, name)  # ty: ignore[invalid-argument-type]
         enable = [(luid, win32con.SE_PRIVILEGE_ENABLED)]
+        win32api.SetLastError(0)
         previous = win32security.AdjustTokenPrivileges(token, False, enable)  # ty: ignore[invalid-argument-type]
+        # AdjustTokenPrivileges succeeds even when the privilege is not held; only the last error says so.
+        if win32api.GetLastError() == winerror.ERROR_NOT_ALL_ASSIGNED:
+            raise AssertionError(f"this process does not hold {name}; run the Windows tests elevated")
         try:
             yield
         finally:
@@ -505,6 +510,92 @@ def test_grant_service_read_is_idempotent(tmp_path):
     first = acls_under(repo)
     grant_service_read(repo, LOCAL_SERVICE)
     assert acls_under(repo) == first
+
+
+def entries_of(path: Path, *, directory: bool = True) -> list[winacl.Entry]:
+    with perms_windows._handle(path, directory=directory, access=perms_windows.winfile.READ_CONTROL) as handle:
+        return winacl.read_entries(handle)[0]
+
+
+def test_grant_service_read_keeps_an_explicit_deny_for_the_service(tmp_path):
+    repo = repo_with(tmp_path)
+    subprocess.run(["icacls", str(repo), "/deny", f"*{SID_LOCAL_SERVICE}:(W)"], check=True, capture_output=True)
+    grant_service_read(repo, LOCAL_SERVICE)
+    kept = [e for e in entries_of(repo) if e.sid == SID_LOCAL_SERVICE]
+    assert {e.ace_type for e in kept} == {winacl.ACCESS_ALLOWED_ACE_TYPE, winacl.ACCESS_DENIED_ACE_TYPE}
+
+
+# Names outside the BMP ================================================================================================
+
+NON_BMP = "\U0001d4b3"
+
+
+def test_converge_tree_opens_an_entry_whose_name_is_outside_the_bmp(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    entry = logs / f"frpc-{NON_BMP}.log"
+    entry.write_bytes(b"")
+    harden_file(entry, None, NO_READERS, root=tmp_path)
+    converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
+    assert SID_LOCAL_SERVICE in principals(entry)
+
+
+def test_converge_tree_refuses_a_non_bmp_junction_by_name_instead_of_skipping_it(tmp_path):
+    import _winapi
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    before = {path: winacl.read_acl(path) for path in (logs, target)}
+    _winapi.CreateJunction(str(target), str(logs / NON_BMP))
+    with pytest.raises(PermsError) as raised:
+        converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
+    assert NON_BMP in str(raised.value)
+    assert "reparse point" in str(raised.value)
+    assert {path: winacl.read_acl(path) for path in before} == before
+
+
+def test_grant_service_read_opens_a_non_bmp_file_name_in_bin(tmp_path):
+    repo = repo_with(tmp_path)
+    (repo / "bin" / f"tool-{NON_BMP}.exe").write_bytes(b"")
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert SID_LOCAL_SERVICE in principals(repo / "bin" / f"tool-{NON_BMP}.exe")
+
+
+# Differential against NTFS ============================================================================================
+
+
+def test_inherited_for_reproduces_what_ntfs_computes_for_creator_owner_and_generic_rights(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    subprocess.run(
+        [
+            "icacls",
+            str(parent), "/inheritance:r", "/grant:r", f"*{SID_ADMINISTRATORS}:(OI)(CI)(F)", "*S-1-3-0:(OI)(CI)(IO)(F)",
+            f"*{SID_USERS}:(OI)(CI)(GR,GE)"
+        ],
+        check=True,
+        capture_output=True,
+    )
+    child_file = parent / "f"
+    child_file.write_bytes(b"")
+    child_dir = parent / "d"
+    child_dir.mkdir()
+    parent_entries = entries_of(parent)
+
+    def triples(entries):
+        return {(e.sid, e.mask, e.flags) for e in entries}
+
+    for path, directory in ((child_file, False), (child_dir, True)):
+        with perms_windows._handle(path, directory=directory) as handle:
+            by_ntfs = triples(winacl.read_entries(handle)[0])
+            owner, group = winacl.owner_and_group(handle)
+            winacl.set_dacl(handle, [], protected=False)
+            assert winacl.read_entries(handle)[0] == []
+            computed = winacl.inherited_for(parent_entries, directory=directory, owner=owner, group=group)
+            winacl.set_dacl(handle, computed, protected=False)
+            assert triples(winacl.read_entries(handle)[0]) == by_ntfs, path
 
 
 # Inspection ===========================================================================================================
