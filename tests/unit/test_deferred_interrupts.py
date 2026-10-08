@@ -118,3 +118,76 @@ def test_an_interrupt_never_removes_a_target_that_already_existed(tmp_path):
     with pytest.raises(FileExistsError):
         extract_member(path, ArchiveFormat.TAR_XZ, "top/tool", scratch / "tool")
     assert (scratch / "tool").read_bytes() == b"old"
+
+
+# Nesting and restoring ================================================================================================
+
+
+def test_an_inner_block_leaves_the_interrupt_to_the_outermost_one():
+    steps = []
+    with pytest.raises(KeyboardInterrupt):
+        with deferred_interrupts():
+            with deferred_interrupts():
+                interrupt()
+                steps.append("inner body")
+            steps.append("after the inner block")  # an inner exit must not raise inside the outer section
+        steps.append("never: the outer block raised")
+    assert steps == ["inner body", "after the inner block"]
+
+
+def test_nesting_installs_and_restores_the_handler_once():
+    before = signal.getsignal(signal.SIGINT)
+    with deferred_interrupts():
+        outer = signal.getsignal(signal.SIGINT)
+        with deferred_interrupts():
+            assert signal.getsignal(signal.SIGINT) is outer
+        assert signal.getsignal(signal.SIGINT) is outer
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_a_block_after_a_finished_outer_block_defers_again():
+    with deferred_interrupts():
+        pass
+    with pytest.raises(KeyboardInterrupt):
+        with deferred_interrupts():
+            interrupt()
+
+
+def test_handlers_are_restored_in_reverse_order_of_installation(monkeypatch):
+    from ctl import atomic
+
+    monkeypatch.setattr(atomic, "DEFERRED_SIGNALS", ("SIGINT", "SIGTERM"))
+    calls = []
+    real = signal.signal
+
+    def spy(number, handler):
+        calls.append(number)
+        return real(number, handler)
+
+    monkeypatch.setattr(signal, "signal", spy)
+    with deferred_interrupts():
+        pass
+    assert calls == [signal.SIGINT, signal.SIGTERM, signal.SIGTERM, signal.SIGINT]
+
+
+def test_every_handler_is_restored_even_when_restoring_one_fails(monkeypatch):
+    from ctl import atomic
+
+    monkeypatch.setattr(atomic, "DEFERRED_SIGNALS", ("SIGINT", "SIGTERM"))
+    before_int, before_term = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
+    real = signal.signal
+    seen = []
+
+    def spy(number, handler):
+        if number == signal.SIGTERM and number in seen:
+            raise OSError("cannot restore")
+        seen.append(number)
+        return real(number, handler)
+
+    monkeypatch.setattr(signal, "signal", spy)
+    with pytest.raises(OSError, match="cannot restore"):
+        with deferred_interrupts():
+            pass
+    monkeypatch.setattr(signal, "signal", real)
+    assert signal.getsignal(signal.SIGINT) is before_int
+    real(signal.SIGTERM, before_term)

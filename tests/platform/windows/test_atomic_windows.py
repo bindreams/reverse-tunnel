@@ -204,3 +204,28 @@ def test_a_handle_reports_the_name_it_has_now_and_a_rename_through_it_changes_it
     finally:
         winfile.close_handle(directory)
     assert [p.name for p in tmp_path.iterdir()] == ["final"]
+
+
+def test_a_name_longer_than_the_first_buffer_is_still_read_in_full(tmp_path):
+    import ctypes
+
+    name = "n" * 250
+    directory = winfile.open_handle(
+        tmp_path,
+        access=winfile.FILE_ADD_FILE | winfile.FILE_LIST_DIRECTORY,
+        disposition=winfile.OPEN_EXISTING,
+        directory=True,
+        error=BinariesError,
+        share=winfile.FILE_SHARE_READ_WRITE,
+    )
+    holder = ctypes.c_void_p()
+    try:
+        winfile.create_relative(
+            directory, name, label=tmp_path / name, access=winfile.GENERIC_WRITE, error=BinariesError, into=holder
+        )
+        assert holder.value is not None
+        assert len(str(tmp_path)) + len(name) > winfile.NAME_BUFFER_SIZE // 2  # the volume-relative path overflows it
+        assert winfile.final_name(holder.value) == name
+        winfile.close_handle(holder.value)
+    finally:
+        winfile.close_handle(directory)

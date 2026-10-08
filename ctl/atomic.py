@@ -14,7 +14,7 @@ import signal
 import stat
 import sys
 import threading
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from pathlib import Path
 from types import FrameType
 from typing import IO
@@ -33,34 +33,40 @@ def is_link(status: os.stat_result) -> bool:
     ) or bool(getattr(status, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+DEFERRED_SIGNALS = ("SIGINT", "SIGBREAK")  # SIGBREAK exists on Windows only
+_holding = False  # whether the main thread is inside an outermost `deferred_interrupts` block
+
+
 @contextlib.contextmanager
 def deferred_interrupts() -> Generator[None]:
     """Hold Ctrl-C (and Ctrl-Break on Windows) until the block ends, then raise `KeyboardInterrupt` if one arrived.
 
     A block that creates, writes, renames and cleans up files must not be torn in the middle: an interrupt between a
     system call returning and its result being stored would leak a handle or a temporary no matter how the code is
-    ordered. The previous handlers are restored on exit. Signals can only be handled on the main thread, so elsewhere the
-    block simply runs; a signal whose handler is `SIG_IGN` stays ignored.
+    ordered. The previous handlers are restored on exit, last installed first, and every restore runs even if one fails.
+    Signals can only be handled on the main thread, so elsewhere the block simply runs; a signal whose handler is
+    `SIG_IGN` stays ignored. Blocks nest: an inner one leaves the interrupt to the outermost, which alone raises.
     """
-    if threading.current_thread() is not threading.main_thread():
+    global _holding
+    if threading.current_thread() is not threading.main_thread() or _holding:
         yield
         return
-    names = ("SIGINT", "SIGBREAK")
     arrived: list[int] = []
-    previous: dict[int, Callable[[int, FrameType | None], object] | int | None] = {}
 
-    def record(number: int, frame: object) -> None:
+    def record(number: int, frame: FrameType | None) -> None:
         arrived.append(number)
 
-    for name in names:
-        number = getattr(signal, name, None)
-        if number is not None and signal.getsignal(number) != signal.SIG_IGN:
-            previous[number] = signal.signal(number, record)
+    _holding = True
     try:
-        yield
+        with contextlib.ExitStack() as restore:
+            for name in DEFERRED_SIGNALS:
+                number = getattr(signal, name, None)
+                if number is not None and signal.getsignal(number) != signal.SIG_IGN:
+                    previous = signal.signal(number, record)
+                    restore.callback(signal.signal, number, signal.SIG_DFL if previous is None else previous)
+            yield
     finally:
-        for number, handler in previous.items():
-            signal.signal(number, signal.SIG_DFL if handler is None else handler)
+        _holding = False
         if arrived:
             raise KeyboardInterrupt
 

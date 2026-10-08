@@ -56,7 +56,8 @@ STATUS_INVALID_INFO_CLASS = 0xC0000003
 STATUS_INVALID_PARAMETER = 0xC000000D
 STATUS_NOT_SUPPORTED = 0xC00000BB
 UNSUPPORTED_CLASS = (STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED)
-NAME_BUFFER_SIZE = 4 + 2 * 32768
+NAME_BUFFER_SIZE = 4 + 2 * 260  # a first guess; `final_name` grows it to whatever the name needs
+STATUS_BUFFER_OVERFLOW = 0x80000005
 FILE_RENAME_REPLACE_IF_EXISTS = 0x1
 FILE_DISPOSITION_DELETE = 0x1
 FILE_DISPOSITION_POSIX_SEMANTICS = 0x2
@@ -360,15 +361,20 @@ def delete_now(handle: int) -> None:
 def final_name(handle: int) -> str:
     """The last component of the name the open file `handle` has now, which a rename through the handle changes."""
     ntdll = _ntdll()
-    buffer = ctypes.create_string_buffer(NAME_BUFFER_SIZE)
-    status = ntdll.NtQueryInformationFile(
-        handle, ctypes.byref(_IoStatusBlock()), ctypes.addressof(buffer), NAME_BUFFER_SIZE, FILE_NAME_INFORMATION
-    )
-    if status < 0:
-        _raise_status(ntdll, status)
-    length = ctypes.c_uint32.from_buffer(buffer).value
-    path = ctypes.wstring_at(ctypes.addressof(buffer) + 4, length // 2)
-    return path.rsplit("\\", 1)[-1]
+    size = NAME_BUFFER_SIZE
+    while True:
+        buffer = ctypes.create_string_buffer(size)
+        status = ntdll.NtQueryInformationFile(
+            handle, ctypes.byref(_IoStatusBlock()), ctypes.addressof(buffer), size, FILE_NAME_INFORMATION
+        )
+        length = ctypes.c_uint32.from_buffer(buffer).value
+        if status & 0xFFFFFFFF == STATUS_BUFFER_OVERFLOW:  # the length field still says how much the name needs
+            size = 4 + length
+            continue
+        if status < 0:
+            _raise_status(ntdll, status)
+        path = ctypes.wstring_at(ctypes.addressof(buffer) + 4, length // 2)
+        return path.rsplit("\\", 1)[-1]
 
 
 def _set_information(handle: int, information_class: int, buffer, size: int) -> int:
