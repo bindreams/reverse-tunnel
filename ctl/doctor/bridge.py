@@ -12,18 +12,20 @@ import hashlib
 import json
 import re
 import subprocess
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 
 from ctl.atomic import read_file
-from ctl.config import MAX_PORT, PORT, Config
+from ctl.config import Config
 from ctl.doctor import frps_api
 from ctl.doctor.model import Check, Skip, Verdict, execute, fail, not_applicable, ok
 from ctl.doctor.permissions import Permissions
 from ctl.doctor.probes import DOCKER_TIMEOUT, Probes
 from ctl.doctor.tls import TlsProbeError, is_staging
-from ctl.errors import BinariesError
+from ctl.errors import BinariesError, InstallError
+from ctl.host import token_digest
 
 SERVICE = "frps"
 RECREATE = "docker compose up -d --force-recreate"
@@ -33,6 +35,7 @@ DIGEST = re.compile(r"[0-9a-f]{64}", re.ASCII)
 WILDCARDS = {"0.0.0.0": LOOPBACK, "::": "::1", "0:0:0:0:0:0:0:0": "::1"}
 # Not a label any host would use; frps answers 404 for a name no proxy has registered.
 UNREGISTERED = "rt-doctor-unregistered"
+DURABLE_POLICIES = ("always", "unless-stopped")
 
 
 class DockerProblem(Exception):
@@ -75,8 +78,8 @@ class Bridge:
             ("vhost_answers_404", self.vhost_answers_404),
             ("registered_labels", self.registered_labels),
             ("label_collisions", self.label_collisions),
-            ("config_skew", lambda: self.skew("config.sha256", "bridge", "frps.toml", "bridge/frps.toml")),
-            ("token_skew", lambda: self.skew("token.sha256", "secrets", "token", "secrets/token")),
+            ("config_skew", lambda: self.skew("config.sha256", "bridge/frps.toml", self.config_digest)),
+            ("token_skew", lambda: self.skew("token.sha256", "RT_TOKEN", lambda: token_digest(self.config))),
             ("tls_chain_validates", self.tls_chain_validates),
             ("tls_issuer_is_not_staging", self.tls_issuer_is_not_staging),
             ("env_permissions", self.permissions.env),
@@ -151,6 +154,11 @@ class Bridge:
             raise Skip(f"the {SERVICE} container is not running (see container_healthy)")
         return container
 
+    def skip_if_docker_is_the_cause(self) -> None:
+        """Nothing answered on a published port. With Docker unusable that is its symptom, already reported once."""
+        if self.docker_problem:
+            raise Skip("Docker is not usable and nothing answers on the published port (see docker_reachable)")
+
     def skip_if_known_down(self) -> None:
         """For checks that talk to the published ports: when Docker shows the container is down, say so once."""
         if self.docker_problem or self.found.problem:
@@ -187,16 +195,25 @@ class Bridge:
         return ok(f"the {SERVICE} container is running and healthy")
 
     def restart_policy(self) -> Verdict:
+        """`always` or `unless-stopped`. `on-failure` restarts after a crash only, so a reboot leaves the bridge down."""
         try:
-            policy = self.host_config.get("RestartPolicy", {}).get("Name") or "no"
+            policy = self.host_config.get("RestartPolicy")
         except DockerProblem as exc:
             return fail(str(exc))
-        if policy == "no":
+        if not isinstance(policy, dict):
             return fail(
-                "the container's restart policy is 'no', so a reboot or a docker restart leaves the bridge down for "
-                "every host. compose.yaml declares `restart: unless-stopped`; recreate the container with `docker compose up -d`"
+                "`docker inspect` reports a null RestartPolicy for the container, so what happens after a reboot is "
+                "unknown. compose.yaml declares `restart: unless-stopped`; recreate the container with "
+                "`docker compose up -d`"
             )
-        return ok(f"the container's restart policy is {policy}")
+        name = policy.get("Name") or "no"
+        if name not in DURABLE_POLICIES:
+            return fail(
+                f"the container's restart policy is '{name}', which does not bring the bridge back after a reboot or a "
+                "docker restart, and every host depends on it. compose.yaml declares `restart: unless-stopped`; "
+                "recreate the container with `docker compose up -d`"
+            )
+        return ok(f"the container's restart policy is {name}")
 
     def control_port_published(self) -> Verdict:
         try:
@@ -233,6 +250,7 @@ class Bridge:
         self.skip_if_known_down()
         answer = self.get(f"{self.admin_url()}/healthz")
         if isinstance(answer, str):
+            self.skip_if_docker_is_the_cause()
             return fail(answer)
         if answer.status_code != 200:
             return fail(f"{self.admin_url()}/healthz answered HTTP {answer.status_code}, not 200")
@@ -256,59 +274,100 @@ class Bridge:
         answer = self.get(url, headers={"Host": f"{UNREGISTERED}.{self.config.require('RT_DOMAIN')}"})
         if isinstance(answer, str):
             return fail(answer)
+        server = answer.headers.get("server")
         if answer.status_code != 404:
             return fail(
                 f"{url} answered HTTP {answer.status_code} for a subdomain nobody registered; frps answers 404, so "
                 "something else holds the port or frps is not routing"
             )
+        if server is not None:
+            return fail(
+                f"{url} answered 404 with Server: {server}; frps's own 404 carries no Server header, so another server "
+                "holds the vhost port"
+            )
         return ok(f"{url} answered frps's 404 for an unregistered subdomain")
 
     # frps's admin API -------------------------------------------------------------------------------------------------
 
-    def api(self, lister):
+    def api(self, lister, user: str | None = None):
         self.skip_if_known_down()
-        return lister(self.admin_url(), self.config.require("RT_ADMIN_PASSWORD"), transport=self.probes.transport)
+        try:
+            return lister(
+                self.admin_url(), self.config.require("RT_ADMIN_PASSWORD"), user=user, transport=self.probes.transport
+            )
+        except frps_api.FrpsUnreachable:
+            self.skip_if_docker_is_the_cause()
+            raise
 
     def registered_labels(self) -> Verdict:
+        """The online labels. The fleet listing is informational; each label is then confirmed on its own, filtered."""
         try:
             page = self.api(frps_api.list_proxies)
+            if not page.complete:
+                return fail(
+                    "the list of proxies is incomplete (paging stopped short of frps's total), so it cannot be trusted"
+                )
+            seen = sorted({proxy.user or proxy.name for proxy in page.items if proxy.phase != "offline"})
+            confirmed, gone = [], []
+            for label in seen:
+                one = self.api(frps_api.list_proxies, user=label)
+                if not one.complete:
+                    return fail(f"the list of proxies for label {label} is incomplete, so it cannot be trusted")
+                (confirmed if any(proxy.phase != "offline" for proxy in one.items) else gone).append(label)
         except frps_api.FrpsApiError as exc:
             return fail(str(exc))
-        if not page.complete:
-            return fail(
-                "the list of proxies is incomplete (paging stopped short of frps's total), so it cannot be trusted"
-            )
-        labels = sorted({proxy.user or proxy.name for proxy in page.items if proxy.phase != "offline"})
-        return ok(f"{len(labels)} online: {', '.join(labels)}" if labels else "none online")
+        detail = f"{len(confirmed)} online: {', '.join(confirmed)}" if confirmed else "none online"
+        return ok(detail + (f" (went offline while listing: {', '.join(gone)})" if gone else ""))
 
     def label_collisions(self) -> Verdict:
-        """Collisions show only in the clients: with two claimants the proxies list the winner alone."""
+        """Collisions show only in the clients: with two claimants the proxies list the winner alone.
+
+        The fleet listing only names the labels; whether a label is claimed twice is answered by asking for that label
+        alone (`user=`), a result of a page or less that does not shift while the fleet changes.
+        """
         try:
             page = self.api(frps_api.list_clients)
+            if not page.complete:
+                return fail(
+                    "the list of clients is incomplete (paging stopped short of frps's total), so a label may be "
+                    "missing from it and 'no collision' cannot be said"
+                )
+            labels = sorted({client.user for client in page.items if client.online and client.user})
+            collided: dict[str, list[str]] = {}
+            for label in labels:
+                one = self.api(frps_api.list_clients, user=label)
+                if not one.complete:
+                    return fail(
+                        f"the list of clients for label {label} is incomplete (paging stopped short of frps's total), "
+                        "so a second claimant may be missing and 'no collision' cannot be said"
+                    )
+                claimants = [client.client_id or client.key for client in one.items if client.online]
+                if len(claimants) > 1:
+                    collided[label] = claimants
         except frps_api.FrpsApiError as exc:
             return fail(str(exc))
-        if not page.complete:
-            return fail(
-                "the list of clients is incomplete (paging stopped short of frps's total), so a second claimant of a "
-                "label may be missing from it and 'no collision' cannot be said"
-            )
-        claimants: dict[str, list[str]] = {}
-        for client in page.items:
-            if client.online and client.user:
-                claimants.setdefault(client.user, []).append(client.client_id or client.key)
-        collided = {label: ids for label, ids in claimants.items() if len(ids) > 1}
         if collided:
             listing = "; ".join(f"{label} is claimed by {', '.join(ids)}" for label, ids in sorted(collided.items()))
             return fail(
                 f"{listing}. Only one claimant is routed, and the loser takes the label over when the winner "
                 "disconnects; give each host its own RT_LABEL"
             )
-        return ok(f"{len(claimants)} online client(s), none sharing a label")
+        return ok(f"{len(labels)} online label(s), none claimed twice")
 
     # What frps loaded -------------------------------------------------------------------------------------------------
 
-    def skew(self, recorded_name: str, directory: str, name: str, shown: str) -> Verdict:
-        """The digest the entrypoint recorded of what frps loaded against the file on disk now: content, never mtime."""
+    def config_digest(self) -> str:
+        content = read_file(self.root / "bridge", "frps.toml")
+        if content is None:
+            raise InstallError(f"{self.root / 'bridge' / 'frps.toml'} is missing; restore it from the repository")
+        return hashlib.sha256(content).hexdigest()
+
+    def skew(self, recorded_name: str, shown: str, digest: Callable[[], str]) -> Verdict:
+        """The digest the entrypoint recorded of what frps loaded against what is on disk now: content, never mtime.
+
+        The token is compared as `RT_TOKEN` plus a newline, which is exactly what `ctl install` writes to
+        `secrets/token`: the file itself is never opened, here or on a host.
+        """
         self.require_running()
         try:
             result = self.docker("compose", "exec", "-T", SERVICE, "cat", f"/run/rt/{recorded_name}")
@@ -320,12 +379,10 @@ class Bridge:
         if not fields or not DIGEST.fullmatch(fields[0]):
             return fail(f"the container's record of {shown} is not a digest")
         try:
-            content = read_file(self.root / directory, name)
-        except (BinariesError, OSError) as exc:
+            actual = digest()
+        except (BinariesError, InstallError, OSError) as exc:
             return fail(str(exc))
-        if content is None:
-            return fail(f"{self.root / directory / name} is missing; run `ctl install`")
-        if hashlib.sha256(content).hexdigest() != fields[0]:
+        if actual != fields[0]:
             return fail(
                 f"frps is running with a different {shown} than the one on disk now, and reads it only at startup. "
                 f"Apply it with `{RECREATE}`; recreating drops every connected tunnel, and a host that does not hold "
@@ -341,10 +398,8 @@ class Bridge:
             raise Skip("RT_PUBLIC_HOST is not set, so there is no public front to check")
         if self.config.values.get("RT_SCHEME") == "ws":
             raise Skip("RT_SCHEME=ws: the public front does not terminate TLS")
-        port = self.config.values.get("RT_PUBLIC_PORT") or "443"
-        if not PORT.fullmatch(port) or int(port) > MAX_PORT:
-            raise ValueError(f"RT_PUBLIC_PORT={port!r} is not a port")
-        return host, int(port), self.config.values.get("RT_TLS_CA_BUNDLE") or None
+        port = int(self.config.values.get("RT_PUBLIC_PORT") or 443)  # shape-checked when the configuration loads
+        return host, port, self.config.values.get("RT_TLS_CA_BUNDLE") or None
 
     def tls_chain_validates(self) -> Verdict:
         host, port, bundle = self.tls_target()

@@ -19,7 +19,7 @@ from ctl.doctor.digests import binaries_match_record, input_matches_record
 from ctl.doctor.model import Check, Skip, Verdict, execute, fail, ok
 from ctl.doctor.permissions import Permissions
 from ctl.doctor.probes import Probes
-from ctl.doctor.tls import TlsProbeError
+from ctl.doctor.tls import TlsProbeError, verification_failure
 from ctl.errors import InstallError
 from ctl.goetia import GoetiaError, Report
 
@@ -173,6 +173,13 @@ class Host:
         except TlsProbeError as exc:
             return fail(str(exc))
         except httpx.HTTPError as exc:
+            if (untrusted := verification_failure(exc)) is not None:
+                return fail(
+                    f"the public front answered, but its certificate does not validate for {url}: "
+                    f"{getattr(untrusted, 'verify_message', '') or untrusted}. This is a certificate problem, and the front itself is up: "
+                    "a staging or private-CA certificate is the usual cause. `ctl doctor` on the bridge reports it as "
+                    "tls_chain_validates and tls_issuer_is_not_staging; for a private CA set RT_TLS_CA_BUNDLE here"
+                )
             return fail(
                 f"the public front is unreachable: GET {url} failed ({exc}). Check DNS for the name, the front proxy, "
                 "and RT_SCHEME and RT_PUBLIC_PORT"

@@ -119,6 +119,9 @@ class Net:
         self.page_size: int | None = None  # None: everything on page 1
         self.truncate_clients_at: int | None = None  # stop serving client entries past this many, total unchanged
         self.truncate_proxies_at: int | None = None
+        self.truncate_filtered_at: int | None = None  # as `truncate_clients_at`, but only for `user`-filtered queries
+        self.down = False  # nothing answers on any loopback port, as when the container is not running
+        self.stale_clients: list[dict] | None = None  # what an unfiltered, mid-churn listing claims, if not the truth
 
     @property
     def transport(self) -> httpx.MockTransport:
@@ -127,6 +130,8 @@ class Net:
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         host, path = request.url.host, request.url.path
+        if self.down and host == "127.0.0.1":
+            raise httpx.ConnectError("connection refused", request=request)
         port = request.url.port or {"http": 80, "https": 443}[request.url.scheme]
         if host == "127.0.0.1" and port == self.admin_port:
             if path == "/healthz":
@@ -134,7 +139,9 @@ class Net:
             if path == "/api/v2/proxies":
                 return self._page(request, self.proxies, limit=self.truncate_proxies_at)
             if path == "/api/v2/clients":
-                return self._page(request, self.clients, limit=self.truncate_clients_at)
+                stale = self.stale_clients is not None and "user" not in request.url.params
+                limit = self.truncate_filtered_at if "user" in request.url.params else self.truncate_clients_at
+                return self._page(request, self.stale_clients if stale else self.clients, limit=limit)
             return httpx.Response(404)
         if host == "127.0.0.1" and port == self.vhost_port:
             return self.vhost
@@ -145,6 +152,8 @@ class Net:
     def _page(self, request: httpx.Request, items: list[dict], limit: int | None = None) -> httpx.Response:
         params = request.url.params
         wanted = [item for item in items if (not params.get("user") or item.get("user") == params["user"])]
+        if params.get("status") == "online":  # a server-side filter, like `user`
+            wanted = [item for item in wanted if item.get("online", item.get("status", {}).get("phase") == "online")]
         total = len(wanted)
         if limit is not None:
             wanted = wanted[:limit]

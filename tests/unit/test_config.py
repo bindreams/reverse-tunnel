@@ -126,7 +126,9 @@ def test_required_keys_are_exactly_the_documented_sets():
         Role.CLIENT: frozenset({"ROLE", "RT_DOMAIN", "RT_SCHEME", "RT_PUBLIC_PORT"}),
     }
     assert OPTIONAL == {
-        Role.BRIDGE: frozenset({"RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE"}),
+        Role.BRIDGE: frozenset({
+            "RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE", "RT_SCHEME", "RT_PUBLIC_PORT"
+        }),
         Role.HOST: frozenset({"RT_TLS_CA_BUNDLE"}),
         Role.CLIENT: frozenset(),
     }
@@ -324,6 +326,15 @@ def test_the_ca_bundle_may_be_absent_or_empty_and_is_an_absolute_path_when_set(t
 @pytest.mark.parametrize("role", [Role.BRIDGE, Role.HOST])
 def test_a_relative_ca_bundle_path_is_rejected_because_doctor_runs_from_anywhere(tmp_path, role, bad):
     assert "RT_TLS_CA_BUNDLE" in refused(tmp_path, role, RT_TLS_CA_BUNDLE=bad)
+
+
+@pytest.mark.parametrize("key,bad", [("RT_SCHEME", "https"), ("RT_PUBLIC_PORT", "0"), ("RT_PUBLIC_PORT", "443x")])
+def test_the_bridges_public_front_keys_are_shape_validated_at_load(tmp_path, key, bad):
+    assert key in refused(tmp_path, Role.BRIDGE, **{key: bad})
+
+
+def test_the_bridges_public_front_keys_may_be_absent(tmp_path):
+    load(tmp_path, Role.BRIDGE, RT_SCHEME=None, RT_PUBLIC_PORT=None)
 
 
 def test_an_optional_key_that_is_set_is_validated(tmp_path):

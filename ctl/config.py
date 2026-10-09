@@ -56,7 +56,9 @@ REQUIRED: Mapping[Role, frozenset[str]] = {
 }
 # May be absent or empty; validated when set.
 OPTIONAL: Mapping[Role, frozenset[str]] = {
-    Role.BRIDGE: frozenset({"RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE"}),
+    Role.BRIDGE: frozenset({
+        "RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE", "RT_SCHEME", "RT_PUBLIC_PORT"
+    }),
     Role.HOST: frozenset({"RT_TLS_CA_BUNDLE"}),
     Role.CLIENT: frozenset(),
 }

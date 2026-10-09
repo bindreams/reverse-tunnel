@@ -8,6 +8,11 @@ label collision shows only in `/api/v2/clients`, where `/api/v2/proxies` lists t
 `total` can fall or grow while pages are read, so paging has no page size and no page cap: it stops when it has seen
 `total` entries or when a page adds nothing new. The second is indistinguishable from a read that was cut short, so
 `Page.complete` says which it was, and a consumer must treat an incomplete page as a failure.
+
+Residual: frps pages by offset, so a fleet that changes between two page requests can shift an entry across the boundary
+(read twice, deduplicated here, or not at all, reported as incomplete only if `total` shows it). A listing of the whole
+fleet is therefore informational; a verdict about one label asks for `user=<label>`, a result set of one or two entries
+that fits in a single page.
 """
 
 import dataclasses
@@ -24,6 +29,10 @@ TIMEOUT = httpx.Timeout(10.0)
 
 class FrpsApiError(Exception):
     """The admin API could not be read, or answered with something that is not its documented shape."""
+
+
+class FrpsUnreachable(FrpsApiError):
+    """Nothing answered: the connection was refused, reset, or timed out. Distinct from an answer that is wrong."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,7 +97,7 @@ def _get(client: httpx.Client, base_url: str, path: str, params: dict[str, str])
     try:
         response = client.get(url, params=params)
     except httpx.HTTPError as exc:
-        raise FrpsApiError(f"cannot reach the frps admin API at {base_url}: {exc}") from exc
+        raise FrpsUnreachable(f"cannot reach the frps admin API at {base_url}: {exc}") from exc
     if response.status_code == 401:
         raise FrpsApiError(
             f"the frps admin API at {base_url} rejected RT_ADMIN_PASSWORD (it is sent with an empty username)"

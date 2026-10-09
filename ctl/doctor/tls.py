@@ -33,6 +33,15 @@ class TlsProbe(Protocol):
         """The issuer's common name of the certificate at `host:port`, fetched unverified; raise `TlsProbeError`."""
 
 
+def verification_failure(exc: BaseException | None) -> ssl.SSLCertVerificationError | None:
+    """The certificate-verification error `exc` was raised from, if any: httpx wraps it in a `ConnectError`."""
+    while exc is not None:
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return exc
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
 # The issuer ===========================================================================================================
 
 

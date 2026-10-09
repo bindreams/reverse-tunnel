@@ -1,11 +1,13 @@
 """The bridge's checks: Docker and the container, what frps says about itself, what it loaded, and its front."""
 
+import hashlib
 import json
 import os
 import subprocess
 
 import httpx
 import pytest
+from tests.unit.deployment_support import write_env
 from tests.unit.doctor_support import (
     PORT_BINDINGS,
     PS_ENTRY,
@@ -16,6 +18,9 @@ from tests.unit.doctor_support import (
 )
 
 from ctl import doctor
+from ctl.config import Role
+from ctl.host import token_digest
+from ctl.install import install
 from ctl.doctor import Outcome
 
 
@@ -49,6 +54,33 @@ def test_docker_unavailable_is_one_named_failure_not_ten(world, arrange):
     for name in ("container_healthy", "restart_policy", "control_port_published", "config_skew", "token_skew"):
         assert checks[name].outcome is Outcome.NOT_APPLICABLE
         assert "docker_reachable" in checks[name].detail
+
+
+def test_docker_down_and_nothing_answering_on_loopback_is_exactly_one_docker_failure(world):
+    """The usual cause of both is the same: the stack is not up. Docker is named once and nothing else fails."""
+    world.docker.on("version", returncode=1, stderr="Cannot connect to the Docker daemon")
+    world.net.down = True
+    checks = checks_of(world)
+    assert failures(list(checks.values())) == ["docker_reachable"]
+    for name in ("admin_healthz", "vhost_answers_404", "registered_labels", "label_collisions"):
+        assert checks[name].outcome is Outcome.NOT_APPLICABLE and "docker_reachable" in checks[name].detail
+
+
+def test_docker_down_but_frps_answering_keeps_the_real_results(world):
+    world.docker.on("version", returncode=1, stderr="Cannot connect to the Docker daemon")
+    checks = checks_of(world)
+    for name in ("admin_healthz", "registered_labels", "label_collisions"):
+        assert checks[name].outcome is Outcome.PASS
+
+
+def test_docker_down_and_a_wrong_admin_password_is_still_a_failure_of_that_check(world):
+    world.docker.on("version", returncode=1, stderr="Cannot connect to the Docker daemon")
+
+    def deny(request):
+        return httpx.Response(401) if request.url.path.startswith("/api") else httpx.Response(200)
+
+    checks = checks_of(world, transport=httpx.MockTransport(deny))
+    assert checks["registered_labels"].outcome is Outcome.FAIL
 
 
 def test_docker_unavailable_still_checks_what_does_not_need_it(world):
@@ -126,18 +158,26 @@ def test_an_inspect_that_fails_fails_the_checks_that_need_it_with_dockers_words(
         assert checks[name].outcome is Outcome.FAIL and "No such object" in checks[name].detail
 
 
-@pytest.mark.parametrize("policy", ["no", ""])
-def test_a_container_restart_policy_of_no_is_a_failure(world, policy):
+@pytest.mark.parametrize("policy", ["no", "", "on-failure"])
+def test_a_container_restart_policy_that_does_not_survive_a_reboot_is_a_failure(world, policy):
     world.docker.healthy(restart=policy)
     check = checks_of(world)["restart_policy"]
     assert check.outcome is Outcome.FAIL
-    assert "restart" in check.detail
+    assert "restart" in check.detail and "unless-stopped" in check.detail
 
 
-@pytest.mark.parametrize("policy", ["unless-stopped", "always", "on-failure"])
-def test_any_restart_policy_but_no_passes(world, policy):
+@pytest.mark.parametrize("policy", ["unless-stopped", "always"])
+def test_only_always_and_unless_stopped_pass(world, policy):
     world.docker.healthy(restart=policy)
     assert checks_of(world)["restart_policy"].outcome is Outcome.PASS
+
+
+def test_a_null_restart_policy_is_its_own_named_failure(world):
+    world.docker.on(
+        "inspect", stdout=json.dumps([{"HostConfig": {"RestartPolicy": None, "PortBindings": PORT_BINDINGS}}])
+    )
+    check = checks_of(world)["restart_policy"]
+    assert check.outcome is Outcome.FAIL and "RestartPolicy" in check.detail and "null" in check.detail
 
 
 @pytest.mark.parametrize("protocol", ["tcp", "udp"])
@@ -191,6 +231,13 @@ def test_a_vhost_that_does_not_answer_404_fails_with_the_status(world, response)
     assert check.outcome is Outcome.FAIL and str(response.status_code) in check.detail
 
 
+@pytest.mark.parametrize("server", ["nginx/1.27", "Caddy", "websocat"])
+def test_a_404_that_names_a_server_is_another_server_on_the_vhost_port(world, server):
+    world.net.vhost = httpx.Response(404, headers={"Server": server})
+    check = checks_of(world)["vhost_answers_404"]
+    assert check.outcome is Outcome.FAIL and server in check.detail and "another server" in check.detail
+
+
 def test_a_vhost_that_is_not_published_is_not_applicable_behind_traefik(world):
     bindings = {key: value for key, value in PORT_BINDINGS.items() if key != "8080/tcp"}
     world.docker.healthy(bindings=bindings)
@@ -216,8 +263,39 @@ def test_registered_labels_lists_the_online_labels(world):
 
 def test_registered_labels_asks_only_for_online_proxies(world):
     checks_of(world)
-    (request, ) = [r for r in world.net.requests if r.url.path == "/api/v2/proxies"]
-    assert request.url.params["status"] == "online"
+    requests = [r for r in world.net.requests if r.url.path == "/api/v2/proxies"]
+    assert requests and all(r.url.params["status"] == "online" for r in requests)
+
+
+def asked_users(world, path: str) -> list[str | None]:
+    return [r.url.params.get("user") for r in world.net.requests if r.url.path == path]
+
+
+def test_each_label_is_confirmed_with_the_server_side_user_filter(world):
+    world.net.proxies += [{"name": "beta.ssh", "user": "beta", "clientID": "c-2", "status": {"phase": "online"}}]
+    world.net.clients += [{"key": "k-2", "user": "beta", "clientID": "c-2", "online": True}]
+    checks_of(world)
+    assert sorted(u for u in asked_users(world, "/api/v2/clients") if u) == ["alpha", "beta"]
+    assert sorted(u for u in asked_users(world, "/api/v2/proxies") if u) == ["alpha", "beta"]
+
+
+def test_the_collision_verdict_comes_from_the_label_filtered_query_not_the_fleet_listing(world):
+    """An unfiltered listing is paged by offset while the fleet changes, so it can claim an entry twice or not at all."""
+    world.net.stale_clients = [
+        {"key": "k-1", "user": "alpha", "clientID": "c-1", "online": True},
+        {"key": "k-9", "user": "alpha", "clientID": "c-9", "online": True},
+    ]
+    assert checks_of(world)["label_collisions"].outcome is Outcome.PASS
+
+
+def test_a_label_whose_filtered_query_is_incomplete_fails_the_collision_check(world):
+    world.net.clients = [
+        {"key": "k-1", "user": "alpha", "clientID": "c-1", "online": True},
+        {"key": "k-2", "user": "alpha", "clientID": "c-2", "online": True},
+    ]
+    world.net.truncate_filtered_at = 1
+    check = checks_of(world)["label_collisions"]
+    assert check.outcome is Outcome.FAIL and "alpha" in check.detail and "incomplete" in check.detail
 
 
 def test_offline_proxy_records_do_not_count_as_registered(world):
@@ -256,7 +334,7 @@ def test_collision_is_detected_from_clients_not_proxies(world):
     assert checks["label_collisions"].outcome is Outcome.FAIL
     assert "alpha" in checks["label_collisions"].detail and "c-2" in checks["label_collisions"].detail
     assert checks["registered_labels"].outcome is Outcome.PASS  # proxies alone show nothing wrong
-    assert [r.url.path for r in world.net.requests if "clients" in r.url.path] == ["/api/v2/clients"]
+    assert {r.url.path for r in world.net.requests if "clients" in r.url.path} == {"/api/v2/clients"}
 
 
 def test_distinct_labels_are_not_a_collision(world):
@@ -323,11 +401,26 @@ def test_config_skew_compares_content_not_mtime_a_changed_byte_fails_with_an_old
 
 
 def test_token_skew_is_a_failure_naming_the_recreate(world):
-    edit(world, "secrets/token", ("f" * 64 + "\n").encode())
+    world.edit_env(RT_TOKEN="f" * 64)
     check = checks_of(world)["token_skew"]
     assert check.outcome is Outcome.FAIL
     assert "docker compose up -d --force-recreate" in check.detail
     assert "f" * 64 not in check.detail
+
+
+def test_the_token_file_is_never_opened_by_the_bridge_doctor(world):
+    (world.root / "secrets" / "token").write_bytes(b"not the token\n")  # only RT_TOKEN counts: the file is not read
+    assert checks_of(world)["token_skew"].outcome is Outcome.PASS
+
+
+def test_the_digest_compared_is_of_exactly_what_bridge_install_writes(tmp_path):
+    """Doctor hashes `RT_TOKEN + newline`; install writes that file. If either changes, this fails."""
+    root = tmp_path / "fresh"
+    root.mkdir()
+    config = write_env(root, Role.BRIDGE)
+    assert install(config) == 0
+    written = (root / "secrets" / "token").read_bytes()
+    assert token_digest(config) == hashlib.sha256(written).hexdigest()
 
 
 def test_token_that_matches_what_frps_loaded_passes(world):
@@ -451,4 +544,4 @@ def test_a_missing_secrets_directory_is_a_failure_saying_to_install(world):
     checks = checks_of(world)
     assert checks["secrets_dir_permissions"].outcome is Outcome.FAIL
     assert "ctl install" in checks["secrets_dir_permissions"].detail
-    assert checks["token_skew"].outcome is Outcome.FAIL
+    assert checks["token_skew"].outcome is Outcome.PASS  # judged from RT_TOKEN, as the file is never opened

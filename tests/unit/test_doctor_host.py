@@ -1,5 +1,6 @@
 """The host's checks: what is installed matches what is tracked, both daemons run, and the tunnel carries traffic."""
 
+import ssl
 from pathlib import Path
 
 import httpx
@@ -321,6 +322,17 @@ def test_a_bundle_that_cannot_be_loaded_is_the_probes_failure_with_the_reason(wo
     monkeypatch.setattr(Probes, "http", refuse)
     check = checks_of(world)["tunnel_end_to_end"]
     assert check.outcome is Outcome.FAIL and "/nope.pem" in check.detail
+
+
+def test_a_certificate_verification_failure_is_not_reported_as_an_unreachable_front(world):
+    cause = ssl.SSLCertVerificationError(1, "certificate verify failed: unable to get local issuer certificate")
+    error = httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    error.__cause__ = cause
+    outcome, detail = front_answers(world, error)
+    assert outcome is Outcome.FAIL
+    assert "unreachable" not in detail and "DNS" not in detail
+    assert "certificate" in detail and "tls_chain_validates" in detail and "tls_issuer_is_not_staging" in detail
+    assert "unable to get local issuer certificate" in detail
 
 
 def test_a_404_names_both_possible_causes(world):
