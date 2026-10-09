@@ -288,17 +288,11 @@ def test_a_frpc_restart_is_refused_too_when_the_session_cannot_be_proven_safe(ho
     run_install(host_tree)
     settle(host_tree)
     host_tree.edit_env(RT_TOKEN="f" * 64)
-    before = {
-        path: (host_tree.root / path).read_bytes()
-        for path, kind in tree(host_tree.root).items() if kind == "file"
-    }
+    before = contents(host_tree.root)
     count = len(host_tree.fake.mutations())
     with pytest.raises(InstallError, match=f"{FRPC}.*--allow-self-disconnect"):
         run_install(host_tree)
-    after = {
-        path: (host_tree.root / path).read_bytes()
-        for path, kind in tree(host_tree.root).items() if kind == "file"
-    }
+    after = contents(host_tree.root)
     assert after == before and len(host_tree.fake.mutations()) == count
 
 
