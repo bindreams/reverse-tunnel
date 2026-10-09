@@ -23,7 +23,7 @@ import sys
 from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
 
-from ctl import access, binaries, detach, goetia, handshake, lock, perms
+from ctl import access, atomic, binaries, detach, goetia, handshake, lock, perms
 from ctl.atomic import read_file, replace_file
 from ctl.binaries import Pin
 from ctl.config import Config, Role
@@ -402,17 +402,31 @@ def apply(config: Config, plan: Plan, *, services: Services) -> None:
 
 
 @contextlib.contextmanager
-def _exclusive(root: Path, command: str, inherited: int | None, started: int | None) -> Generator[lock.InstallLock]:
-    """Hold the install lock for the whole run: take it now (never waiting), or adopt the one the parent passed down.
-
-    The detached child tells its parent that it started only once it holds the lock.
-    """
+def _exclusive(root: Path, command: str, inherited: int | None) -> Generator[lock.InstallLock]:
+    """Hold the install lock for the whole run: take it now (never waiting), or adopt the one the parent passed down."""
     held = lock.adopt(root, inherited,
                       command=command) if inherited is not None else lock.acquire(root, command=command)
     with held:
-        if started is not None:
-            handshake.signal(started)
         yield held
+
+
+def _confirm_started(token: int | None) -> None:
+    """The detached child tells its parent it holds the lock, or why it will not go on.
+
+    Called inside the region that cleans up after a failure, so a child that cannot say so (the parent is gone) or
+    cannot outlive its session ends having applied nothing.
+    """
+    if token is None:
+        return
+    problem = detach.survival_problem()
+    try:
+        handshake.signal(token, refusal=problem)
+    except OSError as exc:
+        raise InstallError(
+            "the installing session ended before the detached apply could confirm it started; nothing was applied"
+        ) from exc
+    if problem:
+        raise InstallError(problem)
 
 
 def _detach(config: Config, services: Services, held: lock.InstallLock, arguments: list[str]) -> int:
@@ -421,29 +435,48 @@ def _detach(config: Config, services: Services, held: lock.InstallLock, argument
     The log is created once, through one descriptor, and handed to the child; the lock is handed down too, so that this
     process letting go of it changes nothing. The child's pid proves nothing (under `systemd-run` it is systemd-run's),
     so this blocks until the child says it holds the lock, or until every holder of the pipe is gone without saying so.
+
+    `bin/.staging` is the child's from the moment it exists, so it is removed here only on a definitive "never started":
+    a spawn that raised before any child existed, a refusal, or end of file. Ctrl+C is held until that outcome is known;
+    it must not be able to remove what a running child is about to read.
     """
     root = config.root
     pipe = handshake.Pipe()
+    pid = None
+    started = False
+    interrupted = False
     try:
-        argv = [
-            sys.executable, "-m", "ctl", *arguments, "--inherit-lock",
-            str(held.descriptor), "--started-fd",
-            str(pipe.token)
-        ]
-        with perms.open_log(root / LOG, perms.operator_account(root), LOG_MODE, root=root) as log:
-            pid = services.spawn(argv, cwd=root, log=log, inherit=[held.descriptor, pipe.token])
-        started = pipe.wait()
+        with atomic.deferred_interrupts():
+            argv = [
+                sys.executable, "-m", "ctl", *arguments, "--inherit-lock",
+                str(held.descriptor), "--started-fd",
+                str(pipe.token)
+            ]
+            try:
+                with perms.open_log(root / LOG, perms.operator_account(root), LOG_MODE, root=root) as log:
+                    pid = services.spawn(argv, cwd=root, log=log, inherit=[held.descriptor, pipe.token])
+            except BaseException:
+                _clear_staging_quietly(root)  # no child exists
+                raise
+            started = pipe.wait()
+    except KeyboardInterrupt:  # held until the outcome was known, then delivered by the `with`
+        interrupted = True
     finally:
         pipe.close()
     if not started:
+        _clear_staging_quietly(root)
+        why = f"it refused: {pipe.refusal}" if pipe.refusal else "it exited without taking over the install"
         raise InstallError(
-            f"the detached process (pid {pid}) did not start: it exited without taking over the install. Nothing was "
-            f"applied. What it wrote to {root / LOG}:\n{_tail(root / LOG)}"
+            f"the detached process (pid {pid}) did not start: {why}. Nothing was applied. What it wrote to "
+            f"{root / LOG}:\n{_tail(root / LOG)}"
         )
     print(
         f"The rest is running detached (pid {pid}) and will finish even if this session drops. Its progress and result "
-        f"are in {root / LOG}, ending in a line that starts `apply finished:`; read it once you reconnect."
+        f"are in {root / LOG}, ending in a line that starts `apply finished:`; read it once you reconnect, and do not "
+        "run `ctl install` again before then."
     )
+    if interrupted:
+        raise KeyboardInterrupt
     return 0
 
 
@@ -475,19 +508,20 @@ def install(
     to the detached child leaves it, for the child to use.
     """
     root = config.root
-    with _exclusive(root, "install", inherit_lock, started_fd) as held:
+    with _exclusive(root, "install", inherit_lock) as held:
         try:
+            _confirm_started(started_fd)
             plan = preflight(config, services=services, allow_self_disconnect=allow_self_disconnect)
             if not apply_staged:
                 if plan.detach:
                     detach.check_can_detach()
                 stage(config, plan, services=services)
-                if plan.detach:
-                    return _detach(config, services, held, ["install", "--allow-self-disconnect", "--apply-staged"])
-            apply(config, plan, services=services)
         except BaseException:
             _clear_staging_quietly(root)
             raise
+        if plan.detach and not apply_staged:
+            return _detach(config, services, held, ["install", "--allow-self-disconnect", "--apply-staged"])
+        apply(config, plan, services=services)  # removes bin/.staging itself, whatever happens
     return 0
 
 
@@ -523,7 +557,8 @@ def uninstall(
     `--allow-self-disconnect`, runs detached.
     """
     root = config.root
-    with _exclusive(root, "uninstall", inherit_lock, started_fd) as held:
+    with _exclusive(root, "uninstall", inherit_lock) as held:
+        _confirm_started(started_fd)
         if goetia.available(root):
             if not detached:
                 try:

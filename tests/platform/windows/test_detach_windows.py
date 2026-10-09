@@ -59,3 +59,15 @@ def test_check_can_detach_refuses_in_a_job_that_forbids_breakaway(monkeypatch):
         detach.check_can_detach()
     monkeypatch.setattr(detach, "job_allows_breakaway", lambda: True)
     detach.check_can_detach()
+
+
+def test_the_real_membership_query_answers_without_raising():
+    assert detach.process_in_job() in (True, False)
+
+
+def test_a_child_still_inside_any_job_does_not_claim_it_can_survive(monkeypatch):
+    """With nested jobs the breakaway query sees only the innermost; an outer kill-on-close job would still end the child."""
+    monkeypatch.setattr(detach, "process_in_job", lambda: True)
+    assert detach.survival_problem() == detach.STILL_IN_A_JOB
+    monkeypatch.setattr(detach, "process_in_job", lambda: False)
+    assert detach.survival_problem() is None

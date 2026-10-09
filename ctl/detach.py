@@ -47,6 +47,47 @@ NO_BREAKAWAY = (
 )
 
 
+def _kernel32():
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD)
+    ]
+    return kernel32
+
+
+def process_in_job() -> bool:
+    """Whether this process belongs to any job object, however deeply nested."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = _kernel32()
+    in_job = wintypes.BOOL()
+    if not kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None, ctypes.byref(in_job)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return bool(in_job.value)
+
+
+STILL_IN_A_JOB = "still inside a job object; cannot guarantee surviving the session"
+
+
+def survival_problem() -> str | None:
+    """Why this process, just started detached, could not outlive its session; None if nothing says it could not.
+
+    `job_allows_breakaway` sees only the innermost job. With nested jobs a child that broke out of that one can still be
+    inside an outer job that kills its processes when the session ends, so the child checks for itself, once started,
+    whether it is in any job at all.
+    """
+    if sys.platform == "win32" and process_in_job():
+        return STILL_IN_A_JOB
+    return None
+
+
 def job_allows_breakaway() -> bool:
     """Whether this process may start one that leaves its job: it is in no job, or the job permits breakaway."""
     import ctypes

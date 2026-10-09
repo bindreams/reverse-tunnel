@@ -17,6 +17,7 @@ from ctl.install import install, uninstall
 from ctl.perms import PermsError
 
 ROOT = Path(__file__).resolve().parent.parent
+INHERIT_LOCK = "--inherit-lock"
 
 COMMANDS = {
     "install": "Install or update this deployment.",
@@ -28,10 +29,12 @@ COMMANDS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ctl", description="Install and diagnose a reverse-tunnel deployment.")
+    parser = argparse.ArgumentParser(
+        prog="ctl", description="Install and diagnose a reverse-tunnel deployment.", allow_abbrev=False
+    )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     for name, summary in COMMANDS.items():
-        subparser = commands.add_parser(name, help=summary, description=summary)
+        subparser = commands.add_parser(name, help=summary, description=summary, allow_abbrev=False)
         if name == "install":
             subparser.add_argument(
                 "--allow-self-disconnect",
@@ -118,7 +121,7 @@ def check_inherited(args: argparse.Namespace, *, child: bool, flag: str) -> None
     if (args.inherit_lock is not None or args.started_fd is not None) and not child:
         build_parser().error(f"--inherit-lock and --started-fd are internal to the detached child ({flag})")
     if args.started_fd is not None and args.inherit_lock is None:
-        build_parser().error("--started-fd is given with --inherit-lock")
+        build_parser().error("--started-fd is valid only with --inherit-lock")
 
 
 def run_command(args: argparse.Namespace) -> int:
@@ -176,10 +179,11 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     it can end, a usage error and a lock it cannot take over included, ends its log with an `apply finished:` line.
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
-    child = "--inherit-lock" in arguments
+    child = any(token == INHERIT_LOCK or token.startswith(INHERIT_LOCK + "=") for token in arguments)
     try:
         args = build_parser().parse_args(arguments)
         args.root = root
+        child = getattr(args, "inherit_lock", None) is not None
         code = run_command(args)
     except SystemExit as exc:
         if child and exc.code not in (0, None):
@@ -190,6 +194,10 @@ def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
         if child:
             print(f"apply finished: failed: {exc}", flush=True)
         return 1
+    except BaseException as exc:
+        if child:
+            print(f"apply finished: failed: {type(exc).__name__}: {exc}".rstrip(": "), flush=True)
+        raise
     if child:
         print("apply finished: ok" if code == 0 else f"apply finished: failed: exit status {code}", flush=True)
     return code

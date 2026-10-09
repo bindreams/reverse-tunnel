@@ -436,3 +436,32 @@ def test_the_internal_descriptors_are_refused_outside_the_detached_child(host_ro
     assert raised.value.code == 2
     err = capsys.readouterr().err
     assert "detached" in err or "inherit" in err
+
+
+@pytest.mark.parametrize("error", [RuntimeError("unexpected"), KeyboardInterrupt()])
+def test_the_child_ends_its_log_even_when_it_dies_of_something_unforeseen(host_root, monkeypatch, capsys, error):
+
+    def explode(config, **kwargs):
+        raise error
+
+    monkeypatch.setattr(cli, "install", explode)
+    with pytest.raises(type(error)):
+        main(CHILD, root=host_root)
+    assert last_line(capsys).startswith("apply finished: failed: ")
+
+
+def test_the_child_is_recognised_whichever_way_the_flag_is_written(host_root, capsys):
+    assert main(["install", "--allow-self-disconnect", "--apply-staged", "--inherit-lock=987654"], root=host_root) == 1
+    assert last_line(capsys).startswith("apply finished: failed: ")
+
+
+def test_an_abbreviation_of_an_internal_flag_is_refused_rather_than_guessed(host_root, capsys):
+    with pytest.raises(SystemExit) as raised:
+        main(["install", "--allow-self-disconnect", "--apply-staged", "--inherit-l", "7"], root=host_root)
+    assert raised.value.code == 2
+
+
+def test_the_usage_message_for_a_started_fd_without_a_lock_reads_plainly(host_root, capsys):
+    with pytest.raises(SystemExit):
+        main(["install", "--allow-self-disconnect", "--apply-staged", "--started-fd", "8"], root=host_root)
+    assert "only with --inherit-lock" in capsys.readouterr().err

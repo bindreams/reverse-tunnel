@@ -5,12 +5,13 @@ Everything here runs unprivileged, so nothing is chowned to another account; tes
 
 import dataclasses
 import os
+import signal
 import stat
 import sys
 
 import pytest
 
-from ctl import access, handshake, host, lock, perms
+from ctl import access, detach, handshake, host, lock, perms
 from ctl.config import ConfigError
 from ctl.download import DIGESTS, read_digests
 from ctl.errors import BinariesError, InstallError
@@ -755,7 +756,7 @@ def test_the_child_signals_only_after_it_has_adopted_the_lock(pending, monkeypat
     order = []
     adopt, signal = lock.adopt, handshake.signal
     monkeypatch.setattr(lock, "adopt", lambda *a, **k: order.append("adopt") or adopt(*a, **k))
-    monkeypatch.setattr(handshake, "signal", lambda token: order.append("signal") or signal(token))
+    monkeypatch.setattr(handshake, "signal", lambda token, **kw: order.append("signal") or signal(token, **kw))
     install(
         pending.config,
         allow_self_disconnect=True,
@@ -828,3 +829,95 @@ def test_a_child_whose_preflight_fails_clears_the_staging_directory(pending, mon
     with pytest.raises(InstallError):
         install(pending.config, allow_self_disconnect=True, apply_staged=True, services=pending.services)
     assert not (pending.root / "bin" / ".staging").exists()
+
+
+# What the parent may touch once the child exists ======================================================================
+
+
+def interrupt() -> None:
+    """Ctrl+C, delivered to this process now."""
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def staged_for_a_child(pending) -> None:
+    (pending.root / "bin" / "websocat").write_bytes(b"tampered")
+
+
+def test_an_interrupt_after_the_child_has_started_leaves_the_staging_directory_to_it(pending, capsys):
+    staged_for_a_child(pending)
+
+    def spawn(argv, *, cwd, log, inherit):
+        started(inherit)
+        interrupt()  # arrives after the byte; the parent must still learn the outcome before it is raised
+        return 55
+
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    with pytest.raises(KeyboardInterrupt):
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert (pending.root / "bin" / ".staging" / "websocat").exists()
+    out = capsys.readouterr().out
+    assert "running detached (pid 55)" in out and "apply finished" in out
+
+
+def test_an_interrupt_with_no_child_is_a_failure_to_start_and_clears_the_staging_directory(pending):
+    staged_for_a_child(pending)
+
+    def spawn(argv, *, cwd, log, inherit):
+        interrupt()
+        return 55  # never writes
+
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    with pytest.raises(InstallError, match="did not start"):
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert not (pending.root / "bin" / ".staging").exists()
+
+
+def test_a_child_that_cannot_confirm_because_the_parent_is_gone_says_so_and_cleans_up(pending):
+    staged_for_a_child(pending)
+    services = dataclasses.replace(pending.services, spawn=lambda argv, *, cwd, log, inherit: started(inherit) or 1)
+    install(pending.config, allow_self_disconnect=True, services=services)
+    assert (pending.root / "bin" / ".staging" / "websocat").exists()
+    gone = handshake.Pipe()
+    child_end = os.dup(gone.token)
+    gone.close()  # the installing session ended: nobody reads
+    count = len(pending.fake.mutations())
+    with pytest.raises(
+        InstallError, match="ended before the detached apply could confirm it started; nothing was applied"
+    ):
+        install(
+            pending.config,
+            allow_self_disconnect=True,
+            apply_staged=True,
+            started_fd=child_end,
+            services=pending.services
+        )
+    assert not (pending.root / "bin" / ".staging").exists() and len(pending.fake.mutations()) == count
+
+
+def test_a_child_that_cannot_survive_the_session_refuses_and_the_parent_reports_why(pending, monkeypatch):
+    staged_for_a_child(pending)
+    reason = "still inside a job object; cannot guarantee surviving the session"
+    monkeypatch.setattr(detach, "survival_problem", lambda: reason)
+    results = []
+
+    def spawn(argv, *, cwd, log, inherit):
+        child_end = os.dup(inherit[-1])
+        try:
+            install(
+                pending.config,
+                allow_self_disconnect=True,
+                apply_staged=True,
+                inherit_lock=os.dup(inherit[0]),
+                started_fd=child_end,
+                services=pending.services,
+            )
+        except InstallError as exc:
+            results.append(str(exc))
+        return 77
+
+    count = len(pending.fake.mutations())
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    with pytest.raises(InstallError, match="job object") as raised:
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert "refused" in str(raised.value) and results == [reason]
+    assert not (pending.root / "bin" / ".staging").exists() and len(pending.fake.mutations()) == count

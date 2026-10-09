@@ -118,3 +118,18 @@ def test_systemd_run_is_only_considered_for_root(monkeypatch):
     assert detach.systemd_run() is None
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     assert detach.systemd_run() == "/usr/bin/systemd-run"
+
+
+def test_a_refusal_carries_its_reason_to_the_parent():
+    pipe = handshake.Pipe()
+    handshake.signal(os.dup(pipe.token), refusal="still inside a job object")
+    assert pipe.wait() is False
+    assert pipe.refusal == "still inside a job object"
+
+
+def test_a_start_carries_no_refusal_and_silence_carries_none_either():
+    pipe = handshake.Pipe()
+    handshake.signal(os.dup(pipe.token))
+    assert pipe.wait() is True and pipe.refusal is None
+    silent = handshake.Pipe()
+    assert silent.wait() is False and silent.refusal is None

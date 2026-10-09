@@ -12,12 +12,15 @@ does mean that nobody is left. Nothing is waited for on a timer: the child eithe
 import os
 import sys
 
+STARTED, REFUSED = b"1", b"0"
+
 
 class Pipe:
     """The parent's side. `token` names the write end for the child: a descriptor on POSIX, a handle on Windows."""
 
     def __init__(self) -> None:
         self._read, self._write = os.pipe()
+        self.refusal: str | None = None  # why the child declined to go on, when it said
         self._closed_write = False
         self._closed_read = False
         if sys.platform == "win32":
@@ -28,10 +31,17 @@ class Pipe:
             self.token = self._write
 
     def wait(self) -> bool:
-        """Block until the child says it started (True) or no holder of the write end is left (False)."""
+        """Block until the child says it started (True), declines (False, `refusal` set), or no holder of the write end is
+        left without having said anything (False)."""
         self._close_write()
         try:
-            return os.read(self._read, 1) != b""
+            first = os.read(self._read, 1)
+            if first == REFUSED:
+                chunks = []
+                while chunk := os.read(self._read, 4096):  # the child closes its end right after the reason
+                    chunks.append(chunk)
+                self.refusal = b"".join(chunks).decode(errors="replace")
+            return first == STARTED
         finally:
             self.close()
 
@@ -47,14 +57,17 @@ class Pipe:
             os.close(self._read)
 
 
-def signal(token: int) -> None:
-    """The child's side: say that it started, and let go of the pipe."""
+def signal(token: int, refusal: str | None = None) -> None:
+    """The child's side: say that it started, or why it will not go on, and let go of the pipe."""
     descriptor = token
     if sys.platform == "win32":
         import msvcrt
 
         descriptor = msvcrt.open_osfhandle(token, os.O_WRONLY)
     try:
-        os.write(descriptor, b"1")
+        data = STARTED if refusal is None else REFUSED + refusal.encode()
+        view = memoryview(data)
+        while view:
+            view = view[os.write(descriptor, view):]
     finally:
         os.close(descriptor)
