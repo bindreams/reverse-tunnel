@@ -180,9 +180,8 @@ def test_install_accepts_allow_self_disconnect_for_a_host(tmp_path, monkeypatch)
     monkeypatch.setattr(
         cli,
         "install",
-        lambda config, *, allow_self_disconnect=False, apply_staged=False, inherit_lock=None: seen.append(
-            (allow_self_disconnect, apply_staged, inherit_lock)
-        ) or 0
+        lambda config, *, allow_self_disconnect=False, apply_staged=False, inherit_lock=None, started_fd=None: seen.
+        append((allow_self_disconnect, apply_staged, inherit_lock)) or 0
     )
     assert main(["install", "--allow-self-disconnect"], root=tmp_path) == 0
     assert main(["install"], root=tmp_path) == 0
@@ -196,9 +195,8 @@ def test_the_detached_child_is_started_with_a_flag_that_help_does_not_advertise(
     monkeypatch.setattr(
         cli,
         "install",
-        lambda config, *, allow_self_disconnect=False, apply_staged=False, inherit_lock=None: seen.append(
-            (allow_self_disconnect, apply_staged, inherit_lock)
-        ) or 0
+        lambda config, *, allow_self_disconnect=False, apply_staged=False, inherit_lock=None, started_fd=None: seen.
+        append((allow_self_disconnect, apply_staged, inherit_lock)) or 0
     )
     assert main(["install", "--allow-self-disconnect", "--apply-staged", "--inherit-lock", "7"], root=tmp_path) == 0
     assert seen == [(True, True, 7)]
@@ -296,9 +294,8 @@ def test_allow_self_disconnect_reaches_a_host_uninstall(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli,
         "uninstall",
-        lambda config, *, force=False, allow_self_disconnect=False, detached=False, inherit_lock=None: seen.append(
-            (allow_self_disconnect, detached, inherit_lock)
-        ) or 0
+        lambda config, *, force=False, allow_self_disconnect=False, detached=False, inherit_lock=None, started_fd=None:
+        seen.append((allow_self_disconnect, detached, inherit_lock)) or 0
     )
     assert main(["uninstall", "--allow-self-disconnect"], root=tmp_path) == 0
     assert main(["uninstall", "--allow-self-disconnect", "--detached", "--inherit-lock", "9"], root=tmp_path) == 0
@@ -354,3 +351,88 @@ def test_the_refusal_names_root_and_an_elevated_administrator(tmp_path, monkeypa
     monkeypatch.setattr(cli, "is_elevated", lambda: True)
     assert main(["install"], root=tmp_path) == 1
     assert "Administrator" in capsys.readouterr().err
+
+
+# The detached child ===================================================================================================
+
+CHILD = ["install", "--allow-self-disconnect", "--apply-staged", "--inherit-lock", "7", "--started-fd", "8"]
+
+
+@pytest.fixture
+def host_root(tmp_path, monkeypatch):
+    write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
+    return tmp_path
+
+
+def last_line(capsys) -> str:
+    return capsys.readouterr().out.splitlines()[-1]
+
+
+def test_the_child_ends_its_log_with_ok(host_root, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "install", lambda config, **kwargs: 0)
+    assert main(CHILD, root=host_root) == 0
+    assert last_line(capsys) == "apply finished: ok"
+
+
+@pytest.mark.parametrize("error", [InstallError("goetia refused"), PermsError("cannot chown"), OSError(5, "I/O error")])
+def test_the_child_ends_its_log_with_the_failure(host_root, monkeypatch, capsys, error):
+
+    def fail(config, **kwargs):
+        raise error
+
+    monkeypatch.setattr(cli, "install", fail)
+    assert main(CHILD, root=host_root) == 1
+    line = last_line(capsys)
+    assert line.startswith("apply finished: failed: ") and str(error) in line
+
+
+def test_the_child_reports_a_broken_configuration(host_root, capsys):
+    (host_root / ".env").write_text("ROLE=host\n")
+    assert main(CHILD, root=host_root) == 1
+    assert last_line(capsys).startswith("apply finished: failed: ")
+
+
+def test_the_child_reports_a_missing_env_file(tmp_path, capsys):
+    assert main(CHILD, root=tmp_path) == 1
+    line = last_line(capsys)
+    assert line.startswith("apply finished: failed: ") and ".env" in line
+
+
+def test_the_child_reports_a_lock_it_cannot_adopt(host_root, capsys):
+    assert main(["install", "--allow-self-disconnect", "--apply-staged", "--inherit-lock", "987654"],
+                root=host_root) == 1
+    line = last_line(capsys)
+    assert line.startswith("apply finished: failed: ") and "lock" in line
+
+
+def test_the_child_reports_a_usage_error(host_root, capsys):
+    with pytest.raises(SystemExit) as raised:
+        main(["install", "--apply-staged", "--inherit-lock", "7"], root=host_root)
+    assert raised.value.code == 2
+    assert last_line(capsys).startswith("apply finished: failed: ")
+
+
+def test_an_ordinary_run_prints_no_outcome_line(host_root, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "install", lambda config, **kwargs: 0)
+    assert main(["install"], root=host_root) == 0
+    assert "apply finished" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv", [
+        ["install", "--inherit-lock", "7"],
+        ["install", "--allow-self-disconnect", "--inherit-lock", "7"],
+        ["install", "--allow-self-disconnect", "--apply-staged", "--started-fd", "8"],
+        ["uninstall", "--allow-self-disconnect", "--inherit-lock", "7"],
+        ["uninstall", "--allow-self-disconnect", "--detached", "--started-fd", "8"],
+    ]
+)
+def test_the_internal_descriptors_are_refused_outside_the_detached_child(host_root, monkeypatch, capsys, argv):
+    monkeypatch.setattr(cli, "install", lambda *a, **k: pytest.fail("must not run"))
+    monkeypatch.setattr(cli, "uninstall", lambda *a, **k: pytest.fail("must not run"))
+    with pytest.raises(SystemExit) as raised:
+        main(argv, root=host_root)
+    assert raised.value.code == 2
+    err = capsys.readouterr().err
+    assert "detached" in err or "inherit" in err

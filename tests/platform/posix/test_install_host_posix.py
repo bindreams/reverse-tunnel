@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from ctl import access, host, lock, perms
+from ctl import access, handshake, host, lock, perms
 from ctl.config import ConfigError
 from ctl.download import DIGESTS, read_digests
 from ctl.errors import BinariesError, InstallError
@@ -41,6 +41,19 @@ OFF_TUNNEL = "192.0.2.10 51234 192.0.2.1 22"
 
 def run_install(host_tree, **kwargs) -> int:
     return install(host_tree.config, services=host_tree.services, **kwargs)
+
+
+def contents(root) -> dict[str, bytes]:
+    """Every file under `root` with its bytes, except the lock file, whose text names the run that held it."""
+    return {
+        path: (root / path).read_bytes()
+        for path, kind in tree(root).items() if kind == "file" and path != lock.LOCK_NAME
+    }
+
+
+def started(inherit) -> None:
+    """What the detached child does once it holds the lock: tell the parent, on the last descriptor it was given."""
+    os.write(inherit[-1], b"1")
 
 
 def stopped(host_tree) -> None:
@@ -262,11 +275,11 @@ def pending(host_tree):
 
 
 def test_guard_refusal_leaves_the_tree_untouched(pending):
-    before = {path: (pending.root / path).read_bytes() for path, kind in tree(pending.root).items() if kind == "file"}
+    before = contents(pending.root)
     count = len(pending.fake.mutations())
     with pytest.raises(InstallError, match="--allow-self-disconnect"):
         run_install(pending)
-    after = {path: (pending.root / path).read_bytes() for path, kind in tree(pending.root).items() if kind == "file"}
+    after = contents(pending.root)
     assert after == before and len(pending.fake.mutations()) == count
 
 
@@ -308,6 +321,7 @@ def test_allow_self_disconnect_detaches_the_apply_phase(pending):
 
     def spawn(argv, *, cwd, log, inherit):
         launches.append(Spawned(list(argv), cwd, os.fstat(log.fileno()).st_ino))
+        started(inherit)
         return 4321
 
     services = dataclasses.replace(pending.services, spawn=spawn)
@@ -315,8 +329,8 @@ def test_allow_self_disconnect_detaches_the_apply_phase(pending):
     assert install(pending.config, allow_self_disconnect=True, services=services) == 0
     assert pending.fake.mutations()[count:] == []
     (launch, ) = launches
-    assert launch.argv[:-2] == [sys.executable, "-m", "ctl", "install", "--allow-self-disconnect", "--apply-staged"]
-    assert launch.argv[-2] == "--inherit-lock"
+    assert launch.argv[:-4] == [sys.executable, "-m", "ctl", "install", "--allow-self-disconnect", "--apply-staged"]
+    assert launch.argv[-4] == "--inherit-lock" and launch.argv[-2] == "--started-fd"
     assert launch.cwd == pending.root and launch.log == os.stat(pending.root / "install.log").st_ino
     log = pending.root / "install.log"
     assert mode_of(log) == 0o640 and log.stat().st_uid == pending.uid
@@ -326,7 +340,7 @@ def test_the_detached_child_applies_what_the_parent_staged_without_staging_again
     (pending.root / "bin" / "websocat").write_bytes(b"tampered")
     launches = []
     services = dataclasses.replace(
-        pending.services, spawn=lambda argv, *, cwd, log, inherit: launches.append(argv) or 1
+        pending.services, spawn=lambda argv, *, cwd, log, inherit: launches.append(argv) or started(inherit) or 1
     )
     child = dataclasses.replace(pending.services, spawn=lambda *a, **k: pytest.fail("the child detaches no further"))
     assert install(pending.config, allow_self_disconnect=True, services=services) == 0
@@ -572,15 +586,16 @@ def test_the_detached_child_inherits_the_lock_and_the_parent_does_not_release_it
     inherited = []
 
     def spawn(argv, *, cwd, log, inherit):
-        inherited.extend(os.dup(fd) for fd in inherit)  # what the child process holds
+        inherited.append(os.dup(inherit[0]))  # what the child process holds
         launches.append(list(argv))
+        started(inherit)
         return 1
 
     launches: list[list[str]] = []
     services = dataclasses.replace(pending.services, spawn=spawn)
     assert install(pending.config, allow_self_disconnect=True, services=services) == 0
     (argv, ) = launches
-    assert argv[-2] == "--inherit-lock" and argv[-1].isdigit()
+    assert argv[-4] == "--inherit-lock" and argv[-3].isdigit() and argv[-2] == "--started-fd" and argv[-1].isdigit()
     # The parent has returned and closed its descriptor; the lock is still held through the child's.
     with pytest.raises(InstallError, match="already running"):
         run_install(pending)
@@ -625,13 +640,14 @@ def test_uninstall_with_the_flag_detaches_and_the_child_does_the_work(running):
 
     def spawn(argv, *, cwd, log, inherit):
         launches.append((list(argv), list(inherit)))
+        started(inherit)
         return 1
 
     services = dataclasses.replace(running.services, spawn=spawn)
     assert uninstall(running.config, allow_self_disconnect=True, services=services) == 0
     ((argv, inherit), ) = launches
-    assert argv[1:-2] == ["-m", "ctl", "uninstall", "--allow-self-disconnect", "--detached"]
-    assert argv[-2] == "--inherit-lock" and len(inherit) == 1
+    assert argv[1:-4] == ["-m", "ctl", "uninstall", "--allow-self-disconnect", "--detached"]
+    assert argv[-4] == "--inherit-lock" and argv[-2] == "--started-fd" and len(inherit) == 2
     assert running.fake.calls_of("uninstall") == [] and (running.root / "bin").exists()
     assert (running.root / "install.log").exists()
     assert uninstall(running.config, allow_self_disconnect=True, detached=True, services=running.services) == 0
@@ -699,22 +715,116 @@ def test_an_existing_bin_is_converged_to_0755_and_the_installing_account(host_tr
     assert mode_of(host_tree.root / "bin") == 0o755 and (host_tree.root / "bin").stat().st_uid == os.geteuid()
 
 
-# The detached child's last word =======================================================================================
+# The start handshake ==================================================================================================
 
 
-def test_the_child_ends_its_log_with_the_outcome_ok(pending, capsys):
-    install(pending.config, allow_self_disconnect=True, apply_staged=True, services=pending.services)
-    assert capsys.readouterr().out.splitlines()[-1] == "apply finished: ok"
+def test_a_detached_child_that_never_starts_is_reported_with_the_tail_of_its_log_and_nothing_is_applied(pending):
+
+    def spawn(argv, *, cwd, log, inherit):
+        log.write(b"Failed to start transient scope unit: Access denied\n")
+        log.flush()
+        return 99  # the pid of a launcher that has already failed; nobody writes to the pipe
+
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    count = len(pending.fake.mutations())
+    with pytest.raises(InstallError) as raised:
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert "did not start" in str(raised.value) and "Access denied" in str(raised.value)
+    assert len(pending.fake.mutations()) == count
+    assert not (pending.root / "bin" / ".staging").exists()
+    lock.acquire(pending.root, command="install").close()
 
 
-def test_the_child_ends_its_log_with_the_failure(pending, capsys):
-    pending.fake.on("restart", WEBSOCAT, stderr="error: boom\n", exit=4)
+def test_a_spawn_that_raises_clears_the_staging_directory_and_releases_the_lock(pending):
+
+    def spawn(argv, *, cwd, log, inherit):
+        raise OSError("no such launcher")
+
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    with pytest.raises(OSError, match="no such launcher"):
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert not (pending.root / "bin" / ".staging").exists()
+    lock.acquire(pending.root, command="install").close()
+
+
+def test_the_child_signals_only_after_it_has_adopted_the_lock(pending, monkeypatch):
+    held = lock.acquire(pending.root, command="install")
+    inherited = os.dup(held.descriptor)
+    held.close()
+    pipe = handshake.Pipe()
+    order = []
+    adopt, signal = lock.adopt, handshake.signal
+    monkeypatch.setattr(lock, "adopt", lambda *a, **k: order.append("adopt") or adopt(*a, **k))
+    monkeypatch.setattr(handshake, "signal", lambda token: order.append("signal") or signal(token))
+    install(
+        pending.config,
+        allow_self_disconnect=True,
+        apply_staged=True,
+        inherit_lock=inherited,
+        started_fd=os.dup(pipe.token),
+        services=pending.services,
+    )
+    assert order == ["adopt", "signal"]
+    assert pipe.wait() is True
+
+
+def test_a_child_that_cannot_adopt_the_lock_never_signals(pending):
+    pipe = handshake.Pipe()
+    child_end = os.dup(pipe.token)
+    with pytest.raises(InstallError, match="lock"):
+        install(
+            pending.config,
+            allow_self_disconnect=True,
+            apply_staged=True,
+            inherit_lock=os.open(os.devnull, os.O_RDONLY),
+            started_fd=child_end,
+            services=pending.services,
+        )
+    os.close(child_end)  # the child exits, closing its end
+    assert pipe.wait() is False
+
+
+# Failures that the child must report ==================================================================================
+
+
+def test_uninstall_whose_status_cannot_be_read_counts_as_uncertain_and_the_guard_applies(running):
+    running.fake.forget("status")
+    running.fake.on("status", stderr="error: bus unavailable\n", exit=1)
+    with pytest.raises(InstallError, match="--allow-self-disconnect"):
+        uninstall(running.config, services=running.services)
+    assert running.fake.calls_of("uninstall") == [] and (running.root / "bin").exists()
+
+
+def test_the_flag_gets_an_uninstall_past_a_status_that_cannot_be_read(running):
+    running.fake.forget("status")
+    running.fake.on("status", stderr="error: bus unavailable\n", exit=1)
+    launches = []
+    services = dataclasses.replace(
+        running.services, spawn=lambda argv, *, cwd, log, inherit: launches.append(argv) or started(inherit) or 1
+    )
+    assert uninstall(running.config, allow_self_disconnect=True, services=services) == 0
+    assert len(launches) == 1
+
+
+def test_a_failure_after_the_download_clears_the_staging_directory(running, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
+    (running.root / "bin" / "frpc").write_bytes(b"tampered")
+
+    def fail(path, owner, readers, *, root):
+        raise perms.PermsError("cannot tighten .env")
+
+    monkeypatch.setattr(perms, "harden_file", fail)
+    with pytest.raises(perms.PermsError):
+        run_install(running)
+    assert not (running.root / "bin" / ".staging").exists()
+
+
+def test_a_child_whose_preflight_fails_clears_the_staging_directory(pending, monkeypatch):
+    services = dataclasses.replace(pending.services, spawn=lambda argv, *, cwd, log, inherit: started(inherit) or 1)
+    (pending.root / "bin" / "websocat").write_bytes(b"tampered")
+    install(pending.config, allow_self_disconnect=True, services=services)
+    assert (pending.root / "bin" / ".staging" / "websocat").exists()
+    (pending.root / "host" / "frpc.toml").unlink()
     with pytest.raises(InstallError):
         install(pending.config, allow_self_disconnect=True, apply_staged=True, services=pending.services)
-    last = capsys.readouterr().out.splitlines()[-1]
-    assert last.startswith("apply finished: failed: ") and WEBSOCAT in last
-
-
-def test_a_foreground_install_prints_no_outcome_line(host_tree, capsys):
-    run_install(host_tree)
-    assert "apply finished" not in capsys.readouterr().out
+    assert not (pending.root / "bin" / ".staging").exists()

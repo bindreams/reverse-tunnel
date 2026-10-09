@@ -15,6 +15,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import IO
 
+from ctl.errors import InstallError
+
 # Windows creation flags, written out so that this module reads the same on every platform.
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -35,13 +37,86 @@ def spawn_detached(argv: list[str], *, cwd: Path, log: IO[bytes], inherit: Seque
 
 # Windows ==============================================================================================================
 
+JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
+JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+NO_BREAKAWAY = (
+    "the job this session runs in does not allow a process to break away from it, so a detached apply phase could be "
+    "killed part-way. Nothing has been applied. Run the install from the console or from a session that is not in such "
+    "a job"
+)
+
+
+def job_allows_breakaway() -> bool:
+    """Whether this process may start one that leaves its job: it is in no job, or the job permits breakaway."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount", "ReadTransferCount",
+            "WriteTransferCount", "OtherTransferCount"
+        )]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimits),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+    kernel32.QueryInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD)
+    ]
+    in_job = wintypes.BOOL()
+    if not kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None, ctypes.byref(in_job)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not in_job.value:
+        return True
+    limits = ExtendedLimits()
+    # A null job handle asks about the job the calling process belongs to.
+    if not kernel32.QueryInformationJobObject(
+        None, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS, ctypes.byref(limits), ctypes.sizeof(limits), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    flags = limits.BasicLimitInformation.LimitFlags
+    return bool(flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK))
+
+
+def check_can_detach() -> None:
+    """Raise `InstallError` if a detached process could not leave this session's job. Nothing else to check elsewhere."""
+    if sys.platform == "win32" and not job_allows_breakaway():
+        raise InstallError(f"cannot detach the apply phase: {NO_BREAKAWAY}")
+
 
 def _spawn_windows(argv: list[str], cwd: Path, log: IO[bytes], inherit: Sequence[int]) -> int:
     """Detached from the console, in a group of its own, and outside the job the session runs in.
 
-    A job that kills its processes when the session ends would take the apply phase with it. If the job forbids
-    breakaway the start fails with access denied, and that is refused rather than gambled on: nothing has been applied.
+    The job is asked first, because `CreateProcess` answers a refused breakaway with the same access denied as a program
+    that may not be run, and the two need different words. An access denied after the job allowed breakaway is the program.
     """
+    if not job_allows_breakaway():
+        raise OSError(f"cannot detach the apply phase: {NO_BREAKAWAY}")
     flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
     startupinfo = None
     if inherit:
@@ -59,12 +134,6 @@ def _spawn_windows(argv: list[str], cwd: Path, log: IO[bytes], inherit: Sequence
             close_fds=True,
             startupinfo=startupinfo,
         )
-    except PermissionError as exc:
-        raise OSError(
-            "cannot detach the apply phase: the job this session runs in does not allow a process to break away from "
-            f"it, so the apply phase could be killed part-way ({exc}). Nothing has been applied. Run the install from "
-            "the console or from a session that is not in such a job"
-        ) from exc
     finally:
         for handle in inherit:
             os.set_handle_inheritable(handle, False)
@@ -75,8 +144,12 @@ def _spawn_windows(argv: list[str], cwd: Path, log: IO[bytes], inherit: Sequence
 
 
 def systemd_run() -> str | None:
-    """`systemd-run`, when systemd is what runs this machine."""
-    if not sys.platform.startswith("linux") or not os.path.isdir(SYSTEMD_RUNTIME):
+    """`systemd-run`, when systemd is what runs this machine and this is root.
+
+    Only root: for anyone else `systemd-run --scope` asks polkit for authority, which an unattended run cannot answer.
+    A host install is always root, so nothing real is lost.
+    """
+    if not sys.platform.startswith("linux") or os.geteuid() != 0 or not os.path.isdir(SYSTEMD_RUNTIME):
         return None
     return shutil.which("systemd-run")
 

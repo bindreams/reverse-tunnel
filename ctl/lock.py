@@ -173,7 +173,35 @@ def _acquire_windows(root: Path, command: str) -> InstallLock:
 
 
 def _adopt_windows(root: Path, descriptor: int, command: str) -> InstallLock:
-    return InstallLock(descriptor)  # the handle the parent made inheritable; there is nothing to re-acquire
+    """Take over the handle the parent made inheritable, after checking that it is a handle to the lock file.
+
+    The lock file is held with no sharing, but opening it for attributes only (no data access) is not a sharing
+    conflict, which is what allows comparing identities. There is nothing to re-acquire: holding the handle is the lock.
+    """
+    from ctl import _winfile as winfile
+
+    path = root / LOCK_NAME
+    try:
+        named = winfile.open_handle(
+            path,
+            access=0,
+            disposition=winfile.OPEN_EXISTING,
+            directory=False,
+            error=InstallError,
+            share=winfile.FILE_SHARE_ALL
+        )
+    except OSError as exc:
+        raise InstallError(f"{path}: cannot be inspected to check the inherited lock: {exc.strerror or exc}") from exc
+    try:
+        try:
+            held = winfile.file_identity(descriptor)
+        except OSError as exc:
+            raise InstallError(f"handle {descriptor} is not the install lock {path}: {exc.strerror or exc}") from exc
+        if held != winfile.file_identity(named):
+            raise InstallError(f"handle {descriptor} is not the install lock {path}")
+    finally:
+        winfile.close_handle(named)
+    return InstallLock(descriptor)
 
 
 # Entry points =========================================================================================================

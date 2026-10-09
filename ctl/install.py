@@ -30,6 +30,7 @@ def install(
     allow_self_disconnect: bool = False,
     apply_staged: bool = False,
     inherit_lock: int | None = None,
+    started_fd: int | None = None,
     services: Services | None = None,
 ) -> int:
     """Install this deployment's role; the exit status. The last three keywords before `services` are host-only."""
@@ -49,6 +50,7 @@ def install(
         allow_self_disconnect=allow_self_disconnect,
         apply_staged=apply_staged,
         inherit_lock=inherit_lock,
+        started_fd=started_fd,
         services=services,
     )
 
@@ -60,6 +62,7 @@ def uninstall(
     allow_self_disconnect: bool = False,
     detached: bool = False,
     inherit_lock: int | None = None,
+    started_fd: int | None = None,
     services: Services | None = None,
 ) -> int:
     """Remove what `install` created for this role, and say so when there was nothing. Safe to repeat.
@@ -78,6 +81,7 @@ def uninstall(
         allow_self_disconnect=allow_self_disconnect,
         detached=detached,
         inherit_lock=inherit_lock,
+        started_fd=started_fd,
         services=services,
     )
 

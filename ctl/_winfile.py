@@ -183,6 +183,14 @@ def _inspect(kernel32, handle: int, path, *, directory: bool, single_link: bool,
         )
 
 
+def file_identity(handle: int) -> tuple[int, int]:
+    """The volume serial number and file index of the object behind `handle`: equal for two handles to one file."""
+    information = _FileInformation()
+    if not _kernel32().GetFileInformationByHandle(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return information.dwVolumeSerialNumber, (information.nFileIndexHigh << 32) | information.nFileIndexLow
+
+
 def open_handle(
     path,
     *,

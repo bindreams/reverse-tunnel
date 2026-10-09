@@ -6,9 +6,15 @@ import sys
 
 import pytest
 
-from ctl import lock
+from ctl import detach, lock
 from ctl.detach import spawn_detached
 from ctl.errors import InstallError
+
+
+@pytest.fixture(autouse=True)
+def no_systemd(monkeypatch):
+    monkeypatch.setattr(detach, "systemd_run", lambda: None)
+
 
 HOLD = """
 import os, sys

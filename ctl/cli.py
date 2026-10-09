@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
             # The detached child of --allow-self-disconnect: the apply phase only, for what the parent staged.
             subparser.add_argument("--apply-staged", action="store_true", help=argparse.SUPPRESS)
             subparser.add_argument("--inherit-lock", type=int, help=argparse.SUPPRESS)
+            subparser.add_argument("--started-fd", type=int, help=argparse.SUPPRESS)
         if name == "uninstall":
             subparser.add_argument(
                 "--allow-self-disconnect",
@@ -49,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
             )
             subparser.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
             subparser.add_argument("--inherit-lock", type=int, help=argparse.SUPPRESS)
+            subparser.add_argument("--started-fd", type=int, help=argparse.SUPPRESS)
             subparser.add_argument(
                 "--force",
                 action="store_true",
@@ -111,6 +113,14 @@ def require_elevation(command: str, config: Config) -> None:
         )
 
 
+def check_inherited(args: argparse.Namespace, *, child: bool, flag: str) -> None:
+    """The descriptors a detached child is told about mean nothing, and could close the wrong one, anywhere else."""
+    if (args.inherit_lock is not None or args.started_fd is not None) and not child:
+        build_parser().error(f"--inherit-lock and --started-fd are internal to the detached child ({flag})")
+    if args.started_fd is not None and args.inherit_lock is None:
+        build_parser().error("--started-fd is given with --inherit-lock")
+
+
 def run_command(args: argparse.Namespace) -> int:
     if args.command == "pin":
         return pin_command(args)
@@ -123,6 +133,7 @@ def run_command(args: argparse.Namespace) -> int:
                 )
             if args.apply_staged and not args.allow_self_disconnect:
                 build_parser().error("--apply-staged is for the detached child of --allow-self-disconnect")
+            check_inherited(args, child=args.apply_staged, flag="--apply-staged")
             refuse_root("install", config)
             require_elevation("install", config)
             return install(
@@ -130,6 +141,7 @@ def run_command(args: argparse.Namespace) -> int:
                 allow_self_disconnect=args.allow_self_disconnect,
                 apply_staged=args.apply_staged,
                 inherit_lock=args.inherit_lock,
+                started_fd=args.started_fd,
             )
         if args.command == "uninstall":
             if args.force and config.role is not Role.BRIDGE:
@@ -139,6 +151,7 @@ def run_command(args: argparse.Namespace) -> int:
                 ).error("--allow-self-disconnect applies to ROLE=host only; this deployment has no daemons to stop")
             if args.detached and not args.allow_self_disconnect:
                 build_parser().error("--detached is for the detached child of --allow-self-disconnect")
+            check_inherited(args, child=args.detached, flag="--detached")
             refuse_root("uninstall", config)
             require_elevation("uninstall", config)
             if config.role is not Role.HOST:
@@ -148,6 +161,7 @@ def run_command(args: argparse.Namespace) -> int:
                 allow_self_disconnect=args.allow_self_disconnect,
                 detached=args.detached,
                 inherit_lock=args.inherit_lock,
+                started_fd=args.started_fd,
             )
         print(render_ssh_config(config, args.label), end="")
         return 0
@@ -156,11 +170,26 @@ def run_command(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
-    """Run a command against the deployment in `root`, which is this checkout unless a test says otherwise."""
-    args = build_parser().parse_args(argv)
-    args.root = root
+    """Run a command against the deployment in `root`, which is this checkout unless a test says otherwise.
+
+    The detached child of an install or uninstall (the one given `--inherit-lock`) has nobody watching it, so every way
+    it can end, a usage error and a lock it cannot take over included, ends its log with an `apply finished:` line.
+    """
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    child = "--inherit-lock" in arguments
     try:
-        return run_command(args)
+        args = build_parser().parse_args(arguments)
+        args.root = root
+        code = run_command(args)
+    except SystemExit as exc:
+        if child and exc.code not in (0, None):
+            print(f"apply finished: failed: usage error (exit status {exc.code})", flush=True)
+        raise
     except (ConfigError, EnvError, BinariesError, InstallError, PermsError, OSError) as exc:
         print(f"ctl {args.command}: {exc}", file=sys.stderr)
+        if child:
+            print(f"apply finished: failed: {exc}", flush=True)
         return 1
+    if child:
+        print("apply finished: ok" if code == 0 else f"apply finished: failed: exit status {code}", flush=True)
+    return code

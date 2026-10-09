@@ -169,6 +169,7 @@ def test_the_detached_install_log_is_the_operator_s_and_0640(host_tree):
 
     def spawn(argv, *, cwd, log, inherit):
         seen.append(os.fstat(log.fileno()).st_ino)
+        os.write(inherit[-1], b"1")
         return 1
 
     services = dataclasses.replace(host_tree.services, spawn=spawn)

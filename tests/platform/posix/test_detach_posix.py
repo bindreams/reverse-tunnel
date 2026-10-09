@@ -9,6 +9,13 @@ import pytest
 from ctl import detach
 from ctl.detach import spawn_detached
 
+
+@pytest.fixture(autouse=True)
+def no_systemd(monkeypatch):
+    """What starts the child is tested below with the detection stubbed; the rest must not depend on the machine."""
+    monkeypatch.setattr(detach, "systemd_run", lambda: None)
+
+
 REPORT = """
 import os, sys
 print("hello from the child", flush=True)
@@ -71,6 +78,7 @@ def test_without_systemd_the_program_is_started_as_it_is(monkeypatch):
 
 
 def test_systemd_run_is_not_used_where_systemd_is_not_running(monkeypatch):
+    monkeypatch.undo()
     monkeypatch.setattr(os.path, "isdir", lambda path: False)
     assert detach.systemd_run() is None
 
