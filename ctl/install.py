@@ -15,7 +15,7 @@ from ctl.atomic import read_file
 from ctl.config import Config, Role
 from ctl.errors import BinariesError, InstallError
 from ctl.removal import remove_directory
-from ctl.services import Runner, Services, run_command  # re-exported: callers import them from here
+from ctl.services import Runner, Services, run_command  # noqa: F401  re-exported: callers import them from here
 
 NO_READERS: frozenset[str] = frozenset()
 SECRETS_MODE = 0o711
@@ -29,9 +29,10 @@ def install(
     *,
     allow_self_disconnect: bool = False,
     apply_staged: bool = False,
+    inherit_lock: int | None = None,
     services: Services | None = None,
 ) -> int:
-    """Install this deployment's role; the exit status. The two flags concern the host role only."""
+    """Install this deployment's role; the exit status. The last three keywords before `services` are host-only."""
     services = services or Services()
     if config.role is Role.BRIDGE:
         return _install_bridge(config)
@@ -44,14 +45,27 @@ def install(
         )
         return 0
     return host.install(
-        config, allow_self_disconnect=allow_self_disconnect, apply_staged=apply_staged, services=services
+        config,
+        allow_self_disconnect=allow_self_disconnect,
+        apply_staged=apply_staged,
+        inherit_lock=inherit_lock,
+        services=services,
     )
 
 
-def uninstall(config: Config, *, force: bool = False, services: Services | None = None) -> int:
+def uninstall(
+    config: Config,
+    *,
+    force: bool = False,
+    allow_self_disconnect: bool = False,
+    detached: bool = False,
+    inherit_lock: int | None = None,
+    services: Services | None = None,
+) -> int:
     """Remove what `install` created for this role, and say so when there was nothing. Safe to repeat.
 
     The bridge's container is taken down first, and `secrets/` stays if that cannot be done; `force` skips the step.
+    The three keywords after `force` are host-only.
     """
     services = services or Services()
     if config.role is Role.BRIDGE:
@@ -59,7 +73,13 @@ def uninstall(config: Config, *, force: bool = False, services: Services | None 
     if config.role is Role.CLIENT:
         client.uninstall_client(config)
         return 0
-    return host.uninstall(config, services=services)
+    return host.uninstall(
+        config,
+        allow_self_disconnect=allow_self_disconnect,
+        detached=detached,
+        inherit_lock=inherit_lock,
+        services=services,
+    )
 
 
 # Bridge ===============================================================================================================

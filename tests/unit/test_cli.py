@@ -180,13 +180,13 @@ def test_install_accepts_allow_self_disconnect_for_a_host(tmp_path, monkeypatch)
     monkeypatch.setattr(
         cli,
         "install",
-        lambda config, *, allow_self_disconnect=False, apply_staged=False: seen.append(
-            (allow_self_disconnect, apply_staged)
+        lambda config, *, allow_self_disconnect=False, apply_staged=False, inherit_lock=None: seen.append(
+            (allow_self_disconnect, apply_staged, inherit_lock)
         ) or 0
     )
     assert main(["install", "--allow-self-disconnect"], root=tmp_path) == 0
     assert main(["install"], root=tmp_path) == 0
-    assert seen == [(True, False), (False, False)]
+    assert seen == [(True, False, None), (False, False, None)]
 
 
 def test_the_detached_child_is_started_with_a_flag_that_help_does_not_advertise(tmp_path, monkeypatch, capsys):
@@ -196,15 +196,16 @@ def test_the_detached_child_is_started_with_a_flag_that_help_does_not_advertise(
     monkeypatch.setattr(
         cli,
         "install",
-        lambda config, *, allow_self_disconnect=False, apply_staged=False: seen.append(
-            (allow_self_disconnect, apply_staged)
+        lambda config, *, allow_self_disconnect=False, apply_staged=False, inherit_lock=None: seen.append(
+            (allow_self_disconnect, apply_staged, inherit_lock)
         ) or 0
     )
-    assert main(["install", "--allow-self-disconnect", "--apply-staged"], root=tmp_path) == 0
-    assert seen == [(True, True)]
+    assert main(["install", "--allow-self-disconnect", "--apply-staged", "--inherit-lock", "7"], root=tmp_path) == 0
+    assert seen == [(True, True, 7)]
     with pytest.raises(SystemExit):
         main(["install", "--help"])
-    assert "apply-staged" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "apply-staged" not in out and "inherit-lock" not in out
 
 
 def test_apply_staged_requires_allow_self_disconnect(tmp_path, monkeypatch, capsys):
@@ -288,9 +289,36 @@ def test_an_operating_system_error_is_a_message_and_exit_1_not_a_traceback(error
     assert "uninstall" in err and "Traceback" not in err
 
 
-def test_allow_self_disconnect_belongs_to_install_only(deployment):
+def test_allow_self_disconnect_reaches_a_host_uninstall(tmp_path, monkeypatch):
+    write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
+    seen = []
+    monkeypatch.setattr(
+        cli,
+        "uninstall",
+        lambda config, *, force=False, allow_self_disconnect=False, detached=False, inherit_lock=None: seen.append(
+            (allow_self_disconnect, detached, inherit_lock)
+        ) or 0
+    )
+    assert main(["uninstall", "--allow-self-disconnect"], root=tmp_path) == 0
+    assert main(["uninstall", "--allow-self-disconnect", "--detached", "--inherit-lock", "9"], root=tmp_path) == 0
+    assert seen == [(True, False, None), (True, True, 9)]
+
+
+@pytest.mark.parametrize("role", [Role.CLIENT, Role.BRIDGE])
+def test_allow_self_disconnect_on_uninstall_is_refused_where_there_are_no_daemons(tmp_path, role, capsys):
+    write_env(tmp_path, role)
     with pytest.raises(SystemExit) as raised:
-        main(["uninstall", "--allow-self-disconnect"], root=deployment)
+        main(["uninstall", "--allow-self-disconnect"], root=tmp_path)
+    assert raised.value.code == 2
+    assert "ROLE=host" in capsys.readouterr().err
+
+
+def test_detached_requires_allow_self_disconnect(tmp_path, monkeypatch):
+    write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
+    with pytest.raises(SystemExit) as raised:
+        main(["uninstall", "--detached"], root=tmp_path)
     assert raised.value.code == 2
 
 

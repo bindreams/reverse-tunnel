@@ -40,7 +40,15 @@ def build_parser() -> argparse.ArgumentParser:
             )
             # The detached child of --allow-self-disconnect: the apply phase only, for what the parent staged.
             subparser.add_argument("--apply-staged", action="store_true", help=argparse.SUPPRESS)
+            subparser.add_argument("--inherit-lock", type=int, help=argparse.SUPPRESS)
         if name == "uninstall":
+            subparser.add_argument(
+                "--allow-self-disconnect",
+                action="store_true",
+                help="host role: stop the daemons even though this session may be running over the tunnel",
+            )
+            subparser.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
+            subparser.add_argument("--inherit-lock", type=int, help=argparse.SUPPRESS)
             subparser.add_argument(
                 "--force",
                 action="store_true",
@@ -117,13 +125,30 @@ def run_command(args: argparse.Namespace) -> int:
                 build_parser().error("--apply-staged is for the detached child of --allow-self-disconnect")
             refuse_root("install", config)
             require_elevation("install", config)
-            return install(config, allow_self_disconnect=args.allow_self_disconnect, apply_staged=args.apply_staged)
+            return install(
+                config,
+                allow_self_disconnect=args.allow_self_disconnect,
+                apply_staged=args.apply_staged,
+                inherit_lock=args.inherit_lock,
+            )
         if args.command == "uninstall":
             if args.force and config.role is not Role.BRIDGE:
                 build_parser().error("--force applies to ROLE=bridge only; no other role checks a container")
+            if args.allow_self_disconnect and config.role is not Role.HOST:
+                build_parser(
+                ).error("--allow-self-disconnect applies to ROLE=host only; this deployment has no daemons to stop")
+            if args.detached and not args.allow_self_disconnect:
+                build_parser().error("--detached is for the detached child of --allow-self-disconnect")
             refuse_root("uninstall", config)
             require_elevation("uninstall", config)
-            return uninstall(config, force=args.force)
+            if config.role is not Role.HOST:
+                return uninstall(config, force=args.force)
+            return uninstall(
+                config,
+                allow_self_disconnect=args.allow_self_disconnect,
+                detached=args.detached,
+                inherit_lock=args.inherit_lock,
+            )
         print(render_ssh_config(config, args.label), end="")
         return 0
     print(f"ctl {args.command}: not implemented yet", file=sys.stderr)

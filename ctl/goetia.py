@@ -224,6 +224,17 @@ def daemon_status(root: Path, ids: Sequence[str]) -> list[DaemonState]:
     """The state of each of `ids` that is installed; one that is not is left out. Any other problem is an error."""
     report = daemon_report(root, "status", ids)
     _raise_unless_clean("status", report, tolerated=ids)
+    answered = {state.id for state in report.daemons} | {problem.id for problem in report.errors}
+    unanswered, unasked = sorted(set(ids) - answered), sorted({state.id for state in report.daemons} - set(ids))
+    if unanswered or unasked:
+        raise GoetiaError(
+            "`goetia daemon status` did not answer for what was asked: " + "; ".join(
+                part for part in (
+                    f"no entry for {', '.join(unanswered)}" if unanswered else "",
+                    f"unrequested {', '.join(unasked)}" if unasked else "",
+                ) if part
+            )
+        )
     return list(report.daemons)
 
 

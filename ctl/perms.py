@@ -21,6 +21,7 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 from ctl import winacl
 from ctl.config import Config, ConfigError
@@ -349,6 +350,35 @@ def assign_file(path: Path, owner: Account, mode: int, *, root: Path) -> None:
         os.fchmod(fd, mode)
     finally:
         os.close(fd)
+
+
+def open_log(path: Path, owner: Account, mode: int, *, root: Path) -> IO[bytes]:
+    """Start `path` afresh as a log with `owner` and `mode`, and return it open for appending.
+
+    One descriptor does it all: the file is opened without following a link, vetted, emptied, handed over and given its
+    mode, so the descriptor a detached child writes through is the one that was checked. Windows: the file inherits.
+    """
+    if sys.platform == "win32":
+        import io
+
+        from ctl.atomic import replace_file
+
+        replace_file(path.parent, path.name, io.BytesIO(b""), mode)
+        return open(path, "ab")
+    directory_fd = _open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = _open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode, dir_fd=directory_fd, name=path.name)
+    finally:
+        os.close(directory_fd)
+    try:
+        _require_sole_regular_file(fd, path)
+        os.ftruncate(fd, 0)
+        _chown(fd, owner)
+        os.fchmod(fd, mode)
+        return os.fdopen(fd, "ab")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def converge_dir(

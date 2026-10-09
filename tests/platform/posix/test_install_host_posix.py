@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from ctl import access, host, perms
+from ctl import access, host, lock, perms
 from ctl.config import ConfigError
 from ctl.download import DIGESTS, read_digests
 from ctl.errors import BinariesError, InstallError
@@ -21,8 +21,8 @@ from tests.unit.goetia_support import daemon, error
 from tests.unit.host_support import FRPC, WEBSOCAT, build_host
 
 DECLARED = {
-    "secrets", "secrets/token", "logs", "bin", "bin/frpc", "bin/websocat", "bin/goetia", "bin/goetia-shim",
-    f"bin/{DIGESTS}"
+    "secrets", "secrets/token", "logs", ".install.lock", "bin", "bin/frpc", "bin/websocat", "bin/goetia",
+    "bin/goetia-shim", f"bin/{DIGESTS}"
 }
 
 
@@ -41,6 +41,11 @@ OFF_TUNNEL = "192.0.2.10 51234 192.0.2.1 22"
 
 def run_install(host_tree, **kwargs) -> int:
     return install(host_tree.config, services=host_tree.services, **kwargs)
+
+
+def stopped(host_tree) -> None:
+    """Both daemons installed and stopped, so nothing running is cut by an uninstall."""
+    host_tree.script_running(websocat="stopped", frpc="stopped")
 
 
 def settle(host_tree) -> None:
@@ -293,7 +298,7 @@ def test_install_proceeds_when_ssh_connection_shows_a_non_loopback_client(pendin
 class Spawned:
     argv: list[str]
     cwd: object
-    log: str
+    log: int  # inode of the file the child's output goes to
 
 
 def test_allow_self_disconnect_detaches_the_apply_phase(pending):
@@ -301,8 +306,8 @@ def test_allow_self_disconnect_detaches_the_apply_phase(pending):
     disconnect belongs to the end-to-end test."""
     launches = []
 
-    def spawn(argv, *, cwd, log):
-        launches.append(Spawned(list(argv), cwd, log.name))
+    def spawn(argv, *, cwd, log, inherit):
+        launches.append(Spawned(list(argv), cwd, os.fstat(log.fileno()).st_ino))
         return 4321
 
     services = dataclasses.replace(pending.services, spawn=spawn)
@@ -310,8 +315,9 @@ def test_allow_self_disconnect_detaches_the_apply_phase(pending):
     assert install(pending.config, allow_self_disconnect=True, services=services) == 0
     assert pending.fake.mutations()[count:] == []
     (launch, ) = launches
-    assert launch.argv == [sys.executable, "-m", "ctl", "install", "--allow-self-disconnect", "--apply-staged"]
-    assert launch.cwd == pending.root and launch.log == str(pending.root / "install.log")
+    assert launch.argv[:-2] == [sys.executable, "-m", "ctl", "install", "--allow-self-disconnect", "--apply-staged"]
+    assert launch.argv[-2] == "--inherit-lock"
+    assert launch.cwd == pending.root and launch.log == os.stat(pending.root / "install.log").st_ino
     log = pending.root / "install.log"
     assert mode_of(log) == 0o640 and log.stat().st_uid == pending.uid
 
@@ -319,7 +325,9 @@ def test_allow_self_disconnect_detaches_the_apply_phase(pending):
 def test_the_detached_child_applies_what_the_parent_staged_without_staging_again(pending):
     (pending.root / "bin" / "websocat").write_bytes(b"tampered")
     launches = []
-    services = dataclasses.replace(pending.services, spawn=lambda argv, *, cwd, log: launches.append(argv) or 1)
+    services = dataclasses.replace(
+        pending.services, spawn=lambda argv, *, cwd, log, inherit: launches.append(argv) or 1
+    )
     child = dataclasses.replace(pending.services, spawn=lambda *a, **k: pytest.fail("the child detaches no further"))
     assert install(pending.config, allow_self_disconnect=True, services=services) == 0
     staged = pending.root / "bin" / ".staging"
@@ -404,10 +412,17 @@ def test_a_separate_account_is_refused_when_the_service_could_write_the_deployme
     assert "writable" in str(raised.value)
 
 
-@pytest.mark.parametrize("path", ["bin", "host", "goetia.yaml", "host/frpc.toml", ".env"])
+@pytest.mark.parametrize(
+    "path", ["bin", "host", "goetia.yaml", "host/frpc.toml", ".env", "ctl", ".venv", "ctl/cli.py", ".venv/lib/site.py"]
+)
 def test_a_separate_account_is_refused_when_it_could_write_a_file_root_will_run_or_read(host_tree, monkeypatch, path):
-    """`goetia.yaml` names the commands root installs as units, so a service able to edit it owns the machine."""
+    """`goetia.yaml` names the commands root installs as units, and `ctl` and `.venv` are what runs as root, so a
+    service able to edit any of them owns the machine."""
     run_install(host_tree)
+    for made in ("ctl", ".venv/lib"):
+        (host_tree.root / made).mkdir(parents=True, exist_ok=True)
+    (host_tree.root / "ctl" / "cli.py").write_text("x")
+    (host_tree.root / ".venv" / "lib" / "site.py").write_text("x")
     monkeypatch.setattr(access, "verify_traversable", lambda root, service: None)
     host_tree.edit_env(RT_SERVICE_USER="nobody")
     (host_tree.root / path).chmod(0o777)
@@ -425,6 +440,7 @@ def test_the_same_account_mode_does_not_ask_whether_the_service_can_write(host_t
 
 def test_uninstall_removes_the_units_then_bin_logs_and_secrets(host_tree):
     run_install(host_tree)
+    stopped(host_tree)
     (host_tree.root / "logs" / "frpc.log").write_text("log\n")
     assert uninstall(host_tree.config, services=host_tree.services) == 0
     root = host_tree.root
@@ -436,6 +452,7 @@ def test_uninstall_removes_the_units_then_bin_logs_and_secrets(host_tree):
 
 def test_uninstall_empties_a_leftover_staging_directory_first(host_tree):
     run_install(host_tree)
+    stopped(host_tree)
     staging = host_tree.root / "bin" / ".staging"
     staging.mkdir()
     (staging / "frpc").write_bytes(b"x")
@@ -445,6 +462,7 @@ def test_uninstall_empties_a_leftover_staging_directory_first(host_tree):
 
 def test_uninstall_is_idempotent_and_a_second_run_says_so(host_tree, capsys):
     run_install(host_tree)
+    stopped(host_tree)
     assert uninstall(host_tree.config, services=host_tree.services) == 0
     calls = len(host_tree.fake.calls)
     assert uninstall(host_tree.config, services=host_tree.services) == 0
@@ -454,12 +472,14 @@ def test_uninstall_is_idempotent_and_a_second_run_says_so(host_tree, capsys):
 
 def test_uninstall_tolerates_ids_goetia_does_not_know(host_tree):
     run_install(host_tree)
+    stopped(host_tree)
     host_tree.fake.on("uninstall", stdout="not installed (nothing to do)\n")
     assert uninstall(host_tree.config, services=host_tree.services) == 0
 
 
 def test_uninstall_keeps_everything_when_goetia_cannot_remove_a_unit(host_tree):
     run_install(host_tree)
+    stopped(host_tree)
     host_tree.fake.on("uninstall", FRPC, stderr="error: permission denied\n", exit=1)
     with pytest.raises(InstallError, match="permission denied"):
         uninstall(host_tree.config, services=host_tree.services)
@@ -473,3 +493,228 @@ def test_uninstall_with_bin_present_but_goetia_missing_refuses(host_tree):
     with pytest.raises(InstallError, match="goetia"):
         uninstall(host_tree.config, services=host_tree.services)
     assert (host_tree.root / "secrets" / "token").exists()
+
+
+# Uninstall after a failed or hand-damaged install =====================================================================
+
+
+@pytest.fixture
+def failed_first_install(host_tree):
+    """What a first install leaves when it fails after stage: directories and a token, no goetia, no record."""
+    root = host_tree.root
+    for name in ("secrets", "logs"):
+        (root / name).mkdir()
+    (root / "secrets" / "token").write_text("t\n")
+    return host_tree
+
+
+@pytest.mark.parametrize("bin_state", ["absent", "empty", "staging-only"])
+def test_uninstall_after_a_failed_first_install_removes_what_is_there(failed_first_install, bin_state, capsys):
+    root = failed_first_install.root
+    if bin_state != "absent":
+        (root / "bin").mkdir()
+    if bin_state == "staging-only":
+        (root / "bin" / ".staging").mkdir()
+        (root / "bin" / ".staging" / "frpc").write_bytes(b"half")
+    assert uninstall(failed_first_install.config, services=failed_first_install.services) == 0
+    assert not (root / "bin").exists() and not (root / "secrets").exists() and not (root / "logs").exists()
+    assert failed_first_install.fake.calls == []
+    assert "goetia" in capsys.readouterr().err  # the units, if any, could not be asked about
+    assert uninstall(failed_first_install.config, services=failed_first_install.services) == 0
+
+
+def test_a_second_uninstall_of_a_clean_tree_prints_no_warning(host_tree, capsys):
+    assert uninstall(host_tree.config, services=host_tree.services) == 0
+    assert capsys.readouterr().err == ""
+
+
+# The lock =============================================================================================================
+
+
+def test_an_install_refuses_at_once_while_another_holds_the_lock_and_changes_nothing(host_tree):
+    before = tree(host_tree.root)
+    with lock.acquire(host_tree.root, command="install"):
+        with pytest.raises(InstallError, match="already running"):
+            run_install(host_tree)
+    assert {k: v for k, v in tree(host_tree.root).items() if k != lock.LOCK_NAME} == before
+    assert host_tree.fake.calls == []
+
+
+def test_an_uninstall_takes_the_same_lock(host_tree):
+    run_install(host_tree)
+    settle(host_tree)
+    host_tree.script_running(websocat="stopped", frpc="stopped")
+    with lock.acquire(host_tree.root, command="install"):
+        with pytest.raises(InstallError, match="already running"):
+            uninstall(host_tree.config, services=host_tree.services)
+    assert (host_tree.root / "bin").exists()
+
+
+def test_the_lock_is_released_when_the_install_ends_whatever_the_outcome(host_tree, monkeypatch):
+    host_tree.fake.on("install", WEBSOCAT, stderr="error: nope\n", exit=1)
+    with pytest.raises(InstallError):
+        run_install(host_tree)
+    lock.acquire(host_tree.root, command="install").close()
+    host_tree.fake.forget("install", WEBSOCAT)
+    host_tree.script_running()
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
+    run_install(host_tree)
+    lock.acquire(host_tree.root, command="install").close()
+
+
+def test_the_lock_file_belongs_to_the_operator(host_tree):
+    run_install(host_tree)
+    status = os.stat(host_tree.root / lock.LOCK_NAME)
+    assert status.st_uid == host_tree.uid and mode_of(host_tree.root / lock.LOCK_NAME) == 0o640
+
+
+def test_the_detached_child_inherits_the_lock_and_the_parent_does_not_release_it(pending):
+    inherited = []
+
+    def spawn(argv, *, cwd, log, inherit):
+        inherited.extend(os.dup(fd) for fd in inherit)  # what the child process holds
+        launches.append(list(argv))
+        return 1
+
+    launches: list[list[str]] = []
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    assert install(pending.config, allow_self_disconnect=True, services=services) == 0
+    (argv, ) = launches
+    assert argv[-2] == "--inherit-lock" and argv[-1].isdigit()
+    # The parent has returned and closed its descriptor; the lock is still held through the child's.
+    with pytest.raises(InstallError, match="already running"):
+        run_install(pending)
+    child = dataclasses.replace(pending.services, spawn=lambda *a, **k: pytest.fail("the child detaches no further"))
+    fd = inherited[0]
+    assert install(pending.config, allow_self_disconnect=True, apply_staged=True, inherit_lock=fd, services=child) == 0
+    lock.acquire(pending.root, command="install").close()  # the child's adopted descriptor was the last one
+
+
+# Uninstall and your own session =======================================================================================
+
+
+@pytest.fixture
+def running(host_tree):
+    run_install(host_tree)
+    settle(host_tree)
+    return host_tree
+
+
+def test_uninstall_is_refused_when_the_session_cannot_be_proven_safe_and_removes_nothing(running):
+    with pytest.raises(InstallError) as raised:
+        uninstall(running.config, services=running.services)
+    message = str(raised.value)
+    assert FRPC in message and WEBSOCAT in message and "--allow-self-disconnect" in message
+    assert running.fake.calls_of("uninstall") == [] and (running.root / "bin").exists()
+    assert (running.root / "secrets" / "token").exists()
+
+
+def test_uninstall_proceeds_from_a_session_that_is_provably_off_the_tunnel(running, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
+    assert uninstall(running.config, services=running.services) == 0
+    assert not (running.root / "bin").exists()
+
+
+def test_uninstall_proceeds_when_nothing_is_running(running):
+    running.script_running(websocat="stopped", frpc="stopped")
+    assert uninstall(running.config, services=running.services) == 0
+
+
+def test_uninstall_with_the_flag_detaches_and_the_child_does_the_work(running):
+    launches = []
+
+    def spawn(argv, *, cwd, log, inherit):
+        launches.append((list(argv), list(inherit)))
+        return 1
+
+    services = dataclasses.replace(running.services, spawn=spawn)
+    assert uninstall(running.config, allow_self_disconnect=True, services=services) == 0
+    ((argv, inherit), ) = launches
+    assert argv[1:-2] == ["-m", "ctl", "uninstall", "--allow-self-disconnect", "--detached"]
+    assert argv[-2] == "--inherit-lock" and len(inherit) == 1
+    assert running.fake.calls_of("uninstall") == [] and (running.root / "bin").exists()
+    assert (running.root / "install.log").exists()
+    assert uninstall(running.config, allow_self_disconnect=True, detached=True, services=running.services) == 0
+    assert not (running.root / "bin").exists()
+
+
+def test_the_flag_does_not_detach_an_uninstall_that_cannot_disconnect_anyone(running):
+    running.script_running(websocat="stopped", frpc="stopped")
+    services = dataclasses.replace(running.services, spawn=lambda *a, **k: pytest.fail("nothing to protect"))
+    assert uninstall(running.config, allow_self_disconnect=True, services=services) == 0
+
+
+# Staging directory ====================================================================================================
+
+
+def test_stage_empties_the_staging_directory_before_granting_the_service_read(running, monkeypatch):
+    """On Windows `grant_service_read` refuses a subdirectory of `bin\\`, and a failed run leaves exactly that."""
+    staging = running.root / "bin" / ".staging"
+    (staging / "leftover-directory").mkdir(parents=True)
+    (staging / "leftover").write_bytes(b"x")
+    seen = []
+    original = perms.grant_service_read
+    monkeypatch.setattr(
+        perms, "grant_service_read",
+        lambda root, account: seen.append((root / "bin" / ".staging").exists()) or original(root, account)
+    )
+    run_install(running)
+    assert seen == [False]
+
+
+def test_the_staging_directory_is_gone_after_a_failed_apply(running, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
+    (running.root / "bin" / "frpc").write_bytes(b"tampered")
+    running.fake.on("restart", FRPC, stderr="error: failed\n", exit=4)
+    with pytest.raises(InstallError):
+        run_install(running)
+    assert not (running.root / "bin" / ".staging").exists()
+
+
+def test_the_staging_directory_is_gone_after_a_failed_download(running, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
+    (running.root / "bin" / "frpc").write_bytes(b"tampered")
+
+    class Broken:
+
+        def __enter__(self):
+            raise BinariesError("the download failed")
+
+        def __exit__(self, *exc):
+            return None
+
+    broken = dataclasses.replace(running.services, fetcher=Broken)
+    with pytest.raises(BinariesError):
+        install(running.config, services=broken)
+    assert not (running.root / "bin" / ".staging").exists()
+
+
+# bin/ is the installer's ==============================================================================================
+
+
+def test_an_existing_bin_is_converged_to_0755_and_the_installing_account(host_tree):
+    (host_tree.root / "bin").mkdir()
+    (host_tree.root / "bin").chmod(0o777)
+    run_install(host_tree)
+    assert mode_of(host_tree.root / "bin") == 0o755 and (host_tree.root / "bin").stat().st_uid == os.geteuid()
+
+
+# The detached child's last word =======================================================================================
+
+
+def test_the_child_ends_its_log_with_the_outcome_ok(pending, capsys):
+    install(pending.config, allow_self_disconnect=True, apply_staged=True, services=pending.services)
+    assert capsys.readouterr().out.splitlines()[-1] == "apply finished: ok"
+
+
+def test_the_child_ends_its_log_with_the_failure(pending, capsys):
+    pending.fake.on("restart", WEBSOCAT, stderr="error: boom\n", exit=4)
+    with pytest.raises(InstallError):
+        install(pending.config, allow_self_disconnect=True, apply_staged=True, services=pending.services)
+    last = capsys.readouterr().out.splitlines()[-1]
+    assert last.startswith("apply finished: failed: ") and WEBSOCAT in last
+
+
+def test_a_foreground_install_prints_no_outcome_line(host_tree, capsys):
+    run_install(host_tree)
+    assert "apply finished" not in capsys.readouterr().out

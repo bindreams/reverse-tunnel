@@ -39,7 +39,7 @@ def assess(environ: Mapping[str, str] | None = None) -> Verdict:
     try:
         if len(fields) != 4:
             raise ValueError
-        address = ipaddress.ip_address(fields[0])
+        address, server = ipaddress.ip_address(fields[0]), ipaddress.ip_address(fields[2])
     except ValueError:
         return Verdict(
             False, f"{VARIABLE} is {value!r}, which is not `client-address client-port server-address server-port`"
@@ -48,5 +48,11 @@ def assess(environ: Mapping[str, str] | None = None) -> Verdict:
         return Verdict(
             False,
             f"the ssh client address is loopback ({fields[0]}), which is how a session through the tunnel arrives"
+        )
+    if address == server:
+        return Verdict(
+            False,
+            f"the ssh client and server addresses are the same ({fields[0]}): the connection was made from this machine "
+            "to itself, which is how a relay on it looks",
         )
     return Verdict(True, f"the ssh client address is {fields[0]}, not loopback")

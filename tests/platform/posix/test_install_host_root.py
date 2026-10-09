@@ -6,6 +6,7 @@ is stubbed: until the owner decides how a separate account reaches the deploymen
 this file tests what happens once it does not.
 """
 
+import dataclasses
 import grp
 import os
 import pwd
@@ -130,7 +131,8 @@ def test_a_service_that_could_write_the_repository_root_is_refused_before_anythi
     before = tree(root)
     with pytest.raises(InstallError, match="writable"):
         run_install(host_tree)
-    assert tree(root) == before and host_tree.fake.calls == []
+    # The lock file is the one thing a refused run leaves: it holds no state.
+    assert {k: v for k, v in tree(root).items() if k != ".install.lock"} == before and host_tree.fake.calls == []
 
 
 def test_the_operator_s_own_group_may_write_when_the_service_is_not_in_it(host_tree):
@@ -141,3 +143,35 @@ def test_the_operator_s_own_group_may_write_when_the_service_is_not_in_it(host_t
 def test_a_deployment_the_service_owns_is_the_same_account_mode_and_is_not_asked_whether_it_can_write(host_tree):
     os.chown(host_tree.root, uid_of(SERVICE), -1)
     assert host.preflight(host_tree.config, services=host_tree.services).mode is AccountMode.SAME
+
+
+def test_an_existing_operator_owned_bin_is_converged_to_root_and_0755(host_tree):
+    """`bin/` holds what root executes, so it is root's even when the operator created it, stricter than the table."""
+    (host_tree.root / "bin").mkdir()
+    os.chown(host_tree.root / "bin", OPERATOR, OPERATOR)
+    (host_tree.root / "bin").chmod(0o775)  # the service, in neither the owner nor the group, cannot write it
+    run_install(host_tree)
+    assert owner_and_mode(host_tree.root / "bin") == (0, 0o755)
+
+
+def test_the_lock_file_and_the_install_log_belong_to_the_operator(host_tree):
+    host_tree.fake.on("install", host.WEBSOCAT_ID, stderr="error: nope\n", exit=1)
+    with pytest.raises(InstallError):
+        run_install(host_tree)
+    assert owner_and_mode(host_tree.root / ".install.lock") == (OPERATOR, 0o640)
+
+
+def test_the_detached_install_log_is_the_operator_s_and_0640(host_tree):
+    run_install(host_tree)
+    host_tree.script_running()
+    host_tree.set_spec(host.WEBSOCAT_ID, installed="command: [old]\n", manifest="command: [new]\n")
+    seen = []
+
+    def spawn(argv, *, cwd, log, inherit):
+        seen.append(os.fstat(log.fileno()).st_ino)
+        return 1
+
+    services = dataclasses.replace(host_tree.services, spawn=spawn)
+    assert install(host_tree.config, allow_self_disconnect=True, services=services) == 0
+    assert seen == [os.stat(host_tree.root / "install.log").st_ino]
+    assert owner_and_mode(host_tree.root / "install.log") == (OPERATOR, 0o640)

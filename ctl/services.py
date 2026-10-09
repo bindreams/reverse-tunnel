@@ -3,7 +3,7 @@
 
 import dataclasses
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import IO, Protocol
 
@@ -23,8 +23,10 @@ def run_command(args: list[str], *, cwd: Path) -> int:
 
 class Spawner(Protocol):
 
-    def __call__(self, argv: list[str], *, cwd: Path, log: IO[bytes]) -> int:
-        """Start `argv` detached from this session, its output appended to `log`; return its pid."""
+    def __call__(self, argv: list[str], *, cwd: Path, log: IO[bytes], inherit: Sequence[int]) -> int:
+        """Start `argv` detached from this session, its output appended to `log`; return its pid.
+
+        The child keeps the descriptors (handles on Windows) in `inherit`, the install lock among them."""
 
 
 @dataclasses.dataclass(frozen=True)

@@ -4,6 +4,7 @@
 import os
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from ctl.errors import InstallError
@@ -12,6 +13,8 @@ from ctl.perms import Account, AccountMode, account_mode
 # Everything root runs, reads, or hands the daemons the means to. A service able to write `goetia.yaml` or `bin/` could
 # make the next `ctl install` run its own command as root, and `.env` holds the fleet token.
 GUARDED = ("", "bin", "host", "goetia.yaml", "host/frpc.toml", ".env")
+# What `sudo .venv/bin/python -m ctl` executes as root; everything beneath is checked too.
+GUARDED_TREES = ("ctl", ".venv")
 
 
 def verify_traversable(root: Path, service: Account) -> None:
@@ -63,11 +66,23 @@ def refuse_service_writable(root: Path, service: Account) -> None:
     """In separate-account mode, raise if the service could rewrite what root runs. Same-account mode owns it all."""
     if sys.platform == "win32" or account_mode(root, service) is AccountMode.SAME:
         return
-    for name in GUARDED:
-        path = root / name if name else root
+    for path in _guarded_paths(root):
         if service_can_write(path, service):
             raise InstallError(
                 f"{path} is writable by {service.name}, the account the daemons run as. A compromised daemon could "
                 "then rewrite what root runs or reads on the next install. Remove the write permission "
                 f"(for example `chmod go-w {path}`, and make sure {service.name} does not own it)"
             )
+
+
+def _guarded_paths(root: Path) -> Iterator[Path]:
+    for name in GUARDED:
+        yield root / name if name else root
+    for name in GUARDED_TREES:
+        top = root / name
+        if not top.is_dir():
+            continue
+        yield top
+        for directory, directories, files in os.walk(top):  # links are listed, never entered
+            for entry in directories + files:
+                yield Path(directory) / entry

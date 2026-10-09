@@ -4,6 +4,7 @@ secrets/
 bin/
 logs/
 install.log
+.install.lock
 
 # Cache
 __pycache__/

@@ -56,15 +56,9 @@ def test_preflight_downloads_nothing(converged):
     assert converged.downloads == []
 
 
-def test_preflight_refuses_a_deployment_that_is_not_a_host(tmp_path, monkeypatch):
-    from deployment_support import write_env
-
-    from ctl.config import Role
-
+def test_preflight_refuses_a_deployment_that_is_not_a_host(tree, tmp_path):
     root = tmp_path / "client"
     root.mkdir()
-    write_env(root, Role.CLIENT)
-    tree = build_host(tmp_path, monkeypatch)
     with pytest.raises(InstallError, match="ROLE=host"):
         host.preflight(write_env(root, Role.CLIENT), services=tree.services)
 
@@ -241,6 +235,13 @@ def test_the_plan_proceeds_when_ssh_connection_shows_a_non_loopback_client(webso
     assert plan.daemons_to_converge == (WEBSOCAT, ) and plan.detach is False
 
 
+def test_the_refusal_names_the_real_ways_forward(websocat_pending):
+    with pytest.raises(InstallError) as raised:
+        plan_of(websocat_pending)
+    message = str(raised.value)
+    assert "--allow-self-disconnect" in message and "--preserve-env=SSH_CONNECTION" in message
+
+
 def test_the_plan_proceeds_when_websocat_is_not_yet_running(tree):
     """A first install never needs the flag: nothing is installed, so nothing can be serving this session."""
     plan = plan_of(tree)
@@ -278,6 +279,43 @@ def test_the_flag_does_not_detach_when_the_session_is_provably_safe(websocat_pen
 def test_the_flag_does_not_detach_when_no_scheduled_daemon_is_running(converged):
     converged.script_running(frpc="stopped")
     assert plan_of(converged, allow_self_disconnect=True).detach is False
+
+
+# Traces of an earlier install =========================================================================================
+# With no goetia to ask, "nothing is installed" is only believable on a tree that has never been installed.
+
+
+@pytest.mark.parametrize("trace", ["secrets", "logs", "bin"])
+def test_a_trace_of_an_earlier_install_makes_not_installed_uncertain(tree, trace):
+    (tree.root / trace).mkdir()
+    if trace == "bin":
+        (tree.root / "bin" / "frpc").write_bytes(b"x")
+    with pytest.raises(InstallError, match="--allow-self-disconnect"):
+        plan_of(tree)
+    plan = plan_of(tree, allow_self_disconnect=True)
+    assert set(plan.daemons_to_converge) == {FRPC, WEBSOCAT}
+
+
+def test_bin_removed_by_hand_after_a_real_install_does_not_open_the_guard(converged):
+    """`rm -rf bin` leaves secrets/ and logs/ behind, and the daemons it installed may still be running."""
+    (converged.root / "secrets").mkdir()
+    (converged.root / "logs").mkdir()
+    for entry in (converged.root / "bin").iterdir():
+        entry.unlink()
+    (converged.root / "bin").rmdir()
+    with pytest.raises(InstallError, match="--allow-self-disconnect"):
+        plan_of(converged)
+
+
+@pytest.mark.parametrize("leftover", [".install.lock", "install.log"])
+def test_files_the_installer_itself_leaves_are_not_traces(tree, leftover):
+    (tree.root / leftover).write_text("x")
+    assert plan_of(tree).detach is False
+
+
+def test_a_staging_directory_alone_is_not_a_trace(tree):
+    (tree.root / "bin" / ".staging").mkdir(parents=True)
+    assert plan_of(tree).detach is False
 
 
 # The guard covers frpc too ============================================================================================

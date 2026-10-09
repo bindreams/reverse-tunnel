@@ -116,6 +116,18 @@ def test_daemon_status_raises_for_every_other_error_kind(fake, root, kind):
         goetia.daemon_status(root, [ID])
 
 
+def test_daemon_status_raises_when_a_requested_id_is_neither_reported_nor_said_to_be_absent(fake, root):
+    fake.status(daemon(OTHER))
+    with pytest.raises(GoetiaError, match=ID):
+        goetia.daemon_status(root, [ID, OTHER])
+
+
+def test_daemon_status_raises_when_an_id_comes_back_that_nobody_asked_for(fake, root):
+    fake.status(daemon(ID), daemon(OTHER))
+    with pytest.raises(GoetiaError, match=OTHER):
+        goetia.daemon_status(root, [ID])
+
+
 def test_daemon_status_raises_when_the_state_could_not_be_determined(fake, root):
     fake.status(undetermined=[{"name": ID, "reason": "unit unreadable"}], exit=4)
     with pytest.raises(GoetiaError, match="unit unreadable"):

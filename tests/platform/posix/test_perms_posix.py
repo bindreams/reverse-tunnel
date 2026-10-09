@@ -638,3 +638,40 @@ def test_assign_file_refuses_a_directory(tmp_path):
 def test_operator_account_is_the_owner_of_the_repository_root(tmp_path):
     operator = perms.operator_account(tmp_path)
     assert operator.uid == os.getuid() and operator.name == pwd.getpwuid(os.getuid()).pw_name
+
+
+# open_log =============================================================================================================
+
+
+def test_open_log_creates_the_file_with_the_mode_and_owner_in_one_descriptor(tmp_path):
+    with perms.open_log(tmp_path / "install.log", me(), 0o640, root=tmp_path) as log:
+        log.write(b"hello\n")
+        assert os.fstat(log.fileno()).st_ino == os.stat(tmp_path / "install.log").st_ino
+    assert mode_of(tmp_path / "install.log") == 0o640 and (tmp_path / "install.log").stat().st_uid == os.getuid()
+    assert (tmp_path / "install.log").read_bytes() == b"hello\n"
+
+
+def test_open_log_starts_the_file_afresh_and_appends(tmp_path):
+    (tmp_path / "install.log").write_text("an earlier run\n")
+    with perms.open_log(tmp_path / "install.log", me(), 0o640, root=tmp_path) as log:
+        log.write(b"first\n")
+    with open(tmp_path / "install.log", "ab") as again:
+        again.write(b"second\n")
+    assert (tmp_path / "install.log").read_text() == "first\nsecond\n"
+
+
+def test_open_log_refuses_a_symlink_and_leaves_its_target_alone(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("precious")
+    (tmp_path / "install.log").symlink_to(target)
+    with pytest.raises(PermsError, match="symlink"):
+        perms.open_log(tmp_path / "install.log", me(), 0o640, root=tmp_path)
+    assert target.read_text() == "precious"
+
+
+def test_open_log_refuses_a_hard_linked_file_without_truncating_it(tmp_path):
+    (tmp_path / "other").write_text("precious")
+    os.link(tmp_path / "other", tmp_path / "install.log")
+    with pytest.raises(PermsError, match="hard link"):
+        perms.open_log(tmp_path / "install.log", me(), 0o640, root=tmp_path)
+    assert (tmp_path / "other").read_text() == "precious"

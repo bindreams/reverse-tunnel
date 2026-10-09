@@ -42,3 +42,14 @@ def test_an_absent_variable_is_not_and_says_why():
     verdict = assess({})
     assert verdict.safe is False
     assert "SSH_CONNECTION is not set" in verdict.reason and "sudo" in verdict.reason and "tmux" in verdict.reason
+
+
+@pytest.mark.parametrize("value", ["192.0.2.10 51234 192.0.2.10 22", "2001:db8::10 51234 2001:db8::10 22"])
+def test_a_client_address_equal_to_the_server_address_is_not_provably_safe(value):
+    """The connection was made from this machine to itself, which is how a relay on this machine looks."""
+    verdict = assess({"SSH_CONNECTION": value})
+    assert verdict.safe is False and "same" in verdict.reason and value.split()[0] in verdict.reason
+
+
+def test_a_server_address_that_is_not_an_address_is_not_provably_safe():
+    assert assess({"SSH_CONNECTION": "192.0.2.10 51234 nonsense 22"}).safe is False
