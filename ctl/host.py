@@ -446,15 +446,18 @@ def _detach(config: Config, services: Services, held: lock.InstallLock, argument
     interrupt anything. The wait itself can be interrupted, and then the outcome is simply unknown.
     """
     root = config.root
-    try:
-        pipe = handshake.Pipe()
-    except BaseException:
-        _clear_staging_quietly(root)  # no child can exist
-        raise
+    verb = arguments[0]
     spawn_error: Exception | None = None
     pid = None
+    started = False
     interrupted = False
+    pipe = None
     try:
+        try:
+            pipe = handshake.Pipe()
+        except BaseException:
+            _clear_staging_quietly(root)  # no child can exist
+            raise
         try:
             with atomic.deferred_interrupts():
                 try:
@@ -474,31 +477,33 @@ def _detach(config: Config, services: Services, held: lock.InstallLock, argument
             started = pipe.wait()
         except KeyboardInterrupt:
             print(
-                f"Interrupted while waiting for the detached process: outcome unknown, so nothing was cleaned "
-                f"up. See {root / LOG} for a line starting `apply finished:`; do not run `ctl install` again before it "
-                "appears, or before you have established that the process is gone.",
+                f"Interrupted while waiting for the detached {verb}: outcome unknown, so nothing was cleaned up. See "
+                f"{root / LOG} for a line starting `apply finished:`; do not run `ctl {verb}` again before it appears, "
+                "or before you have established that the process is gone."
             )
             raise
     finally:
-        pipe.close()
+        if pipe is not None:
+            pipe.close()
     if not started:
         _clear_staging_quietly(root)
         why = f"it refused: {pipe.refusal}" if pipe.refusal else "it exited without taking over the install"
         failure = f"; starting it raised {type(spawn_error).__name__}: {spawn_error}" if spawn_error else ""
         raise InstallError(
-            f"the detached process (pid {pid}) did not start: {why}{failure}. Nothing was applied. What it wrote to "
+            f"the detached {verb} (pid {pid}) did not start: {why}{failure}. Nothing was applied. What it wrote to "
             f"{root / LOG}:\n{_tail(root / LOG)}"
         ) from spawn_error
+    also = f" Starting it also raised {type(spawn_error).__name__}: {spawn_error}." if spawn_error else ""
     print(
-        f"The rest is running detached (pid {pid}) and will finish even if this session drops. Its progress and result "
+        f"The {verb} is running detached (pid {pid}) and will finish even if this session drops. Its progress and result "
         f"are in {root / LOG}, ending in a line that starts `apply finished:`; read it once you reconnect, and do not "
-        "run `ctl install` again before then."
+        f"run `ctl {verb}` again before then.{also}"
     )
     if interrupted:
         raise KeyboardInterrupt
     if spawn_error:
         raise InstallError(
-            f"starting the detached process raised {type(spawn_error).__name__}: {spawn_error}, but it did start and is "
+            f"starting the detached {verb} raised {type(spawn_error).__name__}: {spawn_error}, but it did start and is "
             f"running (pid {pid}); watch {root / LOG} for `apply finished:` and do not run the install again meanwhile"
         ) from spawn_error
     return 0

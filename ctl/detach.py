@@ -135,18 +135,26 @@ def job_allows_breakaway() -> bool:
     return bool(flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK))
 
 
-# Adds the directories named in argv[1] the way `site` does, `.pth` files included (pywin32 depends on one), which
-# `PYTHONPATH` would not.
-PRELUDE = """
-import os, site, sys
-for path in sys.argv[1].split(os.pathsep):
-    site.addsitedir(path)
+# What `python -m ctl` has in the venv: the repository first, the standard library, and the venv's site-packages with
+# its `.pth` files (pywin32 depends on one), and nothing else. The interpreter is run with `-I -S`, which keeps out the
+# user site, `PYTHON*` variables and the base install's site-packages (whose `.pth` files would otherwise run, elevated,
+# outside the operator-owned set). The two paths arrive as arguments of their own: argv[1] is the venv's site-packages,
+# argv[2] the repository.
+ISOLATED_SETUP = """
+import site, sys
+site.addsitedir(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
 """
-BOOTSTRAP = PRELUDE + """
+BOOTSTRAP = ISOLATED_SETUP + """
 import runpy
-sys.argv = ["ctl", *sys.argv[2:]]
+sys.argv = ["ctl", *sys.argv[3:]]
 runpy.run_module("ctl", run_name="__main__", alter_sys=True)
 """
+
+
+def isolated_command(interpreter: str, site_packages: str, root: str, arguments: list[str]) -> list[str]:
+    """`ctl <arguments>` run by `interpreter` with only the venv's packages and the repository on its path."""
+    return [interpreter, "-I", "-S", "-c", BOOTSTRAP, site_packages, root, *arguments]
 
 
 def python_command(arguments: list[str]) -> list[str]:
@@ -154,16 +162,15 @@ def python_command(arguments: list[str]) -> list[str]:
 
     On Windows a venv's `python.exe` can be a redirector that starts the real interpreter inside a job that kills it
     with the redirector, which would take a detached child down with the session. So the child is started from the real
-    interpreter, given the venv's packages and the repository, and runs `ctl` the way `-m` does.
+    interpreter, isolated as above.
     """
     if sys.platform != "win32":
         return [sys.executable, "-m", "ctl", *arguments]
     import sysconfig
 
     root = Path(__file__).resolve().parent.parent
-    paths = {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}
     interpreter = getattr(sys, "_base_executable", sys.executable)
-    return [interpreter, "-c", BOOTSTRAP, os.pathsep.join([*sorted(paths), str(root)]), *arguments]
+    return isolated_command(interpreter, sysconfig.get_path("purelib"), str(root), arguments)
 
 
 def check_can_detach() -> None:

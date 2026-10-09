@@ -655,6 +655,13 @@ def test_uninstall_with_the_flag_detaches_and_the_child_does_the_work(running):
     assert not (running.root / "bin").exists()
 
 
+def test_a_detached_uninstall_says_it_is_an_uninstall(running, capsys):
+    services = dataclasses.replace(running.services, spawn=lambda argv, *, cwd, log, inherit: started(inherit) or 1)
+    assert uninstall(running.config, allow_self_disconnect=True, services=services) == 0
+    out = capsys.readouterr().out
+    assert "The uninstall is running detached" in out and "ctl uninstall" in out and "ctl install" not in out
+
+
 def test_the_flag_does_not_detach_an_uninstall_that_cannot_disconnect_anyone(running):
     running.script_running(websocat="stopped", frpc="stopped")
     services = dataclasses.replace(running.services, spawn=lambda *a, **k: pytest.fail("nothing to protect"))
@@ -857,7 +864,7 @@ def test_an_interrupt_after_the_child_has_started_leaves_the_staging_directory_t
         install(pending.config, allow_self_disconnect=True, services=services)
     assert (pending.root / "bin" / ".staging" / "websocat").exists()
     out = capsys.readouterr().out
-    assert "running detached (pid 55)" in out and "apply finished" in out
+    assert "The install is running detached (pid 55)" in out and "apply finished" in out
 
 
 def test_an_interrupt_with_no_child_is_a_failure_to_start_and_clears_the_staging_directory(pending):
@@ -943,7 +950,7 @@ def test_a_spawn_that_raises_after_the_child_started_leaves_the_staging_director
     assert (pending.root / "bin" / ".staging" / "websocat").exists()
 
 
-def test_a_spawn_that_raises_and_a_ctrl_c_together_still_leave_the_staging_to_a_started_child(pending):
+def test_a_spawn_that_raises_and_a_ctrl_c_together_still_leave_the_staging_to_a_started_child(pending, capsys):
     staged_for_a_child(pending)
 
     def spawn(argv, *, cwd, log, inherit):
@@ -955,6 +962,7 @@ def test_a_spawn_that_raises_and_a_ctrl_c_together_still_leave_the_staging_to_a_
     with pytest.raises(KeyboardInterrupt):
         install(pending.config, allow_self_disconnect=True, services=services)
     assert (pending.root / "bin" / ".staging" / "websocat").exists()
+    assert "launcher died after Popen" in capsys.readouterr().out  # the error is not lost to the interrupt
 
 
 def test_a_ctrl_c_during_the_wait_leaves_the_staging_directory_and_says_the_outcome_is_unknown(
@@ -971,7 +979,7 @@ def test_a_ctrl_c_during_the_wait_leaves_the_staging_directory_and_says_the_outc
         install(pending.config, allow_self_disconnect=True, services=services)
     assert (pending.root / "bin" / ".staging" / "websocat").exists()
     out = capsys.readouterr().out
-    assert "outcome unknown" in out and "apply finished:" in out
+    assert "outcome unknown" in out and "apply finished:" in out and "ctl install" in out
     lock.acquire(pending.root, command="install").close()
 
 
