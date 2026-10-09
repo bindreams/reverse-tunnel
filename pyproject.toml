@@ -7,10 +7,12 @@ license = "AGPL-3.0-or-later"
 license-files = ["LICENSE.md"]
 requires-python = ">=3.13"
 dependencies = [
+    "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "pywin32>=312 ; sys_platform == 'win32'",
     "sigstore>=4.5.0",
     "tomlkit>=0.15.1",
+    "truststore>=0.10.4",
 ]
 
 [tool.uv]

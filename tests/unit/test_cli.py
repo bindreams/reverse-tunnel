@@ -15,7 +15,6 @@ from deployment_support import write_env
 
 SPEC_SUBCOMMANDS = {"install", "uninstall", "doctor", "client-config", "pin"}
 REPO_ROOT = Path(__file__).resolve().parents[2]
-UNIMPLEMENTED_SUBCOMMANDS = {"doctor"}
 
 
 def declared_subcommands() -> set[str]:
@@ -33,12 +32,6 @@ def test_every_spec_subcommand_is_declared():
     assert declared_subcommands() == SPEC_SUBCOMMANDS
 
 
-@pytest.mark.parametrize("name", sorted(UNIMPLEMENTED_SUBCOMMANDS))
-def test_unimplemented_subcommand_exits_nonzero_naming_itself(name, capsys):
-    assert main([name]) != 0
-    assert name in capsys.readouterr().err
-
-
 def test_missing_subcommand_is_a_usage_error():
     with pytest.raises(SystemExit) as raised:
         main([])
@@ -47,14 +40,14 @@ def test_missing_subcommand_is_a_usage_error():
 
 def test_module_entrypoint_propagates_the_exit_code():
     result = subprocess.run(
-        [sys.executable, "-m", "ctl", "doctor"],
+        [sys.executable, "-m", "ctl", "pin", "frp"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode != 0
-    assert "doctor" in result.stderr
+    assert "--update" in result.stderr
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,7 @@ GOOD_PASSWORD = "correct-horse-battery_staple"
 GOOD_LABEL = "alpha"
 
 # Keys the ctl process consumes itself, which no tracked template references. Permanent.
-CTL_ONLY = frozenset({"ROLE", "RT_TOKEN", "RT_SCHEME", "RT_PUBLIC_PORT", "RT_PUBLIC_HOST"})
+CTL_ONLY = frozenset({"ROLE", "RT_TOKEN", "RT_SCHEME", "RT_PUBLIC_PORT", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE"})
 
 # Helpers ==============================================================================================================
 
@@ -126,8 +126,8 @@ def test_required_keys_are_exactly_the_documented_sets():
         Role.CLIENT: frozenset({"ROLE", "RT_DOMAIN", "RT_SCHEME", "RT_PUBLIC_PORT"}),
     }
     assert OPTIONAL == {
-        Role.BRIDGE: frozenset({"RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST"}),
-        Role.HOST: frozenset(),
+        Role.BRIDGE: frozenset({"RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE"}),
+        Role.HOST: frozenset({"RT_TLS_CA_BUNDLE"}),
         Role.CLIENT: frozenset(),
     }
 
@@ -301,13 +301,29 @@ def test_a_dns_name_or_strict_ip_literal_is_accepted(tmp_path, good):
     assert load(tmp_path, Role.HOST, RT_SERVER_ADDR=good).values["RT_SERVER_ADDR"] == good
 
 
-OPTIONAL_PAIRS = [pytest.param(key, id=key) for key in ("RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST")]
+OPTIONAL_PAIRS = [
+    pytest.param(key, id=key) for key in ("RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE")
+]
 
 
 @pytest.mark.parametrize("key", OPTIONAL_PAIRS)
 def test_an_optional_bridge_key_may_be_absent_or_empty(tmp_path, key):
     load(tmp_path, Role.BRIDGE, **{key: None})
     assert load(tmp_path, Role.BRIDGE, **{key: ""}).values[key] == ""
+
+
+@pytest.mark.parametrize("role", [Role.BRIDGE, Role.HOST])
+def test_the_ca_bundle_may_be_absent_or_empty_and_is_an_absolute_path_when_set(tmp_path, role):
+    load(tmp_path, role, RT_TLS_CA_BUNDLE=None)
+    load(tmp_path, role, RT_TLS_CA_BUNDLE="")
+    for good in ("/etc/ssl/rt-ca.pem", "C:/certs/rt-ca.pem"):
+        assert load(tmp_path, role, RT_TLS_CA_BUNDLE=good).values["RT_TLS_CA_BUNDLE"] == good
+
+
+@pytest.mark.parametrize("bad", ["ca.pem", "./ca.pem", "../ca.pem", "certs/ca.pem", "~/ca.pem"])
+@pytest.mark.parametrize("role", [Role.BRIDGE, Role.HOST])
+def test_a_relative_ca_bundle_path_is_rejected_because_doctor_runs_from_anywhere(tmp_path, role, bad):
+    assert "RT_TLS_CA_BUNDLE" in refused(tmp_path, role, RT_TLS_CA_BUNDLE=bad)
 
 
 def test_an_optional_key_that_is_set_is_validated(tmp_path):

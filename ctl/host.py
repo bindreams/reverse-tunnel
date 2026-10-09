@@ -97,11 +97,20 @@ def _token_bytes(config: Config) -> bytes:
     return config.require("RT_TOKEN").encode("ascii") + b"\n"
 
 
-def _inputs(config: Config) -> dict[str, str]:
-    toml = read_file(config.root / "host", "frpc.toml")
+def token_digest(config: Config) -> str:
+    return hashlib.sha256(_token_bytes(config)).hexdigest()
+
+
+def frpc_toml_digest(root: Path) -> str:
+    toml = read_file(root / "host", "frpc.toml")
     if toml is None:
-        raise InstallError(f"{config.root / 'host' / 'frpc.toml'} is missing; restore it from the repository")
-    return {"token": hashlib.sha256(_token_bytes(config)).hexdigest(), "frpc.toml": hashlib.sha256(toml).hexdigest()}
+        raise InstallError(f"{root / 'host' / 'frpc.toml'} is missing; restore it from the repository")
+    return hashlib.sha256(toml).hexdigest()
+
+
+def input_digests(config: Config) -> dict[str, str]:
+    """The digests `bin/.digests.json` records for the files the daemons read once at startup."""
+    return {"token": token_digest(config), "frpc.toml": frpc_toml_digest(config.root)}
 
 
 def _digest_on_disk(bin_dir: Path, name: str) -> str | None:
@@ -188,7 +197,7 @@ def preflight(config: Config, *, services: Services, allow_self_disconnect: bool
     pins, bundle, platform = _host_pins(services)
     by_base = {_base(pin.install_name): pin for pin in pins}
     record = read_digests(root / "bin")
-    inputs = _inputs(config)
+    inputs = input_digests(config)
     replacing = {
         pin.install_name
         for pin in pins if _digest_on_disk(root / "bin", pin.install_name) != pin.member_sha256

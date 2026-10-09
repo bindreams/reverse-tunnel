@@ -8,7 +8,7 @@ from collections.abc import Sequence
 
 from pathlib import Path
 
-from ctl import binaries
+from ctl import binaries, doctor
 from ctl.client import render_ssh_config
 from ctl.config import Config, ConfigError, Role
 from ctl.env import EnvError
@@ -168,8 +168,10 @@ def run_command(args: argparse.Namespace) -> int:
             )
         print(render_ssh_config(config, args.label), end="")
         return 0
-    print(f"ctl {args.command}: not implemented yet", file=sys.stderr)
-    return 1
+    assert args.command == "doctor", f"unhandled command {args.command!r}"
+    checks = doctor.diagnose(args.root)
+    print(doctor.render(checks))
+    return doctor.exit_code(checks)
 
 
 def main(argv: Sequence[str] | None = None, *, root: Path = ROOT) -> int:

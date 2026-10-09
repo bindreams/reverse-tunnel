@@ -11,7 +11,7 @@ import ipaddress
 import re
 import sys
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
 from ctl.env import EnvError, read
@@ -56,8 +56,8 @@ REQUIRED: Mapping[Role, frozenset[str]] = {
 }
 # May be absent or empty; validated when set.
 OPTIONAL: Mapping[Role, frozenset[str]] = {
-    Role.BRIDGE: frozenset({"RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST"}),
-    Role.HOST: frozenset(),
+    Role.BRIDGE: frozenset({"RT_CONTROL_HOST", "RT_PROXY_NETWORK", "RT_PUBLIC_HOST", "RT_TLS_CA_BUNDLE"}),
+    Role.HOST: frozenset({"RT_TLS_CA_BUNDLE"}),
     Role.CLIENT: frozenset(),
 }
 
@@ -161,6 +161,10 @@ def _check_shape(key: str, value: str) -> str | None:
     elif key in HOST_KEYS:
         if not _is_dns_name_or_ip(value):
             return "must be a DNS name or IP address, without a scheme, port, path or trailing dot"
+    elif key == "RT_TLS_CA_BUNDLE":
+        # `ctl doctor` runs from any directory, and `.env` cannot hold a backslash, so a Windows path uses `/`.
+        if not (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()):
+            return "must be an absolute path (on Windows write it with `/`)"
     elif key.endswith("_PORT") and not _check_port(value):
         return f"must be an integer from 1 to {MAX_PORT}"
     return None
