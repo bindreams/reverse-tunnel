@@ -7,7 +7,7 @@ from binaries_support import VERSIONS, Upstream
 from ctl import binaries
 from ctl.config import Config, Role
 from ctl.download import DIGESTS, Fetcher, Installed, TrustLevel, describe_install, read_digests
-from ctl.errors import BinariesError, InstallError
+from ctl.errors import BinariesError
 from ctl.install import Services, install, uninstall
 from deployment_support import tree, write_env
 
@@ -101,12 +101,6 @@ def test_a_wrong_download_installs_nothing_and_records_nothing(config, generated
     assert list((tmp_path / "bin").iterdir()) == []
 
 
-def test_host_install_is_not_available_yet(tmp_path, services):
-    config = write_env(tmp_path, Role.HOST)
-    with pytest.raises(InstallError, match="host"):
-        install(config, services=services)
-
-
 # Uninstall ============================================================================================================
 
 
@@ -116,8 +110,3 @@ def test_client_uninstall_removes_bin_and_tolerates_its_absence(config, services
     assert not (tmp_path / "bin").exists()
     assert (tmp_path / ".env").exists()
     assert uninstall(config, services=services) == 0
-
-
-def test_host_uninstall_is_not_available_yet(tmp_path, services):
-    with pytest.raises(InstallError, match="host"):
-        uninstall(write_env(tmp_path, Role.HOST), services=services)

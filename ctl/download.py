@@ -287,12 +287,19 @@ def is_plain_name(name: str) -> bool:
     return is_safe_member(name) and PurePosixPath(name).name == name and name not in (".", "..")
 
 
-def record_digests(bin_dir: Path, pins: Iterable[Pin]) -> None:
-    """Replace `bin/.digests.json` with each pin's install name mapped to the `member_sha256` it was installed from."""
+def record_digests(bin_dir: Path, pins: Iterable[Pin], inputs: Mapping[str, str] | None = None) -> None:
+    """Replace `bin/.digests.json` with each pin's install name mapped to the `member_sha256` it was installed from.
+
+    `inputs` adds the digests of other files a daemon reads once at startup, under plain names of their own.
+    """
     recorded: dict[str, str] = {}
     for pin in pins:
         if recorded.setdefault(pin.install_name, pin.member_sha256) != pin.member_sha256:
             raise BinariesError(f"{pin.install_name}: two pins with different member digests")
+    for name, digest in (inputs or {}).items():
+        if not is_plain_name(name) or not HEX64.fullmatch(digest) or name in recorded:
+            raise BinariesError(f"{name}: not a plain name of its own with a sha256 digest")
+        recorded[name] = digest
     write_atomically(bin_dir / DIGESTS, json.dumps(recorded, indent=2, sort_keys=True) + "\n")
 
 

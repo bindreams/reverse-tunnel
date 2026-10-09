@@ -1,0 +1,22 @@
+# frpc for a host: the control connection to the bridge. Read by frpc itself, which expands the variables below from
+# the environment goetia.yaml gives it; nothing here is rendered. Paths are relative to the daemon's `cwd` (`logs/`).
+user = "{{ .Envs.RT_LABEL }}"
+serverAddr = "{{ .Envs.RT_SERVER_ADDR }}"
+serverPort = {{ .Envs.RT_SERVER_PORT }}
+transport.protocol = "{{ .Envs.RT_PROTOCOL }}"
+auth.method = "token"
+auth.tokenSource = { type = "file", file = { path = "../secrets/token" } }
+
+# frp's default (`true`) makes frpc exit for good after one failed login, which is wrong on a laptop whose network is
+# not up at boot. It must stay a top-level key.
+loginFailExit = false
+log.disablePrintColor = true
+
+[[proxies]]
+name = "ssh"
+type = "http"
+# `<label>.<RT_DOMAIN>`, through the bridge's subDomainHost.
+subdomain = "{{ .Envs.RT_LABEL }}"
+localIP = "127.0.0.1"
+# websocat listens here and forwards to sshd.
+localPort = {{ .Envs.RT_WS_PORT }}

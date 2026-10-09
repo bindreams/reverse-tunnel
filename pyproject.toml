@@ -23,6 +23,7 @@ pythonpath = ["."]
 addopts = "-ra --strict-markers"
 markers = [
   "root: needs uid 0 and fails, never skips, without it; opt out explicitly with -m 'not root'",
+  "goetia: needs a goetia executable (RT_TEST_GOETIA, or the pinned release downloaded); fails, never skips, without one; opt out explicitly with -m 'not goetia'",
   "mount: mounts filesystems; needs root and a private mount namespace, and fails, never skips, without them; opt out explicitly with -m 'not mount'",
 ]
 
@@ -30,6 +31,7 @@ markers = [
 dev = [
     "prek>=0.5.5",
     "pytest>=9.1.1",
+    "pyyaml>=6.0.3",
     "ty>=0.0.85",
     "types-pywin32>=312.0.0.20261006",
     "yapf>=0.43.0",

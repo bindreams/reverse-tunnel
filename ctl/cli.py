@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="host role: restart websocat even though this session may be running over the tunnel",
             )
+            # The detached child of --allow-self-disconnect: the apply phase only, for what the parent staged.
+            subparser.add_argument("--apply-staged", action="store_true", help=argparse.SUPPRESS)
         if name == "uninstall":
             subparser.add_argument(
                 "--force",
@@ -91,6 +93,16 @@ def refuse_root(command: str, config: Config) -> None:
         )
 
 
+def require_elevation(command: str, config: Config) -> None:
+    """The host role installs system services, which goetia can do only as root or an elevated Administrator."""
+    if config.role is Role.HOST and not is_elevated():
+        raise InstallError(
+            f"ROLE=host: `{command}` needs root. Run `uv sync` as yourself, then `sudo .venv/bin/python -m ctl "
+            f"{command}` (on Windows, the same from an elevated Administrator prompt), so that uv and its cache are "
+            "not left owned by root"
+        )
+
+
 def run_command(args: argparse.Namespace) -> int:
     if args.command == "pin":
         return pin_command(args)
@@ -101,12 +113,16 @@ def run_command(args: argparse.Namespace) -> int:
                 build_parser().error(
                     "--allow-self-disconnect applies to ROLE=host only; this deployment has no websocat to restart"
                 )
+            if args.apply_staged and not args.allow_self_disconnect:
+                build_parser().error("--apply-staged is for the detached child of --allow-self-disconnect")
             refuse_root("install", config)
-            return install(config, allow_self_disconnect=args.allow_self_disconnect)
+            require_elevation("install", config)
+            return install(config, allow_self_disconnect=args.allow_self_disconnect, apply_staged=args.apply_staged)
         if args.command == "uninstall":
             if args.force and config.role is not Role.BRIDGE:
                 build_parser().error("--force applies to ROLE=bridge only; no other role checks a container")
             refuse_root("uninstall", config)
+            require_elevation("uninstall", config)
             return uninstall(config, force=args.force)
         print(render_ssh_config(config, args.label), end="")
         return 0

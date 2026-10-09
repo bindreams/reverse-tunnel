@@ -596,3 +596,45 @@ def test_harden_file_does_not_chmod_or_chown_the_inode_behind_a_hard_link(tmp_pa
 def test_a_socket_swapped_in_after_the_check_is_reported_as_not_a_regular_file():
     failure = perms._failure(Path("logs/frpc.log"), OSError(errno.ENXIO, "Device not configured"))
     assert "not a regular file" in str(failure)
+
+
+# assign_file ==========================================================================================================
+
+
+def test_assign_file_sets_the_mode_through_the_descriptor(tmp_path):
+    path = tmp_path / "record"
+    path.write_text("x")
+    path.chmod(0o600)
+    perms.assign_file(path, me(), 0o644, root=tmp_path)
+    assert mode_of(path) == 0o644 and path.stat().st_uid == os.getuid()
+
+
+def test_assign_file_refuses_a_symlink_and_leaves_its_target_alone(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("x")
+    target.chmod(0o600)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(PermsError, match="symlink"):
+        perms.assign_file(link, me(), 0o644, root=tmp_path)
+    assert mode_of(target) == 0o600
+
+
+def test_assign_file_refuses_a_hard_linked_file(tmp_path):
+    path = tmp_path / "record"
+    path.write_text("x")
+    path.chmod(0o600)
+    os.link(path, tmp_path / "other-name")
+    with pytest.raises(PermsError, match="hard link"):
+        perms.assign_file(path, me(), 0o644, root=tmp_path)
+    assert mode_of(path) == 0o600
+
+
+def test_assign_file_refuses_a_directory(tmp_path):
+    with pytest.raises(PermsError, match="not a regular file"):
+        perms.assign_file(tmp_path, me(), 0o644, root=tmp_path)
+
+
+def test_operator_account_is_the_owner_of_the_repository_root(tmp_path):
+    operator = perms.operator_account(tmp_path)
+    assert operator.uid == os.getuid() and operator.name == pwd.getpwuid(os.getuid()).pw_name

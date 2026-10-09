@@ -510,3 +510,7 @@ def test_tracked_config_files_of_this_repository_include_the_known_minimum():
 
 def test_the_known_minimum_names_the_bridge_files():
     assert {"compose.yaml", "compose.traefik.yaml", "bridge/frps.toml"} <= set(env.KNOWN_MINIMUM)
+
+
+def test_the_known_minimum_names_the_host_files():
+    assert {"goetia.yaml", "host/frpc.toml"} <= set(env.KNOWN_MINIMUM)

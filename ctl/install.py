@@ -2,57 +2,36 @@
 """`ctl install` and `ctl uninstall`, per role.
 
 The bridge is Docker: all `install` does for it is give compose the token it mounts. A client is one binary. A host
-(goetia, frpc, websocat as services) is not available yet.
+(goetia, frpc, websocat as services) is `ctl.host`.
 """
 
-import dataclasses
 import os
 import stat
-import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
 
-from ctl import binaries, client, perms
+from ctl import binaries, client, host, perms
 from ctl.atomic import read_file
 from ctl.config import Config, Role
-from ctl.download import Fetcher
 from ctl.errors import BinariesError, InstallError
 from ctl.removal import remove_directory
+from ctl.services import Runner, Services, run_command  # re-exported: callers import them from here
 
 NO_READERS: frozenset[str] = frozenset()
 SECRETS_MODE = 0o711
 RECREATE = "docker compose up -d --force-recreate"
 
-# Seams ================================================================================================================
-
-
-class Runner(Protocol):
-
-    def __call__(self, args: list[str], *, cwd: Path) -> int:
-        """Run `args` in `cwd` and return its exit status; raise `FileNotFoundError` if the program does not exist."""
-
-
-def run_command(args: list[str], *, cwd: Path) -> int:
-    return subprocess.run(args, cwd=cwd, check=False).returncode
-
-
-@dataclasses.dataclass(frozen=True)
-class Services:
-    """What install reaches outside the tree: the pins, the platform, the downloader, and docker."""
-
-    lock_path: Path = binaries.LOCK_PATH
-    platform: str | None = None  # None: this machine's
-    fetcher: Callable[[], Fetcher] = Fetcher
-    run: Runner = run_command
-
-
 # Entry points =========================================================================================================
 
 
-def install(config: Config, *, allow_self_disconnect: bool = False, services: Services | None = None) -> int:
-    """Install this deployment's role; the exit status. `allow_self_disconnect` concerns the host role only."""
+def install(
+    config: Config,
+    *,
+    allow_self_disconnect: bool = False,
+    apply_staged: bool = False,
+    services: Services | None = None,
+) -> int:
+    """Install this deployment's role; the exit status. The two flags concern the host role only."""
     services = services or Services()
     if config.role is Role.BRIDGE:
         return _install_bridge(config)
@@ -64,7 +43,9 @@ def install(config: Config, *, allow_self_disconnect: bool = False, services: Se
             fetcher=services.fetcher,
         )
         return 0
-    raise _host_unavailable("install")
+    return host.install(
+        config, allow_self_disconnect=allow_self_disconnect, apply_staged=apply_staged, services=services
+    )
 
 
 def uninstall(config: Config, *, force: bool = False, services: Services | None = None) -> int:
@@ -78,11 +59,7 @@ def uninstall(config: Config, *, force: bool = False, services: Services | None 
     if config.role is Role.CLIENT:
         client.uninstall_client(config)
         return 0
-    raise _host_unavailable("uninstall")
-
-
-def _host_unavailable(command: str) -> InstallError:
-    return InstallError(f"ROLE=host: {command} is not available yet")
+    return host.uninstall(config, services=services)
 
 
 # Bridge ===============================================================================================================

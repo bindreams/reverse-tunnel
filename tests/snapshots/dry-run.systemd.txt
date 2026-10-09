@@ -1,0 +1,52 @@
+# reverse-tunnel-frpc
+[Unit]
+Description=reverse-tunnel-frpc
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=<ROOT>/bin/frpc -c ../host/frpc.toml
+WorkingDirectory=<ROOT>/logs
+Environment=RT_LABEL=alpha
+Environment=RT_PROTOCOL=quic
+Environment=RT_SERVER_ADDR=bridge.example.com
+Environment=RT_SERVER_PORT=7000
+Environment=RT_WS_PORT=8022
+User=svc-example
+Restart=always
+RestartSec=5
+StandardOutput=append:<ROOT>/logs/frpc.log
+StandardError=append:<ROOT>/logs/frpc.log
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Goetia]
+Marker=goetia
+Schema=1
+Version=0.1.0
+Spec={"schema": 1, "spec": {"command": ["<ROOT>/bin/frpc", "-c", "../host/frpc.toml"], "cwd": "<ROOT>/logs", "env": {"RT_LABEL": "alpha", "RT_PROTOCOL": "quic", "RT_SERVER_ADDR": "bridge.example.com", "RT_SERVER_PORT": "7000", "RT_WS_PORT": "8022"}, "id": "reverse-tunnel-frpc", "kind": "simple", "logs": "<ROOT>/logs/frpc.log", "name": "reverse-tunnel-frpc", "restart": "always", "restart_delay": {"nanos": 0, "secs": 5}, "user": {"kind": "name", "name": "svc-example"}}, "version": "0.1.0"}
+
+# reverse-tunnel-websocat
+[Unit]
+Description=reverse-tunnel-websocat
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=<ROOT>/bin/websocat --binary ws-l:127.0.0.1:8022 tcp:127.0.0.1:22
+WorkingDirectory=<ROOT>/logs
+User=svc-example
+Restart=always
+RestartSec=5
+StandardOutput=append:<ROOT>/logs/websocat.log
+StandardError=append:<ROOT>/logs/websocat.log
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Goetia]
+Marker=goetia
+Schema=1
+Version=0.1.0
+Spec={"schema": 1, "spec": {"command": ["<ROOT>/bin/websocat", "--binary", "ws-l:127.0.0.1:8022", "tcp:127.0.0.1:22"], "cwd": "<ROOT>/logs", "env": {}, "id": "reverse-tunnel-websocat", "kind": "simple", "logs": "<ROOT>/logs/websocat.log", "name": "reverse-tunnel-websocat", "restart": "always", "restart_delay": {"nanos": 0, "secs": 5}, "user": {"kind": "name", "name": "svc-example"}}, "version": "0.1.0"}

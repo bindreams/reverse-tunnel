@@ -175,13 +175,56 @@ def test_client_config_with_a_bad_label_is_a_message_and_exit_1(deployment, caps
 
 def test_install_accepts_allow_self_disconnect_for_a_host(tmp_path, monkeypatch):
     write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
     seen = []
     monkeypatch.setattr(
-        cli, "install", lambda config, *, allow_self_disconnect=False: seen.append(allow_self_disconnect) or 0
+        cli,
+        "install",
+        lambda config, *, allow_self_disconnect=False, apply_staged=False: seen.append(
+            (allow_self_disconnect, apply_staged)
+        ) or 0
     )
     assert main(["install", "--allow-self-disconnect"], root=tmp_path) == 0
     assert main(["install"], root=tmp_path) == 0
-    assert seen == [True, False]
+    assert seen == [(True, False), (False, False)]
+
+
+def test_the_detached_child_is_started_with_a_flag_that_help_does_not_advertise(tmp_path, monkeypatch, capsys):
+    write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
+    seen = []
+    monkeypatch.setattr(
+        cli,
+        "install",
+        lambda config, *, allow_self_disconnect=False, apply_staged=False: seen.append(
+            (allow_self_disconnect, apply_staged)
+        ) or 0
+    )
+    assert main(["install", "--allow-self-disconnect", "--apply-staged"], root=tmp_path) == 0
+    assert seen == [(True, True)]
+    with pytest.raises(SystemExit):
+        main(["install", "--help"])
+    assert "apply-staged" not in capsys.readouterr().out
+
+
+def test_apply_staged_requires_allow_self_disconnect(tmp_path, monkeypatch, capsys):
+    """It exists only for the detached child, which has already been allowed."""
+    write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "is_elevated", lambda: True)
+    with pytest.raises(SystemExit) as raised:
+        main(["install", "--apply-staged"], root=tmp_path)
+    assert raised.value.code == 2
+    assert "--allow-self-disconnect" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+def test_a_host_command_without_elevation_says_how_to_elevate(tmp_path, monkeypatch, capsys, command):
+    write_env(tmp_path, Role.HOST)
+    monkeypatch.setattr(cli, "install", lambda *a, **k: pytest.fail("goetia needs root"))
+    monkeypatch.setattr(cli, "uninstall", lambda *a, **k: pytest.fail("goetia needs root"))
+    assert main([command], root=tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "ROLE=host" in err and "sudo .venv/bin/python -m ctl" in err and "Administrator" in err
 
 
 @pytest.mark.parametrize("role", [Role.CLIENT, Role.BRIDGE])

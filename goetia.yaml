@@ -1,0 +1,33 @@
+# The host's two services, as goetia manifests them. goetia fills in the variables below from the `.env` beside this file.
+# Both run with `cwd: logs`, the one directory the service account may write, so relative paths in `command` climb out
+# of it. `restart: always` is not goetia's default (`never`) and is what brings a daemon back from a crash.
+daemons:
+  reverse-tunnel-frpc:
+    command: ["bin/frpc", "-c", "../host/frpc.toml"]
+    cwd: "logs"
+    logs: "logs/frpc.log"
+    restart: always
+    restart-delay: 5s
+    env:
+      RT_LABEL: "${RT_LABEL}"
+      RT_SERVER_ADDR: "${RT_SERVER_ADDR}"
+      RT_SERVER_PORT: "${RT_SERVER_PORT}"
+      RT_PROTOCOL: "${RT_PROTOCOL}"
+      RT_WS_PORT: "${RT_WS_PORT}"
+    backend-specific:
+      systemd: { user: "${RT_SERVICE_USER}" }
+      launchd: { user: "${RT_SERVICE_USER}" }
+      scm: { user: LocalService, command: ["bin/frpc.exe", "-c", "../host/frpc.toml"] }
+
+  reverse-tunnel-websocat:
+    command: ["bin/websocat", "--binary", "ws-l:127.0.0.1:${RT_WS_PORT}", "tcp:127.0.0.1:${RT_SSH_PORT}"]
+    cwd: "logs"
+    logs: "logs/websocat.log"
+    restart: always
+    restart-delay: 5s
+    backend-specific:
+      systemd: { user: "${RT_SERVICE_USER}" }
+      launchd: { user: "${RT_SERVICE_USER}" }
+      scm:
+        user: LocalService
+        command: ["bin/websocat.exe", "--binary", "ws-l:127.0.0.1:${RT_WS_PORT}", "tcp:127.0.0.1:${RT_SSH_PORT}"]

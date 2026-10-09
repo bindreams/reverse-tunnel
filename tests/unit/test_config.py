@@ -27,18 +27,6 @@ GOOD_LABEL = "alpha"
 # Keys the ctl process consumes itself, which no tracked template references. Permanent.
 CTL_ONLY = frozenset({"ROLE", "RT_TOKEN", "RT_SCHEME", "RT_PUBLIC_PORT", "RT_PUBLIC_HOST"})
 
-# TEMPORARY: keys whose referencing template has not landed yet. Task 8 (frpc.toml, goetia.yaml) removes its keys
-# from this set as it adds the templates, then deletes the set.
-PENDING_TEMPLATE_KEYS = frozenset({
-    "RT_LABEL",
-    "RT_SERVER_ADDR",
-    "RT_SERVER_PORT",
-    "RT_PROTOCOL",
-    "RT_SSH_PORT",
-    "RT_WS_PORT",
-    "RT_SERVICE_USER",
-})
-
 # Helpers ==============================================================================================================
 
 
@@ -477,8 +465,8 @@ def undeclared(root: Path, declared: set[str], **kwargs) -> set[str]:
     return referenced_by_tracked_files(root, **kwargs) - declared
 
 
-def unreferenced(root: Path, declared: set[str], *, ctl_only, pending, **kwargs) -> set[str]:
-    return declared - referenced_by_tracked_files(root, **kwargs) - set(ctl_only) - set(pending)
+def unreferenced(root: Path, declared: set[str], *, ctl_only, **kwargs) -> set[str]:
+    return declared - referenced_by_tracked_files(root, **kwargs) - set(ctl_only)
 
 
 def test_example_env_declares_every_variable_every_tracked_file_references():
@@ -500,31 +488,23 @@ def test_the_declared_gate_does_not_see_an_untracked_file(repo):
 
 def test_example_env_declares_nothing_unreferenced():
     keys = set(example_values())
-    assert unreferenced(REPO_ROOT, keys, ctl_only=CTL_ONLY, pending=PENDING_TEMPLATE_KEYS) == set()
+    assert unreferenced(REPO_ROOT, keys, ctl_only=CTL_ONLY) == set()
 
 
 def test_the_unreferenced_gate_catches_a_stale_key(repo):
     (repo / "frps.toml").write_text("x = ${RT_USED}\n")
     git(repo, "add", "frps.toml")
-    declared = {"RT_USED", "RT_STALE", "RT_CTL", "RT_LATER"}
-    stale = unreferenced(repo, declared, ctl_only={"RT_CTL"}, pending={"RT_LATER"}, minimum=())
+    declared = {"RT_USED", "RT_STALE", "RT_CTL"}
+    stale = unreferenced(repo, declared, ctl_only={"RT_CTL"}, minimum=())
     assert stale == {"RT_STALE"}
 
 
-def test_the_allowlists_name_only_declared_keys():
-    keys = set(example_values())
-    assert CTL_ONLY <= keys
-    assert PENDING_TEMPLATE_KEYS <= keys
+def test_the_allowlist_names_only_declared_keys():
+    assert CTL_ONLY <= set(example_values())
 
 
-def test_a_key_that_a_template_now_references_must_leave_both_allowlists():
-    referenced = referenced_by_tracked_files(REPO_ROOT)
-    assert referenced & PENDING_TEMPLATE_KEYS == set()
-    assert referenced & CTL_ONLY == set()
-
-
-def test_the_two_allowlists_do_not_overlap():
-    assert CTL_ONLY & PENDING_TEMPLATE_KEYS == set()
+def test_a_key_that_a_template_now_references_must_leave_the_allowlist():
+    assert referenced_by_tracked_files(REPO_ROOT) & CTL_ONLY == set()
 
 
 # Value rules shared with the bridge entrypoint ========================================================================

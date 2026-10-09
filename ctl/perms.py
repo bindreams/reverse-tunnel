@@ -93,6 +93,23 @@ def service_account(config: Config) -> Account:
     return resolve_service_account(config.require("RT_SERVICE_USER"))
 
 
+def operator_account(root: Path) -> Account:
+    """The account that owns the repository root: the operator, whom files root writes there are handed back to.
+
+    On Windows an elevated process's files inherit the folder's ACL, so there is nothing to hand back and no uid.
+    """
+    if sys.platform == "win32":
+        return Account("operator", None, None)
+    import pwd
+
+    status = os.stat(root)
+    try:
+        name = pwd.getpwuid(status.st_uid).pw_name
+    except KeyError:
+        name = str(status.st_uid)
+    return Account(name, status.st_uid, status.st_gid)
+
+
 def account_mode(root: Path, service: Account) -> AccountMode:
     """Whether the daemons run as the repository's owner. Windows' `LocalService` never is."""
     if service.uid is None:
@@ -315,6 +332,23 @@ def harden_file(path: Path, owner: Account | None, readers: frozenset[str], *, r
 
 
 # Directories ==========================================================================================================
+
+
+def assign_file(path: Path, owner: Account, mode: int, *, root: Path) -> None:
+    """Give the regular file `path` `owner` and `mode`, through its descriptor. Windows: nothing, the file inherits.
+
+    Refuses a symlink, a hard-linked file and anything that is not a regular file, like `harden_file`. For files root
+    creates in the operator's tree that the operator must still be able to read: `harden_file` would make them `0600`.
+    """
+    if sys.platform == "win32":
+        return
+    fd = _open(path, os.O_RDONLY)
+    try:
+        _require_sole_regular_file(fd, path)
+        _chown(fd, owner)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
 
 
 def converge_dir(

@@ -1,0 +1,294 @@
+"""What a host install decides before it changes anything: the plan, and the guard that protects your own session."""
+
+import pytest
+from tests.unit.deployment_support import write_env
+from tests.unit.goetia_support import daemon, error
+from tests.unit.host_support import FRPC, WEBSOCAT, build_host
+
+from ctl import access, host
+from ctl.config import Role
+from ctl.errors import BinariesError, InstallError
+
+
+@pytest.fixture
+def tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(access, "verify_traversable", lambda root, service: None)  # the seam; see test_access.py
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    return build_host(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def converged(tree):
+    tree.converge()
+    return tree
+
+
+def plan_of(tree, **kwargs) -> host.Plan:
+    return host.preflight(tree.config, services=tree.services, **kwargs)
+
+
+def snapshot(root):
+    return {
+        path.relative_to(root).as_posix(): (path.read_bytes() if path.is_file() else None)
+        for path in sorted(root.rglob("*"))
+    }
+
+
+# Preflight changes nothing ============================================================================================
+
+
+def test_preflight_mutates_nothing(converged):
+    converged.edit_env(RT_WS_PORT="9000")  # a pending change, so the plan is not empty
+    before = snapshot(converged.root)
+    plan_of(converged)
+    assert snapshot(converged.root) == before
+
+
+def test_preflight_on_a_never_installed_tree_creates_no_directory(tree):
+    before = snapshot(tree.root)
+    plan_of(tree)
+    assert snapshot(tree.root) == before
+    assert not (tree.root / "bin").exists() and not (tree.root / "secrets").exists()
+
+
+def test_preflight_downloads_nothing(converged):
+    plan_of(converged)
+    assert converged.downloads == []
+
+
+def test_preflight_refuses_a_deployment_that_is_not_a_host(tmp_path, monkeypatch):
+    from deployment_support import write_env
+
+    from ctl.config import Role
+
+    root = tmp_path / "client"
+    root.mkdir()
+    write_env(root, Role.CLIENT)
+    tree = build_host(tmp_path, monkeypatch)
+    with pytest.raises(InstallError, match="ROLE=host"):
+        host.preflight(write_env(root, Role.CLIENT), services=tree.services)
+
+
+def test_preflight_runs_the_traversal_seam_before_asking_goetia_anything(tree, monkeypatch):
+
+    def refuse(root, service):
+        raise InstallError("separate-account mode needs the traversal check, not yet available")
+
+    monkeypatch.setattr(access, "verify_traversable", refuse)
+    with pytest.raises(InstallError, match="not yet available"):
+        plan_of(tree)
+    assert tree.fake.calls == []
+
+
+# What is scheduled ====================================================================================================
+
+
+def test_a_converged_install_schedules_nothing(converged):
+    plan = plan_of(converged)
+    assert plan.daemons_to_converge == () and plan.binaries_to_replace == ()
+
+
+def test_a_never_installed_tree_schedules_both_daemons_and_every_binary(tree):
+    plan = plan_of(tree)
+    assert set(plan.daemons_to_converge) == {FRPC, WEBSOCAT}
+    assert set(plan.binaries_to_replace) == {"frpc", "websocat", "goetia", "goetia-shim"}
+    assert tree.fake.calls == []  # there is no goetia to ask yet
+
+
+def test_plan_schedules_a_daemon_whose_binary_changed(converged):
+    """The record matches websocat but not frpc: only frpc is scheduled."""
+    converged.record({"frpc": "0" * 64})
+    plan = plan_of(converged)
+    assert plan.daemons_to_converge == (FRPC, )
+    assert "binary" in plan.reasons[FRPC]
+    assert plan.binaries_to_replace == ()  # the file on disk is the pinned one; only the running process is stale
+
+
+def test_plan_replaces_a_binary_whose_file_differs_from_the_pin_though_the_record_agrees(converged):
+    (converged.bin / "frpc").write_bytes(b"tampered")
+    plan = plan_of(converged)
+    assert plan.binaries_to_replace == ("frpc", ) and plan.daemons_to_converge == (FRPC, )
+
+
+def test_plan_replaces_a_binary_that_is_missing(converged):
+    (converged.bin / "websocat").unlink()
+    plan = plan_of(converged, allow_self_disconnect=True)
+    assert plan.binaries_to_replace == ("websocat", ) and plan.daemons_to_converge == (WEBSOCAT, )
+
+
+def test_a_goetia_update_alone_restarts_no_daemon(converged):
+    (converged.bin / "goetia").write_bytes(b"older")
+    converged.record({"goetia": "0" * 64})
+    plan = plan_of(converged)
+    assert plan.binaries_to_replace == ("goetia", ) and plan.daemons_to_converge == ()
+
+
+def test_plan_schedules_a_daemon_whose_goetia_spec_changed(converged):
+    """Same record, a changed `.env` port: the websocat spec differs, frpc's does not."""
+    converged.set_spec(WEBSOCAT, installed="command: [websocat, 8022]\n", manifest="command: [websocat, 9000]\n")
+    plan = plan_of(converged, allow_self_disconnect=True)
+    assert plan.daemons_to_converge == (WEBSOCAT, ) and "spec" in plan.reasons[WEBSOCAT]
+
+
+def test_plan_schedules_a_daemon_that_is_installed_but_stopped(converged):
+    """The convergence property: identical digests and spec, yet it is not running, so a diff-only plan lies."""
+    converged.script_running(websocat="stopped")
+    plan = plan_of(converged)
+    assert plan.daemons_to_converge == (WEBSOCAT, ) and "stopped" in plan.reasons[WEBSOCAT]
+
+
+def test_plan_schedules_a_daemon_that_is_installed_but_not_enabled(converged):
+    converged.script_running(enabled=False)
+    plan = plan_of(converged, allow_self_disconnect=True)
+    assert plan.daemons_to_converge == (WEBSOCAT, ) and "enabled" in plan.reasons[WEBSOCAT]
+
+
+def test_plan_schedules_a_daemon_that_goetia_does_not_know(converged):
+    converged.fake.forget("status")
+    converged.fake.status(daemon(FRPC), errors=[error("not-installed", WEBSOCAT)], exit=1)
+    plan = plan_of(converged)
+    assert plan.daemons_to_converge == (WEBSOCAT, ) and "not installed" in plan.reasons[WEBSOCAT]
+
+
+def test_plan_schedules_frpc_when_the_token_digest_changed(converged):
+    """Rotation: frp reads `tokenSource` once per process, and `loginFailExit = false` keeps frpc from ever exiting."""
+    converged.edit_env(RT_TOKEN="f" * 64)
+    plan = plan_of(converged)
+    assert plan.daemons_to_converge == (FRPC, ) and "token" in plan.reasons[FRPC]
+
+
+def test_plan_schedules_frpc_when_host_frpc_toml_changed(converged):
+    """The `git pull` case."""
+    path = converged.root / "host" / "frpc.toml"
+    path.write_text(path.read_text() + "# edited\n")
+    plan = plan_of(converged)
+    assert plan.daemons_to_converge == (FRPC, ) and "frpc.toml" in plan.reasons[FRPC]
+
+
+def test_plan_schedules_frpc_when_the_input_record_is_missing(converged):
+    converged.record({"token": None})
+    assert plan_of(converged).daemons_to_converge == (FRPC, )
+
+
+def test_plan_records_what_the_running_daemons_will_have_read(converged):
+    plan = plan_of(converged)
+    assert plan.inputs == {"token": converged.token_digest(), "frpc.toml": converged.frpc_toml_digest()}
+
+
+def test_a_missing_frpc_config_is_an_error(converged):
+    (converged.root / "host" / "frpc.toml").unlink()
+    with pytest.raises(InstallError, match="frpc.toml"):
+        plan_of(converged)
+
+
+def test_a_malformed_record_is_an_error_not_an_empty_one(converged):
+    (converged.bin / ".digests.json").write_text("not json")
+    with pytest.raises(BinariesError, match="digests"):
+        plan_of(converged)
+
+
+def test_goetia_reporting_a_daemon_it_cannot_read_stops_the_plan(converged):
+    converged.fake.forget("status")
+    converged.fake.status(daemon(FRPC), errors=[error("unreadable", WEBSOCAT)], exit=4)
+    with pytest.raises(InstallError, match="unreadable"):
+        plan_of(converged)
+
+
+# The self-disconnect guard ============================================================================================
+
+
+@pytest.fixture
+def websocat_pending(converged):
+    """websocat is running and scheduled for a restart: the one case the guard exists for."""
+    converged.set_spec(WEBSOCAT, installed="command: [old]\n", manifest="command: [new]\n")
+    return converged
+
+
+@pytest.mark.parametrize("ssh_connection", [None, "127.0.0.1 51234 127.0.0.1 22", "::1 51234 ::1 22"])
+def test_the_guard_refuses_when_the_session_cannot_be_proven_safe(websocat_pending, monkeypatch, ssh_connection):
+    if ssh_connection:
+        monkeypatch.setenv("SSH_CONNECTION", ssh_connection)
+    with pytest.raises(InstallError, match="--allow-self-disconnect"):
+        plan_of(websocat_pending)
+
+
+def test_guard_refusal_names_the_failing_disjunct(websocat_pending, monkeypatch):
+    with pytest.raises(InstallError) as absent:
+        plan_of(websocat_pending)
+    monkeypatch.setenv("SSH_CONNECTION", "127.0.0.1 51234 127.0.0.1 22")
+    with pytest.raises(InstallError) as loopback:
+        plan_of(websocat_pending)
+    monkeypatch.setenv("SSH_CONNECTION", "garbage")
+    with pytest.raises(InstallError) as malformed:
+        plan_of(websocat_pending)
+    assert "SSH_CONNECTION is not set" in str(absent.value) and "sudo" in str(absent.value)
+    assert "127.0.0.1" in str(loopback.value) and "loopback" in str(loopback.value)
+    assert "garbage" in str(malformed.value)
+    assert len({str(absent.value), str(loopback.value), str(malformed.value)}) == 3
+
+
+def test_guard_refusal_leaves_the_tree_untouched(websocat_pending):
+    before = snapshot(websocat_pending.root)
+    with pytest.raises(InstallError):
+        plan_of(websocat_pending)
+    assert snapshot(websocat_pending.root) == before
+    assert websocat_pending.fake.mutations() == []
+
+
+def test_the_plan_proceeds_when_ssh_connection_shows_a_non_loopback_client(websocat_pending, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", "192.0.2.10 51234 192.0.2.1 22")
+    plan = plan_of(websocat_pending)
+    assert plan.daemons_to_converge == (WEBSOCAT, ) and plan.detach is False
+
+
+def test_the_plan_proceeds_when_websocat_is_not_yet_running(tree):
+    """A first install never needs the flag: nothing is installed, so nothing can be serving this session."""
+    plan = plan_of(tree)
+    assert WEBSOCAT in plan.daemons_to_converge and plan.detach is False
+
+
+@pytest.mark.parametrize("state", ["stopped", "failed"])
+def test_the_plan_proceeds_when_websocat_is_installed_but_not_running(converged, state):
+    converged.script_running(websocat=state)
+    assert plan_of(converged).daemons_to_converge == (WEBSOCAT, )
+
+
+def test_an_unknown_websocat_state_counts_as_running(converged):
+    converged.script_running(websocat="unknown")
+    with pytest.raises(InstallError, match="--allow-self-disconnect"):
+        plan_of(converged)
+
+
+def test_websocat_not_in_the_plan_needs_no_proof(converged):
+    converged.record({"frpc": "0" * 64})
+    assert plan_of(converged).daemons_to_converge == (FRPC, )
+
+
+def test_the_flag_overrides_the_guard_and_asks_for_the_apply_phase_to_be_detached(websocat_pending):
+    plan = plan_of(websocat_pending, allow_self_disconnect=True)
+    assert plan.daemons_to_converge == (WEBSOCAT, ) and plan.detach is True
+
+
+def test_the_flag_does_not_detach_when_the_session_is_provably_safe(websocat_pending, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", "192.0.2.10 51234 192.0.2.1 22")
+    assert plan_of(websocat_pending, allow_self_disconnect=True).detach is False
+
+
+def test_the_flag_does_not_detach_when_websocat_is_not_in_the_plan(converged):
+    converged.record({"frpc": "0" * 64})
+    assert plan_of(converged, allow_self_disconnect=True).detach is False
+
+
+def test_a_missing_goetia_with_a_record_cannot_show_websocat_is_stopped(converged):
+    """bin/ was damaged after an install: whether websocat is running is unknowable, so it is assumed to be."""
+    (converged.bin / "goetia").unlink()
+    with pytest.raises(InstallError, match="--allow-self-disconnect"):
+        plan_of(converged)
+    assert set(plan_of(converged, allow_self_disconnect=True).daemons_to_converge) == {FRPC, WEBSOCAT}
+
+
+def test_session_is_provably_safe_reads_the_environment(monkeypatch):
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    assert host.session_is_provably_safe() is False
+    monkeypatch.setenv("SSH_CONNECTION", "198.51.100.7 40000 198.51.100.1 22")
+    assert host.session_is_provably_safe() is True

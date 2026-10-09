@@ -484,3 +484,18 @@ def test_a_malformed_digest_record_is_an_error_and_never_empty(dest, text):
     (dest / ".digests.json").write_text(text)
     with pytest.raises(BinariesError, match="digests"):
         read_digests(dest)
+
+
+def test_record_digests_records_the_inputs_beside_the_binaries(lock, dest):
+    pin = the_pin(lock, "frp", "linux-x86_64", "frpc")
+    record_digests(dest, [pin], {"token": "a" * 64, "frpc.toml": "b" * 64})
+    assert read_digests(dest) == {"frpc": pin.member_sha256, "token": "a" * 64, "frpc.toml": "b" * 64}
+
+
+@pytest.mark.parametrize(("name", "digest"), [("frpc", "a" * 64), ("secrets/token", "a" * 64), ("..", "a" * 64),
+                                              ("token", "not-hex")])
+def test_an_input_that_collides_with_a_binary_or_is_malformed_is_refused(lock, dest, name, digest):
+    pin = the_pin(lock, "frp", "linux-x86_64", "frpc")
+    with pytest.raises(BinariesError, match="plain name"):
+        record_digests(dest, [pin], {name: digest})
+    assert list(dest.iterdir()) == []

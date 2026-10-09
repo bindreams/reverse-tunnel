@@ -1,0 +1,383 @@
+# This file is part of reverse-tunnel, licensed under AGPL-3.0-or-later; see LICENSE.md.
+"""The host role: frpc and websocat as two goetia-managed daemons, installed without cutting your own ssh session.
+
+Hosts are reachable only through the tunnel, so `install` is three phases and the order is the safety:
+
+- `preflight` changes nothing. It checks the accounts, asks goetia what is installed, and decides what to touch.
+- `stage` changes things that disturb nothing: directories, the token, the downloaded and verified binaries.
+- `apply` is the disruptive part: replace binaries, install units, restart.
+
+A daemon is scheduled when any of four things holds, because each is a way for a running process to differ from what
+the tree says: its binary is not the pinned one; its installed unit differs from the manifest; a file it reads once at
+startup (the token, `host/frpc.toml`) changed; or goetia does not report it running and enabled. `bin/.digests.json`
+records what the live processes were started with and is rewritten last, so a failure part-way leaves them looking
+stale and a rerun finishes the job.
+"""
+
+import dataclasses
+import hashlib
+import io
+import os
+import sys
+from collections.abc import Callable, Mapping
+from pathlib import Path
+
+from ctl import access, binaries, goetia, perms
+from ctl.atomic import read_file, replace_file
+from ctl.binaries import Pin
+from ctl.config import Config, Role
+from ctl.download import DIGESTS, describe_install, read_digests, record_digests
+from ctl.errors import BinariesError, InstallError
+from ctl.goetia import DaemonState, GoetiaError
+from ctl.perms import AccountMode
+from ctl.removal import remove_directory
+from ctl.services import Services
+from ctl.session import assess
+
+FRPC_ID = "reverse-tunnel-frpc"
+WEBSOCAT_ID = "reverse-tunnel-websocat"
+IDS = (FRPC_ID, WEBSOCAT_ID)
+
+# Promotion order: goetia first, so a rerun after an interruption can already ask it what is installed.
+HOST_BINARIES = ("goetia", "goetia-shim", "frpc", "websocat")
+RUNS = {FRPC_ID: ("frpc", ), WEBSOCAT_ID: ("websocat", )}
+# Read once at startup, so changing one means nothing until the daemon restarts. Keys of `bin/.digests.json`.
+READS = {FRPC_ID: ("token", "frpc.toml")}
+
+# Windows refuses to replace a running executable; POSIX replaces the file and the process keeps its inode.
+STOP_BEFORE_REPLACE = sys.platform == "win32"
+SECRETS_MODE, LOGS_MODE, BIN_MODE, STAGING_MODE = 0o711, 0o750, 0o755, 0o700
+RECORD_MODE, LOG_MODE = 0o644, 0o640
+STAGING = ".staging"
+LOG = "install.log"
+SERVING = ("stopped", "failed")  # states that are certainly not carrying a session
+
+# Plan =================================================================================================================
+
+
+@dataclasses.dataclass(frozen=True)
+class Plan:
+    binaries_to_replace: tuple[str, ...]  # install names whose file is missing or not the pinned one
+    daemons_to_converge: tuple[str, ...]
+    mode: AccountMode
+    platform: str
+    pins: tuple[Pin, ...]  # every binary a host runs, in promotion order
+    bundle: Pin | None  # goetia's Sigstore bundle
+    installed: tuple[str, ...]  # the daemons goetia reports installed
+    detach: bool  # the apply phase must outlive this session
+    inputs: Mapping[str, str]  # digests of the files the daemons will have read when started
+    reasons: Mapping[str, str]  # why each scheduled daemon is
+
+
+def _base(install_name: str) -> str:
+    return install_name.removesuffix(".exe")
+
+
+def _binaries_of(daemon_id: str, platform: str) -> tuple[str, ...]:
+    """The base names of the files a daemon is started from. On Windows that includes goetia's service shim."""
+    return RUNS[daemon_id] + (("goetia-shim", ) if platform.startswith("windows") else ())
+
+
+def _host_pins(services: Services) -> tuple[tuple[Pin, ...], Pin | None, str]:
+    lock = binaries.load_lock(services.lock_path)
+    platform = services.platform or binaries.current_platform()
+    found = {
+        _base(pin.install_name): pin
+        for tool in binaries.tools_for_role(Role.HOST)
+        for pin in binaries.pins_for(lock, tool, platform)
+    }
+    missing = [name for name in HOST_BINARIES if name not in found]
+    if missing:
+        raise BinariesError(f"the lock pins no {', '.join(missing)} for {platform}")
+    return tuple(found[name] for name in HOST_BINARIES), binaries.bundle_for(lock, "goetia"), platform
+
+
+def _token_bytes(config: Config) -> bytes:
+    return config.require("RT_TOKEN").encode("ascii") + b"\n"
+
+
+def _inputs(config: Config) -> dict[str, str]:
+    toml = read_file(config.root / "host", "frpc.toml")
+    if toml is None:
+        raise InstallError(f"{config.root / 'host' / 'frpc.toml'} is missing; restore it from the repository")
+    return {"token": hashlib.sha256(_token_bytes(config)).hexdigest(), "frpc.toml": hashlib.sha256(toml).hexdigest()}
+
+
+def _digest_on_disk(bin_dir: Path, name: str) -> str | None:
+    content = read_file(bin_dir, name)  # refuses a link; None when absent
+    return None if content is None else hashlib.sha256(content).hexdigest()
+
+
+@dataclasses.dataclass(frozen=True)
+class Observed:
+    """What goetia says is installed. `certain` is false when it could not be asked although daemons may exist."""
+
+    states: Mapping[str, DaemonState]
+    current: Mapping[str, bool]
+    certain: bool
+
+    def may_be_serving(self, daemon_id: str) -> bool:
+        if not self.certain:
+            return True
+        state = self.states.get(daemon_id)
+        return state is not None and state.state not in SERVING
+
+
+def _observe(root: Path, record: Mapping[str, str]) -> Observed:
+    if not goetia.available(root):
+        # No goetia and no record: nothing has been installed. A record without goetia means bin/ was damaged later.
+        return Observed({}, {}, certain=not record)
+    states = {state.id: state for state in goetia.daemon_status(root, IDS)}
+    return Observed(states, {daemon_id: goetia.spec_is_current(root, daemon_id) for daemon_id in states}, certain=True)
+
+
+def _reasons(
+    daemon_id: str, observed: Observed, record: Mapping[str, str], inputs: Mapping[str, str], pins: Mapping[str, Pin],
+    replacing: set[str], platform: str
+) -> list[str]:
+    reasons = []
+    stale = [
+        name for name in _binaries_of(daemon_id, platform)
+        if pins[name].install_name in replacing or record.get(pins[name].install_name) != pins[name].member_sha256
+    ]
+    if stale:
+        reasons.append(f"binary changed ({', '.join(stale)})")
+    state = observed.states.get(daemon_id)
+    if state is None:
+        reasons.append("not installed" if observed.certain else "goetia is missing, so it cannot be shown installed")
+    else:
+        if not observed.current[daemon_id]:
+            reasons.append("its installed unit differs from goetia.yaml (spec)")
+        if state.state != "running":
+            reasons.append(f"state is {state.state}")
+        if not state.enabled:
+            reasons.append("not enabled")
+    reasons += [f"{name} changed" for name in READS.get(daemon_id, ()) if record.get(name) != inputs[name]]
+    return reasons
+
+
+def preflight(config: Config, *, services: Services, allow_self_disconnect: bool = False) -> Plan:
+    """Decide what an install would touch. Changes nothing; refuses, having changed nothing, if it is not safe."""
+    if config.role is not Role.HOST:
+        raise InstallError(f"ROLE=host is required; this deployment is ROLE={config.role}")
+    root = config.root
+    service = perms.service_account(config)
+    access.verify_traversable(root, service)
+    access.refuse_service_writable(root, service)
+    mode = perms.account_mode(root, service)
+
+    pins, bundle, platform = _host_pins(services)
+    by_base = {_base(pin.install_name): pin for pin in pins}
+    record = read_digests(root / "bin")
+    inputs = _inputs(config)
+    replacing = {
+        pin.install_name
+        for pin in pins if _digest_on_disk(root / "bin", pin.install_name) != pin.member_sha256
+    }
+    observed = _observe(root, record)
+
+    reasons = {
+        daemon_id: _reasons(daemon_id, observed, record, inputs, by_base, replacing, platform)
+        for daemon_id in IDS
+    }
+    scheduled = tuple(daemon_id for daemon_id in IDS if reasons[daemon_id])
+    detach = _check_session(scheduled, observed, allow_self_disconnect)
+    return Plan(
+        binaries_to_replace=tuple(pin.install_name for pin in pins if pin.install_name in replacing),
+        daemons_to_converge=scheduled,
+        mode=mode,
+        platform=platform,
+        pins=pins,
+        bundle=bundle,
+        installed=tuple(observed.states),
+        detach=detach,
+        inputs=inputs,
+        reasons={daemon_id: "; ".join(reasons[daemon_id])
+                 for daemon_id in scheduled},
+    )
+
+
+# The self-disconnect guard ============================================================================================
+
+
+def session_is_provably_safe() -> bool:
+    """Whether this process was started from an ssh session whose client is not on loopback."""
+    return assess().safe
+
+
+def _check_session(scheduled: tuple[str, ...], observed: Observed, allowed: bool) -> bool:
+    """Refuse unless touching websocat is provably safe; return whether the apply phase must be detached.
+
+    The proof is asked for because its absence is the common case: `sudo` strips `SSH_CONNECTION`. Evaluated here, before
+    anything is staged, so a refusal leaves the tree as it was: aborting `apply` half way would leave it half staged, and
+    skipping only websocat would leave its unit rewritten and its process not.
+    """
+    if WEBSOCAT_ID not in scheduled or not observed.may_be_serving(WEBSOCAT_ID):
+        return False
+    verdict = assess()
+    if verdict.safe:
+        return False
+    if not allowed:
+        raise InstallError(
+            f"this install would restart {WEBSOCAT_ID}, which this session may be running over, and it cannot be shown "
+            f"that it is not: {verdict.reason}. Nothing has been changed. Run it from the machine itself or from a "
+            "session that does not come through the tunnel, or pass --allow-self-disconnect to apply detached from this "
+            f"session, with its output in {LOG}"
+        )
+    return True
+
+
+# Stage ================================================================================================================
+
+
+def _service_readers(root: Path) -> frozenset[str]:
+    """The Windows principals that read `secrets/`: the service, and the operator, who runs doctor. POSIX has modes."""
+    if sys.platform != "win32":
+        return frozenset()
+    from ctl import perms_windows
+
+    return frozenset({perms.SID_LOCAL_SERVICE, perms_windows.operator_sid(root)})
+
+
+def stage(config: Config, plan: Plan, *, services: Services) -> None:
+    """Make the tree ready without disturbing anything running. The order matters.
+
+    `secrets/` and `logs/` come first: the token is created inside the first, and goetia must never be handed a `logs/`
+    owned by root. `.env` is tightened last, after everything that could fail.
+    """
+    root = config.root
+    service = perms.service_account(config)
+    readers = _service_readers(root)
+    perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
+    perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
+    perms.write_secret(root / "secrets" / "token", _token_bytes(config), service, readers, root=root)
+    perms.grant_service_read(root, service)
+    _download(root, plan, services)
+    perms.harden_file(root / ".env", None, frozenset(), root=root)
+
+
+def _download(root: Path, plan: Plan, services: Services) -> None:
+    if not plan.binaries_to_replace:
+        return
+    bin_dir, staging = root / "bin", root / "bin" / STAGING
+    perms.converge_dir(bin_dir, None, BIN_MODE, frozenset(), isolate=False, root=root)
+    remove_directory(bin_dir, STAGING)  # whatever an interrupted run left
+    perms.converge_dir(staging, None, STAGING_MODE, frozenset(), isolate=False, root=root)
+    with services.fetcher() as fetch:
+        for pin in plan.pins:
+            if pin.install_name in plan.binaries_to_replace:
+                bundle = plan.bundle if pin.tool == "goetia" else None
+                print(describe_install(pin, fetch.fetch(pin, staging, bundle)))
+
+
+# Apply ================================================================================================================
+
+
+def _step(description: str, action: Callable[..., None], *args, **kwargs) -> None:
+    try:
+        action(*args, **kwargs)
+    except GoetiaError as exc:
+        raise InstallError(f"{description}: {exc}") from exc
+
+
+def _promote(root: Path, plan: Plan) -> None:
+    bin_dir, staging = root / "bin", root / "bin" / STAGING
+    for pin in plan.pins:
+        if pin.install_name not in plan.binaries_to_replace:
+            continue
+        content = read_file(staging, pin.install_name)
+        if content is None:
+            raise InstallError(
+                f"{staging / pin.install_name} is missing: the staged binaries are gone. Run `ctl install` again"
+            )
+        if hashlib.sha256(content).hexdigest() != pin.member_sha256:
+            raise BinariesError(
+                f"{staging / pin.install_name} is not the pinned {pin.install_name}; it was changed after staging"
+            )
+        replace_file(bin_dir, pin.install_name, io.BytesIO(content), BIN_MODE)
+
+
+def apply(config: Config, plan: Plan, *, services: Services) -> None:
+    """Replace the binaries, install and restart exactly the scheduled daemons, then record what they now run.
+
+    `install` is run per id and never without one: with none, goetia installs every daemon in the manifest, so an
+    unscheduled websocat would get a rewritten unit and a process still running the old one, a divergence nothing
+    afterwards detects. Each id is restarted because `install` writes and enables but never starts.
+    """
+    root, bin_dir = config.root, config.root / "bin"
+    if STOP_BEFORE_REPLACE:
+        for daemon_id in plan.daemons_to_converge:
+            runs = {
+                pin.install_name
+                for pin in plan.pins if _base(pin.install_name) in _binaries_of(daemon_id, plan.platform)
+            }
+            if daemon_id in plan.installed and runs & set(plan.binaries_to_replace):
+                _step(f"stopping {daemon_id}", goetia.daemon_stop, root, daemon_id)
+    _promote(root, plan)
+    for daemon_id in plan.daemons_to_converge:
+        _step(f"installing {daemon_id}", goetia.daemon_install, root, daemon_id, enable=True)
+        _step(f"restarting {daemon_id}", goetia.daemon_restart, root, daemon_id)
+        print(f"{daemon_id}: installed and restarted ({plan.reasons[daemon_id]})")
+    expected = {pin.install_name: pin.member_sha256 for pin in plan.pins} | dict(plan.inputs)
+    if read_digests(bin_dir) != expected:
+        record_digests(bin_dir, plan.pins, plan.inputs)
+        perms.assign_file(bin_dir / DIGESTS, perms.operator_account(root), RECORD_MODE, root=root)
+    if (bin_dir / STAGING).exists():
+        remove_directory(bin_dir, STAGING)
+    if not plan.daemons_to_converge:
+        print("host: both daemons are current; nothing was restarted")
+
+
+# Entry points =========================================================================================================
+
+
+def install(config: Config, *, allow_self_disconnect: bool, apply_staged: bool, services: Services) -> int:
+    """Preflight, stage, apply. With `apply_staged` only the apply phase runs: it is the detached child's job."""
+    plan = preflight(config, services=services, allow_self_disconnect=allow_self_disconnect)
+    if not apply_staged:
+        stage(config, plan, services=services)
+        if plan.detach:
+            return _detach(config, services)
+    apply(config, plan, services=services)
+    return 0
+
+
+def _detach(config: Config, services: Services) -> int:
+    """Run the apply phase in a process that survives this session, writing to `install.log` at the repository root."""
+    root = config.root
+    path = root / LOG
+    replace_file(root, LOG, io.BytesIO(b""), LOG_MODE)
+    perms.assign_file(path, perms.operator_account(root), LOG_MODE, root=root)
+
+    def no_follow(name: str, flags: int) -> int:
+        return os.open(name, flags | getattr(os, "O_NOFOLLOW", 0))
+
+    argv = [sys.executable, "-m", "ctl", "install", "--allow-self-disconnect", "--apply-staged"]
+    with open(path, "ab", opener=no_follow) as log:
+        pid = services.spawn(argv, cwd=root, log=log)
+    print(
+        f"The apply phase is running detached (pid {pid}) and will finish even if this session drops. Its progress and "
+        f"result are in {path}; read it once you reconnect."
+    )
+    return 0
+
+
+def uninstall(config: Config, *, services: Services) -> int:
+    """Uninstall both services, then remove `bin/`, `logs/` and `secrets/`. Safe to repeat.
+
+    The units go first: they hold the logs and, on Windows, the executables open. If goetia cannot remove one, nothing is
+    deleted. With `bin/` already gone there is no goetia, and none could have been left installed by `ctl`.
+    """
+    root = config.root
+    if goetia.available(root):
+        goetia.daemon_uninstall(root, IDS)
+    elif (root / "bin").exists():
+        raise InstallError(
+            f"{root / 'bin'} exists but holds no goetia, so the installed services cannot be removed through it. Run "
+            "`ctl install` to restore it, then `ctl uninstall`"
+        )
+    if (root / "bin").is_dir() and (root / "bin" / STAGING).exists():
+        remove_directory(root / "bin", STAGING)
+    for name in ("bin", "logs", "secrets"):
+        print(f"removed {name}/" if remove_directory(root, name) else f"{name}/ is already absent")
+    return 0
