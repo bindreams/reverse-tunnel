@@ -71,3 +71,30 @@ def test_a_child_still_inside_any_job_does_not_claim_it_can_survive(monkeypatch)
     assert detach.survival_problem() == detach.STILL_IN_A_JOB
     monkeypatch.setattr(detach, "process_in_job", lambda: False)
     assert detach.survival_problem() is None
+
+
+def test_the_child_command_uses_the_real_interpreter_not_the_venv_redirector(tmp_path):
+    """A venv's python.exe may be a launcher that puts the real interpreter in a kill-on-close job."""
+    import sys
+
+    argv = detach.python_command(["install", "--apply-staged"])
+    assert argv[0] == getattr(sys, "_base_executable", sys.executable) and argv[1] == "-c"
+    assert argv[-2:] == ["install", "--apply-staged"]
+    assert any(path for path in argv[3].split(";") if path.lower().endswith("site-packages"))
+
+
+def test_a_child_started_from_the_venv_is_in_no_job_and_says_so(tmp_path):
+    import sys
+
+    from ctl import handshake
+
+    body = (
+        "from ctl import detach, handshake\n"
+        "handshake.signal(int(sys.argv[2]), refusal=detach.survival_problem())\n"
+    )
+    pipe = handshake.Pipe()
+    prefix = detach.python_command([])
+    argv = [prefix[0], "-c", detach.PRELUDE + body, prefix[3], str(pipe.token)]
+    with open(tmp_path / "install.log", "ab") as log:
+        detach.spawn_detached(argv, cwd=tmp_path, log=log, inherit=[pipe.token])
+    assert pipe.wait() is True, pipe.refusal

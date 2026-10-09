@@ -742,8 +742,9 @@ def test_a_spawn_that_raises_clears_the_staging_directory_and_releases_the_lock(
         raise OSError("no such launcher")
 
     services = dataclasses.replace(pending.services, spawn=spawn)
-    with pytest.raises(OSError, match="no such launcher"):
+    with pytest.raises(InstallError, match="no such launcher") as raised:
         install(pending.config, allow_self_disconnect=True, services=services)
+    assert isinstance(raised.value.__cause__, OSError)
     assert not (pending.root / "bin" / ".staging").exists()
     lock.acquire(pending.root, command="install").close()
 
@@ -921,3 +922,97 @@ def test_a_child_that_cannot_survive_the_session_refuses_and_the_parent_reports_
         install(pending.config, allow_self_disconnect=True, services=services)
     assert "refused" in str(raised.value) and results == [reason]
     assert not (pending.root / "bin" / ".staging").exists() and len(pending.fake.mutations()) == count
+
+
+# The pipe alone decides ===============================================================================================
+
+
+def test_a_spawn_that_raises_after_the_child_started_leaves_the_staging_directory_and_keeps_the_error(pending):
+    """A launcher can die after the child exists (a failed close, a failed `set_handle_inheritable`): only the pipe knows."""
+    staged_for_a_child(pending)
+
+    def spawn(argv, *, cwd, log, inherit):
+        started(inherit)
+        raise OSError("launcher died after Popen")
+
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    with pytest.raises(InstallError) as raised:
+        install(pending.config, allow_self_disconnect=True, services=services)
+    message = str(raised.value)
+    assert "launcher died after Popen" in message and "running" in message
+    assert (pending.root / "bin" / ".staging" / "websocat").exists()
+
+
+def test_a_spawn_that_raises_and_a_ctrl_c_together_still_leave_the_staging_to_a_started_child(pending):
+    staged_for_a_child(pending)
+
+    def spawn(argv, *, cwd, log, inherit):
+        started(inherit)
+        interrupt()
+        raise OSError("launcher died after Popen")
+
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    with pytest.raises(KeyboardInterrupt):
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert (pending.root / "bin" / ".staging" / "websocat").exists()
+
+
+def test_a_ctrl_c_during_the_wait_leaves_the_staging_directory_and_says_the_outcome_is_unknown(
+    pending, monkeypatch, capsys
+):
+    staged_for_a_child(pending)
+
+    def interrupted_wait(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(handshake.Pipe, "wait", interrupted_wait)
+    services = dataclasses.replace(pending.services, spawn=lambda argv, *, cwd, log, inherit: started(inherit) or 1)
+    with pytest.raises(KeyboardInterrupt):
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert (pending.root / "bin" / ".staging" / "websocat").exists()
+    out = capsys.readouterr().out
+    assert "outcome unknown" in out and "apply finished:" in out
+    lock.acquire(pending.root, command="install").close()
+
+
+def test_a_spawn_that_raises_before_any_child_clears_the_staging_directory_and_names_the_error(pending):
+    staged_for_a_child(pending)
+
+    def spawn(argv, *, cwd, log, inherit):
+        raise OSError("no launcher here")
+
+    services = dataclasses.replace(pending.services, spawn=spawn)
+    with pytest.raises(InstallError, match="no launcher here"):
+        install(pending.config, allow_self_disconnect=True, services=services)
+    assert not (pending.root / "bin" / ".staging").exists()
+
+
+def test_a_pipe_that_cannot_be_created_clears_the_staging_directory(pending, monkeypatch):
+    staged_for_a_child(pending)
+
+    def refuse():
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(handshake, "Pipe", refuse)
+    with pytest.raises(OSError, match="Too many open files"):
+        install(pending.config, allow_self_disconnect=True, services=pending.services)
+    assert not (pending.root / "bin" / ".staging").exists()
+
+
+def test_a_refusing_child_leaves_the_clearing_to_its_parent(pending, monkeypatch):
+    """Two processes clearing one directory would race; the parent is the one that learns the outcome."""
+    staged_for_a_child(pending)
+    services = dataclasses.replace(pending.services, spawn=lambda argv, *, cwd, log, inherit: started(inherit) or 1)
+    install(pending.config, allow_self_disconnect=True, services=services)
+    monkeypatch.setattr(detach, "survival_problem", lambda: "still inside a job object")
+    pipe = handshake.Pipe()
+    with pytest.raises(InstallError, match="job object"):
+        install(
+            pending.config,
+            allow_self_disconnect=True,
+            apply_staged=True,
+            started_fd=os.dup(pipe.token),
+            services=pending.services,
+        )
+    assert (pending.root / "bin" / ".staging" / "websocat").exists()
+    assert pipe.wait() is False and pipe.refusal == "still inside a job object"

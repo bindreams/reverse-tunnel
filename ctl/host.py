@@ -410,6 +410,10 @@ def _exclusive(root: Path, command: str, inherited: int | None) -> Generator[loc
         yield held
 
 
+class Refused(InstallError):
+    """The detached child will not go on. Its parent, which reads the refusal, is the one that cleans up."""
+
+
 def _confirm_started(token: int | None) -> None:
     """The detached child tells its parent it holds the lock, or why it will not go on.
 
@@ -426,7 +430,7 @@ def _confirm_started(token: int | None) -> None:
             "the installing session ended before the detached apply could confirm it started; nothing was applied"
         ) from exc
     if problem:
-        raise InstallError(problem)
+        raise Refused(problem)
 
 
 def _detach(config: Config, services: Services, held: lock.InstallLock, arguments: list[str]) -> int:
@@ -434,42 +438,57 @@ def _detach(config: Config, services: Services, held: lock.InstallLock, argument
 
     The log is created once, through one descriptor, and handed to the child; the lock is handed down too, so that this
     process letting go of it changes nothing. The child's pid proves nothing (under `systemd-run` it is systemd-run's),
-    so this blocks until the child says it holds the lock, or until every holder of the pipe is gone without saying so.
+    and neither does what `spawn` did or did not raise: a launcher can fail after the child exists. So the pipe alone
+    decides. Whatever happened, the parent's write end is closed and the pipe read: a start byte means the child owns
+    `bin/.staging` and this never touches it; a refusal or end of file means no child, and it is cleared here.
 
-    `bin/.staging` is the child's from the moment it exists, so it is removed here only on a definitive "never started":
-    a spawn that raised before any child existed, a refusal, or end of file. Ctrl+C is held until that outcome is known;
-    it must not be able to remove what a running child is about to read.
+    Ctrl+C is held only around the spawn and closing the write end, so the pipe is in a readable state before it can
+    interrupt anything. The wait itself can be interrupted, and then the outcome is simply unknown.
     """
     root = config.root
-    pipe = handshake.Pipe()
+    try:
+        pipe = handshake.Pipe()
+    except BaseException:
+        _clear_staging_quietly(root)  # no child can exist
+        raise
+    spawn_error: Exception | None = None
     pid = None
-    started = False
     interrupted = False
     try:
-        with atomic.deferred_interrupts():
-            argv = [
-                sys.executable, "-m", "ctl", *arguments, "--inherit-lock",
-                str(held.descriptor), "--started-fd",
-                str(pipe.token)
-            ]
-            try:
-                with perms.open_log(root / LOG, perms.operator_account(root), LOG_MODE, root=root) as log:
-                    pid = services.spawn(argv, cwd=root, log=log, inherit=[held.descriptor, pipe.token])
-            except BaseException:
-                _clear_staging_quietly(root)  # no child exists
-                raise
+        try:
+            with atomic.deferred_interrupts():
+                try:
+                    command = detach.python_command([
+                        *arguments, "--inherit-lock",
+                        str(held.descriptor), "--started-fd",
+                        str(pipe.token)
+                    ])
+                    with perms.open_log(root / LOG, perms.operator_account(root), LOG_MODE, root=root) as log:
+                        pid = services.spawn(command, cwd=root, log=log, inherit=[held.descriptor, pipe.token])
+                except Exception as exc:
+                    spawn_error = exc
+                pipe.close_write()
+        except KeyboardInterrupt:  # held through the above, delivered by the `with`
+            interrupted = True
+        try:
             started = pipe.wait()
-    except KeyboardInterrupt:  # held until the outcome was known, then delivered by the `with`
-        interrupted = True
+        except KeyboardInterrupt:
+            print(
+                f"Interrupted while waiting for the detached process: outcome unknown, so nothing was cleaned "
+                f"up. See {root / LOG} for a line starting `apply finished:`; do not run `ctl install` again before it "
+                "appears, or before you have established that the process is gone.",
+            )
+            raise
     finally:
         pipe.close()
     if not started:
         _clear_staging_quietly(root)
         why = f"it refused: {pipe.refusal}" if pipe.refusal else "it exited without taking over the install"
+        failure = f"; starting it raised {type(spawn_error).__name__}: {spawn_error}" if spawn_error else ""
         raise InstallError(
-            f"the detached process (pid {pid}) did not start: {why}. Nothing was applied. What it wrote to "
+            f"the detached process (pid {pid}) did not start: {why}{failure}. Nothing was applied. What it wrote to "
             f"{root / LOG}:\n{_tail(root / LOG)}"
-        )
+        ) from spawn_error
     print(
         f"The rest is running detached (pid {pid}) and will finish even if this session drops. Its progress and result "
         f"are in {root / LOG}, ending in a line that starts `apply finished:`; read it once you reconnect, and do not "
@@ -477,6 +496,11 @@ def _detach(config: Config, services: Services, held: lock.InstallLock, argument
     )
     if interrupted:
         raise KeyboardInterrupt
+    if spawn_error:
+        raise InstallError(
+            f"starting the detached process raised {type(spawn_error).__name__}: {spawn_error}, but it did start and is "
+            f"running (pid {pid}); watch {root / LOG} for `apply finished:` and do not run the install again meanwhile"
+        ) from spawn_error
     return 0
 
 
@@ -516,6 +540,8 @@ def install(
                 if plan.detach:
                     detach.check_can_detach()
                 stage(config, plan, services=services)
+        except Refused:
+            raise
         except BaseException:
             _clear_staging_quietly(root)
             raise

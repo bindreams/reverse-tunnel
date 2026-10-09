@@ -33,7 +33,7 @@ class Pipe:
     def wait(self) -> bool:
         """Block until the child says it started (True), declines (False, `refusal` set), or no holder of the write end is
         left without having said anything (False)."""
-        self._close_write()
+        self.close_write()
         try:
             first = os.read(self._read, 1)
             if first == REFUSED:
@@ -45,13 +45,14 @@ class Pipe:
         finally:
             self.close()
 
-    def _close_write(self) -> None:
+    def close_write(self) -> None:
+        """Let go of the parent's copy of the write end; after this, end of file means no child holds it."""
         if not self._closed_write:
             self._closed_write = True
             os.close(self._write)
 
     def close(self) -> None:
-        self._close_write()
+        self.close_write()
         if not self._closed_read:
             self._closed_read = True
             os.close(self._read)

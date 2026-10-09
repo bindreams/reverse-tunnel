@@ -122,17 +122,8 @@ def job_allows_breakaway() -> bool:
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-    kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
-    kernel32.QueryInformationJobObject.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD)
-    ]
-    in_job = wintypes.BOOL()
-    if not kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None, ctypes.byref(in_job)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    if not in_job.value:
+    kernel32 = _kernel32()
+    if not process_in_job():
         return True
     limits = ExtendedLimits()
     # A null job handle asks about the job the calling process belongs to.
@@ -142,6 +133,37 @@ def job_allows_breakaway() -> bool:
         raise ctypes.WinError(ctypes.get_last_error())
     flags = limits.BasicLimitInformation.LimitFlags
     return bool(flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK))
+
+
+# Adds the directories named in argv[1] the way `site` does, `.pth` files included (pywin32 depends on one), which
+# `PYTHONPATH` would not.
+PRELUDE = """
+import os, site, sys
+for path in sys.argv[1].split(os.pathsep):
+    site.addsitedir(path)
+"""
+BOOTSTRAP = PRELUDE + """
+import runpy
+sys.argv = ["ctl", *sys.argv[2:]]
+runpy.run_module("ctl", run_name="__main__", alter_sys=True)
+"""
+
+
+def python_command(arguments: list[str]) -> list[str]:
+    """The command that runs `python -m ctl <arguments>` as a detached child.
+
+    On Windows a venv's `python.exe` can be a redirector that starts the real interpreter inside a job that kills it
+    with the redirector, which would take a detached child down with the session. So the child is started from the real
+    interpreter, given the venv's packages and the repository, and runs `ctl` the way `-m` does.
+    """
+    if sys.platform != "win32":
+        return [sys.executable, "-m", "ctl", *arguments]
+    import sysconfig
+
+    root = Path(__file__).resolve().parent.parent
+    paths = {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}
+    interpreter = getattr(sys, "_base_executable", sys.executable)
+    return [interpreter, "-c", BOOTSTRAP, os.pathsep.join([*sorted(paths), str(root)]), *arguments]
 
 
 def check_can_detach() -> None:
