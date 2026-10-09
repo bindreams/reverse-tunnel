@@ -98,7 +98,7 @@ def test_a_never_installed_tree_schedules_both_daemons_and_every_binary(tree):
 def test_plan_schedules_a_daemon_whose_binary_changed(converged):
     """The record matches websocat but not frpc: only frpc is scheduled."""
     converged.record({"frpc": "0" * 64})
-    plan = plan_of(converged)
+    plan = plan_of(converged, allow_self_disconnect=True)
     assert plan.daemons_to_converge == (FRPC, )
     assert "binary" in plan.reasons[FRPC]
     assert plan.binaries_to_replace == ()  # the file on disk is the pinned one; only the running process is stale
@@ -106,7 +106,7 @@ def test_plan_schedules_a_daemon_whose_binary_changed(converged):
 
 def test_plan_replaces_a_binary_whose_file_differs_from_the_pin_though_the_record_agrees(converged):
     (converged.bin / "frpc").write_bytes(b"tampered")
-    plan = plan_of(converged)
+    plan = plan_of(converged, allow_self_disconnect=True)
     assert plan.binaries_to_replace == ("frpc", ) and plan.daemons_to_converge == (FRPC, )
 
 
@@ -119,7 +119,7 @@ def test_plan_replaces_a_binary_that_is_missing(converged):
 def test_a_goetia_update_alone_restarts_no_daemon(converged):
     (converged.bin / "goetia").write_bytes(b"older")
     converged.record({"goetia": "0" * 64})
-    plan = plan_of(converged)
+    plan = plan_of(converged, allow_self_disconnect=True)
     assert plan.binaries_to_replace == ("goetia", ) and plan.daemons_to_converge == ()
 
 
@@ -133,7 +133,7 @@ def test_plan_schedules_a_daemon_whose_goetia_spec_changed(converged):
 def test_plan_schedules_a_daemon_that_is_installed_but_stopped(converged):
     """The convergence property: identical digests and spec, yet it is not running, so a diff-only plan lies."""
     converged.script_running(websocat="stopped")
-    plan = plan_of(converged)
+    plan = plan_of(converged, allow_self_disconnect=True)
     assert plan.daemons_to_converge == (WEBSOCAT, ) and "stopped" in plan.reasons[WEBSOCAT]
 
 
@@ -146,14 +146,14 @@ def test_plan_schedules_a_daemon_that_is_installed_but_not_enabled(converged):
 def test_plan_schedules_a_daemon_that_goetia_does_not_know(converged):
     converged.fake.forget("status")
     converged.fake.status(daemon(FRPC), errors=[error("not-installed", WEBSOCAT)], exit=1)
-    plan = plan_of(converged)
+    plan = plan_of(converged, allow_self_disconnect=True)
     assert plan.daemons_to_converge == (WEBSOCAT, ) and "not installed" in plan.reasons[WEBSOCAT]
 
 
 def test_plan_schedules_frpc_when_the_token_digest_changed(converged):
     """Rotation: frp reads `tokenSource` once per process, and `loginFailExit = false` keeps frpc from ever exiting."""
     converged.edit_env(RT_TOKEN="f" * 64)
-    plan = plan_of(converged)
+    plan = plan_of(converged, allow_self_disconnect=True)
     assert plan.daemons_to_converge == (FRPC, ) and "token" in plan.reasons[FRPC]
 
 
@@ -161,13 +161,13 @@ def test_plan_schedules_frpc_when_host_frpc_toml_changed(converged):
     """The `git pull` case."""
     path = converged.root / "host" / "frpc.toml"
     path.write_text(path.read_text() + "# edited\n")
-    plan = plan_of(converged)
+    plan = plan_of(converged, allow_self_disconnect=True)
     assert plan.daemons_to_converge == (FRPC, ) and "frpc.toml" in plan.reasons[FRPC]
 
 
 def test_plan_schedules_frpc_when_the_input_record_is_missing(converged):
     converged.record({"token": None})
-    assert plan_of(converged).daemons_to_converge == (FRPC, )
+    assert plan_of(converged, allow_self_disconnect=True).daemons_to_converge == (FRPC, )
 
 
 def test_plan_records_what_the_running_daemons_will_have_read(converged):
@@ -259,8 +259,9 @@ def test_an_unknown_websocat_state_counts_as_running(converged):
         plan_of(converged)
 
 
-def test_websocat_not_in_the_plan_needs_no_proof(converged):
-    converged.record({"frpc": "0" * 64})
+def test_a_daemon_that_is_not_in_the_plan_needs_no_proof(converged):
+    """websocat is running and unchanged; frpc is stopped and is the only one scheduled."""
+    converged.script_running(frpc="stopped")
     assert plan_of(converged).daemons_to_converge == (FRPC, )
 
 
@@ -274,9 +275,62 @@ def test_the_flag_does_not_detach_when_the_session_is_provably_safe(websocat_pen
     assert plan_of(websocat_pending, allow_self_disconnect=True).detach is False
 
 
-def test_the_flag_does_not_detach_when_websocat_is_not_in_the_plan(converged):
-    converged.record({"frpc": "0" * 64})
+def test_the_flag_does_not_detach_when_no_scheduled_daemon_is_running(converged):
+    converged.script_running(frpc="stopped")
     assert plan_of(converged, allow_self_disconnect=True).detach is False
+
+
+# The guard covers frpc too ============================================================================================
+# A session through the tunnel rides frps -> frpc -> websocat -> sshd, so restarting either one drops it.
+
+
+@pytest.fixture
+def frpc_pending(converged):
+    """frpc is running and its token has been rotated, so the install would restart it; websocat is untouched."""
+    converged.edit_env(RT_TOKEN="f" * 64)
+    return converged
+
+
+def test_the_guard_refuses_a_restart_of_frpc_alone_and_names_it(frpc_pending):
+    with pytest.raises(InstallError) as raised:
+        plan_of(frpc_pending)
+    message = str(raised.value)
+    assert FRPC in message and WEBSOCAT not in message and "--allow-self-disconnect" in message
+    assert "SSH_CONNECTION is not set" in message
+
+
+def test_the_guard_names_both_daemons_when_both_would_restart(frpc_pending):
+    frpc_pending.set_spec(WEBSOCAT, installed="command: [old]\n", manifest="command: [new]\n")
+    with pytest.raises(InstallError) as raised:
+        plan_of(frpc_pending)
+    assert FRPC in str(raised.value) and WEBSOCAT in str(raised.value)
+
+
+def test_a_loopback_session_is_refused_for_frpc_and_the_message_says_loopback(frpc_pending, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", "127.0.0.1 51234 127.0.0.1 22")
+    with pytest.raises(InstallError, match="loopback"):
+        plan_of(frpc_pending)
+
+
+def test_frpc_may_be_restarted_from_a_session_that_is_provably_off_the_tunnel(frpc_pending, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", "192.0.2.10 51234 192.0.2.1 22")
+    plan = plan_of(frpc_pending)
+    assert plan.daemons_to_converge == (FRPC, ) and plan.detach is False
+
+
+def test_the_flag_detaches_the_apply_phase_for_a_frpc_restart(frpc_pending):
+    plan = plan_of(frpc_pending, allow_self_disconnect=True)
+    assert plan.daemons_to_converge == (FRPC, ) and plan.detach is True
+
+
+@pytest.mark.parametrize("state", ["stopped", "failed"])
+def test_frpc_may_be_restarted_when_it_is_not_running(frpc_pending, state):
+    frpc_pending.script_running(frpc=state)
+    assert plan_of(frpc_pending).daemons_to_converge == (FRPC, )
+
+
+def test_a_frpc_that_goetia_does_not_know_needs_no_proof(tree):
+    assert plan_of(tree).detach is False
 
 
 def test_a_missing_goetia_with_a_record_cannot_show_websocat_is_stopped(converged):

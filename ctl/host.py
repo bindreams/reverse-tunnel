@@ -206,23 +206,26 @@ def session_is_provably_safe() -> bool:
 
 
 def _check_session(scheduled: tuple[str, ...], observed: Observed, allowed: bool) -> bool:
-    """Refuse unless touching websocat is provably safe; return whether the apply phase must be detached.
+    """Refuse unless restarting the scheduled daemons is provably safe; return whether the apply phase must be detached.
 
-    The proof is asked for because its absence is the common case: `sudo` strips `SSH_CONNECTION`. Evaluated here, before
-    anything is staged, so a refusal leaves the tree as it was: aborting `apply` half way would leave it half staged, and
-    skipping only websocat would leave its unit rewritten and its process not.
+    A session through the tunnel rides frps, frpc, websocat and sshd, so restarting frpc drops it exactly as restarting
+    websocat does. The restart is safe when no scheduled daemon may be carrying a session, or the session is provably
+    off the tunnel. The proof is asked for because its absence is the common case: `sudo` strips `SSH_CONNECTION`.
+    Evaluated here, before anything is staged, so a refusal leaves the tree as it was: aborting `apply` half way would
+    leave it half staged, and skipping one daemon would leave its unit rewritten and its process not.
     """
-    if WEBSOCAT_ID not in scheduled or not observed.may_be_serving(WEBSOCAT_ID):
+    serving = [daemon_id for daemon_id in scheduled if observed.may_be_serving(daemon_id)]
+    if not serving:
         return False
     verdict = assess()
     if verdict.safe:
         return False
     if not allowed:
         raise InstallError(
-            f"this install would restart {WEBSOCAT_ID}, which this session may be running over, and it cannot be shown "
-            f"that it is not: {verdict.reason}. Nothing has been changed. Run it from the machine itself or from a "
-            "session that does not come through the tunnel, or pass --allow-self-disconnect to apply detached from this "
-            f"session, with its output in {LOG}"
+            f"this install would restart {' and '.join(serving)}, which this session may be running over, and it cannot "
+            f"be shown that it is not: {verdict.reason}. Nothing has been changed. Run it from the machine itself or "
+            "from a session that does not come through the tunnel, or pass --allow-self-disconnect to apply detached "
+            f"from this session, with its output in {LOG}"
         )
     return True
 

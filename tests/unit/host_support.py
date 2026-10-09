@@ -105,10 +105,10 @@ class HostTree:
         self.record()
         self.script_running()
 
-    def script_running(self, websocat: str = "running", enabled: bool = True) -> None:
-        """Both daemons installed and current; websocat in the given state."""
+    def script_running(self, websocat: str = "running", enabled: bool = True, frpc: str = "running") -> None:
+        """Both daemons installed and current, in the given states."""
         self.fake.forget("status")
-        self.fake.status(daemon(FRPC), daemon(WEBSOCAT, websocat, enabled))
+        self.fake.status(daemon(FRPC, frpc), daemon(WEBSOCAT, websocat, enabled))
         for daemon_id, text in MANIFEST_SPEC.items():
             self.set_spec(daemon_id, text)
 

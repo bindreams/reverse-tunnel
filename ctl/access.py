@@ -17,12 +17,16 @@ GUARDED = ("", "bin", "host", "goetia.yaml", "host/frpc.toml", ".env")
 def verify_traversable(root: Path, service: Account) -> None:
     """Raise unless `service` can reach the binary and config under `root` at exec time.
 
-    The kernel checks execute permission, as the service account, on every component of the path, so a checkout under
+    Windows always passes: traversal is guaranteed by construction. `perms.grant_service_read` gives LocalService an
+    inheritable read-and-execute ACE on the repository root, and LocalService holds SeChangeNotifyPrivilege, which
+    bypasses traverse checking, so the ancestors of the root need no ACE.
+
+    On POSIX the kernel checks execute permission, as the service account, on every component of the path, so a checkout under
     a `0700` home is unreachable to any account but its owner. Whether to document that as a requirement, to relocate the
     deployment, or to bind-mount it is the owner's decision and is not made yet, so a separate account fails closed. This
     is the one place that decision will land.
     """
-    if account_mode(root, service) is AccountMode.SAME:
+    if sys.platform == "win32" or account_mode(root, service) is AccountMode.SAME:
         return
     raise InstallError(
         f"RT_SERVICE_USER={service.name}: separate-account mode (the daemons run as an account that does not own {root}) "

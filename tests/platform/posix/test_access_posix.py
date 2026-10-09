@@ -6,6 +6,7 @@ import pwd
 import pytest
 
 from ctl import access
+from ctl.errors import InstallError
 from ctl.perms import Account
 
 STRANGER = Account("stranger", os.getuid() + 1, os.getgid() + 1)
@@ -62,3 +63,18 @@ def test_a_symlink_is_judged_by_what_it_points_to(path, tmp_path):
 
 def test_a_missing_path_is_not_writable(tmp_path):
     assert access.service_can_write(tmp_path / "absent", STRANGER) is False
+
+
+# The traversal seam ===================================================================================================
+
+
+def test_a_separate_account_is_refused_with_a_message_that_names_the_account(tmp_path):
+    with pytest.raises(InstallError) as raised:
+        access.verify_traversable(tmp_path, STRANGER)
+    message = str(raised.value)
+    assert "separate-account" in message and "not yet available" in message and "stranger" in message
+    assert "RT_SERVICE_USER" in message
+
+
+def test_the_account_that_owns_the_deployment_is_not_asked_to_prove_traversal(tmp_path):
+    access.verify_traversable(tmp_path, mine())

@@ -36,6 +36,9 @@ def host_tree(tmp_path, monkeypatch):
     return build_host(tmp_path, monkeypatch)
 
 
+OFF_TUNNEL = "192.0.2.10 51234 192.0.2.1 22"
+
+
 def run_install(host_tree, **kwargs) -> int:
     return install(host_tree.config, services=host_tree.services, **kwargs)
 
@@ -165,9 +168,10 @@ def test_install_is_invoked_per_scheduled_id(host_tree):
     assert host_tree.fake.mutations()[4:] == [("install", WEBSOCAT), ("restart", WEBSOCAT)]
 
 
-def test_digests_json_is_written_only_after_restarts_succeed(host_tree):
+def test_digests_json_is_written_only_after_restarts_succeed(host_tree, monkeypatch):
     run_install(host_tree)
     settle(host_tree)
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
     previous = (host_tree.root / "bin" / DIGESTS).read_bytes()
     host_tree.edit_env(RT_TOKEN="f" * 64)
     host_tree.fake.on("restart", FRPC, stderr="error: failed to start\n", exit=4)
@@ -189,11 +193,12 @@ def test_partial_failure_exits_nonzero_naming_the_step(host_tree):
     assert not (host_tree.root / "bin" / DIGESTS).exists()
 
 
-def test_rerun_after_a_partial_failure_completes(host_tree):
+def test_rerun_after_a_partial_failure_completes(host_tree, monkeypatch):
     host_tree.fake.on("install", WEBSOCAT, stderr="error: cannot write the unit\n", exit=1)
     with pytest.raises(InstallError):
         run_install(host_tree)
     host_tree.fake.forget("install", WEBSOCAT)
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)  # frpc is running again and is scheduled until a record exists
     host_tree.fake.status(daemon(FRPC), errors=[error("not-installed", WEBSOCAT)], exit=1)
     host_tree.set_spec(FRPC, installed="command: [frpc]\nuser: svc\n")
     assert run_install(host_tree) == 0
@@ -203,9 +208,10 @@ def test_rerun_after_a_partial_failure_completes(host_tree):
                                                ("restart", WEBSOCAT)]
 
 
-def test_a_stale_binary_on_disk_is_replaced_and_its_daemon_restarted(host_tree):
+def test_a_stale_binary_on_disk_is_replaced_and_its_daemon_restarted(host_tree, monkeypatch):
     run_install(host_tree)
     settle(host_tree)
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
     (host_tree.root / "bin" / "frpc").write_bytes(b"tampered")
     run_install(host_tree)
     assert (host_tree.root / "bin" / "frpc").read_bytes() == host_tree.pinned_bytes("frpc")
@@ -228,6 +234,7 @@ def test_promoting_a_binary_never_follows_a_link_in_bin(host_tree, tmp_path):
 def test_windows_stops_a_daemon_before_replacing_its_binary_and_posix_does_not(host_tree, monkeypatch, stop_first):
     run_install(host_tree)
     settle(host_tree)
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
     monkeypatch.setattr(host, "STOP_BEFORE_REPLACE", stop_first)
     (host_tree.root / "bin" / "frpc").write_bytes(b"tampered")
     run_install(host_tree)
@@ -256,6 +263,24 @@ def test_guard_refusal_leaves_the_tree_untouched(pending):
         run_install(pending)
     after = {path: (pending.root / path).read_bytes() for path, kind in tree(pending.root).items() if kind == "file"}
     assert after == before and len(pending.fake.mutations()) == count
+
+
+def test_a_frpc_restart_is_refused_too_when_the_session_cannot_be_proven_safe(host_tree):
+    run_install(host_tree)
+    settle(host_tree)
+    host_tree.edit_env(RT_TOKEN="f" * 64)
+    before = {
+        path: (host_tree.root / path).read_bytes()
+        for path, kind in tree(host_tree.root).items() if kind == "file"
+    }
+    count = len(host_tree.fake.mutations())
+    with pytest.raises(InstallError, match=f"{FRPC}.*--allow-self-disconnect"):
+        run_install(host_tree)
+    after = {
+        path: (host_tree.root / path).read_bytes()
+        for path, kind in tree(host_tree.root).items() if kind == "file"
+    }
+    assert after == before and len(host_tree.fake.mutations()) == count
 
 
 def test_install_proceeds_when_ssh_connection_shows_a_non_loopback_client(pending, monkeypatch):
