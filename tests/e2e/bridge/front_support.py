@@ -17,6 +17,7 @@ HERE = Path(__file__).parent
 COMPOSE_E2E = "compose.e2e.yaml"
 CONTROL_HOST = "localhost"  # a name every machine resolves, so no test needs DNS or /etc/hosts
 STAGING_HOST = "staging.localhost"
+STAGING_ADDRESS = "127.0.0.1"  # the name-free way in: no SNI, so Traefik offers its default certificate
 FRONTS = ("bare", "nginx", "traefik")
 
 # `examples/nginx.conf` as an operator copies it, adapted to a stack whose nginx is a container beside frps. Each edit is
@@ -85,7 +86,7 @@ def prepare_files(project: Project, pki: Pki, front: str, *, rewrite_host: bool)
     tls.mkdir(parents=True)
     pki.issue(GOOD_DOMAIN, f"*.{GOOD_DOMAIN}").write(tls, GOOD_DOMAIN)
     pki.issue(CONTROL_HOST).write(tls, CONTROL_HOST)
-    pki.issue(STAGING_HOST, staging=True).write(tls, STAGING_HOST)
+    pki.issue(STAGING_HOST, STAGING_ADDRESS, staging=True).write(tls, STAGING_HOST)
     ca_file = project.root / "e2e" / "ca.pem"
     ca_file.write_bytes(pki.root_pem)
     (project.root / "e2e" / "nginx.conf").write_text(render_nginx(rewrite_host=rewrite_host), encoding="utf-8")

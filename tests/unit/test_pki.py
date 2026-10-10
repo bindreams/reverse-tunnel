@@ -1,5 +1,7 @@
 """The end-to-end tests' certificate authority issues what a client really validates, and a `STAGING` issuer on request."""
 
+import ipaddress
+
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -28,6 +30,19 @@ def test_a_leaf_from_the_root_validates_for_each_of_its_names(pki):
     leaf = pki.issue("localhost", "*.tunnel.example.com")
     for name in ("localhost", "alpha.tunnel.example.com"):
         verify(pki, leaf.chain_pem, name)
+
+
+def test_a_leaf_issued_to_an_ip_address_validates_for_that_address_and_no_other(pki):
+    leaf = pki.issue("staging.localhost", "127.0.0.1", staging=True)
+    presented = x509.load_pem_x509_certificates(leaf.chain_pem)
+
+    def verifier(address: str):
+        return PolicyBuilder().store(Store([pki.root.certificate])
+                                     ).build_server_verifier(x509.IPAddress(ipaddress.ip_address(address)))
+
+    verifier("127.0.0.1").verify(presented[0], presented[1:])
+    with pytest.raises(VerificationError):
+        verifier("127.0.0.2").verify(presented[0], presented[1:])
 
 
 def test_a_leaf_does_not_validate_for_a_name_it_was_not_issued_to(pki):

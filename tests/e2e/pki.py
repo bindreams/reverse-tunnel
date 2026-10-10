@@ -6,6 +6,7 @@ thing `ctl doctor` refuses.
 """
 
 import datetime
+import ipaddress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,6 +80,13 @@ def _authority(common_name: str, issuer: Authority | None, path_length: int) -> 
     return Authority(key, builder.sign(signer, hashes.SHA256()))
 
 
+def _general_name(name: str) -> x509.GeneralName:
+    try:
+        return x509.IPAddress(ipaddress.ip_address(name))
+    except ValueError:
+        return x509.DNSName(name)
+
+
 def _pem(certificate: x509.Certificate) -> bytes:
     return certificate.public_bytes(serialization.Encoding.PEM)
 
@@ -95,7 +103,10 @@ class Pki:
         return _pem(self.root.certificate)
 
     def issue(self, *names: str, staging: bool = False) -> Leaf:
-        """A server certificate for `names` (DNS names, the first also its common name), from the root or `STAGING`."""
+        """A server certificate for `names` (DNS names or IP addresses; the first is also the common name).
+
+        It comes from the root, or from the `STAGING` intermediate with `staging=True`.
+        """
         issuer = self.staging if staging else self.root
         key = ec.generate_private_key(ec.SECP256R1())
         builder = _builder(names[0], issuer.certificate.subject, key.public_key())
@@ -104,7 +115,7 @@ class Pki:
             x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer.key.public_key()), critical=False
         )
         builder = builder.add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(name) for name in names]), critical=False
+            x509.SubjectAlternativeName([_general_name(name) for name in names]), critical=False
         )
         builder = builder.add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         leaf = builder.sign(issuer.key, hashes.SHA256())

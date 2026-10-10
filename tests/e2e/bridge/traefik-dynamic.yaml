@@ -1,6 +1,12 @@
-# The certificates the e2e Traefik offers, chosen by the name in the client's SNI. `staging.localhost` is served by an
-# issuer whose name contains STAGING; the others by the test CA's root.
+# The certificates the e2e Traefik offers, chosen by the name in the client's SNI. A client that sends none (an IP
+# address) or an unknown name gets the default: a certificate from an issuer whose name contains STAGING, issued to
+# `staging.localhost` and to 127.0.0.1. The others come from the test CA's root.
 tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/ssl/rt/staging.localhost.pem
+        keyFile: /etc/ssl/rt/staging.localhost.key
   certificates:
     - certFile: /etc/ssl/rt/tunnel.example.com.pem
       keyFile: /etc/ssl/rt/tunnel.example.com.key

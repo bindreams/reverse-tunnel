@@ -9,7 +9,7 @@ import pytest
 from bridge_support import GOOD_DOMAIN, GOOD_PASSWORD, make_project
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from front_support import STAGING_HOST, Stack
+from front_support import CONTROL_HOST, STAGING_ADDRESS, STAGING_HOST, Stack
 from pki import ROOT_NAME
 from tunnel_support import Hosts, round_trip, websocat_client
 
@@ -116,8 +116,8 @@ def test_published_ports_match_the_env_file(tmp_path):
 # The staging issuer ===================================================================================================
 
 
-def served_issuer(stack: Stack, server_name: str) -> str:
-    """The common name of the issuer of the certificate the front presents for `server_name`, unverified."""
+def served_issuer(stack: Stack, server_name: str | None) -> str:
+    """The common name of the issuer of the certificate the front presents for `server_name` (none: no SNI)."""
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -132,7 +132,17 @@ def served_issuer(stack: Stack, server_name: str) -> str:
 def test_the_front_serves_the_test_ca_for_its_own_names(front, request):
     stack: Stack = request.getfixturevalue(f"{front}_stack")
     assert served_issuer(stack, f"alpha.{GOOD_DOMAIN}") == ROOT_NAME
+    assert served_issuer(stack, CONTROL_HOST) == ROOT_NAME
 
 
-def test_the_traefik_front_also_serves_a_certificate_whose_issuer_is_staging(traefik_stack):
-    assert "STAGING" in served_issuer(traefik_stack, STAGING_HOST)
+@pytest.mark.parametrize("server_name", [STAGING_HOST, None])
+def test_the_traefik_front_serves_a_staging_issuer_by_name_and_to_a_client_that_sends_none(traefik_stack, server_name):
+    assert "STAGING" in served_issuer(traefik_stack, server_name)
+
+
+def test_the_staging_certificate_validates_against_the_test_ca_so_only_its_issuer_is_wrong(traefik_stack):
+    """What a doctor run against `127.0.0.1` sees: a chain that validates, from an issuer that does not."""
+    context = ssl.create_default_context(cafile=str(traefik_stack.ca_file))
+    with socket.create_connection((traefik_stack.vhost.host, traefik_stack.vhost.port)) as sock:
+        with context.wrap_socket(sock, server_hostname=STAGING_ADDRESS) as secured:
+            assert secured.version() is not None
