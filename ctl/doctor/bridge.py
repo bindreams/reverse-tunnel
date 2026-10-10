@@ -35,6 +35,13 @@ DIGEST = re.compile(r"[0-9a-f]{64}", re.ASCII)
 WILDCARDS = {"0.0.0.0": LOOPBACK, "::": "::1", "0:0:0:0:0:0:0:0": "::1"}
 # Not a label any host would use; frps answers 404 for a name no proxy has registered.
 UNREGISTERED = "rt-doctor-unregistered"
+CONFIG_REMEDY = f"Apply it with `{RECREATE}`, which drops every connected tunnel."
+# A recreate reloads `secrets/token`, which is still the old token until `ctl install` writes it from `.env`.
+TOKEN_REMEDY = (
+    "Run `uv run -m ctl install` (writes secrets/token from .env), then `" + RECREATE + "` (drops every connected "
+    "tunnel; a host that does not hold the new token will not reconnect). If install reports the token unchanged, "
+    "only the recreate is needed."
+)
 DURABLE_POLICIES = ("always", "unless-stopped")
 
 
@@ -78,8 +85,11 @@ class Bridge:
             ("vhost_answers_404", self.vhost_answers_404),
             ("registered_labels", self.registered_labels),
             ("label_collisions", self.label_collisions),
-            ("config_skew", lambda: self.skew("config.sha256", "bridge/frps.toml", self.config_digest)),
-            ("token_skew", lambda: self.skew("token.sha256", "RT_TOKEN", lambda: token_digest(self.config))),
+            ("config_skew", lambda: self.skew("config.sha256", "bridge/frps.toml", self.config_digest, CONFIG_REMEDY)),
+            (
+                "token_skew",
+                lambda: self.skew("token.sha256", "RT_TOKEN", lambda: token_digest(self.config), TOKEN_REMEDY)
+            ),
             ("tls_chain_validates", self.tls_chain_validates),
             ("tls_issuer_is_not_staging", self.tls_issuer_is_not_staging),
             ("env_permissions", self.permissions.env),
@@ -307,7 +317,9 @@ class Bridge:
                 return fail(
                     "the list of proxies is incomplete (paging stopped short of frps's total), so it cannot be trusted"
                 )
-            seen = sorted({proxy.user or proxy.name for proxy in page.items if proxy.phase != "offline"})
+            online = [proxy for proxy in page.items if proxy.phase != "offline"]
+            seen = sorted({proxy.user for proxy in online if proxy.user})
+            strays = sorted(proxy.name for proxy in online if not proxy.user)
             confirmed, gone = [], []
             for label in seen:
                 one = self.api(frps_api.list_proxies, user=label)
@@ -317,7 +329,10 @@ class Bridge:
         except frps_api.FrpsApiError as exc:
             return fail(str(exc))
         detail = f"{len(confirmed)} online: {', '.join(confirmed)}" if confirmed else "none online"
-        return ok(detail + (f" (went offline while listing: {', '.join(gone)})" if gone else ""))
+        detail += f" (went offline while listing: {', '.join(gone)})" if gone else ""
+        # frpc always sets `user` to the host's label, so a proxy without one was not made by a reverse-tunnel host.
+        detail += "".join(f"; proxy without a user (not a reverse-tunnel host): {name}" for name in strays)
+        return ok(detail)
 
     def label_collisions(self) -> Verdict:
         """Collisions show only in the clients: with two claimants the proxies list the winner alone.
@@ -362,7 +377,7 @@ class Bridge:
             raise InstallError(f"{self.root / 'bridge' / 'frps.toml'} is missing; restore it from the repository")
         return hashlib.sha256(content).hexdigest()
 
-    def skew(self, recorded_name: str, shown: str, digest: Callable[[], str]) -> Verdict:
+    def skew(self, recorded_name: str, shown: str, digest: Callable[[], str], remedy: str) -> Verdict:
         """The digest the entrypoint recorded of what frps loaded against what is on disk now: content, never mtime.
 
         The token is compared as `RT_TOKEN` plus a newline, which is exactly what `ctl install` writes to
@@ -385,9 +400,7 @@ class Bridge:
             return fail(str(exc))
         if actual != fields[0]:
             return fail(
-                f"frps is running with a different {shown} than the one on disk now, and reads it only at startup. "
-                f"Apply it with `{RECREATE}`; recreating drops every connected tunnel, and a host that does not hold "
-                "the new token will not reconnect"
+                f"frps is running with a different {shown} than the one on disk now, and reads it only at startup. {remedy}"
             )
         return ok(f"frps loaded the {shown} that is on disk")
 

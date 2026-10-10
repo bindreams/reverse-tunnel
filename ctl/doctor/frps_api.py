@@ -92,12 +92,25 @@ def _client(item: dict) -> Client:
 # Reading ==============================================================================================================
 
 
+def _no_answer(exc: httpx.HTTPError) -> bool:
+    """Whether nothing answered: the connection was refused, reset or timed out, or closed before any response.
+
+    A peer that answers with something else than HTTP, a body that cannot be decoded, or a redirect loop did answer, so
+    those are failures of what was said, not of reaching it.
+    """
+    if isinstance(exc, (httpx.NetworkError, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, httpx.RemoteProtocolError) and "without sending a response" in str(exc)
+
+
 def _get(client: httpx.Client, base_url: str, path: str, params: dict[str, str]) -> dict:
     url = f"{base_url.rstrip('/')}{path}"
     try:
         response = client.get(url, params=params)
     except httpx.HTTPError as exc:
-        raise FrpsUnreachable(f"cannot reach the frps admin API at {base_url}: {exc}") from exc
+        if _no_answer(exc):
+            raise FrpsUnreachable(f"cannot reach the frps admin API at {base_url}: {exc}") from exc
+        raise FrpsApiError(f"the frps admin API at {base_url}{path} gave an answer that cannot be read: {exc}") from exc
     if response.status_code == 401:
         raise FrpsApiError(
             f"the frps admin API at {base_url} rejected RT_ADMIN_PASSWORD (it is sent with an empty username)"

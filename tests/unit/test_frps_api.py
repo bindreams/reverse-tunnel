@@ -209,3 +209,47 @@ def test_the_error_never_repeats_the_password():
     with pytest.raises(FrpsApiError) as raised:
         frps_api.list_proxies(BASE, PASSWORD, transport=httpx.MockTransport(deny))
     assert PASSWORD not in str(raised.value)
+
+
+# Unreachable versus wrong =============================================================================================
+
+
+def raising(error_for):
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error_for(request)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda r: httpx.ConnectError("connection refused", request=r),
+        lambda r: httpx.ConnectTimeout("timed out", request=r),
+        lambda r: httpx.ReadError("connection reset by peer", request=r),
+        lambda r: httpx.ReadTimeout("timed out", request=r),
+        lambda r: httpx.RemoteProtocolError("Server disconnected without sending a response.", request=r),
+    ],
+    ids=["connect", "connect-timeout", "read-error", "read-timeout", "closed-before-any-response"],
+)
+def test_no_answer_at_all_is_unreachable(error):
+    with pytest.raises(frps_api.FrpsUnreachable):
+        frps_api.list_proxies(BASE, PASSWORD, transport=raising(error))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda r: httpx.RemoteProtocolError("illegal status line: bad HTTP/1.1 request", request=r),
+        lambda r: httpx.DecodingError("invalid gzip data", request=r),
+        lambda r: httpx.TooManyRedirects("too many", request=r),
+        lambda r: httpx.UnsupportedProtocol("unknown scheme", request=r),
+    ],
+    ids=["not-http", "decoding", "redirects", "protocol"],
+)
+def test_an_answer_that_is_wrong_is_a_real_failure_not_unreachable(error):
+    with pytest.raises(FrpsApiError) as raised:
+        frps_api.list_proxies(BASE, PASSWORD, transport=raising(error))
+    assert not isinstance(raised.value, frps_api.FrpsUnreachable)
+    assert "127.0.0.1:7500" in str(raised.value)

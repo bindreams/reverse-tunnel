@@ -279,6 +279,15 @@ def test_each_label_is_confirmed_with_the_server_side_user_filter(world):
     assert sorted(u for u in asked_users(world, "/api/v2/proxies") if u) == ["alpha", "beta"]
 
 
+def test_a_proxy_without_a_user_is_not_one_of_ours_and_is_not_queried_as_a_label(world):
+    world.net.proxies += [{"name": "stray", "clientID": "c-x", "status": {"phase": "online"}}]
+    check = checks_of(world)["registered_labels"]
+    assert check.outcome is Outcome.PASS
+    assert "proxy without a user (not a reverse-tunnel host): stray" in check.detail
+    assert "1 online: alpha" in check.detail
+    assert asked_users(world, "/api/v2/proxies").count("stray") == 0
+
+
 def test_the_collision_verdict_comes_from_the_label_filtered_query_not_the_fleet_listing(world):
     """An unfiltered listing is paged by offset while the fleet changes, so it can claim an entry twice or not at all."""
     world.net.stale_clients = [
@@ -406,6 +415,24 @@ def test_token_skew_is_a_failure_naming_the_recreate(world):
     assert check.outcome is Outcome.FAIL
     assert "docker compose up -d --force-recreate" in check.detail
     assert "f" * 64 not in check.detail
+
+
+def test_token_skew_gives_the_whole_remedy_because_the_file_may_be_stale_too(world):
+    """A recreate alone reloads `secrets/token`, which is still the old token if `ctl install` has not run."""
+    detail = checks_of(world)["token_skew"].detail
+    assert detail == "frps loaded the RT_TOKEN that is on disk"
+    world.edit_env(RT_TOKEN="f" * 64)
+    detail = checks_of(world)["token_skew"].detail
+    install, recreate = detail.index("uv run -m ctl install"), detail.index("docker compose up -d --force-recreate")
+    assert install < recreate, "install writes secrets/token from .env; only then does a recreate load it"
+    assert "writes secrets/token" in detail and "drops every connected tunnel" in detail
+    assert "unchanged" in detail and "only the recreate" in detail
+
+
+def test_config_skew_needs_only_the_recreate(world):
+    (world.root / "bridge" / "frps.toml").write_bytes(b"# edited\n")
+    detail = checks_of(world)["config_skew"].detail
+    assert "docker compose up -d --force-recreate" in detail and "ctl install" not in detail
 
 
 def test_the_token_file_is_never_opened_by_the_bridge_doctor(world):
