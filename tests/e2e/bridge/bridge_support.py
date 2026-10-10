@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_VARIABLE = "RT_E2E_SANDBOX"
 
@@ -16,6 +18,13 @@ GOOD_TOKEN = "0123456789abcdef" * 4
 GOOD_PASSWORD = "correct-horse-battery_staple"
 GOOD_DOMAIN = "tunnel.example.com"
 BRIDGE_FILES = ("compose.yaml", "compose.traefik.yaml", "bridge")
+
+
+def get(url: str, **kwargs) -> httpx.Response:
+    """GET `url` with no client-side timeout: httpx's default is a bet that 5 s is long enough, and a request that never
+    answers ends at the CI job's own limit."""
+    with httpx.Client(timeout=None) as client:
+        return client.get(url, **kwargs)
 
 
 def clean_environment() -> dict[str, str]:

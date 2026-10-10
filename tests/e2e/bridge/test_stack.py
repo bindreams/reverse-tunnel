@@ -3,9 +3,8 @@
 import hashlib
 import json
 
-import httpx
 import pytest
-from bridge_support import GOOD_PASSWORD, Project, make_project
+from bridge_support import GOOD_PASSWORD, Project, get, make_project
 
 
 def published_admin_url(project: Project) -> str:
@@ -33,13 +32,13 @@ def test_starts_and_reports_healthy_with_a_valid_token(project: Project):
 
 
 def test_admin_api_answers_on_the_published_port_from_the_host(running: Project):
-    response = httpx.get(published_admin_url(running) + "/api/v2/system/info", auth=("", GOOD_PASSWORD))
+    response = get(published_admin_url(running) + "/api/v2/system/info", auth=("", GOOD_PASSWORD))
     assert response.status_code == 200
     assert response.json()["data"]["config"]["subdomainHost"] == "tunnel.example.com"
 
 
 def test_admin_api_rejects_a_non_empty_username(running: Project):
-    response = httpx.get(published_admin_url(running) + "/api/v2/system/info", auth=("admin", GOOD_PASSWORD))
+    response = get(published_admin_url(running) + "/api/v2/system/info", auth=("admin", GOOD_PASSWORD))
     assert response.status_code == 401
 
 

@@ -28,7 +28,7 @@ def test_a_partial_or_split_name_and_a_clean_text_are_not_flagged(text, hashes_f
     assert kinds(text, hashes_file) == []
 
 
-def path(*parts, sep):
+def path(*parts: str, sep: str) -> str:
     return sep.join(parts)
 
 
