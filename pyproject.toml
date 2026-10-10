@@ -21,7 +21,8 @@ package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/platform"]
-pythonpath = ["."]
+# tests/e2e holds the helpers shared by every end-to-end directory, and tests/unit tests them.
+pythonpath = [".", "tests/e2e"]
 addopts = "-ra --strict-markers"
 markers = [
   "root: needs uid 0 and fails, never skips, without it; opt out explicitly with -m 'not root'",
@@ -42,3 +43,5 @@ dev = [
 [tool.ty.environment]
 # `ctl` has Windows-only code paths (`ctl/env.py`); check them on every platform.
 python-platform = "all"
+# The end-to-end helpers shared by tests/unit and every tests/e2e directory (pytest's `pythonpath` has the same entry).
+extra-paths = ["tests/e2e"]
