@@ -122,6 +122,12 @@ def nginx_stack(tmp_path: Path, pki: Pki) -> Iterator[Stack]:
 
 
 @pytest.fixture
+def caddy_stack(tmp_path: Path, pki: Pki) -> Iterator[Stack]:
+    with running_stack(tmp_path, pki, "caddy") as stack:
+        yield stack
+
+
+@pytest.fixture
 def traefik_stack(tmp_path: Path, pki: Pki) -> Iterator[Stack]:
     with running_stack(tmp_path, pki, "traefik") as stack:
         yield stack

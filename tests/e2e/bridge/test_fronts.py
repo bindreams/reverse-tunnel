@@ -36,11 +36,15 @@ def test_websocket_echo_survives_nginx(nginx_stack, hosts, pinned):
     assert_echo(nginx_stack, hosts, pinned)
 
 
+def test_websocket_echo_survives_caddy(caddy_stack, hosts, pinned):
+    assert_echo(caddy_stack, hosts, pinned)
+
+
 def test_websocket_echo_survives_the_traefik_overlay(traefik_stack, hosts, pinned):
     assert_echo(traefik_stack, hosts, pinned)
 
 
-@pytest.mark.parametrize("front", ["nginx", "traefik"])
+@pytest.mark.parametrize("front", ["nginx", "caddy", "traefik"])
 def test_a_client_that_does_not_trust_the_test_ca_is_refused(front, request, hosts, pinned):
     """The control for the two tests above: TLS verification is real, so passing them proves the chain validates."""
     stack: Stack = request.getfixturevalue(f"{front}_stack")
@@ -50,7 +54,7 @@ def test_a_client_that_does_not_trust_the_test_ca_is_refused(front, request, hos
     assert echoed.data == b"" and "certificate" in echoed.diagnostics.lower(), echoed
 
 
-@pytest.mark.parametrize("front", ["nginx", "traefik"])
+@pytest.mark.parametrize("front", ["nginx", "caddy", "traefik"])
 def test_wss_control_connection_registers_through_the_front(front, request, hosts, pinned):
     stack: Stack = request.getfixturevalue(f"{front}_stack")
     assert_echo(stack, hosts, pinned, through_front=True)
@@ -64,13 +68,13 @@ def assert_tunnel_answers_as_websocat(stack: Stack, label: str) -> None:
     assert (response.status_code, response.headers.get("server")) == (400, "websocat"), response.headers
 
 
-@pytest.mark.parametrize("front", ["bare", "nginx", "traefik"])
+@pytest.mark.parametrize("front", ["bare", "nginx", "caddy", "traefik"])
 def test_a_working_tunnel_answers_a_plain_get_as_websocat_through_every_front(front, request, hosts):
     stack: Stack = request.getfixturevalue(f"{front}_stack")
     assert_tunnel_answers_as_websocat(stack, hosts.start(stack).label)
 
 
-@pytest.mark.parametrize("front", ["bare", "nginx", "traefik"])
+@pytest.mark.parametrize("front", ["bare", "nginx", "caddy", "traefik"])
 def test_an_unregistered_label_is_frps_own_404_through_every_front(front, request):
     stack: Stack = request.getfixturevalue(f"{front}_stack")
     response = stack.request(f"nobody.{GOOD_DOMAIN}")
@@ -128,7 +132,7 @@ def served_issuer(stack: Stack, server_name: str | None) -> str:
     return str(x509.load_der_x509_certificate(der).issuer.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value)
 
 
-@pytest.mark.parametrize("front", ["nginx", "traefik"])
+@pytest.mark.parametrize("front", ["nginx", "caddy", "traefik"])
 def test_the_front_serves_the_test_ca_for_its_own_names(front, request):
     stack: Stack = request.getfixturevalue(f"{front}_stack")
     assert served_issuer(stack, f"alpha.{GOOD_DOMAIN}") == ROOT_NAME

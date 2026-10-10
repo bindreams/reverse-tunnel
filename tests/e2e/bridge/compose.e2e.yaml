@@ -1,5 +1,6 @@
 # Test-only fronts for the bridge stack, added with `-f` and chosen with `--profile`:
 #   nginx    examples/nginx.conf (rendered by the test) in front of compose.yaml's frps
+#   caddy    examples/Caddyfile (rendered by the test) in front of compose.yaml's frps
 #   traefik  a Traefik v3 on the external network that compose.traefik.yaml attaches frps to
 # Both serve TLS from the test's own CA and publish 443 on a port Docker picks; the test reads it with `compose port`.
 services:
@@ -23,6 +24,33 @@ services:
         read_only: true
     healthcheck:
       # Connecting and then reading end-of-file from /dev/null succeeds exactly when something is listening.
+      test: ["CMD-SHELL", "nc 127.0.0.1 443 < /dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+
+  caddy:
+    profiles: [caddy]
+    container_name: caddy
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    depends_on:
+      frps:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1::443"
+    volumes:
+      - type: bind
+        source: ./e2e/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: bind
+        source: ./e2e/tls
+        target: /etc/ssl/rt
+        read_only: true
+    healthcheck:
+      # Caddy listens only after it has loaded its configuration, so a listening port means the sites are live.
       test: ["CMD-SHELL", "nc 127.0.0.1 443 < /dev/null"]
       interval: 10s
       timeout: 3s

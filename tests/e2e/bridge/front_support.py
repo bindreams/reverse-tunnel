@@ -18,7 +18,7 @@ COMPOSE_E2E = "compose.e2e.yaml"
 CONTROL_HOST = "localhost"  # a name every machine resolves, so no test needs DNS or /etc/hosts
 STAGING_HOST = "staging.localhost"
 STAGING_ADDRESS = "127.0.0.1"  # the name-free way in: no SNI, so Traefik offers its default certificate
-FRONTS = ("bare", "nginx", "traefik")
+FRONTS = ("bare", "nginx", "caddy", "traefik")
 
 # `examples/nginx.conf` as an operator copies it, adapted to a stack whose nginx is a container beside frps. Each edit is
 # (text, replacement, how many times the example holds it); an example that drifts fails here instead of being skipped.
@@ -40,6 +40,30 @@ def render_nginx(*, rewrite_host: bool = False) -> str:
         text = text.replace(old, new)
     assert text.count(HOST_HEADER) == 2, "examples/nginx.conf no longer sets Host in both of its server blocks"
     return text.replace(HOST_HEADER, HOST_HEADER_OMITTED, 1) if rewrite_host else text
+
+
+# `examples/Caddyfile` for the e2e stack: the same upstream edits, and the test CA's certificates instead of ACME.
+CADDY_EDITS = (
+    (
+        "bridge.example.com {\n",
+        f"{CONTROL_HOST} {{\n\ttls /etc/ssl/rt/{CONTROL_HOST}.pem /etc/ssl/rt/{CONTROL_HOST}.key\n", 1
+    ),
+    (
+        "*.tunnel.example.com {\n",
+        f"*.tunnel.example.com {{\n\ttls /etc/ssl/rt/{GOOD_DOMAIN}.pem /etc/ssl/rt/{GOOD_DOMAIN}.key\n",
+        1,
+    ),
+    ("reverse_proxy 127.0.0.1:8080", "reverse_proxy frps:8080", 1),
+    ("reverse_proxy 127.0.0.1:7000", "reverse_proxy frps:8001", 1),
+)
+
+
+def render_caddyfile() -> str:
+    text = (REPO_ROOT / "examples" / "Caddyfile").read_text(encoding="utf-8")
+    for old, new, count in CADDY_EDITS:
+        assert text.count(old) == count, f"examples/Caddyfile holds {text.count(old)} x {old!r}, expected {count}"
+        text = text.replace(old, new)
+    return text
 
 
 @dataclass(frozen=True)
@@ -89,6 +113,7 @@ def prepare_files(project: Project, pki: Pki, front: str, *, rewrite_host: bool)
     pki.issue(STAGING_HOST, STAGING_ADDRESS, staging=True).write(tls, STAGING_HOST)
     ca_file = project.root / "e2e" / "ca.pem"
     ca_file.write_bytes(pki.root_pem)
+    (project.root / "e2e" / "Caddyfile").write_text(render_caddyfile(), encoding="utf-8")
     (project.root / "e2e" / "nginx.conf").write_text(render_nginx(rewrite_host=rewrite_host), encoding="utf-8")
     return ca_file
 

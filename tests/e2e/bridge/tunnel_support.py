@@ -171,11 +171,17 @@ class Echoed:
         return f"{len(self.data)} bytes (sha256 {hashlib.sha256(self.data).hexdigest()[:12]}); client said {self.diagnostics!r}"
 
 
-def round_trip(command: list[str | Path], payload: bytes, *, ca_file: Path | None = None) -> Echoed:
-    """Send `payload` through `command` and return what comes back, up to as many bytes as were sent.
+# websocat holds back the end of what it writes to stdout until more arrives (measured: a TLS client left 623 bytes
+# short of a 4 MiB echo, and delivered them only when more data followed). Its buffer is 64 KiB, so a tail of padding
+# that is never read keeps the held-back bytes out of the payload.
+PADDING = bytes(1024 * 1024)
 
-    Stdin stays open until everything has come back: closing it first would close the WebSocket while the echo is still
-    on its way. A short result means the stream ended early.
+
+def round_trip(command: list[str | Path], payload: bytes, *, ca_file: Path | None = None) -> Echoed:
+    """Send `payload` (and padding) through `command` and return the first `len(payload)` bytes that come back.
+
+    The client is stopped once it has delivered them, not asked to close: stdin stays open until then, because closing
+    it first would close the WebSocket while the echo is still on its way. A short result means the stream ended early.
     """
     environment = {**clean_environment(), **({"SSL_CERT_FILE": str(ca_file)} if ca_file else {})}
     with tempfile.TemporaryFile() as errors:
@@ -187,16 +193,21 @@ def round_trip(command: list[str | Path], payload: bytes, *, ca_file: Path | Non
 
             def send() -> None:
                 try:
-                    stdin.write(payload)
+                    stdin.write(payload + PADDING)
                     stdin.flush()
                 except OSError:
-                    pass  # the connection died; the read below comes back short
+                    pass  # the client was stopped, or the connection died; the read comes back short in that case
 
             writer = threading.Thread(target=send, daemon=True)
             writer.start()
             received = stdout.read(len(payload))
-            stdin.close()
+            # Stopping it breaks the pipe under a writer that is still sending padding; only then is stdin safe to close.
+            client.terminate()
             client.wait()
             writer.join()
+            try:
+                stdin.close()
+            except OSError:
+                pass  # flushing what the stopped client never read
         errors.seek(0)
         return Echoed(received, errors.read().decode(errors="replace"))
