@@ -253,3 +253,41 @@ def test_an_answer_that_is_wrong_is_a_real_failure_not_unreachable(error):
         frps_api.list_proxies(BASE, PASSWORD, transport=raising(error))
     assert not isinstance(raised.value, frps_api.FrpsUnreachable)
     assert "127.0.0.1:7500" in str(raised.value)
+
+
+class BrokenBody(httpx.SyncByteStream):
+    """Headers arrive, then the connection fails while the body is read."""
+
+    def __init__(self, error: httpx.HTTPError) -> None:
+        self.error = error
+
+    def __iter__(self):
+        yield b'{"code": 200, '
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadError("connection reset by peer"),
+        httpx.ReadTimeout("timed out"),
+        httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+    ],
+    ids=["reset", "timeout", "truncated"],
+)
+def test_an_error_while_reading_the_body_means_something_answered_so_it_is_not_unreachable(error):
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, stream=BrokenBody(error)))
+    with pytest.raises(FrpsApiError) as raised:
+        frps_api.list_proxies(BASE, PASSWORD, transport=transport)
+    assert not isinstance(raised.value, frps_api.FrpsUnreachable)
+    assert "127.0.0.1:7500" in str(raised.value) and "/api/v2/proxies" in str(raised.value)
+    assert "body" in str(raised.value)
+
+
+def test_an_error_before_any_response_is_still_unreachable_through_the_stream():
+
+    def refuse(request):
+        raise httpx.ReadError("connection reset by peer", request=request)
+
+    with pytest.raises(frps_api.FrpsUnreachable):
+        frps_api.list_proxies(BASE, PASSWORD, transport=httpx.MockTransport(refuse))
