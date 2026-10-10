@@ -137,6 +137,16 @@ CLOCK_POLLING = [
     ("import datetime\nwhile True:\n    datetime.datetime.utcnow()\n", "clock-loop"),
 ]
 
+PLATFORM = [
+    ("import ctypes\nctypes.windll.kernel32.Sleep(100)\n", "sleep"),
+    ("import win32api\nwin32api.Sleep(100)\n", "sleep"),
+    ("import win32event\nwin32event.WaitForSingleObject(h, 5000)\n", "timed-wait"),
+    ("import win32event\nwin32event.WaitForMultipleObjects([a, b], False, 0)\n", "timed-wait"),
+    ("import anyio\nasync def f():\n    with anyio.fail_after(5):\n        pass\n", "sleep"),
+    ("def f(proc):\n    while proc.poll() is None:\n        pass\n", "loop-poll"),
+    ("def f(q):\n    while True:\n        q.get_nowait()\n", "loop-poll"),
+]
+
 HIDDEN = [
     ("exec('import time; time.sleep(1)')\n", "dynamic"),
     ("eval('1')\n", "dynamic"),
@@ -147,11 +157,15 @@ HIDDEN = [
     ("def broken(:\n", "unparsable"),
 ]
 
-MUST_FLAG = SLEEPS + TIMEOUTS + IMPLICIT + TIMED_METHODS + ARGV_OPTIONS + ENVIRONMENT + CLOCK_POLLING + HIDDEN
+MUST_FLAG = SLEEPS + TIMEOUTS + IMPLICIT + TIMED_METHODS + ARGV_OPTIONS + ENVIRONMENT + PLATFORM + CLOCK_POLLING + HIDDEN
 
 # What must be left alone ==============================================================================================
 
 MUST_PASS = [
+    "import win32event\nwin32event.WaitForSingleObject(h, win32event.INFINITE)\n",
+    "import win32event\nwin32event.WaitForMultipleObjects([a, b], False, -1)\n",
+    "def f(proc):\n    proc.poll()\n",
+    "def f(q):\n    q.get_nowait()\n",
     "import os\nhome = os.environ['HOME']\n",
     "env = {'RT_DOMAIN': 'x', 'PATH': '/bin'}\n",
     "import shlex\nshlex.split('docker compose up --wait')\n",

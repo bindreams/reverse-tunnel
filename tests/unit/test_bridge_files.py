@@ -170,6 +170,13 @@ def test_nginx_example_forwards_websocket_upgrades_and_the_host():
     assert "proxy_set_header Host $host;" in text
 
 
+def test_nginx_example_passes_websocats_server_header_through_for_the_vhost():
+    """nginx hides the upstream's Server header by default, and `ctl doctor` recognises a live tunnel by it."""
+    text = (REPO_ROOT / "examples" / "nginx.conf").read_text(encoding="utf-8")
+    vhost = text.split("server {")[1]
+    assert "proxy_pass_header Server;" in vhost
+
+
 def test_caddy_example_ships_the_vhost_and_the_control_site():
     text = (REPO_ROOT / "examples" / "Caddyfile").read_text(encoding="utf-8")
     assert re.findall(r"^(\S+) \{$", text, re.MULTILINE) == ["*.tunnel.example.com", "bridge.example.com"]

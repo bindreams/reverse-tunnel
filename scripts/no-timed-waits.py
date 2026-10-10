@@ -47,7 +47,18 @@ BANNED_REFERENCES = frozenset({
 # Never exempt: nothing about a sleep or a spin is a failure bound on an external event.
 NEVER_EXEMPT = frozenset({"time.sleep", "asyncio.sleep", "signal.alarm", "signal.setitimer", "os.WNOHANG"})
 # By final name alone, because the receiver's type is not known: `anyio.sleep`, `self.sleep`, `loop.call_later`.
-BANNED_NAMES = frozenset({"sleep", "usleep", "nanosleep", "call_later", "call_at", "enterabs", "setitimer"})
+BANNED_NAMES = frozenset({
+    "sleep", "usleep", "nanosleep", "call_later", "call_at", "enterabs", "setitimer", "Sleep", "SleepEx",
+    "NtDelayExecution", "fail_after", "move_on_after", "fail_at", "move_on_at"
+})
+# Win32 waits take a timeout in milliseconds; only `INFINITE` (or -1) is a wait on the event alone.
+WINDOWS_WAITS = frozenset({
+    "WaitForSingleObject", "WaitForSingleObjectEx", "WaitForMultipleObjects", "WaitForMultipleObjectsEx",
+    "MsgWaitForMultipleObjects", "MsgWaitForMultipleObjectsEx", "WaitNamedPipe"
+})
+INFINITE_VALUES = frozenset({-1, 0xFFFFFFFF})
+# Asking "is it done yet?" inside a loop is a poll, whatever the loop's body does.
+LOOP_POLLS = frozenset({"poll", "get_nowait"})
 TIMEOUT_WORD = re.compile(r"timeout|deadline", re.IGNORECASE)
 # Exceptions that report a timeout are not waits: tests construct them to stand in for one.
 TIMEOUT_EXCEPTION = re.compile(r"(?:Error|Expired|Exception)$|^(?:Connect|Read|Write|Pool)Timeout$")
@@ -349,6 +360,10 @@ class Module(ast.NodeVisitor):
         if name in BANNED_NAMES and resolved not in BANNED_REFERENCES:
             self.report(node, "sleep", f"{name}() waits on the clock", exempt=False)
         self.check_clock(node, resolved)
+        if name in WINDOWS_WAITS and not any(self.is_infinite(argument) for argument in arguments):
+            self.report(node, "timed-wait", f"{name}() with a finite timeout")
+        if name in LOOP_POLLS and not node.args and self.whiles:
+            self.report(node, "loop-poll", f".{name}() inside a while loop polls instead of waiting", exempt=False)
         for keyword in node.keywords:
             if keyword.arg and TIMEOUT_WORD.search(keyword.arg) and not is_none(keyword.value):
                 self.report(node, "timeout-argument", f"{keyword.arg}= given to {name}()", value=keyword.value)
@@ -377,6 +392,14 @@ class Module(ast.NodeVisitor):
             self.check_method(node, node.func)
         if resolved in RESOLVED_POSITIONAL and len(node.args) >= RESOLVED_POSITIONAL[resolved]:
             self.report(node, "timeout-argument", f"{resolved}() given a timeout positionally")
+
+    def is_infinite(self, node: ast.expr) -> bool:
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            return self.final_name(node) == "INFINITE"
+        try:
+            return ast.literal_eval(node) in INFINITE_VALUES
+        except (ValueError, TypeError, SyntaxError):
+            return False
 
     def check_method(self, node: ast.Call, func: ast.Attribute) -> None:
         method, positional = func.attr, node.args

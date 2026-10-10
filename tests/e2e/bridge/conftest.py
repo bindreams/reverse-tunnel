@@ -12,10 +12,16 @@ from pathlib import Path
 
 import pytest
 from bridge_support import REPO_ROOT, SANDBOX_VARIABLE, Entrypoint, Project, make_project, run
+from echo_target import EchoTarget
+from front_support import Stack, running_stack
+from pinned import fetch_pinned
+from pki import Pki
+from tunnel_support import Hosts
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True, scope="session")
 def sandbox():
+    """Session-scoped so it runs before every other session fixture, `image` and `pinned` included."""
     if os.environ.get(SANDBOX_VARIABLE) != "1":
         pytest.fail(
             f"these tests start containers and publish ports; run them in a throwaway VM or on CI with "
@@ -72,3 +78,57 @@ def project(tmp_path: Path) -> Iterator[Project]:
 def config_project(tmp_path: Path) -> Project:
     """A project for `docker compose config`, which starts nothing."""
     return make_project(tmp_path)
+
+
+# Fronts ===============================================================================================================
+
+
+@pytest.fixture(scope="session")
+def pinned(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """frpc, frps and websocat from `binaries.lock.toml`, fetched and verified by ctl's own downloader."""
+    return fetch_pinned(tmp_path_factory.mktemp("pinned"), "frp", "websocat")
+
+
+@pytest.fixture(scope="session")
+def pki() -> Pki:
+    return Pki()
+
+
+@pytest.fixture
+def echo() -> Iterator[EchoTarget]:
+    """What a host's websocat forwards to, in place of sshd."""
+    with EchoTarget() as target:
+        yield target
+
+
+@pytest.fixture
+def hosts(tmp_path: Path, pinned: dict[str, Path], echo: EchoTarget) -> Iterator[Hosts]:
+    """Starts hosts whose websocat forwards to `echo`; each is stopped when the test ends, whatever happened."""
+    hosts = Hosts(tmp_path, pinned, echo.port)
+    yield hosts
+    hosts.close()
+
+
+@pytest.fixture
+def bare_stack(tmp_path: Path, pki: Pki) -> Iterator[Stack]:
+    with running_stack(tmp_path, pki, "bare") as stack:
+        yield stack
+
+
+@pytest.fixture
+def nginx_stack(tmp_path: Path, pki: Pki) -> Iterator[Stack]:
+    with running_stack(tmp_path, pki, "nginx") as stack:
+        yield stack
+
+
+@pytest.fixture
+def traefik_stack(tmp_path: Path, pki: Pki) -> Iterator[Stack]:
+    with running_stack(tmp_path, pki, "traefik") as stack:
+        yield stack
+
+
+@pytest.fixture
+def host_rewriting_nginx_stack(tmp_path: Path, pki: Pki) -> Iterator[Stack]:
+    """nginx configured as a careless copy of the example would be: the vhost's `Host` line is left out."""
+    with running_stack(tmp_path, pki, "nginx", rewrite_host=True) as stack:
+        yield stack

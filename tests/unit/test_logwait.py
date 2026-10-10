@@ -57,13 +57,13 @@ def test_wait_for_returns_a_matching_line_after_the_mark(feed):
 
 
 def test_wait_for_ignores_a_matching_line_before_the_mark(feed):
-    feed.write("close proxy [alpha.ssh] success")
-    feed.seen("close proxy [alpha.ssh] success")
+    feed.write("[alpha.ssh] proxy closing")
+    feed.seen("[alpha.ssh] proxy closing")
     mark = feed.tail.mark()
     feed.write("something else")
     feed.finish()
     with pytest.raises(StreamEnded) as ended:
-        feed.tail.wait_for("close proxy [alpha.ssh] success", after=mark)
+        feed.tail.wait_for("[alpha.ssh] proxy closing", after=mark)
     assert ended.value.lines == ("something else", )
 
 

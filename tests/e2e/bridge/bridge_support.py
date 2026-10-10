@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+from logwait import LineTail, tail_compose
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_VARIABLE = "RT_E2E_SANDBOX"
@@ -131,14 +132,27 @@ class Project:
     def write_env(self) -> None:
         (self.root / ".env").write_text("".join(f"{key}={value}\n" for key, value in self.values.items()))
 
+    def arguments(self, *, overlay: bool = False, extra_files: tuple[str, ...] = ()) -> list[str]:
+        """The global `docker compose` options that select this project and its files."""
+        names = ["compose.yaml", *(["compose.traefik.yaml"] if overlay else []), *extra_files]
+        return ["--project-name", self.name, *(argument for name in names for argument in ("-f", name))]
+
     def compose(self,
                 *args: str,
                 overlay: bool = False,
                 extra_files: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
-        names = ["compose.yaml", *(["compose.traefik.yaml"] if overlay else []), *extra_files]
-        files = [argument for name in names for argument in ("-f", name)]
         self.write_env()
-        return run("docker", "compose", "--project-name", self.name, *files, *args, cwd=self.root)
+        return run("docker", "compose", *self.arguments(overlay=overlay, extra_files=extra_files), *args, cwd=self.root)
+
+    def tail(self, service: str, *, overlay: bool = False, extra_files: tuple[str, ...] = ()) -> LineTail:
+        """Follow `service`'s log from its first line; see `logwait.tail_compose`."""
+        self.write_env()
+        return tail_compose(
+            self.root,
+            service,
+            compose_args=self.arguments(overlay=overlay, extra_files=extra_files),
+            env=clean_environment(),
+        )
 
     def config(self, *, overlay: bool = False) -> dict:
         result = self.compose("config", "--format", "json", overlay=overlay)
@@ -150,8 +164,9 @@ class Project:
         return self.root / "secrets" / "token"
 
 
-def make_project(directory: Path, **overrides: str | None) -> Project:
-    root = directory / "deployment"
+def make_project(directory: Path, root_name: str | None = None, **overrides: str | None) -> Project:
+    """A scratch deployment. With `root_name`, the compose project is named after the directory, as `ctl` runs it."""
+    root = directory / (root_name or "deployment")
     root.mkdir()
     for name in BRIDGE_FILES:
         source = REPO_ROOT / name
@@ -176,7 +191,7 @@ def make_project(directory: Path, **overrides: str | None) -> Project:
             del values[key]
         else:
             values[key] = value
-    return Project(root, f"rt-e2e-{uuid.uuid4().hex[:10]}", values)
+    return Project(root, root_name or f"rt-e2e-{uuid.uuid4().hex[:10]}", values)
 
 
 def assert_refused(result: subprocess.CompletedProcess[str], message: str) -> None:

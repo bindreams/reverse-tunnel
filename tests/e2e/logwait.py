@@ -65,7 +65,11 @@ class LineTail:
             self._cond.notify_all()
 
     def mark(self) -> int:
-        """The position after the last line taken in. Take it before the action whose effect is awaited."""
+        """The position after the last line taken in. Take it before the action whose effect is awaited.
+
+        A line still in flight when the mark is taken counts as new, so what is awaited must be unique to the test (a
+        fresh label), not merely later than the mark.
+        """
         with self._cond:
             return len(self._lines)
 
@@ -100,35 +104,35 @@ class LineTail:
         self.close()
 
 
-class _ProcessTail(LineTail):
+class ProcessTail(LineTail):
     """A tail that owns the process it follows: closing it ends the process."""
 
     def __init__(self, process: subprocess.Popen[str]) -> None:
         assert process.stdout is not None
-        self._process = process
+        self.process = process
         super().__init__(process.stdout)
 
     def close(self) -> None:
         super().close()
-        self._process.terminate()
-        self._process.wait()
+        self.process.terminate()
+        self.process.wait()
         # The process is gone, so the reader is about to see end-of-file; closing the pipe earlier would block on it.
         self._reader.join()
-        assert self._process.stdout is not None
-        self._process.stdout.close()
+        assert self.process.stdout is not None
+        self.process.stdout.close()
 
 
 # Sources ==============================================================================================================
 
 
-def tail_process(process: subprocess.Popen[str]) -> LineTail:
+def tail_process(process: subprocess.Popen[str]) -> ProcessTail:
     """Follow `process`'s stdout, which the caller must have piped (with stderr merged into it, if that matters).
 
     Closing the tail terminates the process and waits for it to exit.
     """
     if process.stdout is None:
         raise ValueError("tail_process needs a process started with stdout=subprocess.PIPE")
-    return _ProcessTail(process)
+    return ProcessTail(process)
 
 
 def tail_compose(
@@ -137,7 +141,7 @@ def tail_compose(
     *,
     compose_args: Sequence[str] = (),
     env: Mapping[str, str] | None = None,
-) -> LineTail:
+) -> ProcessTail:
     """Follow one service's log through `docker compose logs --follow`.
 
     `logs` replays the whole history before it follows, so a tail started after an event still sees it: there is no

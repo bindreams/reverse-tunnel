@@ -1,0 +1,75 @@
+# Test-only fronts for the bridge stack, added with `-f` and chosen with `--profile`:
+#   nginx    examples/nginx.conf (rendered by the test) in front of compose.yaml's frps
+#   traefik  a Traefik v3 on the external network that compose.traefik.yaml attaches frps to
+# Both serve TLS from the test's own CA and publish 443 on a port Docker picks; the test reads it with `compose port`.
+services:
+  nginx:
+    profiles: [nginx]
+    container_name: nginx
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    depends_on:
+      frps:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1::443"
+    volumes:
+      - type: bind
+        source: ./e2e/nginx.conf
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+      - type: bind
+        source: ./e2e/tls
+        target: /etc/ssl/rt
+        read_only: true
+    healthcheck:
+      # Connecting and then reading end-of-file from /dev/null succeeds exactly when something is listening.
+      test: ["CMD-SHELL", "nc 127.0.0.1 443 < /dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+
+  traefik:
+    profiles: [traefik]
+    container_name: traefik
+    image: traefik:v3.7.14@sha256:575fa15b135078fe5e50aa847987d96dbddd7b093c172429618404df73f3fa7c
+    depends_on:
+      frps:
+        condition: service_healthy
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/etc/traefik/dynamic.yaml
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+    ports:
+      - "127.0.0.1::443"
+    networks:
+      - proxy
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: bind
+        source: ./e2e/traefik-dynamic.yaml
+        target: /etc/traefik/dynamic.yaml
+        read_only: true
+      - type: bind
+        source: ./e2e/tls
+        target: /etc/ssl/rt
+        read_only: true
+    healthcheck:
+      # Healthy means the routers from frps's labels are live, not merely that Traefik listens: a request for the control
+      # host reaches the router (frps answers 502, since it does not speak HTTP on its control port) instead of Traefik's
+      # own 404. Both routers arrive in one configuration, so the vhost router is live too.
+      test:
+        - CMD-SHELL
+        - |-
+          wget -S -O /dev/null --no-check-certificate --header 'Host: localhost' https://127.0.0.1:443/ 2>&1 | grep -E '^ *HTTP/' | grep -qv ' 404 '
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
