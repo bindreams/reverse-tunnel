@@ -366,7 +366,8 @@ class Bridge:
         """The digest the entrypoint recorded of what frps loaded against what is on disk now: content, never mtime.
 
         The token is compared as `RT_TOKEN` plus a newline, which is exactly what `ctl install` writes to
-        `secrets/token`: the file itself is never opened, here or on a host.
+        `secrets/token`: the file itself is never opened, here or on a host. The entrypoint records the digest of the same
+        canonical form whatever whitespace the mounted file has (tests/e2e/bridge/test_entrypoint.py pins the two together).
         """
         self.require_running()
         try:

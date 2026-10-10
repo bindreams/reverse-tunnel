@@ -4,6 +4,10 @@ from pathlib import Path
 
 import pytest
 from bridge_support import GOOD_TOKEN, REPO_ROOT, Entrypoint, assert_refused
+from tests.unit.deployment_support import write_env
+
+from ctl.config import Role
+from ctl.host import token_digest
 
 EXAMPLE_TOKEN = "0" * 64
 EXAMPLE_PASSWORD = "example-admin-password"
@@ -254,10 +258,34 @@ def recorded_digest(entrypoint: Entrypoint, name: str, *, token: str, config: st
     return result.stdout.split()[0]
 
 
-def test_records_the_loaded_token_digest(entrypoint: Entrypoint, tracked_config: str):
-    token = "  " + GOOD_TOKEN + "\n"
+STRAY_TOKENS = {
+    "newline": GOOD_TOKEN + "\n",
+    "no-newline": GOOD_TOKEN,
+    "leading-spaces": "  " + GOOD_TOKEN + "\n",
+    "trailing-spaces": GOOD_TOKEN + "  \n",
+    "crlf": GOOD_TOKEN + "\r\n",
+    "tabs-and-blank-lines": "\t" + GOOD_TOKEN + "\t\n\n\n",
+}
+
+
+@pytest.mark.parametrize("token", STRAY_TOKENS.values(), ids=STRAY_TOKENS.keys())
+def test_records_the_digest_of_the_canonical_token_whatever_whitespace_the_file_has(
+    entrypoint: Entrypoint, tracked_config: str, token: str, tmp_path
+):
+    """`ctl doctor` hashes RT_TOKEN and a newline, which is what install writes; the entrypoint must agree with it."""
     digest = recorded_digest(entrypoint, "token.sha256", token=token, config=tracked_config)
-    assert digest == hashlib.sha256(token.encode()).hexdigest()
+    root = tmp_path / "doctor"
+    root.mkdir()
+    assert digest == token_digest(write_env(root, Role.BRIDGE, RT_TOKEN=GOOD_TOKEN))
+    assert digest == hashlib.sha256((GOOD_TOKEN + "\n").encode()).hexdigest()
+
+
+@pytest.mark.parametrize("token", STRAY_TOKENS.values(), ids=STRAY_TOKENS.keys())
+def test_frps_reads_the_canonical_token(entrypoint: Entrypoint, tracked_config: str, token: str):
+    """Hashed in the container, since the harness reads text and would turn a CRLF into a newline."""
+    result = entrypoint.run(token=token, config=tracked_config, command=("sha256sum", "secrets/token"))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split()[0] == hashlib.sha256((GOOD_TOKEN + "\n").encode()).hexdigest()
 
 
 def test_records_the_loaded_config_digest(entrypoint: Entrypoint, tracked_config: str):

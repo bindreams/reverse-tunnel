@@ -159,6 +159,9 @@ check_token() {
 	if [ "$token" = "$example_token" ]; then
 		fail "$mounted_token is the example token from example.env; set your own RT_TOKEN and run \`uv run -m ctl install\`"
 	fi
+	# frps loads the canonical form, the validated token and one newline, whatever whitespace or line ending the mounted
+	# file has. That is also what `ctl install` writes and what `ctl doctor` hashes (sha256 of RT_TOKEN and a newline).
+	printf '%s\n' "$token" > "$work_dir/secrets/token"
 }
 
 check_admin_password() {
@@ -229,8 +232,8 @@ check_admin_password
 check_domain
 check_config
 
-# frps reads the token once at startup and has no reload, so a digest that no longer matches the host file means the
-# running server holds an outdated token or config.
+# frps reads the token once at startup and has no reload, so a digest that no longer matches the host's token or config
+# means the running server holds an outdated one. The token's digest is of its canonical form (see check_token).
 sha256sum "$work_dir/secrets/token" > "$state_dir/token.sha256"
 sha256sum "$work_dir/bridge/frps.toml" > "$state_dir/config.sha256"
 
