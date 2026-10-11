@@ -19,4 +19,6 @@ In a throwaway VM with Docker, Compose and `uv` installed (for example `orb crea
 RT_E2E_SANDBOX=1 uv run pytest tests/unit tests/e2e/bridge
 ```
 
+Readiness is never a health state Docker polls: each stack waits for frps's `frps started successfully` and for its front's own start-up line (see `front_support.READY`).
+
 There is no per-test timeout: a line that never arrives blocks until the CI job's own limit.

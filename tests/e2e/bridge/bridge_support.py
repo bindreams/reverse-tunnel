@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -15,6 +15,7 @@ from logwait import LineTail, tail_compose
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_VARIABLE = "RT_E2E_SANDBOX"
 
+FRPS_READY = "frps started successfully"
 GOOD_TOKEN = "0123456789abcdef" * 4
 GOOD_PASSWORD = "correct-horse-battery_staple"
 GOOD_DOMAIN = "tunnel.example.com"
@@ -128,14 +129,22 @@ class Project:
     root: Path
     name: str
     values: dict[str, str]
+    tails: list[LineTail] = field(default_factory=list)  # logs followed since `up`, ended by `down`
 
     def write_env(self) -> None:
         (self.root / ".env").write_text("".join(f"{key}={value}\n" for key, value in self.values.items()))
 
-    def arguments(self, *, overlay: bool = False, extra_files: tuple[str, ...] = ()) -> list[str]:
-        """The global `docker compose` options that select this project and its files."""
+    def arguments(self,
+                  *,
+                  overlay: bool = False,
+                  extra_files: tuple[str, ...] = (),
+                  profiles: tuple[str, ...] = ()) -> list[str]:
+        """The global `docker compose` options that select this project, its files and its profiles."""
         names = ["compose.yaml", *(["compose.traefik.yaml"] if overlay else []), *extra_files]
-        return ["--project-name", self.name, *(argument for name in names for argument in ("-f", name))]
+        return [
+            "--project-name", self.name, *(argument for name in names for argument in ("-f", name)),
+            *(argument for profile in profiles for argument in ("--profile", profile))
+        ]
 
     def compose(self,
                 *args: str,
@@ -144,15 +153,54 @@ class Project:
         self.write_env()
         return run("docker", "compose", *self.arguments(overlay=overlay, extra_files=extra_files), *args, cwd=self.root)
 
-    def tail(self, service: str, *, overlay: bool = False, extra_files: tuple[str, ...] = ()) -> LineTail:
+    def tail(
+        self,
+        service: str,
+        *,
+        overlay: bool = False,
+        extra_files: tuple[str, ...] = (),
+        profiles: tuple[str, ...] = ()
+    ) -> LineTail:
         """Follow `service`'s log from its first line; see `logwait.tail_compose`."""
         self.write_env()
         return tail_compose(
             self.root,
             service,
-            compose_args=self.arguments(overlay=overlay, extra_files=extra_files),
+            compose_args=self.arguments(overlay=overlay, extra_files=extra_files, profiles=profiles),
             env=clean_environment(),
         )
+
+    def up(
+        self, *, overlay: bool = False, extra_files: tuple[str, ...] = (), profiles: tuple[str, ...] = ()
+    ) -> LineTail:
+        """Build and start the stack, then wait for frps to say it is serving; the frps log, followed from its start.
+
+        Nothing waits on the compose healthcheck, which Docker evaluates on a schedule: the test blocks on the line.
+        """
+        options = [argument for profile in profiles for argument in ("--profile", profile)]
+        started = self.compose(*options, "up", "--detach", "--build", overlay=overlay, extra_files=extra_files)
+        assert started.returncode == 0, started.stdout + started.stderr
+        log = self.tail("frps", overlay=overlay, extra_files=extra_files, profiles=profiles)
+        self.tails.append(log)
+        log.wait_for(FRPS_READY, after=0)
+        return log
+
+    def down(self, *, overlay: bool = False, extra_files: tuple[str, ...] = (), profiles: tuple[str, ...] = ()) -> None:
+        """End every followed log, then remove the containers, networks, volumes and the image built for the project."""
+        for log in self.tails:
+            log.close()
+        options = [argument for profile in profiles for argument in ("--profile", profile)]
+        removed = self.compose(
+            *options,
+            "down",
+            "--volumes",
+            "--remove-orphans",
+            "--rmi",
+            "local",
+            overlay=overlay,
+            extra_files=extra_files
+        )
+        assert removed.returncode == 0, removed.stderr
 
     def config(self, *, overlay: bool = False) -> dict:
         result = self.compose("config", "--format", "json", overlay=overlay)

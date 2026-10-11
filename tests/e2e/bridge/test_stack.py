@@ -1,4 +1,4 @@
-"""The real stack: image built by compose, container started with `up --wait`, admin API reached through its publish."""
+"""The real stack: image built by compose, container started, admin API reached through its publish."""
 
 import hashlib
 import json
@@ -17,18 +17,21 @@ def published_admin_url(project: Project) -> str:
 
 @pytest.fixture
 def running(project: Project) -> Project:
-    up = project.compose("up", "--detach", "--wait", "--build")
-    assert up.returncode == 0, up.stdout + up.stderr
+    project.up()
     return project
 
 
-def test_starts_and_reports_healthy_with_a_valid_token(project: Project):
-    up = project.compose("up", "--detach", "--wait", "--build")
-    assert up.returncode == 0, up.stdout + up.stderr
+def test_starts_with_a_valid_token_and_its_healthcheck_command_succeeds(project: Project):
+    """The healthcheck is run once, on request, rather than waited for until Docker's schedule reports a state."""
+    project.up()
     listing = project.compose("ps", "--format", "json")
     assert listing.returncode == 0, listing.stderr
     states = [json.loads(line) for line in listing.stdout.splitlines()]
-    assert [(s["Service"], s["State"], s["Health"]) for s in states] == [("frps", "running", "healthy")]
+    assert [(s["Service"], s["State"]) for s in states] == [("frps", "running")]
+    healthcheck = project.config()["services"]["frps"]["healthcheck"]["test"]
+    assert healthcheck[0] == "CMD"
+    probe = project.compose("exec", "-T", "frps", *healthcheck[1:])
+    assert probe.returncode == 0, probe.stdout + probe.stderr
 
 
 def test_admin_api_answers_on_the_published_port_from_the_host(running: Project):
@@ -126,12 +129,10 @@ def test_frps_carries_every_rt_variable_exactly_as_given(tmp_path):
     entries = [f"      {name}: {json.dumps(value.replace('$', '$$'))}" for name, value in SENTINELS.items()]
     (project.root / SENTINEL_FILE).write_text("\n".join(["services:", "  frps:", "    environment:", *entries]) + "\n")
     try:
-        up = project.compose("up", "--detach", "--wait", "--build", extra_files=(SENTINEL_FILE, ))
-        assert up.returncode == 0, up.stdout + up.stderr
+        project.up(extra_files=(SENTINEL_FILE, ))
         environment = environment_of_pid_one(project)
         given = {"RT_DOMAIN": DOMAIN, "RT_ADMIN_PASSWORD": PASSWORD, **SENTINELS}
         assert {name: value for name, value in environment.items() if name.startswith("RT_")} == given
         assert set(environment) - set(given) <= {"PATH", "HOSTNAME", "HOME", "PWD", "OLDPWD", "SHLVL"}
     finally:
-        down = project.compose("down", "--volumes", "--remove-orphans", "--rmi", "local", extra_files=(SENTINEL_FILE, ))
-        assert down.returncode == 0, down.stderr
+        project.down(extra_files=(SENTINEL_FILE, ))

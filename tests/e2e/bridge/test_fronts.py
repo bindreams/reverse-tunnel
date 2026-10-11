@@ -32,6 +32,12 @@ def test_websocket_echo_survives_the_bare_http_path(bare_stack, hosts, pinned):
     assert_echo(bare_stack, hosts, pinned)
 
 
+@pytest.mark.parametrize("protocol", ["quic", "websocket"])
+def test_the_other_control_protocols_register_and_echo_over_the_bare_stack(protocol, bare_stack, hosts, pinned):
+    """`quic` is the default `RT_PROTOCOL` (the UDP publish); `websocket` is plain WebSocket to the control port."""
+    assert_echo(bare_stack, hosts, pinned, protocol=protocol)
+
+
 def test_websocket_echo_survives_nginx(nginx_stack, hosts, pinned):
     assert_echo(nginx_stack, hosts, pinned)
 
@@ -76,10 +82,13 @@ def test_a_working_tunnel_answers_a_plain_get_as_websocat_through_every_front(fr
 
 @pytest.mark.parametrize("front", ["bare", "nginx", "caddy", "traefik"])
 def test_an_unregistered_label_is_frps_own_404_through_every_front(front, request):
+    """Measured: frps's page is `text/html` with a `Not Found` title and no Server header; a front's own 404 differs."""
     stack: Stack = request.getfixturevalue(f"{front}_stack")
     response = stack.request(f"nobody.{GOOD_DOMAIN}")
     assert response.status_code == 404
-    assert response.headers.get("server") != "websocat"
+    assert "server" not in response.headers
+    assert response.headers["content-type"].startswith("text/html")
+    assert "<title>Not Found</title>" in response.text
 
 
 def test_a_front_that_rewrites_the_host_header_404s(host_rewriting_nginx_stack, hosts):
@@ -88,7 +97,7 @@ def test_a_front_that_rewrites_the_host_header_404s(host_rewriting_nginx_stack, 
     registered = list_proxies(stack.admin, GOOD_PASSWORD, user=host.label)
     assert [(proxy.name, proxy.phase) for proxy in registered.items] == [(f"{host.label}.ssh", "online")]
     response = stack.request(f"{host.label}.{GOOD_DOMAIN}")
-    assert response.status_code == 404 and response.headers.get("server") != "websocat"
+    assert response.status_code == 404 and "<title>Not Found</title>" in response.text  # frps's page, not the front's
 
 
 # Published ports ======================================================================================================
@@ -100,8 +109,7 @@ def test_published_ports_match_the_env_file(tmp_path):
     """Fixed ports, because the point is that Docker publishes exactly what `.env` says; a busy port fails `up`."""
     project = make_project(tmp_path, RT_CONTROL_PORT=CONTROL, RT_VHOST_PORT=VHOST, RT_ADMIN_PORT=ADMIN)
     try:
-        up = project.compose("up", "--detach", "--wait", "--build")
-        assert up.returncode == 0, up.stdout + up.stderr
+        project.up()
 
         def published(port: int, protocol: str = "tcp") -> str:
             result = project.compose("port", "--protocol", protocol, "frps", str(port))
@@ -113,8 +121,7 @@ def test_published_ports_match_the_env_file(tmp_path):
         assert published(8080) == f"127.0.0.1:{VHOST}"
         assert published(7500) == f"127.0.0.1:{ADMIN}"
     finally:
-        down = project.compose("down", "--volumes", "--remove-orphans", "--rmi", "local")
-        assert down.returncode == 0, down.stderr
+        project.down()
 
 
 # The staging issuer ===================================================================================================

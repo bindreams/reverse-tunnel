@@ -32,8 +32,7 @@ def test_uninstall_takes_the_container_down_then_removes_secrets_and_a_later_up_
     try:
         assert cli.main(["install"], root=project.root) == 0
         assert project.token_file.read_text() == GOOD_TOKEN + "\n"
-        up = project.compose("up", "--detach", "--wait", "--build")
-        assert up.returncode == 0, up.stdout + up.stderr
+        project.up()
         assert len(running_containers(project)) == 1
 
         assert cli.main(["uninstall"], root=project.root) == 0
@@ -46,7 +45,6 @@ def test_uninstall_takes_the_container_down_then_removes_secrets_and_a_later_up_
         assert refused.returncode != 0 and "secrets/token" in refused.stderr
         assert not (project.root / "secrets").exists()  # compose did not make a root-owned directory in its place
     finally:
-        down = project.compose("down", "--volumes", "--remove-orphans", "--rmi", "local")
-        assert down.returncode == 0, down.stderr
+        project.down()
     output = capsys.readouterr()
     assert "removed secrets/" in output.out and "already absent" in output.out

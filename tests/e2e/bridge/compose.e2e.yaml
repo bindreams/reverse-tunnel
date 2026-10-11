@@ -2,7 +2,9 @@
 #   nginx    examples/nginx.conf (rendered by the test) in front of compose.yaml's frps
 #   caddy    examples/Caddyfile (rendered by the test) in front of compose.yaml's frps
 #   traefik  a Traefik v3 on the external network that compose.traefik.yaml attaches frps to
-# Both serve TLS from the test's own CA and publish 443 on a port Docker picks; the test reads it with `compose port`.
+# None of them has a healthcheck: the tests wait on each service's own log line (see front_support.READY), not on a
+# health state Docker polls on a schedule.
+# All serve TLS from the test's own CA and publish 443 on a port Docker picks; the test reads it with `compose port`.
 services:
   nginx:
     profiles: [nginx]
@@ -10,7 +12,7 @@ services:
     image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
     depends_on:
       frps:
-        condition: service_healthy
+        condition: service_started
     ports:
       - "127.0.0.1::443"
     volumes:
@@ -22,14 +24,6 @@ services:
         source: ./e2e/tls
         target: /etc/ssl/rt
         read_only: true
-    healthcheck:
-      # Connecting and then reading end-of-file from /dev/null succeeds exactly when something is listening.
-      test: ["CMD-SHELL", "nc 127.0.0.1 443 < /dev/null"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
-      start_interval: 1s
 
   caddy:
     profiles: [caddy]
@@ -37,7 +31,7 @@ services:
     image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
     depends_on:
       frps:
-        condition: service_healthy
+        condition: service_started
     ports:
       - "127.0.0.1::443"
     volumes:
@@ -49,14 +43,6 @@ services:
         source: ./e2e/tls
         target: /etc/ssl/rt
         read_only: true
-    healthcheck:
-      # Caddy listens only after it has loaded its configuration, so a listening port means the sites are live.
-      test: ["CMD-SHELL", "nc 127.0.0.1 443 < /dev/null"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
-      start_interval: 1s
 
   traefik:
     profiles: [traefik]
@@ -64,11 +50,13 @@ services:
     image: traefik:v3.7.14@sha256:575fa15b135078fe5e50aa847987d96dbddd7b093c172429618404df73f3fa7c
     depends_on:
       frps:
-        condition: service_healthy
+        condition: service_started
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.file.filename=/etc/traefik/dynamic.yaml
+      - --log.level=DEBUG
+      - --log.noColor=true
       - --entrypoints.websecure.address=:443
       - --entrypoints.websecure.http.tls=true
     ports:
@@ -88,16 +76,3 @@ services:
         source: ./e2e/tls
         target: /etc/ssl/rt
         read_only: true
-    healthcheck:
-      # Healthy means the routers from frps's labels are live, not merely that Traefik listens: a request for the control
-      # host reaches the router (frps answers 502, since it does not speak HTTP on its control port) instead of Traefik's
-      # own 404. Both routers arrive in one configuration, so the vhost router is live too.
-      test:
-        - CMD-SHELL
-        - |-
-          wget -S -O /dev/null --no-check-certificate --header 'Host: localhost' https://127.0.0.1:443/ 2>&1 | grep -E '^ *HTTP/' | grep -qv ' 404 '
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
-      start_interval: 1s

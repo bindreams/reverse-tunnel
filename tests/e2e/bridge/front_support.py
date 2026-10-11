@@ -1,5 +1,6 @@
 """The bridge stack under each front: bare HTTP, nginx, and the Traefik overlay. Every port is one Docker picked."""
 
+import re
 import shutil
 import ssl
 import uuid
@@ -9,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-from bridge_support import GOOD_DOMAIN, GOOD_PASSWORD, REPO_ROOT, Project, make_project, run
+from bridge_support import FRPS_READY, GOOD_DOMAIN, GOOD_PASSWORD, REPO_ROOT, Project, make_project, run
 from logwait import LineTail
 from pki import Pki
 
@@ -19,6 +20,14 @@ CONTROL_HOST = "localhost"  # a name every machine resolves, so no test needs DN
 STAGING_HOST = "staging.localhost"
 STAGING_ADDRESS = "127.0.0.1"  # the name-free way in: no SNI, so Traefik offers its default certificate
 FRONTS = ("bare", "nginx", "caddy", "traefik")
+# The line each front writes once it is serving what it was configured with; the tests wait on it, never on a health
+# state. Measured: nginx logs it after it has bound its sockets, Caddy after its servers run, Traefik (debug level, no
+# colour) when it has built the route for the control host from frps's labels.
+READY: dict[str, str | re.Pattern[str]] = {
+    "nginx": "start worker processes",
+    "caddy": '"msg":"serving initial configuration"',
+    "traefik": re.compile(r"Adding route for localhost .*routerName=rt-control@docker"),
+}
 
 # `examples/nginx.conf` as an operator copies it, adapted to a stack whose nginx is a container beside frps. Each edit is
 # (text, replacement, how many times the example holds it); an example that drifts fails here instead of being skipped.
@@ -82,9 +91,11 @@ class Stack:
     front: str
     pki: Pki
     frps_log: LineTail
+    front_log: LineTail | None
     admin: str  # base URL of frps's admin API, on the VM's loopback
     vhost: Endpoint  # where `<label>.<domain>` is served: the front's 443, or frps's own vhost publish when bare
-    control: Endpoint  # frps's control port, published directly
+    control: Endpoint  # frps's control port, published directly (tcp)
+    control_udp: Endpoint  # the same port number's UDP publish, which Docker assigns separately
     control_front: Endpoint | None  # the same control port reached through the front, as `RT_CONTROL_HOST`
     ca_file: Path
 
@@ -120,7 +131,7 @@ def prepare_files(project: Project, pki: Pki, front: str, *, rewrite_host: bool)
 
 @contextmanager
 def running_stack(directory: Path, pki: Pki, front: str, *, rewrite_host: bool = False) -> Generator[Stack]:
-    """Start the bridge under `front`, wait until Docker reports every service healthy, and take it down afterwards."""
+    """Start the bridge under `front`, wait for the log lines that say it is serving, and take it down afterwards."""
     assert front in FRONTS, front
     network = f"rt-e2e-proxy-{uuid.uuid4().hex[:10]}"
     project = make_project(
@@ -134,16 +145,19 @@ def running_stack(directory: Path, pki: Pki, front: str, *, rewrite_host: bool =
     (project.root / "e2e").mkdir()
     ca_file = prepare_files(project, pki, front, rewrite_host=rewrite_host)
     overlay = front == "traefik"
-    options = ("--profile", front) if front != "bare" else ()
+    profiles = (front, ) if front != "bare" else ()
+    options = tuple(argument for profile in profiles for argument in ("--profile", profile))
     extra = (COMPOSE_E2E, )
     if overlay:
         created = run("docker", "network", "create", network)
         assert created.returncode == 0, created.stderr
-    frps_log: LineTail | None = None
     try:
-        up = project.compose(*options, "up", "--detach", "--wait", "--build", overlay=overlay, extra_files=extra)
-        assert up.returncode == 0, up.stdout + up.stderr
-        frps_log = project.tail("frps", overlay=overlay, extra_files=extra)
+        frps_log = project.up(overlay=overlay, extra_files=extra, profiles=profiles)
+        front_log = None
+        if front != "bare":
+            front_log = project.tail(front, overlay=overlay, extra_files=extra, profiles=profiles)
+            project.tails.append(front_log)
+            front_log.wait_for(READY[front], after=0)
 
         def port(service: str, number: int, protocol: str = "tcp") -> int:
             result = project.compose(
@@ -159,19 +173,18 @@ def running_stack(directory: Path, pki: Pki, front: str, *, rewrite_host: bool =
             front=front,
             pki=pki,
             frps_log=frps_log,
+            front_log=front_log,
             admin=f"http://{loopback}:{port('frps', 7500)}",
             vhost=secure or Endpoint(loopback, port("frps", 8080)),
             control=Endpoint(loopback, port("frps", 8001)),
+            control_udp=Endpoint(loopback, port("frps", 8001, "udp")),
             control_front=secure,
             ca_file=ca_file,
         )
     finally:
-        if frps_log is not None:
-            frps_log.close()
-        down = project.compose(
-            *options, "down", "--volumes", "--remove-orphans", "--rmi", "local", overlay=overlay, extra_files=extra
-        )
-        if overlay:
-            removed = run("docker", "network", "rm", network)
-            assert removed.returncode == 0, removed.stderr
-        assert down.returncode == 0, down.stderr
+        try:
+            project.down(overlay=overlay, extra_files=extra, profiles=profiles)
+        finally:
+            if overlay:
+                removed = run("docker", "network", "rm", network)
+                assert removed.returncode == 0, removed.stderr

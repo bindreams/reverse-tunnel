@@ -70,8 +70,7 @@ def project(tmp_path: Path) -> Iterator[Project]:
     """A project whose published ports are all dynamic (`0`), so no test depends on a port being free."""
     project = make_project(tmp_path, RT_CONTROL_PORT="0", RT_VHOST_PORT="0", RT_ADMIN_PORT="0")
     yield project
-    down = project.compose("down", "--volumes", "--remove-orphans", "--rmi", "local")
-    assert down.returncode == 0, down.stderr
+    project.down()
 
 
 @pytest.fixture

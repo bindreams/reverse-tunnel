@@ -1,7 +1,8 @@
 """The host side of a tunnel, run as plain processes: websocat and frpc from the pinned release, an echo target behind.
 
-`host/frpc.toml` is the tracked file itself, expanded by frpc from the environment exactly as goetia hands it over, so
-the test fails if the shipped config stops working. Every wait is `LineTail.wait_for` on a log line a process writes.
+The commands and environments come from `goetia.yaml`, and `host/frpc.toml` is the tracked file itself, expanded by frpc
+from that environment, so the tests fail if the shipped manifest or config stops working. Every wait is
+`LineTail.wait_for` on a log line a process writes.
 """
 
 import hashlib
@@ -17,6 +18,7 @@ from pathlib import Path
 from bridge_support import GOOD_TOKEN, REPO_ROOT, clean_environment
 from front_support import CONTROL_HOST, Stack
 from logwait import ProcessTail, tail_process
+from manifest import daemon
 
 # The lines frp 0.71.0 writes, on the server and on the client. frps logs `close proxy [..] success` only when frpc sends
 # a CloseProxy (a config reload that drops the proxy); a frpc that is stopped or dies is logged as `proxy closing`.
@@ -66,35 +68,36 @@ class Host:
         self._reserved.bind(("127.0.0.1", 0))
         self.port: int = self._reserved.getsockname()[1]
 
+    def _launch(self, name: str, **values: str) -> tuple[list[str | Path], Path, dict[str, str]]:
+        """The manifest's command for daemon `name`, with the pinned binary in place of `bin/<name>`."""
+        entry = daemon(name, {"RT_WS_PORT": str(self.port), "RT_SSH_PORT": str(self._target_port), **values})
+        program = Path(entry.argv[0]).name
+        return [self._binaries[program], *entry.argv[1:]], Path(entry.cwd), entry.env
+
     def start_websocat(self) -> None:
-        """Start websocat and return once it is listening."""
-        self.websocat_log = spawn(
-            [
-                self._binaries["websocat"], "--stdout-announce-listening-ports", "--binary",
-                f"ws-l:127.0.0.1:{self.port}", f"tcp:127.0.0.1:{self._target_port}"
-            ],
-            env=clean_environment(),
-        )
+        """Start websocat as the manifest runs it, plus a flag that makes it say when it is listening."""
+        command, _, environment = self._launch("reverse-tunnel-websocat")
+        command.insert(1, "--stdout-announce-listening-ports")
+        self.websocat_log = spawn(command, env={**clean_environment(), **environment})
         self.websocat_log.wait_for(LISTENING, after=0)
 
     def start_frpc(self, server: tuple[str, int], protocol: str, ca_file: Path | None = None) -> None:
-        """Start frpc with the tracked `host/frpc.toml`; it has not registered anything when this returns."""
+        """Start frpc as the manifest runs it, on the tracked `host/frpc.toml`; it has not registered when this returns."""
+        command, cwd, environment = self._launch(
+            "reverse-tunnel-frpc",
+            RT_LABEL=self.label,
+            RT_SERVER_ADDR=server[0],
+            RT_SERVER_PORT=str(server[1]),
+            RT_PROTOCOL=protocol,
+        )
         root = self._directory / f"host-{self.label}-{uuid.uuid4().hex[:8]}"
         (root / "host").mkdir(parents=True)
         (root / "secrets").mkdir()
-        (root / "logs").mkdir()
+        (root / cwd).mkdir()
         (root / "host" / "frpc.toml").write_bytes((REPO_ROOT / "host" / "frpc.toml").read_bytes())
         (root / "secrets" / "token").write_text(GOOD_TOKEN + "\n")
-        environment = {
-            **clean_environment(),
-            "RT_LABEL": self.label,
-            "RT_SERVER_ADDR": server[0],
-            "RT_SERVER_PORT": str(server[1]),
-            "RT_PROTOCOL": protocol,
-            "RT_WS_PORT": str(self.port),
-            **({"SSL_CERT_FILE": str(ca_file)} if ca_file else {}),
-        }
-        self.frpc_log = spawn([self._binaries["frpc"], "-c", "../host/frpc.toml"], cwd=root / "logs", env=environment)
+        environment = {**clean_environment(), **environment, **({"SSL_CERT_FILE": str(ca_file)} if ca_file else {})}
+        self.frpc_log = spawn(command, cwd=root / cwd, env=environment)
 
     def stop_frpc(self) -> None:
         """Interrupt frpc as Ctrl-C does, which lets it tell the server it is leaving, and wait for it to exit."""
@@ -121,12 +124,15 @@ class Hosts:
         stack: Stack,
         *,
         label: str | None = None,
+        protocol: str = "tcp",
         through_front: bool = False,
         wait_for_registration: bool = True,
     ) -> Host:
         """Start a host for `label`; by default return once frps has registered it.
 
-        `through_front` connects as `RT_PROTOCOL=wss` to `RT_CONTROL_HOST` behind the front, trusting the test CA.
+        `protocol` is `RT_PROTOCOL`: `tcp`, `websocket` (plain, to the control port) and `quic` (to its UDP publish)
+        connect to frps directly. `through_front` connects as `wss` to `RT_CONTROL_HOST` behind the front, trusting the
+        test CA; a plain `websocket` cannot go that way, because the shipped front configs serve the control host over TLS.
         """
         host = Host(self._directory, self._binaries, label or new_label(), self._target_port)
         self._started.append(host)
@@ -136,7 +142,8 @@ class Hosts:
             assert stack.control_front is not None, "this stack has no front to reach the control port through"
             host.start_frpc((CONTROL_HOST, stack.control_front.port), "wss", stack.ca_file)
         else:
-            host.start_frpc((stack.control.host, stack.control.port), "tcp")
+            control = stack.control_udp if protocol == "quic" else stack.control
+            host.start_frpc((control.host, control.port), protocol)
         if wait_for_registration:
             stack.frps_log.wait_for(NEW_PROXY.format(label=host.label), after=mark)
         return host

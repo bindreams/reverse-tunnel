@@ -23,6 +23,8 @@ exempt. A marker that exempts nothing, or names no event, is itself a finding.
     no-timed-waits.py --markers     also list every marker that exempted something, with its event
 """
 
+from __future__ import annotations
+
 import argparse
 import ast
 import io
