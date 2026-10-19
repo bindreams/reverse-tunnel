@@ -1,5 +1,6 @@
 # This file is part of reverse-tunnel, licensed under AGPL-3.0-or-later; see LICENSE.md.
-"""Who may read `.env`, `secrets/` and `secrets/token`: each against the exact set `ctl install` gives it.
+"""Who may read `.env`, `secrets/` and `secrets/token`: each against the exact set `ctl install` gives it. On a Windows
+host it also checks the service's read of the repository root, `bin`, `host` and their files.
 
 Stat only, and never an open: `secrets/` is `0711` so that an unelevated operator can `stat` the token in
 separate-account mode, and that grants nothing but the name's existence, mode and owner. On POSIX the expectation is an
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from ctl import perms, winacl
 from ctl.config import Config, ConfigError, Role
-from ctl.doctor.model import Verdict, fail, ok
+from ctl.doctor.model import Verdict, fail, not_applicable, ok
 from ctl.doctor.probes import Probes
 from ctl.perms import PermsError
 
@@ -104,6 +105,38 @@ class Permissions:
             owner=self._secrets_owner,
             grants=lambda: self._secrets_grants(directory=False)
         )
+
+    def service_read(self) -> Verdict:
+        """The service's own read-and-execute ACE on the root, `bin`, `host` and each file in them, none inheritable.
+
+        The inheritable one an earlier `ctl install` wrote on the root makes NTFS rewrite every other entry there.
+        """
+        if not self.probes.windows:
+            return not_applicable("only Windows gives the service its access by ACE; POSIX uses the owner and mode")
+        paths = [self.root]
+        for directory in (self.root / "bin", self.root / "host"):
+            if directory.is_dir():
+                paths.append(directory)
+                paths += sorted(p for p in directory.iterdir() if p.is_file() and not p.is_symlink())
+        problems = [problem for path in paths for problem in self._service_ace_problems(path)]
+        if problems:
+            summary = f"the service's read access is wrong on {len(problems)} path(s); {INSTALL}"
+            return fail("\n".join([summary, *problems]))
+        return ok(f"LocalService reads {self.root}, bin, host and their files, with nothing inheritable")
+
+    def _service_ace_problems(self, path: Path) -> list[str]:
+        mine = [ace for ace in self.probes.acl(path).aces if ace.sid == winacl.SID_LOCAL_SERVICE]
+        explicit = [ace for ace in mine if not ace.flags & winacl.INHERITED_ACE]
+        if not explicit:
+            return [f"{path}: LocalService has no ACE of its own"]
+        problems = []
+        for ace in explicit:
+            described = _describe((ace.sid, ace.mask, ace.flags))
+            if ace.flags & INHERITANCE:
+                problems.append(f"{path}: {described} is inheritable; an earlier install wrote it")
+            if ace.mask != winacl.READ_EXECUTE:
+                problems.append(f"{path}: {described} is not ({RIGHTS[winacl.READ_EXECUTE]})")
+        return problems
 
     def _check(self, path: Path, mode: int, *, directory: bool, owner, grants) -> Verdict:
         try:

@@ -57,6 +57,7 @@ class Host:
             ("env_permissions", self.permissions.env),
             ("secrets_dir_permissions", self.permissions.secrets_dir),
             ("secrets_token_permissions", self.permissions.secrets_token),
+            ("service_read_permissions", self.permissions.service_read),
             ("tunnel_end_to_end", self.tunnel),
         ])
 
