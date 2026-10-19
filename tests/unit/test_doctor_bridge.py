@@ -274,7 +274,6 @@ HARDENING_VIOLATIONS = [
         '["no-new-privileges:false"]',
         id="npp-false",
     ),
-    pytest.param(host_config(ReadonlyRootfs=False), "HostConfig.ReadonlyRootfs", "false", id="writable-rootfs"),
     pytest.param(host_config(NetworkMode="host"), "HostConfig.NetworkMode", '"host"', id="host-network"),
     pytest.param(host_config(NetworkMode="none"), "HostConfig.NetworkMode", '"none"', id="no-network"),
     pytest.param(
@@ -335,21 +334,6 @@ HARDENING_VIOLATIONS = [
     pytest.param(host_config(Runtime="nvidia"), "HostConfig.Runtime", '"nvidia"', id="another-runtime"),
     pytest.param(host_config(Runtime=""), "HostConfig.Runtime", '""', id="no-runtime"),
     pytest.param(config(User="root"), "Config.User", '"root"', id="user"),
-    pytest.param(
-        host_config(Tmpfs={"/run/rt": "mode=0700", "/tmp": ""}),
-        "HostConfig.Tmpfs",
-        '{"/run/rt": "mode=0700", "/tmp": ""}',
-        id="extra-tmpfs",
-    ),
-    pytest.param(host_config(Tmpfs={}), "HostConfig.Tmpfs", "{}", id="tmpfs-missing"),
-    pytest.param(host_config(Tmpfs={"/run/other": ""}), "HostConfig.Tmpfs", '{"/run/other": ""}', id="tmpfs-elsewhere"),
-    pytest.param(
-        host_config(Tmpfs={"/run/rt": "mode=0777,exec"}),
-        "HostConfig.Tmpfs",
-        '{"/run/rt": "mode=0777,exec"}',
-        id="tmpfs-options-loosened",
-    ),
-    pytest.param(host_config(Tmpfs={"/run/rt": ""}), "HostConfig.Tmpfs", '{"/run/rt": ""}', id="tmpfs-options-dropped"),
     pytest.param(
         mounts(lambda found: found.append(DOCKER_SOCKET)),
         "Mounts",
@@ -438,6 +422,22 @@ def test_container_hardening_names_each_violation(world, change, field, value):
     check = hardening(world)
     assert check.outcome is Outcome.FAIL
     assert "\n- " + violation_line(field, value) in check.detail, check.detail
+
+
+@pytest.mark.parametrize(
+    "change", [
+        pytest.param(host_config(ReadonlyRootfs=False), id="writable-rootfs"),
+        pytest.param(host_config(ReadonlyRootfs=None), id="null-readonly-rootfs"),
+        pytest.param(host_config(Tmpfs={"/run/rt": "mode=0777,exec", "/tmp": ""}), id="different-tmpfs"),
+        pytest.param(host_config(Tmpfs={}), id="no-tmpfs"),
+        pytest.param(host_config(Tmpfs=None), id="null-tmpfs"),
+    ]
+)
+def test_the_containers_interior_is_not_held_to_compose_yamls_defaults(world, change):
+    # A writable root and other tmpfs mounts keep the container inside itself: compose.yaml ships them, doctor does not
+    # require them.
+    world.docker.altered(change)
+    assert hardening(world).outcome is Outcome.PASS
 
 
 def test_the_hardening_failure_says_recreating_from_compose_yaml_fixes_a_container_with_no_override(world):
@@ -538,9 +538,7 @@ NULLED = [
     pytest.param(host_config(CapDrop=None), "HostConfig.CapDrop is null;", id="CapDrop"),
     pytest.param(host_config(SecurityOpt=None), "HostConfig.SecurityOpt is null;", id="SecurityOpt"),
     pytest.param(lambda document: document.update(Mounts=None), "Mounts has no /rt/secrets/token;", id="Mounts"),
-    pytest.param(host_config(Tmpfs=None), "HostConfig.Tmpfs is {};", id="Tmpfs"),
     pytest.param(host_config(CapAdd=None), "HostConfig.CapAdd is [];", id="CapAdd"),
-    pytest.param(host_config(ReadonlyRootfs=None), "HostConfig.ReadonlyRootfs is null;", id="ReadonlyRootfs"),
     pytest.param(
         lambda document: document.update(Config=None),
         "`docker inspect` has no Config for the container, so its settings cannot be confirmed",

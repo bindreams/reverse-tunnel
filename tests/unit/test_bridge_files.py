@@ -221,8 +221,6 @@ def test_compose_capabilities_are_the_ones_the_allow_list_holds_the_container_to
 def test_compose_security_settings_are_the_ones_the_allow_list_holds_the_container_to():
     service = frps_service()
     assert service["security_opt"] == [f"{hardening.NO_NEW_PRIVILEGES}:true"]
-    assert service["read_only"] is True
-    assert service["tmpfs"] == [f"{hardening.TMPFS}:{hardening.TMPFS_OPTIONS}"]
 
 
 def test_compose_mounts_are_the_ones_the_allow_list_holds_the_container_to():
