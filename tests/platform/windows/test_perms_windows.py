@@ -243,8 +243,8 @@ def test_a_secret_is_never_written_under_the_permissive_inherited_acl(tmp_path):
     path = folder / "token"
     write_secret(path, b"secret", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}), root=tmp_path)
     assert winacl.read_acl(path).protected
-    assert SID_LOCAL_SERVICE in principals(path)
-    assert owner_of(tmp_path) not in principals(path)
+    # Administrators are always granted, and are the operator on an elevated run; nothing else is, the operator included.
+    assert principals(path) == {SID_LOCAL_SERVICE, SID_ADMINISTRATORS}
 
 
 def test_harden_file_refuses_a_directory_junction(tmp_path):
