@@ -10,7 +10,7 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import httpx
@@ -37,6 +37,52 @@ PORT_BINDINGS = {
     "7500/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7500"}],
 }
 SSH_BANNER = "SSH-2.0-OpenSSH_9.6"
+IMAGE_ID = "sha256:" + "ab" * 32
+IMAGE_ENV = ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "SSL_CERT_FILE=/etc/ssl/cert.pem"]
+RUNTIME = "runc"
+
+
+def hardened_container(root: Path, *, restart: str = "unless-stopped", bindings: dict | None = None) -> dict:
+    """`docker inspect` of the frps container as `compose.yaml` makes it, with the fields the checks read and no others."""
+    return {
+        "Image": IMAGE_ID,
+        "Config": {
+            "Image": "reverse-tunnel-frps",
+            "User": "",
+            "Env": [f"RT_DOMAIN={DOMAIN}", "RT_ADMIN_PASSWORD=not-a-real-password", *IMAGE_ENV],
+        },
+        "Mounts": [
+            {
+                "Type": "bind", "Source": str(root / "secrets" / "token"), "Destination": "/rt/secrets/token",
+                "Mode": "ro", "RW": False
+            },
+            {
+                "Type": "bind", "Source": str(root / "bridge" / "frps.toml"), "Destination": "/rt/bridge/frps.toml",
+                "Mode": "ro", "RW": False
+            },
+        ],
+        "HostConfig": {
+            "RestartPolicy": {"Name": restart},
+            "PortBindings": PORT_BINDINGS if bindings is None else bindings,
+            "CapDrop": ["ALL"],
+            "CapAdd": ["DAC_READ_SEARCH"],
+            "Privileged": False,
+            "SecurityOpt": ["no-new-privileges:true"],
+            "ReadonlyRootfs": True,
+            "NetworkMode": "bridge-deployment_default",
+            "PidMode": "",
+            "UsernsMode": "",
+            "IpcMode": "private",
+            "UTSMode": "",
+            "CgroupnsMode": "private",
+            "Devices": [],
+            "Tmpfs": {"/run/rt": "mode=0700"},
+            "Sysctls": None,
+            "DeviceCgroupRules": None,
+            "DeviceRequests": None,
+            "Runtime": RUNTIME,
+        },
+    }
 
 
 def sha256(data: bytes) -> str:
@@ -57,11 +103,16 @@ def failures(checks: Sequence[Check]) -> list[str]:
 
 
 class FakeDocker:
-    """Scripted `docker` answers keyed by argv tokens; the first rule whose tokens all appear in a call answers it."""
+    """Scripted `docker` answers keyed by argv tokens.
 
-    def __init__(self) -> None:
+    A call is answered by the rule with the most tokens that all appear in it, the latest registered among equals. So
+    `on("image", "inspect")` is not displaced by a later `on("inspect")`, which `image inspect` also contains.
+    """
+
+    def __init__(self, root: Path | None = None) -> None:
         self.rules: list[tuple[tuple[str, ...], subprocess.CompletedProcess[str] | Exception]] = []
         self.calls: list[list[str]] = []
+        self.root = root or Path("/srv/reverse-tunnel")
 
     def on(self, *match: str, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
         self.rules.insert(0, (match, subprocess.CompletedProcess(list(match), returncode, stdout, stderr)))
@@ -71,11 +122,13 @@ class FakeDocker:
 
     def __call__(self, args: Sequence[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(args))
-        for match, answer in self.rules:
-            if all(token in args for token in match):
-                if isinstance(answer, Exception):
-                    raise answer
-                return answer
+        matching = [(match, answer) for match, answer in self.rules if all(token in args for token in match)]
+        if matching:
+            # `max` returns the first of equals, and `on` puts the latest rule first.
+            answer = max(matching, key=lambda rule: len(rule[0]))[1]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         raise AssertionError(f"unscripted docker call: docker {' '.join(args)}")
 
     def healthy(
@@ -90,8 +143,15 @@ class FakeDocker:
         entry = PS_ENTRY | {"State": state, "Health": health}
         self.on("version", stdout="27.0.0\n")
         self.on("ps", stdout=json.dumps(entry) + "\n")
-        inspected = [{"HostConfig": {"RestartPolicy": {"Name": restart}, "PortBindings": bindings or PORT_BINDINGS}}]
-        self.on("inspect", stdout=json.dumps(inspected))
+        self.on("inspect", stdout=json.dumps([hardened_container(self.root, restart=restart, bindings=bindings)]))
+        self.on("image", "inspect", stdout=json.dumps([{"Config": {"Env": IMAGE_ENV}}]))
+        self.on("info", stdout=json.dumps({"DefaultRuntime": RUNTIME, "CgroupVersion": "2"}))
+
+    def altered(self, change: Callable[[dict], None]) -> None:
+        """The container as `healthy` leaves it, after `change` edits its `docker inspect` document in place."""
+        document = hardened_container(self.root)
+        change(document)
+        self.on("inspect", stdout=json.dumps([document]))
 
     def recorded(self, *, config: bytes, token: bytes) -> None:
         """The digests the entrypoint wrote in the container, in `sha256sum`'s format."""
@@ -221,13 +281,16 @@ class World:
     """The deployment under test and the fakes standing for the machine around it."""
 
     root: Path
-    docker: FakeDocker = dataclasses.field(default_factory=FakeDocker)
+    docker: FakeDocker = dataclasses.field(init=False)
     net: Net = dataclasses.field(default_factory=Net)
     tcp: FakeTcp = dataclasses.field(default_factory=FakeTcp)
     tls: FakeTls = dataclasses.field(default_factory=FakeTls)
     granted: dict[Path, frozenset[str]] = dataclasses.field(
         default_factory=dict
     )  # what a path grants, where not as installed
+
+    def __post_init__(self) -> None:
+        self.docker = FakeDocker(self.root)
 
     @property
     def config(self) -> Config:
