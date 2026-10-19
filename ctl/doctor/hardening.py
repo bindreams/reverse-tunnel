@@ -59,18 +59,15 @@ def same_path(found: str, wanted: Path) -> bool:
         return Path(found) == wanted
 
 
-def violations(
-    container: Mapping[str, Any], *, image_env: Collection[str], runtime: str, cgroup_version: str, root: Path
-) -> list[str]:
+def violations(container: Mapping[str, Any], *, image_env: Collection[str], runtime: str, root: Path) -> list[str]:
     """Every way the `docker inspect` document `container` departs from compose.yaml's security settings.
 
-    `image_env` is the variable names the image itself declares, `runtime` the daemon's default runtime and
-    `cgroup_version` the daemon's (`"1"` or `"2"`).
+    `image_env` is the variable names the image itself declares and `runtime` the daemon's default runtime.
     """
     host, config = container.get("HostConfig"), container.get("Config")
     problems = []
     if isinstance(host, dict):
-        problems += host_violations(host, runtime=runtime, cgroup_version=cgroup_version)
+        problems += host_violations(host, runtime=runtime)
     else:
         problems.append("`docker inspect` has no HostConfig for the container, so its settings cannot be confirmed")
     if isinstance(config, dict):
@@ -80,7 +77,7 @@ def violations(
     return problems + mount_violations(container.get("Mounts"), root)
 
 
-def host_violations(host: Mapping[str, Any], *, runtime: str, cgroup_version: str) -> list[str]:
+def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
     problems = []
 
     def check(field: str, holds: bool, wanted: str, found: Any = None) -> None:
@@ -116,9 +113,8 @@ def host_violations(host: Mapping[str, Any], *, runtime: str, cgroup_version: st
     check("Tmpfs", tmpfs == [TMPFS], f"compose.yaml sets exactly tmpfs: [{TMPFS}]", tmpfs)
     check(
         "CgroupnsMode",
-        text(host.get("CgroupnsMode")) in ("", "private")
-        or (host.get("CgroupnsMode") == "host" and cgroup_version == "1"),
-        "compose.yaml uses a private cgroup namespace (the host's only on a cgroup v1 daemon, where it is the default)",
+        host.get("CgroupnsMode") == "private",
+        "compose.yaml sets cgroup: private, because a daemon's default may be the host's namespace",
     )
     check("Runtime", text(host.get("Runtime")) == runtime, f"compose.yaml uses the daemon's default runtime, {runtime}")
     published = listing(mapping(host.get("PortBindings")).get(ADMIN_PORT))

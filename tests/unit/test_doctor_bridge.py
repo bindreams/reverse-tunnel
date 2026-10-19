@@ -253,7 +253,7 @@ HARDENING_VIOLATIONS = [
     pytest.param(host_config(IpcMode="host"), "HostConfig.IpcMode", id="host-ipc"),
     pytest.param(host_config(IpcMode="container:abc123"), "HostConfig.IpcMode", id="shared-ipc"),
     pytest.param(host_config(UTSMode="host"), "HostConfig.UTSMode", id="host-uts"),
-    pytest.param(host_config(CgroupnsMode="host"), "HostConfig.CgroupnsMode", id="host-cgroupns-on-cgroup-v2"),
+    pytest.param(host_config(CgroupnsMode="host"), "HostConfig.CgroupnsMode", id="host-cgroupns"),
     pytest.param(host_config(Devices=[{"PathOnHost": "/dev/mem"}]), "HostConfig.Devices", id="device"),
     pytest.param(host_config(Sysctls={"net.ipv4.ip_forward": "1"}), "HostConfig.Sysctls", id="sysctl"),
     pytest.param(host_config(DeviceCgroupRules=["c *:* rwm"]), "HostConfig.DeviceCgroupRules", id="device-cgroup-rule"),
@@ -332,14 +332,17 @@ def test_a_daemon_that_cannot_say_its_defaults_fails_the_check_closed_with_docke
     assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
 
 
-def test_a_host_cgroupns_passes_on_a_cgroup_v1_daemon(world):
+@pytest.mark.parametrize("mode", ["host", ""])
+def test_only_a_private_cgroupns_passes_whatever_the_daemons_cgroup_version(world, mode):
+    # compose.yaml pins `cgroup: private`, so a daemon default of `host` cannot make a stock container differ.
     world.docker.on("info", stdout=json.dumps({"DefaultRuntime": "runc", "CgroupVersion": "1"}))
-    world.docker.altered(host_config(CgroupnsMode="host"))
-    assert hardening(world).outcome is Outcome.PASS
+    world.docker.altered(host_config(CgroupnsMode=mode))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "HostConfig.CgroupnsMode" in check.detail
 
 
 def test_the_runtime_the_daemon_defaults_to_is_the_one_the_container_must_use(world):
-    world.docker.on("info", stdout=json.dumps({"DefaultRuntime": "crun", "CgroupVersion": "2"}))
+    world.docker.on("info", stdout=json.dumps({"DefaultRuntime": "crun"}))
     world.docker.altered(host_config(Runtime="crun"))
     assert hardening(world).outcome is Outcome.PASS
 

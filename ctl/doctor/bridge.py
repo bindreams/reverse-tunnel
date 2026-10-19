@@ -182,14 +182,13 @@ class Bridge:
                          if isinstance(entry, str)) if isinstance(environment, list) else frozenset()
 
     @functools.cached_property
-    def daemon_defaults(self) -> tuple[str, str]:
-        """The daemon's default runtime and cgroup version, which a container made without asking for either gets."""
+    def default_runtime(self) -> str:
+        """The daemon's default runtime, which a container made without asking for one gets."""
         document = self.docker_json("info", "info", "--format", "{{json .}}")
         runtime = document.get("DefaultRuntime") if isinstance(document, dict) else None
         if not isinstance(runtime, str) or not runtime:
             raise DockerProblem("`docker info` does not name the daemon's default runtime")
-        version = document.get("CgroupVersion")
-        return runtime, version if isinstance(version, str) else ""
+        return runtime
 
     def docker_json(self, shown: str, *args: str) -> Any:
         result = self.docker(*args)
@@ -280,14 +279,8 @@ class Bridge:
         """The live container against compose.yaml's security settings, however the container came to be started."""
         try:
             container = self.inspected  # first, so no container or no Docker is n/a whatever `docker info` says
-            runtime, cgroup_version = self.daemon_defaults
-            problems = hardening.violations(
-                container,
-                image_env=self.image_env_names,
-                runtime=runtime,
-                cgroup_version=cgroup_version,
-                root=self.root
-            )
+            runtime = self.default_runtime
+            problems = hardening.violations(container, image_env=self.image_env_names, runtime=runtime, root=self.root)
         except DockerProblem as exc:
             return fail(f"the container's security settings could not be checked: {exc}")
         if problems:
