@@ -12,7 +12,9 @@ BRIDGE = REPO_ROOT / "bridge"
 FRPS_TOML = BRIDGE / "frps.toml"
 DOCKERFILE = BRIDGE / "Dockerfile"
 ENTRYPOINT = BRIDGE / "entrypoint.sh"
-COMPOSE_FILES = [REPO_ROOT / "compose.yaml", REPO_ROOT / "compose.traefik.yaml"]
+COMPOSE_FILES = [
+    REPO_ROOT / "compose.yaml", REPO_ROOT / "compose.traefik.yaml", REPO_ROOT / "examples" / "compose.override.yaml"
+]
 LOCK = REPO_ROOT / "binaries.lock.toml"
 
 # frps.toml ============================================================================================================
