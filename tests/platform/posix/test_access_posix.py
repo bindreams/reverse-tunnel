@@ -20,6 +20,7 @@ def mine() -> Account:
 def path(tmp_path):
     target = tmp_path / "target"
     target.write_text("x")
+    os.chown(target, -1, os.getgid())  # BSD gives a new file its directory's group, not the process's
     return target
 
 
