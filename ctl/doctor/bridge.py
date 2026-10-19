@@ -302,7 +302,10 @@ class Bridge:
         if found.unread and not found.problems:
             # Nothing else is wrong, so the lookup is all there is to report; a failed one outranks a vanished volume.
             causes = [unread.cause for unread in found.unread]
-            raise next((cause for cause in causes if isinstance(cause, DockerProblem)), causes[0])
+            failed = next((cause for cause in causes if isinstance(cause, DockerProblem)), None)
+            if failed is not None:
+                return fail(f"the container's security settings could not be checked: {failed}")
+            raise causes[0]
         if found.problems:
             lines = "".join(f"\n- {line}" for line in found.problems + [unread.line for unread in found.unread])
             return fail(
