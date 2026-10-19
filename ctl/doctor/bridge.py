@@ -284,8 +284,10 @@ class Bridge:
         if problems:
             lines = "".join(f"\n- {problem}" for problem in problems)
             return fail(
-                f"the container departs from compose.yaml's security settings. Remove the cause (a compose override, "
-                f"or a container started some other way), then recreate it with `{RECREATE}`:{lines}"
+                f"the container departs from compose.yaml's security settings. Remove the cause (a compose override, or a "
+                f"container started some other way), then recreate the container from compose.yaml with `{RECREATE}`. "
+                f"A container created before an upgrade that tightened these rules has no override to remove; "
+                f"recreating it is the fix:{lines}"
             )
         return ok("the container matches compose.yaml's security settings")
 
