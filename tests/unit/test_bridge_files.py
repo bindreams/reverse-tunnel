@@ -2,6 +2,7 @@ import re
 import tomllib
 
 import pytest
+import yaml
 
 from ctl import config
 from ctl.env import GO_TEMPLATE_REFERENCE
@@ -158,6 +159,12 @@ def test_every_compose_variable_is_required_with_a_message(path):
 @pytest.mark.parametrize("path", COMPOSE_FILES, ids=lambda path: path.name)
 def test_compose_files_do_not_load_env_file(path):
     assert "env_file" not in path.read_text(encoding="utf-8")
+
+
+def test_compose_pins_a_private_cgroup_namespace():
+    # The daemon's default may be `host`, which `docker info` does not show; container_hardening requires `private`.
+    compose = yaml.safe_load((REPO_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    assert compose["services"]["frps"]["cgroup"] == "private"
 
 
 # front proxy examples =================================================================================================

@@ -145,7 +145,7 @@ class FakeDocker:
         self.on("ps", stdout=json.dumps(entry) + "\n")
         self.on("inspect", stdout=json.dumps([hardened_container(self.root, restart=restart, bindings=bindings)]))
         self.on("image", "inspect", stdout=json.dumps([{"Config": {"Env": IMAGE_ENV}}]))
-        self.on("info", stdout=json.dumps({"DefaultRuntime": RUNTIME, "CgroupVersion": "2"}))
+        self.on("info", stdout=json.dumps({"DefaultRuntime": RUNTIME}))
 
     def altered(self, change: Callable[[dict], None]) -> None:
         """The container as `healthy` leaves it, after `change` edits its `docker inspect` document in place."""
