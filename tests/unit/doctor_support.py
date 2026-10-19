@@ -22,6 +22,23 @@ from ctl import perms
 from ctl.client import WEBSOCAT
 from ctl.config import Config, Role
 from ctl.doctor import Check, Outcome
+from ctl.doctor.hardening import (
+    ADMIN_PORT,
+    CAPABILITY,
+    CGROUPNS_MODE,
+    CONFIG_SOURCE,
+    CONFIG_TARGET,
+    ENVIRONMENT,
+    IPC_MODE,
+    LOOPBACK,
+    MASKED_PATHS,
+    NO_NEW_PRIVILEGES,
+    READONLY_PATHS,
+    TMPFS,
+    TMPFS_OPTIONS,
+    TOKEN_SOURCE,
+    TOKEN_TARGET,
+)
 from ctl.doctor.probes import Probes, TcpResult, TlsProbeError
 
 LABEL = "alpha"
@@ -35,14 +52,14 @@ PORT_BINDINGS = {
     "8001/tcp": [{"HostIp": "", "HostPort": "7000"}],
     "8001/udp": [{"HostIp": "", "HostPort": "7000"}],
     "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}],
-    "7500/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7500"}],
+    ADMIN_PORT: [{"HostIp": LOOPBACK, "HostPort": "7500"}],
 }
 # What the daemon actually published, as `NetworkSettings.Ports` reports it (a port nothing is published for maps to null).
 ACTUAL_PORTS = {
     "8001/tcp": [{"HostIp": "0.0.0.0", "HostPort": "7000"}, {"HostIp": "::", "HostPort": "7000"}],
     "8001/udp": [{"HostIp": "0.0.0.0", "HostPort": "7000"}, {"HostIp": "::", "HostPort": "7000"}],
     "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}],
-    "7500/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7500"}],
+    ADMIN_PORT: [{"HostIp": LOOPBACK, "HostPort": "7500"}],
 }
 SSH_BANNER = "SSH-2.0-OpenSSH_9.6"
 IMAGE_ID = "sha256:" + "ab" * 32
@@ -61,16 +78,17 @@ def hardened_container(root: Path, *, restart: str = "unless-stopped", bindings:
             "User": "",
             "Entrypoint": ENTRYPOINT,
             "Cmd": COMMAND,
-            "Env": [f"RT_DOMAIN={DOMAIN}", "RT_ADMIN_PASSWORD=not-a-real-password", *IMAGE_ENV],
+            "Env": [f"{name}=not-a-real-value" for name in sorted(ENVIRONMENT)] + IMAGE_ENV,
         },
+        "State": {"Running": True},
         "Mounts": [
             {
-                "Type": "bind", "Source": str(root / "secrets" / "token"), "Destination": "/rt/secrets/token",
-                "Mode": "ro", "RW": False
+                "Type": "bind", "Source": str(root / TOKEN_SOURCE), "Destination": TOKEN_TARGET, "Mode": "ro",
+                "RW": False
             },
             {
-                "Type": "bind", "Source": str(root / "bridge" / "frps.toml"), "Destination": "/rt/bridge/frps.toml",
-                "Mode": "ro", "RW": False
+                "Type": "bind", "Source": str(root / CONFIG_SOURCE), "Destination": CONFIG_TARGET, "Mode": "ro",
+                "RW": False
             },
         ],
         "HostConfig": {
@@ -78,18 +96,20 @@ def hardened_container(root: Path, *, restart: str = "unless-stopped", bindings:
             "PublishAllPorts": False,
             "PortBindings": PORT_BINDINGS if bindings is None else bindings,
             "CapDrop": ["ALL"],
-            "CapAdd": ["DAC_READ_SEARCH"],
+            "CapAdd": [CAPABILITY],
             "Privileged": False,
-            "SecurityOpt": ["no-new-privileges:true"],
+            "SecurityOpt": [f"{NO_NEW_PRIVILEGES}:true"],
             "ReadonlyRootfs": True,
             "NetworkMode": "bridge-deployment_default",
             "PidMode": "",
             "UsernsMode": "",
-            "IpcMode": "private",
+            "IpcMode": IPC_MODE,
             "UTSMode": "",
-            "CgroupnsMode": "private",
+            "CgroupnsMode": CGROUPNS_MODE,
             "Devices": [],
-            "Tmpfs": {"/run/rt": "mode=0700"},
+            "Tmpfs": {TMPFS: TMPFS_OPTIONS},
+            "MaskedPaths": sorted(MASKED_PATHS),
+            "ReadonlyPaths": sorted(READONLY_PATHS),
             "Sysctls": None,
             "DeviceCgroupRules": None,
             "DeviceRequests": None,
