@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 TOKEN_TARGET, CONFIG_TARGET = "/rt/secrets/token", "/rt/bridge/frps.toml"
-TMPFS = "/run/rt"
+# compose.yaml's `tmpfs: [/run/rt:mode=0700]`, which Docker stores as the map {path: options}.
+TMPFS, TMPFS_OPTIONS = "/run/rt", "mode=0700"
 ENVIRONMENT = frozenset({"RT_DOMAIN", "RT_ADMIN_PASSWORD"})
 CAPABILITY = "DAC_READ_SEARCH"
 NO_NEW_PRIVILEGES = "no-new-privileges"
@@ -118,8 +119,10 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
         check(field, text(host.get(field)) == "", "compose.yaml sets none")
     for field in EMPTY_COLLECTIONS:
         check(field, not host.get(field), "compose.yaml sets none")
-    tmpfs = sorted(mapping(host.get("Tmpfs")))
-    check("Tmpfs", tmpfs == [TMPFS], f"compose.yaml sets exactly tmpfs: [{TMPFS}]", tmpfs)
+    tmpfs = dict(mapping(host.get("Tmpfs")))
+    check(
+        "Tmpfs", tmpfs == {TMPFS: TMPFS_OPTIONS}, f"compose.yaml sets exactly tmpfs: [{TMPFS}:{TMPFS_OPTIONS}]", tmpfs
+    )
     check(
         "CgroupnsMode",
         host.get("CgroupnsMode") == "private",

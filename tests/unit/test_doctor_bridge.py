@@ -318,11 +318,18 @@ HARDENING_VIOLATIONS = [
     pytest.param(
         host_config(Tmpfs={"/run/rt": "mode=0700", "/tmp": ""}),
         "HostConfig.Tmpfs",
-        '["/run/rt", "/tmp"]',
+        '{"/run/rt": "mode=0700", "/tmp": ""}',
         id="extra-tmpfs",
     ),
-    pytest.param(host_config(Tmpfs={}), "HostConfig.Tmpfs", "[]", id="tmpfs-missing"),
-    pytest.param(host_config(Tmpfs={"/run/other": ""}), "HostConfig.Tmpfs", '["/run/other"]', id="tmpfs-elsewhere"),
+    pytest.param(host_config(Tmpfs={}), "HostConfig.Tmpfs", "{}", id="tmpfs-missing"),
+    pytest.param(host_config(Tmpfs={"/run/other": ""}), "HostConfig.Tmpfs", '{"/run/other": ""}', id="tmpfs-elsewhere"),
+    pytest.param(
+        host_config(Tmpfs={"/run/rt": "mode=0777,exec"}),
+        "HostConfig.Tmpfs",
+        '{"/run/rt": "mode=0777,exec"}',
+        id="tmpfs-options-loosened",
+    ),
+    pytest.param(host_config(Tmpfs={"/run/rt": ""}), "HostConfig.Tmpfs", '{"/run/rt": ""}', id="tmpfs-options-dropped"),
     pytest.param(
         mounts(lambda found: found.append(DOCKER_SOCKET)),
         "Mounts",
