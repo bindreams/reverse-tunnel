@@ -104,6 +104,21 @@ def test_account_can_raises_when_the_wrapper_fails(monkeypatch, ran, needle):
     assert "not traversable" not in message
 
 
+def test_account_can_reports_undecodable_wrapper_output_as_an_install_error(monkeypatch):
+    """A wrapper message in a non-UTF-8 locale must not escape as a UnicodeDecodeError."""
+    stderr = b"runuser: \xff\xfe\n"
+
+    def run(argv, **kwargs):
+        errors = kwargs.get("errors", "strict")
+        return subprocess.CompletedProcess(argv, 1, "", stderr.decode("utf-8", errors=errors))
+
+    monkeypatch.setattr(access.subprocess, "run", run)
+    with pytest.raises(InstallError) as raised:
+        access.account_can(SERVICE, "-x", Path("/srv/rt"))
+    message = str(raised.value)
+    assert "runuser -u rt-test-svc" in message and "/srv/rt" in message
+
+
 @pytest.mark.parametrize(("platform", "prefix"), [("linux", ["runuser", "-u", "rt-test-svc", "--"]),
                                                   ("darwin", ["sudo", "-n", "-u", "rt-test-svc"])])
 def test_account_can_builds_the_platform_command(monkeypatch, platform, prefix):
