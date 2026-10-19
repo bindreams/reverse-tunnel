@@ -34,8 +34,6 @@ from ctl.doctor.hardening import (
     MASKED_PATHS,
     NO_NEW_PRIVILEGES,
     READONLY_PATHS,
-    TMPFS,
-    TMPFS_OPTIONS,
     TOKEN_SOURCE,
     TOKEN_TARGET,
 )
@@ -107,7 +105,7 @@ def hardened_container(root: Path, *, restart: str = "unless-stopped", bindings:
             "UTSMode": "",
             "CgroupnsMode": CGROUPNS_MODE,
             "Devices": [],
-            "Tmpfs": {TMPFS: TMPFS_OPTIONS},
+            "Tmpfs": {"/run/rt": "mode=0700"},
             "MaskedPaths": sorted(MASKED_PATHS),
             "ReadonlyPaths": sorted(READONLY_PATHS),
             "Sysctls": None,

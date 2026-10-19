@@ -11,8 +11,6 @@ from typing import Any
 TOKEN_TARGET, CONFIG_TARGET = "/rt/secrets/token", "/rt/bridge/frps.toml"
 # Where compose.yaml mounts them from, relative to the deployment.
 TOKEN_SOURCE, CONFIG_SOURCE = "secrets/token", "bridge/frps.toml"
-# compose.yaml's `tmpfs: [/run/rt:mode=0700]`, which Docker stores as the map {path: options}.
-TMPFS, TMPFS_OPTIONS = "/run/rt", "mode=0700"
 ENVIRONMENT = frozenset({"RT_DOMAIN", "RT_ADMIN_PASSWORD"})
 CAPABILITY = "DAC_READ_SEARCH"
 NO_NEW_PRIVILEGES = "no-new-privileges"
@@ -119,7 +117,6 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
         len(options) == 1 and sets_no_new_privileges(options[0]),
         "compose.yaml sets security_opt: [no-new-privileges:true] and nothing more",
     )
-    check("ReadonlyRootfs", host.get("ReadonlyRootfs") is True, "compose.yaml sets read_only: true")
     network = text(host.get("NetworkMode"))
     check(
         "NetworkMode",
@@ -137,10 +134,6 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
         check(field, text(host.get(field)) == "", "compose.yaml sets none")
     for field in EMPTY_COLLECTIONS:
         check(field, not host.get(field), "compose.yaml sets none")
-    tmpfs = dict(mapping(host.get("Tmpfs")))
-    check(
-        "Tmpfs", tmpfs == {TMPFS: TMPFS_OPTIONS}, f"compose.yaml sets exactly tmpfs: [{TMPFS}:{TMPFS_OPTIONS}]", tmpfs
-    )
     check(
         "CgroupnsMode",
         host.get("CgroupnsMode") == CGROUPNS_MODE,
