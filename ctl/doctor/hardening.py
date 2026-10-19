@@ -16,7 +16,9 @@ TOKEN_TARGET, CONFIG_TARGET = "/rt/secrets/token", "/rt/bridge/frps.toml"
 TMPFS = "/run/rt"
 ENVIRONMENT = frozenset({"RT_DOMAIN", "RT_ADMIN_PASSWORD"})
 CAPABILITY = "DAC_READ_SEARCH"
-NO_NEW_PRIVILEGES = frozenset({"no-new-privileges", "no-new-privileges:true", "no-new-privileges=true"})
+NO_NEW_PRIVILEGES = "no-new-privileges"
+# What Go's strconv.ParseBool reads as true, which is how Docker reads the value after `:` or `=`.
+GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 ADMIN_PORT, LOOPBACK = "7500/tcp", "127.0.0.1"
 # Each is empty in compose.yaml; the name is what the message points at.
 EMPTY_STRINGS = ("PidMode", "UsernsMode", "UTSMode")
@@ -42,6 +44,12 @@ def shown(value: Any) -> str:
 def capability(name: Any) -> str:
     name = text(name).upper()
     return name.removeprefix("CAP_")
+
+
+def sets_no_new_privileges(option: str) -> bool:
+    """Whether Docker reads the security option as `no-new-privileges` on: bare, or with a true value after `:` or `=`."""
+    name, separator, value = option.partition("=") if "=" in option else option.partition(":")
+    return name == NO_NEW_PRIVILEGES and (not separator or value in GO_TRUE)
 
 
 def shares(mode: str) -> bool:
@@ -94,7 +102,7 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
     options = [text(option) for option in listing(host.get("SecurityOpt"))]
     check(
         "SecurityOpt",
-        len(options) == 1 and options[0] in NO_NEW_PRIVILEGES,
+        len(options) == 1 and sets_no_new_privileges(options[0]),
         "compose.yaml sets security_opt: [no-new-privileges:true] and nothing more",
     )
     check("ReadonlyRootfs", host.get("ReadonlyRootfs") is True, "compose.yaml sets read_only: true")
