@@ -1,4 +1,4 @@
-"""The traversal seam on Windows."""
+"""The traversal check on Windows."""
 
 from ctl import access
 from ctl.perms import Account
