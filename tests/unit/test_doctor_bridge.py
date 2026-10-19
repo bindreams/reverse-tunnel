@@ -232,77 +232,146 @@ def test_container_hardening_passes_for_the_shipped_compose_shape(world):
 
 
 DOCKER_SOCKET = {"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True}
+# Each case: the edit, the field the message names, and the value text it reports on that same line.
 HARDENING_VIOLATIONS = [
-    pytest.param(host_config(CapDrop=[]), "HostConfig.CapDrop", id="no-cap-drop"),
-    pytest.param(host_config(CapDrop=["NET_RAW"]), "HostConfig.CapDrop", id="cap-drop-without-all"),
-    pytest.param(host_config(CapAdd=["DAC_READ_SEARCH", "SYS_ADMIN"]), "SYS_ADMIN", id="extra-capability"),
-    pytest.param(host_config(CapAdd=[]), "HostConfig.CapAdd", id="capability-missing"),
-    pytest.param(host_config(Privileged=True), "HostConfig.Privileged", id="privileged"),
-    pytest.param(host_config(SecurityOpt=["seccomp=unconfined"]), "seccomp=unconfined", id="seccomp-unconfined-alone"),
+    pytest.param(host_config(CapDrop=[]), "HostConfig.CapDrop", "[]", id="no-cap-drop"),
+    pytest.param(host_config(CapDrop=["NET_RAW"]), "HostConfig.CapDrop", '["NET_RAW"]', id="cap-drop-without-all"),
+    pytest.param(
+        host_config(CapAdd=["DAC_READ_SEARCH", "SYS_ADMIN"]),
+        "HostConfig.CapAdd",
+        '["DAC_READ_SEARCH", "SYS_ADMIN"]',
+        id="extra-capability",
+    ),
+    pytest.param(host_config(CapAdd=[]), "HostConfig.CapAdd", "[]", id="capability-missing"),
+    pytest.param(host_config(Privileged=True), "HostConfig.Privileged", "true", id="privileged"),
+    pytest.param(
+        host_config(SecurityOpt=["seccomp=unconfined"]),
+        "HostConfig.SecurityOpt",
+        '["seccomp=unconfined"]',
+        id="seccomp-unconfined-alone",
+    ),
     pytest.param(
         host_config(SecurityOpt=["no-new-privileges:true", "seccomp=unconfined"]),
-        "seccomp=unconfined",
+        "HostConfig.SecurityOpt",
+        '["no-new-privileges:true", "seccomp=unconfined"]',
         id="seccomp-unconfined-beside-no-new-privileges",
     ),
-    pytest.param(host_config(SecurityOpt=[]), "HostConfig.SecurityOpt", id="no-new-privileges-missing"),
-    pytest.param(host_config(SecurityOpt=["no-new-privileges:false"]), "no-new-privileges:false", id="npp-false"),
-    pytest.param(host_config(ReadonlyRootfs=False), "HostConfig.ReadonlyRootfs", id="writable-rootfs"),
-    pytest.param(host_config(NetworkMode="host"), "HostConfig.NetworkMode", id="host-network"),
-    pytest.param(host_config(NetworkMode="none"), "HostConfig.NetworkMode", id="no-network"),
-    pytest.param(host_config(NetworkMode="container:abc123"), "HostConfig.NetworkMode", id="shared-network"),
-    pytest.param(host_config(PidMode="host"), "HostConfig.PidMode", id="host-pid"),
-    pytest.param(host_config(UsernsMode="host"), "HostConfig.UsernsMode", id="host-userns"),
-    pytest.param(host_config(IpcMode="host"), "HostConfig.IpcMode", id="host-ipc"),
-    pytest.param(host_config(IpcMode="container:abc123"), "HostConfig.IpcMode", id="shared-ipc"),
-    pytest.param(host_config(UTSMode="host"), "HostConfig.UTSMode", id="host-uts"),
-    pytest.param(host_config(CgroupnsMode="host"), "HostConfig.CgroupnsMode", id="host-cgroupns"),
-    pytest.param(host_config(Devices=[{"PathOnHost": "/dev/mem"}]), "HostConfig.Devices", id="device"),
-    pytest.param(host_config(Sysctls={"net.ipv4.ip_forward": "1"}), "HostConfig.Sysctls", id="sysctl"),
-    pytest.param(host_config(DeviceCgroupRules=["c *:* rwm"]), "HostConfig.DeviceCgroupRules", id="device-cgroup-rule"),
-    pytest.param(host_config(DeviceRequests=[{"Driver": "nvidia"}]), "HostConfig.DeviceRequests", id="device-request"),
-    pytest.param(host_config(Runtime="nvidia"), "HostConfig.Runtime", id="another-runtime"),
-    pytest.param(host_config(Runtime=""), "HostConfig.Runtime", id="no-runtime"),
-    pytest.param(config(User="root"), "Config.User", id="user"),
-    pytest.param(config(Entrypoint=["/bin/sh"]), "Config.Entrypoint", id="entrypoint-override"),
-    pytest.param(config(Entrypoint=None), "Config.Entrypoint", id="entrypoint-removed"),
-    pytest.param(config(Cmd=["frps", "-c", "other.toml"]), "Config.Cmd", id="command-override"),
-    pytest.param(config(Cmd=[]), "Config.Cmd", id="command-removed"),
-    pytest.param(host_config(Tmpfs={"/run/rt": "mode=0700", "/tmp": ""}), "/tmp", id="extra-tmpfs"),
-    pytest.param(host_config(Tmpfs={}), "HostConfig.Tmpfs", id="tmpfs-missing"),
-    pytest.param(host_config(Tmpfs={"/run/other": ""}), "/run/other", id="tmpfs-elsewhere"),
-    pytest.param(mounts(lambda found: found.append(DOCKER_SOCKET)), "/var/run/docker.sock", id="docker-socket"),
+    pytest.param(host_config(SecurityOpt=[]), "HostConfig.SecurityOpt", "[]", id="no-new-privileges-missing"),
+    pytest.param(
+        host_config(SecurityOpt=["no-new-privileges:false"]),
+        "HostConfig.SecurityOpt",
+        '["no-new-privileges:false"]',
+        id="npp-false",
+    ),
+    pytest.param(host_config(ReadonlyRootfs=False), "HostConfig.ReadonlyRootfs", "false", id="writable-rootfs"),
+    pytest.param(host_config(NetworkMode="host"), "HostConfig.NetworkMode", '"host"', id="host-network"),
+    pytest.param(host_config(NetworkMode="none"), "HostConfig.NetworkMode", '"none"', id="no-network"),
+    pytest.param(
+        host_config(NetworkMode="container:abc123"),
+        "HostConfig.NetworkMode",
+        '"container:abc123"',
+        id="shared-network"
+    ),
+    pytest.param(host_config(PidMode="host"), "HostConfig.PidMode", '"host"', id="host-pid"),
+    pytest.param(host_config(UsernsMode="host"), "HostConfig.UsernsMode", '"host"', id="host-userns"),
+    pytest.param(host_config(IpcMode="host"), "HostConfig.IpcMode", '"host"', id="host-ipc"),
+    pytest.param(host_config(IpcMode="container:abc123"), "HostConfig.IpcMode", '"container:abc123"', id="shared-ipc"),
+    pytest.param(host_config(UTSMode="host"), "HostConfig.UTSMode", '"host"', id="host-uts"),
+    pytest.param(host_config(CgroupnsMode="host"), "HostConfig.CgroupnsMode", '"host"', id="host-cgroupns"),
+    pytest.param(
+        host_config(Devices=[{"PathOnHost": "/dev/mem"}]),
+        "HostConfig.Devices",
+        '[{"PathOnHost": "/dev/mem"}]',
+        id="device",
+    ),
+    pytest.param(
+        host_config(Sysctls={"net.ipv4.ip_forward": "1"}),
+        "HostConfig.Sysctls",
+        '{"net.ipv4.ip_forward": "1"}',
+        id="sysctl",
+    ),
+    pytest.param(
+        host_config(DeviceCgroupRules=["c *:* rwm"]),
+        "HostConfig.DeviceCgroupRules",
+        '["c *:* rwm"]',
+        id="device-cgroup-rule",
+    ),
+    pytest.param(
+        host_config(DeviceRequests=[{"Driver": "nvidia"}]),
+        "HostConfig.DeviceRequests",
+        '[{"Driver": "nvidia"}]',
+        id="device-request",
+    ),
+    pytest.param(host_config(Runtime="nvidia"), "HostConfig.Runtime", '"nvidia"', id="another-runtime"),
+    pytest.param(host_config(Runtime=""), "HostConfig.Runtime", '""', id="no-runtime"),
+    pytest.param(config(User="root"), "Config.User", '"root"', id="user"),
+    pytest.param(config(Entrypoint=["/bin/sh"]), "Config.Entrypoint", '["/bin/sh"]', id="entrypoint-override"),
+    pytest.param(config(Entrypoint=None), "Config.Entrypoint", "[]", id="entrypoint-removed"),
+    pytest.param(
+        config(Cmd=["frps", "-c", "other.toml"]), "Config.Cmd", '["frps", "-c", "other.toml"]', id="command-override"
+    ),
+    pytest.param(config(Cmd=[]), "Config.Cmd", "[]", id="command-removed"),
+    pytest.param(
+        host_config(Tmpfs={"/run/rt": "mode=0700", "/tmp": ""}),
+        "HostConfig.Tmpfs",
+        '["/run/rt", "/tmp"]',
+        id="extra-tmpfs",
+    ),
+    pytest.param(host_config(Tmpfs={}), "HostConfig.Tmpfs", "[]", id="tmpfs-missing"),
+    pytest.param(host_config(Tmpfs={"/run/other": ""}), "HostConfig.Tmpfs", '["/run/other"]', id="tmpfs-elsewhere"),
+    pytest.param(
+        mounts(lambda found: found.append(DOCKER_SOCKET)),
+        "Mounts",
+        "bind of /var/run/docker.sock at /var/run/docker.sock",
+        id="docker-socket",
+    ),
     pytest.param(
         mounts(lambda found: found.append({"Type": "volume", "Name": "data", "Destination": "/data", "RW": True})),
-        "/data",
+        "Mounts",
+        "volume of data at /data",
         id="volume",
     ),
-    pytest.param(mounts(lambda found: found[0].update(RW=True)), "/rt/secrets/token", id="writable-token-mount"),
-    pytest.param(mounts(lambda found: found[1].update(RW=True)), "/rt/bridge/frps.toml", id="writable-config-mount"),
-    pytest.param(mounts(lambda found: found.pop()), "/rt/bridge/frps.toml", id="config-mount-missing"),
+    pytest.param(
+        mounts(lambda found: found[0].update(RW=True)),
+        "Mounts",
+        "/rt/secrets/token writable",
+        id="writable-token-mount"
+    ),
+    pytest.param(
+        mounts(lambda found: found[1].update(RW=True)),
+        "Mounts",
+        "/rt/bridge/frps.toml writable",
+        id="writable-config-mount",
+    ),
+    pytest.param(mounts(lambda found: found.pop()), "Mounts", "no /rt/bridge/frps.toml", id="config-mount-missing"),
     pytest.param(
         mounts(lambda found: found[0].update(Source="/etc/shadow")),
-        "/etc/shadow",
+        "Mounts",
+        "/rt/secrets/token coming from /etc/shadow",
         id="token-mount-from-elsewhere",
     ),
     pytest.param(
         host_config(PortBindings=PORT_BINDINGS | {"7500/tcp": [{"HostIp": "", "HostPort": "7500"}]}),
-        "7500/tcp",
+        "HostConfig.PortBindings[7500/tcp]",
+        '[""]',
         id="admin-port-on-every-interface",
     ),
     pytest.param(
         host_config(PortBindings=PORT_BINDINGS | {"7500/tcp": [{"HostIp": "0.0.0.0", "HostPort": "7500"}]}),
-        "7500/tcp",
+        "HostConfig.PortBindings[7500/tcp]",
+        '["0.0.0.0"]',
         id="admin-port-on-the-wildcard",
     ),
 ]
 
 
-@pytest.mark.parametrize(("change", "cause"), HARDENING_VIOLATIONS)
-def test_container_hardening_names_each_violation(world, change, cause):
+@pytest.mark.parametrize(("change", "field", "value"), HARDENING_VIOLATIONS)
+def test_container_hardening_names_each_violation(world, change, field, value):
     world.docker.altered(change)
     check = hardening(world)
     assert check.outcome is Outcome.FAIL
-    assert cause in check.detail and "compose.yaml" in check.detail
+    lines = [line for line in check.detail.splitlines() if field in line]
+    assert any(value in line for line in lines), f"no line names {field} with {value}: {check.detail!r}"
 
 
 def test_an_env_file_that_adds_variables_is_named_by_variable_and_never_by_value(world):
