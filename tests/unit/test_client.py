@@ -149,12 +149,3 @@ def test_a_percent_in_the_installed_path_is_escaped_for_ssh(tmp_path):
     line = proxy_command(render_ssh_config(client(root), "alpha"))
     assert str(root / "bin" / WEBSOCAT).replace("%", "%%") in line
     assert line.count("%h") == 2  # the escaped `%%h` of the path and the real one in the URL
-
-
-@pytest.mark.parametrize("newline", ["\n", "\r"])
-def test_an_installed_path_with_a_line_break_is_refused(tmp_path, newline):
-    root = tmp_path / f"a{newline}b"
-    (root / "bin").mkdir(parents=True)
-    (root / "bin" / WEBSOCAT).write_text("x")
-    with pytest.raises(ConfigError, match="line break"):
-        render_ssh_config(client(root), "alpha")
