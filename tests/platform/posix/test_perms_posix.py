@@ -18,6 +18,7 @@ from ctl.perms import (
     converge_tree,
     describe,
     grant_service_read,
+    grant_service_read_file,
     harden_file,
     principals,
     resolve_service_account,
@@ -422,6 +423,15 @@ def test_grant_service_read_is_a_no_op(tmp_path):
     before = os.stat(tmp_path)
     grant_service_read(tmp_path, me())
     assert os.stat(tmp_path).st_mode == before.st_mode
+
+
+def test_grant_service_read_file_is_a_no_op(tmp_path):
+    path = tmp_path / "frpc"
+    path.write_bytes(b"")
+    path.chmod(0o640)
+    before = os.stat(path)
+    grant_service_read_file(path, me())
+    assert os.stat(path).st_mode == before.st_mode
 
 
 # Root =================================================================================================================

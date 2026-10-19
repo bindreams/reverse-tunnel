@@ -1,3 +1,4 @@
+import io
 import os
 import secrets
 import subprocess
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ctl import perms_windows, winacl
+from ctl.atomic import replace_file
 from ctl.perms import (
     SID_ADMINISTRATORS,
     SID_AUTHENTICATED_USERS,
@@ -21,6 +23,7 @@ from ctl.perms import (
     converge_tree,
     describe,
     grant_service_read,
+    grant_service_read_file,
     harden_file,
     principals,
     write_secret,
@@ -38,6 +41,7 @@ DELETE = 0x10000
 OBJECT_INHERIT_ACE = 0x1
 CONTAINER_INHERIT_ACE = 0x2
 INHERITED_ACE = 0x10
+INHERITING = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
 WRITING = FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE
 
 
@@ -465,9 +469,10 @@ def test_grant_service_read_reaches_the_repository_and_leaves_its_ancestors_alon
     ace = ace_for(repo, SID_LOCAL_SERVICE)
     assert ace.mask & FILE_EXECUTE and ace.mask & FILE_READ_DATA
     assert not ace.mask & WRITING
-    assert ace.flags & OBJECT_INHERIT_ACE and ace.flags & CONTAINER_INHERIT_ACE
+    assert not ace.flags & INHERITING
     for path in (repo / "bin", repo / "host", repo / "host" / "frpc.toml"):
-        assert SID_LOCAL_SERVICE in principals(path), path
+        explicit = ace_for(path, SID_LOCAL_SERVICE)
+        assert explicit.mask == winacl.READ_EXECUTE and not explicit.flags & (INHERITING | INHERITED_ACE), path
         assert not winacl.read_acl(path).protected, path
     assert SID_LOCAL_SERVICE not in principals(env)
 
@@ -547,6 +552,65 @@ def test_grant_service_read_is_idempotent(tmp_path):
 def entries_of(path: Path, *, directory: bool = True) -> list[winacl.Entry]:
     with perms_windows._handle(path, directory=directory, access=perms_windows.winfile.READ_CONTROL) as handle:
         return winacl.read_entries(handle)[0]
+
+
+def service_entries(path: Path, *, directory: bool = True) -> list[winacl.Entry]:
+    return [e for e in entries_of(path, directory=directory) if e.sid == SID_LOCAL_SERVICE]
+
+
+@pytest.mark.parametrize("where", [".", "bin", "host"])
+def test_no_service_ace_on_the_root_bin_or_host_is_inheritable(tmp_path, where):
+    """Any inheritable ACE written on a directory can make NTFS rewrite the children `ctl` never opened."""
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    service = service_entries(repo / where)
+    assert service and not any(e.flags & INHERITING for e in service)
+
+
+def test_rerunning_replaces_the_inheritable_root_ace_an_earlier_install_wrote(tmp_path):
+    repo = repo_with(tmp_path)
+    icacls(str(repo), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)(RX)")  # the shape of the earlier install
+    assert any(e.flags & INHERITED_ACE for e in service_entries(repo / "bin" / "frpc.exe", directory=False))
+    grant_service_read(repo, LOCAL_SERVICE)
+    for path, directory in ((repo, True), (repo / "bin", True), (repo / "host", True),
+                            (repo / "bin" / "frpc.exe", False), (repo / "host" / "frpc.toml", False)):
+        assert [(e.mask, e.flags)
+                for e in service_entries(path, directory=directory)] == [(winacl.READ_EXECUTE, 0)], path
+
+
+def test_a_file_replaced_in_bin_loses_the_service_read_until_it_is_given_again(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    binary = repo / "bin" / "frpc.exe"
+    replace_file(repo / "bin", "frpc.exe", io.BytesIO(b"new"), 0o755)
+    assert SID_LOCAL_SERVICE not in principals(binary)
+    grant_service_read_file(binary, LOCAL_SERVICE)
+    assert [(e.mask, e.flags) for e in service_entries(binary, directory=False)] == [(winacl.READ_EXECUTE, 0)]
+
+
+def test_grant_service_read_file_keeps_every_other_entry_and_is_idempotent(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    new = repo / "bin" / "websocat.exe"
+    new.write_bytes(b"")
+    before = entries_of(new, directory=False)
+    grant_service_read_file(new, LOCAL_SERVICE)
+    granted = entries_of(new, directory=False)
+    assert [e for e in granted if e.sid != SID_LOCAL_SERVICE] == before
+    grant_service_read_file(new, LOCAL_SERVICE)
+    assert entries_of(new, directory=False) == granted
+
+
+def test_grant_service_read_file_refuses_a_hard_linked_file_and_leaves_the_foreign_file_alone(tmp_path):
+    repo = repo_with(tmp_path)
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"")
+    os.link(foreign, repo / "bin" / "extra.exe")
+    before = winacl.read_acl(foreign)
+    with pytest.raises(PermsError) as raised:
+        grant_service_read_file(repo / "bin" / "extra.exe", LOCAL_SERVICE)
+    assert "hard link" in str(raised.value)
+    assert winacl.read_acl(foreign) == before
 
 
 def test_grant_service_read_keeps_an_explicit_deny_for_the_service(tmp_path):

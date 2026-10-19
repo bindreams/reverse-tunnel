@@ -430,16 +430,32 @@ def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -
 def grant_service_read(root: Path, account: Account) -> None:
     """Give `account` read-and-execute on the repository `root`, `bin`, `host` and their direct files; POSIX: nothing.
 
-    `root` gets an inheritable ACE and each of the others the ACE it would inherit, written to it directly: nothing is
-    propagated by the OS, so nothing unvetted is touched. A subdirectory, reparse point or hard-linked file inside `bin`
-    or `host` is refused. Ancestors of `root` get no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses
-    traverse checking, so a repository under a user profile is reachable without exposing the profile.
+    Each of them gets its own ACE, written to it directly and applying to it alone. None is inheritable: nothing is
+    propagated by the OS and NTFS has no reason to rewrite an entry that was not opened here, so nothing unvetted is
+    touched. A subdirectory, reparse point or hard-linked file inside `bin` or `host` is refused. Ancestors of `root` get
+    no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository under a
+    user profile is reachable without exposing the profile.
+
+    A file created or replaced in `bin` or `host` afterwards has no ACE for the account until this runs again or
+    `grant_service_read_file` is called on it.
     """
     if sys.platform != "win32":
         return
     from ctl import perms_windows
 
     perms_windows.grant_service_read(root, account)
+
+
+def grant_service_read_file(path: Path, account: Account) -> None:
+    """Give `account` read-and-execute on the one file `path` in `bin`, which was just created or replaced; POSIX: nothing.
+
+    The file keeps its other ACEs. A reparse point or a hard-linked file is refused.
+    """
+    if sys.platform != "win32":
+        return
+    from ctl import perms_windows
+
+    perms_windows.grant_service_read_file(path, account)
 
 
 # Inspection ===========================================================================================================

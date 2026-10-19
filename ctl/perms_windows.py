@@ -8,7 +8,9 @@ through that handle and opened relative to it, and every entry is vetted before 
 
 ACLs are written with `NtSetSecurityObject`, which propagates to no child; the inherited ACEs of each object are
 computed here (`winacl.inherited_for`) and written to that object through its own handle. The Win32 `SetSecurityInfo`
-would instead walk the whole subtree before any of it could be vetted.
+would instead walk the whole subtree before any of it could be vetted. Windows Server 2025 does not stop there: a new
+inheritable ACE on a directory makes NTFS turn the inherited ACEs of its direct children into explicit, protected ones.
+The repository root holds files `ctl` never opens, so the service's ACEs are never inheritable.
 
 The owner field of an object is deliberately left as created (Administrators when the process is elevated). Ownership
 is expressed by the ACL alone, with explicit grants for the principals that matter; `operator_sid` names the one that
@@ -315,13 +317,27 @@ class _Target:
     parent: "_Target | None" = None
 
 
+def _service_read(entries: list[winacl.Entry], sid: str) -> list[winacl.Entry]:
+    """`entries` with the service's read-and-execute ACE, which applies to the object alone and is never inherited.
+
+    Only an earlier explicit allow for the service is replaced (including the inheritable one an older install wrote on
+    the root); a deny for it, or an inherited ACE, stays.
+    """
+    kept = [
+        e for e in entries
+        if e.flags & winacl.INHERITED_ACE or e.sid != sid or e.ace_type != winacl.ACCESS_ALLOWED_ACE_TYPE
+    ]
+    return winacl.canonical(kept + [winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, 0, winacl.READ_EXECUTE, sid)])
+
+
 def grant_service_read(root: Path, account: Account) -> None:
     """Give the service read-and-execute on exactly the objects it needs, each through its own vetted handle.
 
     The set is known: `root`, `bin` and its direct files, `host` and its direct files. `root` and `bin` and `host` are
     held without `FILE_SHARE_DELETE`; their files are opened relative to them. Everything is vetted (a subdirectory, a
     reparse point, a hard-linked file, or an object whose inheritance is broken is refused) before the first ACL is
-    written, and each object's inherited ACEs are computed from its parent's new ACL, never propagated by the OS.
+    written. Each object gets its own explicit ACE and nothing is inherited from the service's ACE on its parent, so a
+    file created or replaced there later has no access until `grant_service_read_file` gives it.
     """
     sid = _sid_of(account)
     listing = ACL_ACCESS | winfile.FILE_LIST_DIRECTORY
@@ -355,27 +371,15 @@ def grant_service_read(root: Path, account: Account) -> None:
             target.entries, protected = winacl.read_entries(target.handle)
             if protected:
                 raise PermsError(f"{target.label}: inheritance is broken; the service could not read it")
-        # Everything is vetted; write parents before children, each from its parent's new ACL.
-        service = winacl.Entry(
-            winacl.ACCESS_ALLOWED_ACE_TYPE,
-            winacl.OBJECT_INHERIT_ACE | winacl.CONTAINER_INHERIT_ACE,
-            winacl.READ_EXECUTE,
-            sid,
-        )
-        # Only an earlier explicit allow for the service is replaced; a deny for it, or an inherited ACE, stays.
-        kept = [
-            e for e in top.entries
-            if e.flags & winacl.INHERITED_ACE or e.sid != sid or e.ace_type != winacl.ACCESS_ALLOWED_ACE_TYPE
-        ]
         # Compute every object's resulting ACL, in the order it will have on disk, before writing any of them: a
-        # refusal (an unsupported inheritable ACE anywhere) then leaves nothing changed.
-        top.entries = winacl.canonical(kept + [service])
+        # refusal (an unsupported inheritable ACE anywhere) then leaves nothing changed. Parents come before children.
+        top.entries = _service_read(top.entries, sid)
         writes = [(root_handle, top.entries, root_protected)]
         for target in targets:
             assert target.parent is not None
             owner_sid, group_sid = winacl.owner_and_group(target.handle)
             target.entries = winacl.canonical(
-                winacl.explicit(target.entries) + winacl.inherited_for(
+                _service_read(winacl.explicit(target.entries), sid) + winacl.inherited_for(
                     target.parent.entries,
                     directory=target.directory,
                     owner=owner_sid,
@@ -389,3 +393,17 @@ def grant_service_read(root: Path, account: Account) -> None:
         for target in [top, *targets]:
             if sid not in winacl.read_acl_handle(target.handle).sids:
                 raise PermsError(f"{target.label}: the service still has no access after the grant")
+
+
+def grant_service_read_file(path: Path, account: Account) -> None:
+    """Give the service read-and-execute on the one file `path`, which `ctl` has just created or replaced.
+
+    The file keeps every ACE it has; only an earlier explicit allow for the service is replaced. It is opened without
+    following a reparse point, and a file with another name is refused.
+    """
+    sid = _sid_of(account)
+    with _errors(path), _handle(path, directory=False, single_link=True) as handle:
+        entries, protected = winacl.read_entries(handle)
+        winacl.set_dacl(handle, _service_read(entries, sid), protected=protected)
+        if sid not in winacl.read_acl_handle(handle).sids:
+            raise PermsError(f"{path}: the service still has no access after the grant")
