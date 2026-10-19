@@ -1,9 +1,8 @@
-import hashlib
 from pathlib import Path
 
 import pytest
 from binaries_support import SEED_LOCK, VERSIONS, Upstream
-from scanner_support import TERM, git
+from scanner_support import init_repo, write_hashes_file
 
 from sigstore.models import TrustedRoot
 from sigstore.verify import Verifier
@@ -14,17 +13,12 @@ from tests.offline import refuse_network
 
 @pytest.fixture
 def hashes_file(tmp_path: Path) -> Path:
-    path = tmp_path / "hashes.txt"
-    path.write_text(f"# banned\n{len(TERM)} {hashlib.sha256(TERM.encode()).hexdigest()}\n")
-    return path
+    return write_hashes_file(tmp_path)
 
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    root = tmp_path / "repo"
-    root.mkdir()
-    git(root, "init", "-q", "-b", "main")
-    return root
+    return init_repo(tmp_path)
 
 
 # Who is running =======================================================================================================

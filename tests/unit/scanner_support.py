@@ -1,5 +1,6 @@
 """Shared helpers for the personal-artifact scanner tests."""
 
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -21,6 +22,19 @@ GIT_ENV = {
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_CONFIG_SYSTEM": os.devnull,
 }
+
+
+def write_hashes_file(directory: Path) -> Path:
+    path = directory / "hashes.txt"
+    path.write_text(f"# banned\n{len(TERM)} {hashlib.sha256(TERM.encode()).hexdigest()}\n")
+    return path
+
+
+def init_repo(directory: Path) -> Path:
+    root = directory / "repo"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    return root
 
 
 def load_script():
