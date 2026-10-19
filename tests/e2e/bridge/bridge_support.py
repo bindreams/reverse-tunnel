@@ -162,6 +162,11 @@ class Project:
         self.write_env()
         return run("docker", "compose", *self.arguments(overlay=overlay, extra_files=extra_files), *args, cwd=self.root)
 
+    def bare_compose(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """`docker compose` as an operator types it: no `-f`, so the files are the ones `COMPOSE_FILE` in `.env` names."""
+        self.write_env()
+        return run("docker", "compose", "--project-name", self.name, *args, cwd=self.root)
+
     def tail(
         self,
         service: str,
@@ -232,8 +237,17 @@ class Project:
         return self.root / "secrets" / "token"
 
 
-def make_project(directory: Path, root_name: str | None = None, **overrides: str | None) -> Project:
-    """A scratch deployment. With `root_name`, the compose project is named after the directory, as `ctl` runs it."""
+def make_project(
+    directory: Path,
+    root_name: str | None = None,
+    *,
+    copy_in: Mapping[str, Path] | None = None,
+    **overrides: str | None,
+) -> Project:
+    """A scratch deployment. With `root_name`, the compose project is named after the directory, as `ctl` runs it.
+
+    `copy_in` maps a file name in the project to the source it is copied from, for example `compose.override.yaml`.
+    """
     root = directory / (root_name or "deployment")
     root.mkdir()
     for name in BRIDGE_FILES:
@@ -242,6 +256,8 @@ def make_project(directory: Path, root_name: str | None = None, **overrides: str
             shutil.copytree(source, root / name)
         else:
             shutil.copy2(source, root / name)
+    for name, source in (copy_in or {}).items():
+        shutil.copy2(source, root / name)
     (root / "secrets").mkdir(mode=0o711)
     write_operator_token(root / "secrets" / "token", (GOOD_TOKEN + "\n").encode())
     values = {

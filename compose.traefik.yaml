@@ -1,6 +1,7 @@
 # Overlay for a Traefik v3 that shares a Docker network with this stack (the rules use v3's `HostRegexp` syntax):
-#   docker compose -f compose.yaml -f compose.traefik.yaml up --wait
-# Set the entrypoints and TLS of the two routers on Traefik's side (for example `entryPoints.<name>.http.tls`).
+#   COMPOSE_FILE=compose.yaml:compose.traefik.yaml   (in .env; then run bare `docker compose up --wait`, not `-f`)
+# Set the entrypoints and TLS of the two routers on Traefik's side (for example `entryPoints.<name>.http.tls`), or per
+# router in your own `compose.override.yaml`; `examples/compose.override.yaml` is a starting point.
 services:
   frps:
     # `!override` replaces the whole list, so the control and admin publishes are declared again; only the vhost
