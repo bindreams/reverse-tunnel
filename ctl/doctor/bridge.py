@@ -20,7 +20,7 @@ import httpx
 from ctl.atomic import read_file
 from ctl.config import Config
 from ctl.doctor import frps_api, hardening
-from ctl.doctor.model import Check, Skip, Verdict, execute, fail, not_applicable, ok
+from ctl.doctor.model import Check, DockerProblem, Skip, Verdict, execute, fail, not_applicable, ok
 from ctl.doctor.permissions import Permissions
 from ctl.doctor.probes import DOCKER_TIMEOUT, Probes
 from ctl.doctor.tls import TlsProbeError, is_staging
@@ -46,10 +46,6 @@ TOKEN_REMEDY = (
     "only the recreate is needed."
 )
 DURABLE_POLICIES = ("always", "unless-stopped")
-
-
-class DockerProblem(Exception):
-    """Docker could not be run or asked; the message says why."""
 
 
 class Found:
@@ -298,13 +294,17 @@ class Bridge:
         try:
             container = self.inspected  # first, so no container or no Docker is n/a whatever `docker info` says
             runtime = self.default_runtime
-            problems = hardening.violations(
+            found = hardening.violations(
                 container, image=self.image_config, runtime=runtime, root=self.root, volume=self.volume_inspected
             )
         except DockerProblem as exc:
             return fail(f"the container's security settings could not be checked: {exc}")
-        if problems:
-            lines = "".join(f"\n- {problem}" for problem in problems)
+        if found.unread and not found.problems:
+            # Nothing else is wrong, so the lookup is all there is to report; a failed one outranks a vanished volume.
+            causes = [unread.cause for unread in found.unread]
+            raise next((cause for cause in causes if isinstance(cause, DockerProblem)), causes[0])
+        if found.problems:
+            lines = "".join(f"\n- {line}" for line in found.problems + [unread.line for unread in found.unread])
             return fail(
                 f"the container departs from compose.yaml's security settings. Remove the cause (a compose override, or a "
                 f"container started some other way), then recreate the container from compose.yaml with `{RECREATE}`. "

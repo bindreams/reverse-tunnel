@@ -8,7 +8,9 @@ reads as empty, so a missing required value fails rather than raises.
 import json
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
+
+from ctl.doctor.model import DockerProblem, Skip
 
 TOKEN_TARGET, CONFIG_TARGET = "/rt/secrets/token", "/rt/bridge/frps.toml"
 # Where compose.yaml mounts them from, relative to the deployment.
@@ -34,6 +36,19 @@ READONLY_PATHS = frozenset({"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "
 # Each is empty in compose.yaml.
 EMPTY_STRINGS = ("PidMode", "UsernsMode", "UTSMode")
 EMPTY_COLLECTIONS = ("Devices", "Sysctls", "DeviceCgroupRules", "DeviceRequests", "GroupAdd")
+
+
+class Unread(NamedTuple):
+    """A volume whose driver options could not be read: the report line, and the `Skip` or `DockerProblem` behind it."""
+    line: str
+    cause: Skip | DockerProblem
+
+
+class Findings(NamedTuple):
+    """What `violations` found: the departures from compose.yaml, and the volumes it could not check. A caller that
+    has departures reports them with the unread volumes; with none, the unread volumes are all there is to report."""
+    problems: list[str]
+    unread: list[Unread]
 
 
 def listing(value: Any) -> list[Any]:
@@ -87,12 +102,12 @@ def violations(
     runtime: str,
     root: Path,
     volume: Callable[[str], Mapping[str, Any]],
-) -> list[str]:
+) -> Findings:
     """What in the `docker inspect` document `container` lets it reach past itself: the host, the network, a secret.
     Settings of its interior (a writable root, extra tmpfs mounts, the image and command it runs) are not checked.
     `image` is the image's own `Config`, whose `Env` names the variables the container may carry besides compose.yaml's;
     `runtime` the daemon's default runtime; `volume` the `docker volume inspect` document of a named volume, which
-    holds the driver options that `Mounts` does not show."""
+    holds the driver options that `Mounts` does not show and raises `Skip` or `DockerProblem` when it cannot be read."""
     host, config = container.get("HostConfig"), container.get("Config")
     problems = []
     if isinstance(host, dict):
@@ -105,8 +120,10 @@ def violations(
         problems.append("`docker inspect` has no Config for the container, so its settings cannot be confirmed")
     # An exited container may report no ports; a running one that reports none is not shown to publish loopback only.
     running = mapping(container.get("State")).get("Running") is not False
-    return problems + network_violations(container.get("NetworkSettings"),
-                                         running=running) + mount_violations(container.get("Mounts"), root, volume)
+    problems += network_violations(container.get("NetworkSettings"), running=running)
+    unread: list[Unread] = []
+    problems += mount_violations(container.get("Mounts"), root, volume, unread)
+    return Findings(problems, unread)
 
 
 def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
@@ -191,9 +208,11 @@ def config_violations(config: Mapping[str, Any], image: Mapping[str, Any]) -> li
     return problems
 
 
-def mount_violations(mounts: Any, root: Path, volume: Callable[[str], Mapping[str, Any]]) -> list[str]:
+def mount_violations(mounts: Any, root: Path, volume: Callable[[str], Mapping[str, Any]],
+                     unread: list[Unread]) -> list[str]:
     """The two required binds, exactly; any other bind reaches the host; a volume must be plain Docker-managed
-    storage; a tmpfs stays in memory; any other type is unknown, so it fails."""
+    storage; a tmpfs stays in memory; any other type is unknown, so it fails. A volume that cannot be looked up is
+    added to `unread`, not raised, so it does not hide what the other mounts show."""
     wanted = {TOKEN_TARGET: root / TOKEN_SOURCE, CONFIG_TARGET: root / CONFIG_SOURCE}
     both = f"compose.yaml mounts {TOKEN_TARGET} and {CONFIG_TARGET}, read-only, from this deployment"
     problems, seen = [], set()
@@ -215,19 +234,26 @@ def mount_violations(mounts: Any, root: Path, volume: Callable[[str], Mapping[st
         elif kind == "bind":
             problems.append(f"{found}, which reaches the host; {both}, and no other bind")
         elif kind == "volume":
-            problems += volume_violations(f"Mounts has a volume of {name or 'nothing'} at {target}", name, volume)
+            problems += volume_violations(
+                f"Mounts has a volume of {name or 'nothing'} at {target}", name, volume, unread
+            )
         elif kind != "tmpfs":
             problems.append(f"{found}, a mount type this check does not know; {both}")
     problems += [f"Mounts has no {target}; {both}" for target in wanted if target not in seen]
     return problems
 
 
-def volume_violations(found: str, name: str, volume: Callable[[str], Mapping[str, Any]]) -> list[str]:
+def volume_violations(found: str, name: str, volume: Callable[[str], Mapping[str, Any]],
+                      unread: list[Unread]) -> list[str]:
     """A volume is plain Docker-managed storage only if its driver is `local` and it has no driver options: with
     options `local` mounts a host path (`o=bind`) or another machine (`type=nfs`), and another driver is unknown."""
     if not name:
         return [f"{found}, whose driver options cannot be read without its name"]
-    document = volume(name)
+    try:
+        document = volume(name)
+    except (Skip, DockerProblem) as exc:
+        unread.append(Unread(f"{found}, which could not be inspected: {exc}", exc))
+        return []
     driver, options = document.get("Driver"), document.get("Options")
     if driver != VOLUME_DRIVER:
         return [

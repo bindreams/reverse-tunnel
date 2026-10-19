@@ -521,6 +521,11 @@ def mounted(*extra: dict):
     return mounts(lambda found: found.extend(extra))
 
 
+def privileged_with(world, *extra: dict) -> None:
+    """A privileged container that also mounts the volumes `extra` describes."""
+    world.docker.altered(lambda document: (host_config(Privileged=True)(document), mounted(*extra)(document)))
+
+
 @pytest.mark.parametrize("options", [None, {}])
 def test_an_anonymous_local_volume_with_no_options_passes(world, options):
     world.docker.altered(mounted(volume_mount("a1b2c3")))
@@ -570,6 +575,37 @@ def test_a_volume_that_vanished_before_volume_inspect_is_not_applicable_not_a_do
 def test_a_volume_inspect_that_fails_fails_the_check_closed_with_dockers_words(world):
     world.docker.altered(mounted(volume_mount()))
     world.docker.on("volume", "inspect", "data", returncode=1, stderr="permission denied while trying to connect")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
+
+
+@pytest.mark.parametrize(("stderr", "reason"), [
+    pytest.param("Error response from daemon: No such volume: data", "is gone", id="vanished"),
+    pytest.param("permission denied while trying to connect", "permission denied", id="inspect-fails"),
+])
+def test_a_volume_that_cannot_be_inspected_does_not_hide_the_other_violations(world, stderr, reason):
+    privileged_with(world, volume_mount())
+    world.docker.on("volume", "inspect", "data", returncode=1, stderr=stderr)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- HostConfig.Privileged is true" in check.detail
+    assert "\n- Mounts has a volume of data at /data, which could not be inspected" in check.detail
+    assert reason in check.detail
+
+
+def test_every_volume_that_cannot_be_inspected_is_named(world):
+    privileged_with(world, volume_mount("a"), volume_mount("b", "/b"))
+    world.docker.on("volume", "inspect", "a", returncode=1, stderr="No such volume: a")
+    world.docker.on("volume", "inspect", "b", returncode=1, stderr="permission denied")
+    detail = hardening(world).detail
+    assert "volume of a at /data, which could not be inspected" in detail
+    assert "volume of b at /b, which could not be inspected" in detail
+
+
+def test_with_nothing_else_wrong_a_failed_volume_lookup_outranks_a_vanished_volume(world):
+    world.docker.altered(mounted(volume_mount("a"), volume_mount("b", "/b")))
+    world.docker.on("volume", "inspect", "a", returncode=1, stderr="No such volume: a")
+    world.docker.on("volume", "inspect", "b", returncode=1, stderr="permission denied")
     check = hardening(world)
     assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
 
