@@ -1,5 +1,7 @@
 """The traversal check: which path the service account cannot reach, and how the kernel's answer is read."""
 
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -171,10 +173,12 @@ def test_verify_traversable_advises_granting_access_when_the_host_files_are_clos
     separate_account, monkeypatch, blocked, chmod
 ):
     monkeypatch.setattr(access, "account_can", lambda account, flag, path: path.as_posix() != blocked)
+    present = os.stat_result((stat.S_IFREG | 0o600, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    monkeypatch.setattr(access.os, "lstat", lambda path: present)
     with pytest.raises(InstallError) as raised:
         access.verify_traversable(separate_account, SERVICE)
     message = str(raised.value)
-    assert chmod in message and "group" in message
+    assert chmod in message and "group" in message and "git" not in message
     assert "/opt" not in message and "/srv/reverse-tunnel" not in message and "RT_SERVICE_USER" not in message
     assert "Move the deployment" not in message
 
@@ -183,7 +187,10 @@ def test_verify_traversable_says_when_the_config_does_not_exist(separate_account
     monkeypatch.setattr(access, "account_can", lambda account, flag, path: flag != "-r")
     with pytest.raises(InstallError) as raised:
         access.verify_traversable(separate_account, SERVICE)
-    assert "/srv/rt/host/frpc.toml" in str(raised.value) and "does not exist" in str(raised.value)
+    message = str(raised.value)
+    assert "/srv/rt/host/frpc.toml" in message and "does not exist" in message
+    # Permissions cannot fix a file the checkout lacks.
+    assert "git -C /srv/rt checkout -- host/frpc.toml" in message and "chmod" not in message
 
 
 def test_verify_traversable_passes_when_every_path_answers_yes(separate_account, monkeypatch):

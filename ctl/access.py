@@ -83,7 +83,12 @@ def verify_traversable(root: Path, service: Account) -> None:
         return
     config = posix_root / "host" / "frpc.toml"
     action = "readable" if blocked == config else "searchable"
-    if blocked in (posix_root / "host", config):
+    if blocked in (posix_root / "host", config) and not _exists(blocked):
+        remedy = (
+            f"It is part of the repository; restore it, for example "
+            f"`git -C {posix_root} checkout -- {blocked.relative_to(posix_root)}`"
+        )
+    elif blocked in (posix_root / "host", config):
         bit = "r" if blocked == config else "x"
         remedy = (
             f"Grant {service.name} access to it, for example `chmod o+{bit} {blocked}`, or give a group "
@@ -98,6 +103,14 @@ def verify_traversable(root: Path, service: Account) -> None:
         f"{blocked} is not {action} by {service.name}, the account the daemons run as ({_describe(blocked)}), so they "
         f"could not start from {posix_root}. Nothing was changed. {remedy}"
     )
+
+
+def _exists(path: PurePosixPath) -> bool:
+    try:
+        os.lstat(path)
+    except OSError:
+        return False
+    return True
 
 
 def _describe(path: PurePosixPath) -> str:
