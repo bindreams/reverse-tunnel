@@ -155,6 +155,13 @@ def test_unknown_role_is_rejected_listing_the_three_valid_roles(tmp_path, role):
         assert valid in message
 
 
+@pytest.fixture
+def service_user_required(monkeypatch):
+    """Windows pins the service account, so `RT_SERVICE_USER` is required only where the platform reads it."""
+    monkeypatch.setattr(config, "service_user_required", lambda: True)
+
+
+@pytest.mark.usefixtures("service_user_required")
 @pytest.mark.parametrize("role", ROLES)
 def test_each_role_requires_its_own_variables(tmp_path, role):
     for key in sorted(REQUIRED[role] - {"ROLE"}):
@@ -169,6 +176,7 @@ def test_every_missing_key_is_named_in_sorted_order(tmp_path, role):
     assert message.index(keys[1]) < message.index(keys[2])
 
 
+@pytest.mark.usefixtures("service_user_required")
 @pytest.mark.parametrize(("role", "key"), REQUIRED_PAIRS)
 def test_a_present_but_empty_required_key_is_rejected(tmp_path, role, key):
     assert key in refused(tmp_path, role, **{key: ""})
