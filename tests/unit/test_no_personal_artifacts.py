@@ -147,14 +147,15 @@ def test_staged_mode_ignores_a_deleted_file(repo, hashes_file):
     assert run_script(repo, hashes_file, "--staged").returncode == 0
 
 
-def test_message_mode_flags_the_commit_message(repo, hashes_file, tmp_path):
-    message = tmp_path / "msg"
+def test_message_mode_flags_the_commit_message(repo, hashes_file):
+    # Named relative to `repo`: an absolute path under a home directory (Windows' temp dir is one) is itself redacted.
+    message = repo / "msg"
     message.write_text(f"feat: add {TERM}\n")
-    result = run_script(repo, hashes_file, "--message", str(message))
+    result = run_script(repo, hashes_file, "--message", "msg")
     assert result.returncode == 1
     assert "msg:1: banned-term" in result.stderr
     message.write_text("feat: add thing\n")
-    assert run_script(repo, hashes_file, "--message", str(message)).returncode == 0
+    assert run_script(repo, hashes_file, "--message", "msg").returncode == 0
 
 
 def test_history_mode_finds_content_removed_in_a_later_commit(repo, hashes_file):

@@ -156,10 +156,9 @@ def test_line_numbers_count_only_newlines(repo, hashes_file):
 # Messages, tags and refs ==============================================================================================
 
 
-def test_message_mode_scans_hash_lines_too(repo, hashes_file, tmp_path):
-    message = tmp_path / "msg"
-    message.write_text(f"feat: x\n\n# {TERM}\n")
-    result = run_script(repo, hashes_file, "--message", str(message))
+def test_message_mode_scans_hash_lines_too(repo, hashes_file):
+    (repo / "msg").write_text(f"feat: x\n\n# {TERM}\n")
+    result = run_script(repo, hashes_file, "--message", "msg")
     assert result.returncode == 1
     assert "msg:3: banned-term" in result.stderr
 

@@ -23,8 +23,8 @@ def test_a_missing_banned_message_file_is_an_exit_2_without_the_name(repo, hashe
     assert TERM not in everything(result) and "Traceback" not in result.stderr
 
 
-def test_a_missing_clean_message_file_is_named_in_the_error(repo, hashes_file, tmp_path):
-    result = run_script(repo, hashes_file, "--message", str(tmp_path / "absent.msg"))
+def test_a_missing_clean_message_file_is_named_in_the_error(repo, hashes_file):
+    result = run_script(repo, hashes_file, "--message", "absent.msg")
     assert result.returncode == 2 and "absent.msg" in result.stderr
 
 
