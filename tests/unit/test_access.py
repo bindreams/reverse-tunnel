@@ -152,6 +152,33 @@ def test_verify_traversable_names_the_path_account_and_an_example_location(separ
     assert "Nothing was changed" in message
 
 
+@pytest.mark.parametrize("blocked", ["/", "/srv", "/srv/rt"], ids=["filesystem-root", "ancestor", "deployment-root"])
+def test_verify_traversable_advises_relocating_when_the_root_or_an_ancestor_is_closed(
+    separate_account, monkeypatch, blocked
+):
+    monkeypatch.setattr(access, "account_can", lambda account, flag, path: path.as_posix() != blocked)
+    with pytest.raises(InstallError) as raised:
+        access.verify_traversable(separate_account, SERVICE)
+    message = str(raised.value)
+    assert "/opt/reverse-tunnel" in message and "RT_SERVICE_USER" in message
+    assert "chmod" not in message
+
+
+@pytest.mark.parametrize(("blocked", "chmod"), [("/srv/rt/host", "chmod o+x /srv/rt/host"),
+                                                ("/srv/rt/host/frpc.toml", "chmod o+r /srv/rt/host/frpc.toml")],
+                         ids=["host-directory", "frpc-config"])
+def test_verify_traversable_advises_granting_access_when_the_host_files_are_closed(
+    separate_account, monkeypatch, blocked, chmod
+):
+    monkeypatch.setattr(access, "account_can", lambda account, flag, path: path.as_posix() != blocked)
+    with pytest.raises(InstallError) as raised:
+        access.verify_traversable(separate_account, SERVICE)
+    message = str(raised.value)
+    assert chmod in message and "group" in message
+    assert "/opt" not in message and "/srv/reverse-tunnel" not in message and "RT_SERVICE_USER" not in message
+    assert "Move the deployment" not in message
+
+
 def test_verify_traversable_says_when_the_config_does_not_exist(separate_account, monkeypatch):
     monkeypatch.setattr(access, "account_can", lambda account, flag, path: flag != "-r")
     with pytest.raises(InstallError) as raised:
