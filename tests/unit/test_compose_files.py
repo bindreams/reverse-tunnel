@@ -55,12 +55,20 @@ def test_compose_file_entries_must_be_regular_files(tmp_path):
     assert len(problems) == 1 and "compose.override.yaml" in problems[0]
 
 
-@pytest.mark.parametrize("entry", ["/abs.yaml", "C:/abs.yaml", "C:x.yaml", "../x.yaml", "sub/../../x.yaml"])
-def test_compose_file_entries_must_be_relative_and_inside_the_root(tmp_path, entry):
+RELATIVE = "relative path"
+NO_PARENT = "`..`"
+
+
+@pytest.mark.parametrize(
+    ("entry", "rule"),
+    [("/abs.yaml", RELATIVE), ("C:/abs.yaml", RELATIVE), ("C:x.yaml", RELATIVE), ("../x.yaml", NO_PARENT),
+     ("sub/../../x.yaml", NO_PARENT)],
+)
+def test_compose_file_entries_must_be_relative_and_inside_the_root(tmp_path, entry, rule):
     root = deployment(tmp_path, "compose.yaml")
     problems = problems_of(root, {**joined("compose.yaml", entry, separator=";"), "COMPOSE_PATH_SEPARATOR": ";"})
     assert len(problems) == 1
-    assert "COMPOSE_FILE" in problems[0] and entry in problems[0]
+    assert "COMPOSE_FILE" in problems[0] and entry in problems[0] and rule in problems[0]
 
 
 def test_compose_path_separator_from_env_is_honoured(tmp_path):
@@ -68,9 +76,11 @@ def test_compose_path_separator_from_env_is_honoured(tmp_path):
     other = ";" if os.pathsep == ":" else ":"
     values = {**joined("compose.yaml", "compose.override.yaml", separator=other), "COMPOSE_PATH_SEPARATOR": other}
     assert problems_of(root, values) == []
-    # Without the variable the same text is one entry that is not a file.
-    problems = problems_of(root, joined("compose.yaml", "compose.override.yaml", separator=other))
-    assert len(problems) >= 1
+    # Proves the separator is what made it valid.
+    unsplit = joined("compose.yaml", "compose.override.yaml", separator=other)
+    assert problems_of(root, unsplit) == [
+        f"COMPOSE_FILE entry {unsplit['COMPOSE_FILE']!r}: the first entry must be compose.yaml"
+    ]
 
 
 def test_every_problem_is_listed_and_nothing_else_from_the_env_is_repeated(tmp_path):
