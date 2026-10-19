@@ -1,7 +1,5 @@
 """The traversal check: which path the service account cannot reach, and how the kernel's answer is read."""
 
-import os
-import stat
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -173,8 +171,7 @@ def test_verify_traversable_advises_granting_access_when_the_host_files_are_clos
     separate_account, monkeypatch, blocked, chmod
 ):
     monkeypatch.setattr(access, "account_can", lambda account, flag, path: path.as_posix() != blocked)
-    present = os.stat_result((stat.S_IFREG | 0o600, 0, 0, 1, 0, 0, 0, 0, 0, 0))
-    monkeypatch.setattr(access.os, "lstat", lambda path: present)
+    monkeypatch.setattr(access, "_exists", lambda path: True)
     with pytest.raises(InstallError) as raised:
         access.verify_traversable(separate_account, SERVICE)
     message = str(raised.value)
@@ -206,3 +203,24 @@ def test_verify_traversable_asks_nothing_in_same_account_mode(monkeypatch):
     monkeypatch.setattr(access, "account_mode", lambda root, service: access.AccountMode.SAME)
     monkeypatch.setattr(access, "account_can", never)
     access.verify_traversable(Path("/srv/rt"), SERVICE)
+
+
+@pytest.mark.parametrize(("blocked", "exists", "command"), [
+    ("/srv/my rt/host", True, "chmod o+x '/srv/my rt/host'"),
+    ("/srv/my rt/host/frpc.toml", False, "git -C '/srv/my rt' checkout -- host/frpc.toml"),
+],
+                         ids=["chmod", "git"])
+def test_the_suggested_command_quotes_a_path_with_a_space(monkeypatch, blocked, exists, command):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(access, "account_mode", lambda root, service: access.AccountMode.SEPARATE)
+    monkeypatch.setattr(access, "account_can", lambda account, flag, path: path.as_posix() != blocked)
+    monkeypatch.setattr(access, "_exists", lambda path: exists)
+    with pytest.raises(InstallError) as raised:
+        access.verify_traversable(Path("/srv/my rt"), SERVICE)
+    assert command in str(raised.value)
+
+
+def test_a_dangling_symlink_counts_as_missing(tmp_path):
+    link = tmp_path / "frpc.toml"
+    link.symlink_to(tmp_path / "absent")
+    assert access._exists(PurePosixPath(link.as_posix())) is False

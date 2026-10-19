@@ -84,15 +84,16 @@ def verify_traversable(root: Path, service: Account) -> None:
     config = posix_root / "host" / "frpc.toml"
     action = "readable" if blocked == config else "searchable"
     if blocked in (posix_root / "host", config) and not _exists(blocked):
+        relative = shlex.quote(str(blocked.relative_to(posix_root)))
         remedy = (
-            f"It is part of the repository; restore it, for example "
-            f"`git -C {posix_root} checkout -- {blocked.relative_to(posix_root)}`"
+            "It is part of the repository; restore it, for example "
+            f"`git -C {shlex.quote(str(posix_root))} checkout -- {relative}`"
         )
     elif blocked in (posix_root / "host", config):
         bit = "r" if blocked == config else "x"
         remedy = (
-            f"Grant {service.name} access to it, for example `chmod o+{bit} {blocked}`, or give a group "
-            f"{service.name} belongs to access to it"
+            f"Grant {service.name} access to it, for example `chmod o+{bit} {shlex.quote(str(blocked))}`, or give a "
+            f"group {service.name} belongs to access to it"
         )
     else:
         remedy = (
@@ -106,8 +107,9 @@ def verify_traversable(root: Path, service: Account) -> None:
 
 
 def _exists(path: PurePosixPath) -> bool:
+    """Whether `path` resolves to something. A dangling symlink does not: restoring it is the remedy, not chmod."""
     try:
-        os.lstat(path)
+        os.stat(path)
     except OSError:
         return False
     return True
