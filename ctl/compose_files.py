@@ -2,10 +2,10 @@
 """Checks on `COMPOSE_FILE`, the variable through which `.env` chooses the bridge's compose files.
 
 Compose reads it from `.env` for the operator's `docker compose` and for `ctl`'s alike, so every call loads the same
-set. Compose prefers an exported `COMPOSE_FILE` to `.env`, so that is the one judged when present. An exported
-`COMPOSE_ENV_FILES` makes Compose skip `.env` altogether, and an exported empty `COMPOSE_FILE` makes it read the working
-directory as a file; both are problems. Only `ctl install` insists on it being sound; `doctor` and `uninstall` must
-still run when it is not, so they never call this.
+set. Compose prefers an exported `COMPOSE_FILE` to `.env`, so that is the one judged when present. Only `ctl install`
+insists on it being sound; `doctor` and `uninstall` must still run when it is not, so they never call this. An exported
+`COMPOSE_ENV_FILES` (Compose then skips `.env`) and an exported empty `COMPOSE_FILE` (Compose reads the working
+directory) are problems.
 """
 
 import os
