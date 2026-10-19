@@ -7,7 +7,7 @@ import zipfile
 from pathlib import PurePosixPath
 
 import pytest
-from archive_support import other, regular, write_archive, write_tar, write_zip, zip_link
+from archive_support import other, regular, write_archive, write_tar, write_zip, zip_link, zip_with_unicode_path
 
 from ctl import archive
 from ctl.archive import ArchiveFormat, extract_member, hash_binary
@@ -111,6 +111,25 @@ def test_a_zip_is_refused_for_an_entry_whose_stored_name_holds_a_nul(tmp_path):
 def test_a_zip_is_refused_for_a_symlink_that_is_not_the_match(tmp_path):
     path = write_zip(tmp_path / "a.zip", [("top/tool", b"binary"), zip_link("top/link")])
     with pytest.raises(BinariesError, match="top/link"):
+        hash_binary(path, ArchiveFormat.ZIP, "tool")
+
+
+@pytest.mark.parametrize("unicode_name", ["../evil", "top\\evil", "web\0sat", "/etc/passwd"])
+def test_a_zip_is_refused_for_an_entry_whose_unicode_path_field_names_an_unsafe_path(tmp_path, unicode_name):
+    path = write_zip(tmp_path / "a.zip", [("top/tool", b"binary"), zip_with_unicode_path("other", unicode_name)])
+    with pytest.raises(BinariesError, match="unsafe"):
+        hash_binary(path, ArchiveFormat.ZIP, "tool")
+
+
+def test_a_zip_is_refused_for_an_entry_whose_unicode_path_field_collides_with_the_match(tmp_path):
+    path = write_zip(tmp_path / "a.zip", [("top/tool", b"binary"), zip_with_unicode_path("other", "TOP/TOOL")])
+    with pytest.raises(BinariesError):
+        hash_binary(path, ArchiveFormat.ZIP, "tool")
+
+
+def test_a_zip_is_refused_for_an_entry_whose_unicode_path_field_names_another_safe_path(tmp_path):
+    path = write_zip(tmp_path / "a.zip", [zip_with_unicode_path("top/tool", "top/other")])
+    with pytest.raises(BinariesError, match="disagree"):
         hash_binary(path, ArchiveFormat.ZIP, "tool")
 
 

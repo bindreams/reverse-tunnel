@@ -12,6 +12,7 @@ import hashlib
 import lzma
 import os
 import stat
+import struct
 import tarfile
 import unicodedata
 import zipfile
@@ -144,12 +145,44 @@ def _entries(path: Path, fmt: ArchiveFormat) -> Iterator[tuple[str, str, Callabl
     if fmt is ArchiveFormat.ZIP:
         with zipfile.ZipFile(path) as zipped:
             for entry in zipped.infolist():
-                # On Windows `filename` has a backslash rewritten to `/`; the unsafe-name check needs the name as stored.
-                yield entry.orig_filename, _zip_kind(entry), partial(zipped.open, entry)
+                yield _zip_name(path, entry), _zip_kind(entry), partial(zipped.open, entry)
     else:
         with tarfile.open(path, TAR_MODES[fmt]) as tarred:
             for member in tarred:
                 yield member.name, _tar_kind(member), partial(_tar_stream, tarred, member)
+
+
+def _zip_name(path: Path, entry: zipfile.ZipInfo) -> str:
+    """The one name an entry goes by; refuses an entry whose names are unsafe or disagree.
+
+    A zip entry can carry several names, and an extractor picks one: the stored name (`orig_filename`), Python's
+    `filename` (a backslash rewritten to `/` on Windows, cut at the first NUL, replaced by the Info-ZIP Unicode Path
+    field 0x7075 when its CRC matches), and the raw 0x7075 values (7-Zip and Info-ZIP use those). Each is checked as
+    unsafe, so none is hidden behind another. They must then agree, so the name counted for collisions and the kind
+    taken from `filename` are those of the one name every extractor uses.
+    """
+    names = [entry.orig_filename, entry.filename, *_unicode_paths(entry)]
+    for name in names:
+        if not is_safe_member(name):
+            raise BinariesError(f"{path.name}: unsafe entry name {name!r}")
+    if len(set(names)) > 1:
+        raise BinariesError(f"{path.name}: entry names disagree: {', '.join(repr(n) for n in dict.fromkeys(names))}")
+    return entry.orig_filename
+
+
+def _unicode_paths(entry: zipfile.ZipInfo) -> Iterator[str]:
+    """Every Info-ZIP Unicode Path value (0x7075) in `entry.extra` whose CRC matches the stored name, unsanitized."""
+    encoding = "utf-8" if entry.flag_bits & 0x800 else "cp437"
+    stored_crc = zlib.crc32(entry.orig_filename.encode(encoding))
+    extra = entry.extra
+    while len(extra) >= 4:  # `ZipFile` already refused an extra field that overruns
+        header_id, size = struct.unpack("<HH", extra[:4])
+        data = extra[4:4 + size]
+        if header_id == 0x7075 and len(data) >= 5:
+            version, crc = struct.unpack("<BL", data[:5])
+            if version == 1 and crc == stored_crc and data[5:]:
+                yield data[5:].decode("utf-8")
+        extra = extra[4 + size:]
 
 
 def _tar_kind(member: tarfile.TarInfo) -> str:

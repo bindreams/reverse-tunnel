@@ -1,8 +1,10 @@
 """Builders for archives with hostile or unusual entries, which `binaries_support.build_archive` cannot express."""
 
 import io
+import struct
 import tarfile
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,6 +50,14 @@ def _verbatim(name: str | zipfile.ZipInfo) -> str | zipfile.ZipInfo:
     info = zipfile.ZipInfo(name)
     info.filename = name
     return info
+
+
+def zip_with_unicode_path(stored: str, unicode_name: str) -> tuple[zipfile.ZipInfo, bytes]:
+    """An entry stored as `stored` whose Info-ZIP Unicode Path field (0x7075) names `unicode_name`, as 7-Zip reads it."""
+    payload = struct.pack("<BL", 1, zlib.crc32(stored.encode())) + unicode_name.encode()
+    info = zipfile.ZipInfo(stored)
+    info.extra = struct.pack("<HH", 0x7075, len(payload)) + payload
+    return info, b"binary"
 
 
 def write_archive(path: Path, fmt: ArchiveFormat, entries: list[Any]) -> Path:
