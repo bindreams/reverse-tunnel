@@ -1,10 +1,12 @@
 # This file is part of reverse-tunnel, licensed under AGPL-3.0-or-later; see LICENSE.md.
 """Inspects the live container, not how it was started: an override file, `docker run` and a hand edit all show in
-`docker inspect`. A null or absent field reads as empty, so a missing required value fails rather than raises.
+`docker inspect`. It fails on what lets the container reach past itself (host access, network exposure, secret
+exposure), not on its interior: a writable root or a tmpfs of its own is the operator's to have. A null or absent field
+reads as empty, so a missing required value fails rather than raises.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ NO_NEW_PRIVILEGES = "no-new-privileges"
 # What Go's strconv.ParseBool reads as true, which is how Docker reads the value after `:` or `=`.
 GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 ADMIN_PORT, LOOPBACK = "7500/tcp", "127.0.0.1"
+VOLUME_DRIVER = "local"
 # compose.yaml pins both: a daemon's default for either may be the host's namespace.
 CGROUPNS_MODE = IPC_MODE = "private"
 # Docker's default masked and read-only paths for an unprivileged container (moby `daemon/pkg/oci/defaults.go`). Compose
@@ -77,10 +80,19 @@ def mismatch(found: str, wanted: Path) -> str | None:
     return f"coming from {found}"
 
 
-def violations(container: Mapping[str, Any], *, image: Mapping[str, Any], runtime: str, root: Path) -> list[str]:
-    """Departures of the `docker inspect` document `container` from compose.yaml. `image` is the image's own `Config`,
-    whose `Env` names the variables the container may carry besides compose.yaml's; `runtime` the daemon's default
-    runtime. The image and command the container runs are not checked: only its confinement."""
+def violations(
+    container: Mapping[str, Any],
+    *,
+    image: Mapping[str, Any],
+    runtime: str,
+    root: Path,
+    volume: Callable[[str], Mapping[str, Any]],
+) -> list[str]:
+    """What in the `docker inspect` document `container` lets it reach past itself: the host, the network, a secret.
+    Settings of its interior (a writable root, extra tmpfs mounts, the image and command it runs) are not checked.
+    `image` is the image's own `Config`, whose `Env` names the variables the container may carry besides compose.yaml's;
+    `runtime` the daemon's default runtime; `volume` the `docker volume inspect` document of a named volume, which
+    holds the driver options that `Mounts` does not show."""
     host, config = container.get("HostConfig"), container.get("Config")
     problems = []
     if isinstance(host, dict):
@@ -94,7 +106,7 @@ def violations(container: Mapping[str, Any], *, image: Mapping[str, Any], runtim
     # An exited container may report no ports; a running one that reports none is not shown to publish loopback only.
     running = mapping(container.get("State")).get("Running") is not False
     return problems + network_violations(container.get("NetworkSettings"),
-                                         running=running) + mount_violations(container.get("Mounts"), root)
+                                         running=running) + mount_violations(container.get("Mounts"), root, volume)
 
 
 def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
@@ -179,21 +191,48 @@ def config_violations(config: Mapping[str, Any], image: Mapping[str, Any]) -> li
     return problems
 
 
-def mount_violations(mounts: Any, root: Path) -> list[str]:
+def mount_violations(mounts: Any, root: Path, volume: Callable[[str], Mapping[str, Any]]) -> list[str]:
+    """The two required binds, exactly; any other bind reaches the host; a volume must be plain Docker-managed
+    storage; a tmpfs stays in memory; any other type is unknown, so it fails."""
     wanted = {TOKEN_TARGET: root / TOKEN_SOURCE, CONFIG_TARGET: root / CONFIG_SOURCE}
-    both = f"compose.yaml mounts only {TOKEN_TARGET} and {CONFIG_TARGET}, read-only, from this deployment"
+    both = f"compose.yaml mounts {TOKEN_TARGET} and {CONFIG_TARGET}, read-only, from this deployment"
     problems, seen = [], set()
     for mount in map(mapping, listing(mounts)):
         target, kind = text(mount.get("Destination")), text(mount.get("Type"))
-        source = text(mount.get("Source")) or text(mount.get("Name"))
-        if kind != "bind" or target not in wanted or target in seen:
-            problems.append(f"Mounts has a {kind or 'mount'} of {source or 'nothing'} at {target}; {both}")
-            continue
-        seen.add(target)
-        if mount.get("RW") is not False:
-            problems.append(f"Mounts has {target} not read-only (RW is {shown(mount.get('RW'))}); {both}")
-        different = mismatch(source, wanted[target])
-        if different:
-            problems.append(f"Mounts has {target} {different}; compose.yaml mounts {wanted[target]}")
+        name = text(mount.get("Name"))
+        source = text(mount.get("Source")) or name
+        found = f"Mounts has a {kind or 'mount'} of {source or 'nothing'} at {target}"
+        if target in wanted:
+            if kind != "bind" or target in seen:
+                problems.append(f"{found}; {both}")
+                continue
+            seen.add(target)
+            if mount.get("RW") is not False:
+                problems.append(f"Mounts has {target} not read-only (RW is {shown(mount.get('RW'))}); {both}")
+            different = mismatch(source, wanted[target])
+            if different:
+                problems.append(f"Mounts has {target} {different}; compose.yaml mounts {wanted[target]}")
+        elif kind == "bind":
+            problems.append(f"{found}, which reaches the host; {both}, and no other bind")
+        elif kind == "volume":
+            problems += volume_violations(f"Mounts has a volume of {name or 'nothing'} at {target}", name, volume)
+        elif kind != "tmpfs":
+            problems.append(f"{found}, a mount type this check does not know; {both}")
     problems += [f"Mounts has no {target}; {both}" for target in wanted if target not in seen]
     return problems
+
+
+def volume_violations(found: str, name: str, volume: Callable[[str], Mapping[str, Any]]) -> list[str]:
+    """A volume is plain Docker-managed storage only if its driver is `local` and it has no driver options: with
+    options `local` mounts a host path (`o=bind`) or another machine (`type=nfs`), and another driver is unknown."""
+    if not name:
+        return [f"{found}, whose driver options cannot be read without its name"]
+    document = volume(name)
+    driver, options = document.get("Driver"), document.get("Options")
+    if driver != VOLUME_DRIVER:
+        return [
+            f"{found}, which uses the driver {shown(driver)}; only Docker's own `{VOLUME_DRIVER}` storage is allowed"
+        ]
+    if options:
+        return [f"{found}, which has driver options {shown(options)} that can reach a host path or another machine"]
+    return []

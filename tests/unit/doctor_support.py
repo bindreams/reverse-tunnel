@@ -149,6 +149,11 @@ class FakeDocker:
     def on(self, *match: str, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
         self.rules.insert(0, (match, subprocess.CompletedProcess(list(match), returncode, stdout, stderr)))
 
+    def volume(self, name: str, *, driver: str = "local", options: dict | None = None) -> None:
+        """What `docker volume inspect` says of a volume; the container's own `Mounts` entry does not carry the options."""
+        document = {"Name": name, "Driver": driver, "Options": options, "Scope": "local"}
+        self.on("volume", "inspect", name, stdout=json.dumps([document]))
+
     def raises(self, *match: str, error: Exception) -> None:
         self.rules.insert(0, (match, error))
 
