@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
+import pytest
 from logwait import LineTail, tail_compose
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -20,6 +21,9 @@ GOOD_TOKEN = "0123456789abcdef" * 4
 GOOD_PASSWORD = "correct-horse-battery_staple"
 GOOD_DOMAIN = "tunnel.example.com"
 BRIDGE_FILES = ("compose.yaml", "compose.traefik.yaml", "bridge")
+# What `compose up` says when Docker's pick for a port published as `0` was already held by a socket it does not track:
+# its range is the kernel's ephemeral one, which every outgoing connection of the runner draws from too.
+DYNAMIC_PORT_COLLISIONS = ("address already in use", "port is already allocated")
 
 
 def get(url: str, **kwargs) -> httpx.Response:
@@ -131,6 +135,11 @@ class Project:
     values: dict[str, str]
     tails: list[LineTail] = field(default_factory=list)  # logs followed since `up`, ended by `down`
 
+    @property
+    def dynamic_ports(self) -> bool:
+        """Whether every published port is one Docker picks; the front services publish theirs that way always."""
+        return all(value == "0" for key, value in self.values.items() if key.endswith("_PORT"))
+
     def write_env(self) -> None:
         (self.root / ".env").write_text("".join(f"{key}={value}\n" for key, value in self.values.items()))
 
@@ -176,10 +185,21 @@ class Project:
         """Build and start the stack, then wait for frps to say it is serving; the frps log, followed from its start.
 
         Nothing waits on the compose healthcheck, which Docker evaluates on a schedule: the test blocks on the line.
+
+        A port published as `0` is picked by Docker, and nothing can reserve it for the stack: another socket on the
+        host may take the pick before Docker binds it. Such a refusal is answered by removing the half-started project
+        and starting it again, which draws a new port; a fixed port that is busy is not retried, it is the test's answer.
         """
         options = [argument for profile in profiles for argument in ("--profile", profile)]
-        started = self.compose(*options, "up", "--detach", "--build", overlay=overlay, extra_files=extra_files)
-        assert started.returncode == 0, started.stdout + started.stderr
+        while True:
+            started = self.compose(*options, "up", "--detach", "--build", overlay=overlay, extra_files=extra_files)
+            if started.returncode == 0:
+                break
+            output = started.stdout + started.stderr
+            if not (self.dynamic_ports and any(marker in output for marker in DYNAMIC_PORT_COLLISIONS)):
+                pytest.fail(output, pytrace=False)
+            cleared = self.compose(*options, "down", "--remove-orphans", overlay=overlay, extra_files=extra_files)
+            assert cleared.returncode == 0, cleared.stderr
         log = self.tail("frps", overlay=overlay, extra_files=extra_files, profiles=profiles)
         self.tails.append(log)
         log.wait_for(FRPS_READY, after=0)
