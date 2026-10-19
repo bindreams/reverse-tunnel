@@ -33,6 +33,7 @@ RIGHTS = {
     winacl.READ_EXECUTE: "RX",
     winacl.READ: "R",
     winacl.READ_WRITE: "R,W",
+    winacl.READ_WRITE_DELETE: "R,W,D",
 }
 
 Ace = tuple[str, int, int]  # sid, rights mask, inheritance flags

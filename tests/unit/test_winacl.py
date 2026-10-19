@@ -282,3 +282,15 @@ def test_plan_refuses_an_unsupported_parent_ace_before_returning_anything():
             owner=OWNER,
             group=GROUP
         )
+
+
+# Grants ===============================================================================================================
+
+DELETE = 0x10000
+
+
+def test_the_operator_may_delete_a_file_it_was_granted_because_replacing_a_secret_deletes_the_old_one():
+    """A non-elevated operator is not an Administrator, so only their own ACE lets `os.replace` move over the token."""
+    operator = "S-1-5-21-1-2-3-1001"
+    granted = winacl.grants(directory=False, operator=operator, readers=(), writers=())
+    assert granted[operator] & DELETE

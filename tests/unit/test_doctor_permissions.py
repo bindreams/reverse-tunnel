@@ -26,12 +26,12 @@ def windows(acls: dict[str, Acl], operator: str = OPERATOR) -> Probes:
 
 # What install writes, spelled out independently of `winacl.grants` so a wrong expectation fails here ==================
 
-HOST_ENV = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE, 0))
+HOST_ENV = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE_DELETE, 0))
 HOST_SECRETS = acl((ADMINS, winacl.FULL, INHERIT), (SERVICE, winacl.READ_EXECUTE, INHERIT),
                    (OPERATOR, winacl.READ_EXECUTE, INHERIT))
 HOST_TOKEN = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ, 0), (OPERATOR, winacl.READ, 0))
 BRIDGE_SECRETS = acl((ADMINS, winacl.FULL, INHERIT), (OPERATOR, winacl.MODIFY, INHERIT))
-BRIDGE_TOKEN = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE, 0))
+BRIDGE_TOKEN = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE_DELETE, 0))
 
 
 @pytest.fixture
@@ -91,18 +91,19 @@ def test_an_unexpected_sid_on_the_token_fails(host):
 
 
 def test_an_unexpected_principal_on_env_is_a_failure(host):
-    extra = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE, 0), (winacl.SID_EVERYONE, winacl.READ, 0))
+    extra = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE_DELETE, 0),
+                (winacl.SID_EVERYONE, winacl.READ, 0))
     assert verdicts(host, host_acls(**{".env": extra}))["env"][0] is Outcome.FAIL
 
 
 def test_the_service_must_not_be_granted_the_env_file(host):
-    extra = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE, 0), (SERVICE, winacl.READ, 0))
+    extra = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE_DELETE, 0), (SERVICE, winacl.READ, 0))
     outcome, detail = verdicts(host, host_acls(**{".env": extra}))["env"]
     assert outcome is Outcome.FAIL and "unexpected" in detail
 
 
 def test_broken_inheritance_is_required(host):
-    unprotected = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE, 0), protected=False)
+    unprotected = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE_DELETE, 0), protected=False)
     outcome, detail = verdicts(host, host_acls(**{".env": unprotected}))["env"]
     assert outcome is Outcome.FAIL and "inheritance" in detail
 

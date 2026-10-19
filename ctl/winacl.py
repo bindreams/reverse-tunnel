@@ -29,12 +29,14 @@ SID_CREATOR_GROUP = "S-1-3-1"
 # CREATOR OWNER SERVER and CREATOR GROUP SERVER have server-side semantics this module does not model.
 SERVER_CREATOR_SIDS = frozenset({"S-1-3-2", "S-1-3-3"})
 
-# The access masks `icacls` means by F, M, RX, R and R,W.
+# The access masks `icacls` means by F, M, RX, R, R,W and R,W,D.
+DELETE = 0x10000
 FULL = 0x1F01FF
 MODIFY = 0x1301BF
 READ_EXECUTE = 0x1200A9
 READ = 0x120089
 READ_WRITE = 0x12019F
+READ_WRITE_DELETE = READ_WRITE | DELETE
 
 # Generic rights and what they mean for a file.
 GENERIC_READ = 0x80000000
@@ -321,12 +323,13 @@ def grants(
 ) -> dict[str, int]:
     """The explicit grants: Administrators full, then `operator`, `writers` and `readers`, strongest first.
 
-    Files give `operator` read and write, and `readers` read. Directories give `operator` and `writers` modify and
+    Files give `operator` read, write and delete (replacing a secret deletes the old file, which a non-elevated operator
+    may do only with their own ACE), and `readers` read. Directories give `operator` and `writers` modify and
     `readers` read and execute.
     """
     wanted = {SID_ADMINISTRATORS: FULL}
     if operator is not None:
-        wanted.setdefault(operator, MODIFY if directory else READ_WRITE)
+        wanted.setdefault(operator, MODIFY if directory else READ_WRITE_DELETE)
     for sid in sorted(writers):
         wanted.setdefault(sid, MODIFY)
     for sid in sorted(readers):
