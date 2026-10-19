@@ -2,6 +2,9 @@
 
 import os
 import pwd
+import shutil
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -66,16 +69,73 @@ def test_a_missing_path_is_not_writable(tmp_path):
     assert access.service_can_write(tmp_path / "absent", STRANGER) is False
 
 
-# The traversal seam ===================================================================================================
+# The traversal check ==================================================================================================
 
 
-def test_a_separate_account_is_refused_with_a_message_that_names_the_account(tmp_path):
+def test_a_separate_account_is_refused_naming_the_first_untraversable_path(tmp_path, monkeypatch):
+    closed = tmp_path.parent
+    monkeypatch.setattr(access, "account_can", lambda account, flag, path: path != closed)
     with pytest.raises(InstallError) as raised:
         access.verify_traversable(tmp_path, STRANGER)
     message = str(raised.value)
-    assert "separate-account" in message and "not yet available" in message and "stranger" in message
-    assert "RT_SERVICE_USER" in message
+    assert f"{closed} is not searchable by stranger" in message and "Nothing was changed" in message
+    assert "/opt/reverse-tunnel" in message
+
+
+def test_the_refusal_names_the_mode_and_owner_of_the_blocked_path(tmp_path, monkeypatch):
+    tmp_path.chmod(0o700)
+    monkeypatch.setattr(access, "account_can", lambda account, flag, path: path != tmp_path)
+    with pytest.raises(InstallError) as raised:
+        access.verify_traversable(tmp_path, STRANGER)
+    assert f"mode 0700, owner {mine().name}" in str(raised.value)
 
 
 def test_the_account_that_owns_the_deployment_is_not_asked_to_prove_traversal(tmp_path):
     access.verify_traversable(tmp_path, mine())
+
+
+# The traversal check, with a real account -----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def deployment(request):
+    """A deployment root that root owns, under a `/tmp` directory every account can search. Not `tmp_path`: pytest's
+    base directory is `0700`."""
+    base = Path(tempfile.mkdtemp(prefix="rt-traverse-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(base))
+    base.chmod(0o755)
+    parent = base / "parent"
+    root = parent / "deploy"
+    (root / "host").mkdir(parents=True)
+    (root / "host" / "frpc.toml").write_text("x")
+    (root / "host" / "frpc.toml").chmod(0o644)
+    for directory in (parent, root, root / "host"):
+        directory.chmod(0o755)
+    return root
+
+
+def service() -> Account:
+    entry = pwd.getpwnam("rt-test-svc")
+    return Account(entry.pw_name, entry.pw_uid, entry.pw_gid)
+
+
+@pytest.mark.root
+def test_a_0700_parent_is_refused_for_a_separate_account(deployment):
+    deployment.parent.chmod(0o700)
+    with pytest.raises(InstallError) as raised:
+        access.verify_traversable(deployment, service())
+    assert f"{deployment.parent} is not searchable by rt-test-svc" in str(raised.value)
+
+
+@pytest.mark.root
+def test_a_0750_parent_outside_the_accounts_groups_is_refused(deployment):
+    deployment.parent.chmod(0o750)
+    assert deployment.parent.stat().st_gid not in access.account_groups(service())
+    with pytest.raises(InstallError) as raised:
+        access.verify_traversable(deployment, service())
+    assert f"{deployment.parent} is not searchable by rt-test-svc" in str(raised.value)
+
+
+@pytest.mark.root
+def test_a_traversable_tree_passes_for_a_separate_account(deployment):
+    access.verify_traversable(deployment, service())

@@ -66,10 +66,10 @@ def test_preflight_refuses_a_deployment_that_is_not_a_host(tree, tmp_path):
 def test_preflight_runs_the_traversal_seam_before_asking_goetia_anything(tree, monkeypatch):
 
     def refuse(root, service):
-        raise InstallError("separate-account mode needs the traversal check, not yet available")
+        raise InstallError("/home/operator is not searchable by rt-test-svc")
 
     monkeypatch.setattr(access, "verify_traversable", refuse)
-    with pytest.raises(InstallError, match="not yet available"):
+    with pytest.raises(InstallError, match="not searchable"):
         plan_of(tree)
     assert tree.fake.calls == []
 
