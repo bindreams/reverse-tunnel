@@ -137,3 +137,22 @@ def test_a_missing_file_is_a_failure_saying_to_install(host):
     permissions = Permissions(host.config, Probes(windows=True, acl=missing, operator_sid=lambda root: OPERATOR))
     outcome, detail = permissions.env()
     assert outcome is Outcome.FAIL and "ctl install" in detail
+
+
+def test_an_operator_ace_with_delete_on_env_and_on_a_bridge_token_is_shown_as_r_w_d(host, bridge):
+    _, detail = verdicts(host, host_acls())["env"]
+    assert f"{OPERATOR}:(R,W,D)" in detail
+    outcome, detail = verdicts(bridge,
+                               {".env": HOST_ENV, "secrets": BRIDGE_SECRETS, "token": BRIDGE_TOKEN})["secrets_token"]
+    assert outcome is Outcome.PASS and f"{OPERATOR}:(R,W,D)" in detail
+
+
+def test_a_legacy_env_whose_operator_ace_lacks_delete_fails_asking_to_reinstall(host):
+    legacy = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.READ_WRITE, 0))
+    outcome, detail = verdicts(host, host_acls(**{".env": legacy}))["env"]
+    path = host.config.root / ".env"
+    assert outcome is Outcome.FAIL
+    assert detail == (
+        f"{path}: unexpected: {OPERATOR}:(R,W); missing: {OPERATOR}:(R,W,D); "
+        f"expected exactly {OPERATOR}:(R,W,D), {ADMINS} (Administrators):(F); run `ctl install` to restore it"
+    )
