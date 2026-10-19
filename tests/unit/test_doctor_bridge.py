@@ -389,10 +389,28 @@ def test_container_hardening_lists_every_violation_at_once(world):
         assert cause in check.detail
 
 
-@pytest.mark.parametrize("spelling", ["no-new-privileges", "no-new-privileges:true", "no-new-privileges=true"])
+# Go's strconv.ParseBool reads these as true, and Docker parses the value with it.
+GO_TRUE = ["1", "t", "T", "TRUE", "true", "True"]
+GO_FALSE = ["0", "f", "F", "FALSE", "false", "False"]
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["no-new-privileges"] + [f"no-new-privileges{separator}{value}" for separator in ":=" for value in GO_TRUE]
+)
 def test_container_hardening_accepts_every_no_new_privileges_spelling(world, spelling):
     world.docker.altered(host_config(SecurityOpt=[spelling]))
     assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [f"no-new-privileges{separator}{value}" for separator in ":=" for value in GO_FALSE + ["", "yes", "TrUe"]]
+)
+def test_container_hardening_rejects_a_no_new_privileges_that_is_not_true(world, spelling):
+    world.docker.altered(host_config(SecurityOpt=[spelling]))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and spelling in check.detail
 
 
 @pytest.mark.parametrize("capability", ["dac_read_search", "CAP_DAC_READ_SEARCH", "cap_dac_read_search"])
