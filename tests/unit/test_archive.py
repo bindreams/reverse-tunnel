@@ -98,6 +98,16 @@ def test_a_zip_is_refused_for_an_unsafe_entry_that_is_not_the_match(tmp_path, na
         hash_binary(path, ArchiveFormat.ZIP, "tool")
 
 
+def test_a_zip_is_refused_for_an_entry_whose_stored_name_holds_a_nul(tmp_path):
+    """`ZipInfo.filename` ends at the first NUL, so `web\0sat` would read as the safe `web`; only the stored name shows it."""
+    path = write_zip(tmp_path / "a.zip", [("top/tool", b"binary"), ("webXsat", b"x")])
+    stored = path.read_bytes()
+    assert stored.count(b"webXsat") == 2  # the local header and the central directory
+    path.write_bytes(stored.replace(b"webXsat", b"web\0sat"))
+    with pytest.raises(BinariesError, match=re.escape(repr("web\0sat"))):
+        hash_binary(path, ArchiveFormat.ZIP, "tool")
+
+
 def test_a_zip_is_refused_for_a_symlink_that_is_not_the_match(tmp_path):
     path = write_zip(tmp_path / "a.zip", [("top/tool", b"binary"), zip_link("top/link")])
     with pytest.raises(BinariesError, match="top/link"):
