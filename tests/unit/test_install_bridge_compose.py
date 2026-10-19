@@ -59,3 +59,35 @@ def test_uninstall_without_a_compose_file_problem_does_not_mention_it(tmp_path, 
     config = write_env(tmp_path, Role.BRIDGE)
     assert uninstall(config, services=Services(run=lambda args, *, cwd: 1)) == 1
     assert "COMPOSE_FILE" not in capsys.readouterr().err
+
+
+def test_install_remedy_names_the_env_file_when_that_was_judged(tmp_path):
+    config = bridge_with_missing_override(tmp_path)
+    with pytest.raises(InstallError) as caught:
+        install(config)
+    assert "fix COMPOSE_FILE in .env" in str(caught.value)
+
+
+def test_install_remedy_names_the_exported_variables_when_that_was_judged(tmp_path, monkeypatch):
+    config = write_env(tmp_path, Role.BRIDGE)
+    (tmp_path / "compose.yaml").write_text("services: {}" + chr(10), newline=chr(10))
+    monkeypatch.setenv("COMPOSE_FILE", MISSING)
+    with pytest.raises(InstallError) as caught:
+        install(config)
+    assert "fix or unset the exported COMPOSE_FILE / COMPOSE_ENV_FILES" in str(caught.value)
+    assert ".env" not in str(caught.value).split("Nothing was changed;")[1]
+
+
+def test_uninstall_hint_follows_the_judged_source(tmp_path, capsys, monkeypatch):
+    config = write_env(tmp_path, Role.BRIDGE)
+    (tmp_path / "compose.yaml").write_text("services: {}" + chr(10), newline=chr(10))
+    monkeypatch.setenv("COMPOSE_FILE", MISSING)
+    assert uninstall(config, services=Services(run=lambda args, *, cwd: 1)) == 1
+    err = capsys.readouterr().err
+    assert "fix or unset the exported COMPOSE_FILE / COMPOSE_ENV_FILES" in err and "--force" in err
+
+
+def test_uninstall_hint_names_the_env_file_when_that_was_judged(tmp_path, capsys):
+    config = bridge_with_missing_override(tmp_path)
+    assert uninstall(config, services=Services(run=lambda args, *, cwd: 1)) == 1
+    assert "fix COMPOSE_FILE in .env" in capsys.readouterr().err
