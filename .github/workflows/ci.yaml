@@ -73,7 +73,9 @@ jobs:
       # The tests that need no privilege, as the unprivileged runner user.
       - run: uv run pytest -p no:cacheprovider -m "not root" tests/unit tests/platform/posix
       # The ownership tests chown to this account and fail without it.
-      - run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin rt-test-svc
+      # The traversal tests need a group the account belongs to and the operator's tree does not.
+      - run: sudo groupadd rt-test-share
+      - run: sudo useradd --system --no-create-home --shell /usr/sbin/nologin --groups rt-test-share rt-test-svc
       - run: sudo -E env "PATH=$PATH" .venv/bin/python -m pytest -p no:cacheprovider -m "not mount" tests/platform/posix
       # The mount tests change the mount table, so they run only in a private mount namespace that dies with them.
       - run: sudo unshare --mount --propagation private env RT_PRIVATE_MOUNT_NS=1 "PATH=$PATH" .venv/bin/python -m pytest -p no:cacheprovider -m mount tests/platform/posix
@@ -98,6 +100,10 @@ jobs:
           sudo dscl . -create "/Users/$account" UniqueID 4300
           sudo dscl . -create "/Users/$account" PrimaryGroupID 20
           sudo dscl . -create "/Users/$account" NFSHomeDirectory /var/empty
+          # The traversal tests need a group the account belongs to and the operator's tree does not.
+          sudo dscl . -create /Groups/rt-test-share
+          sudo dscl . -create /Groups/rt-test-share PrimaryGroupID 4301
+          sudo dscl . -append /Groups/rt-test-share GroupMembership "$account"
       - run: sudo -E env "PATH=$PATH" .venv/bin/python -m pytest -p no:cacheprovider -m "not mount" tests/platform/posix
 
   platform-windows:

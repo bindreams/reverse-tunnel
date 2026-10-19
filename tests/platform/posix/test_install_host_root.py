@@ -2,15 +2,18 @@
 operator, and the daemons run as another account.
 
 Needs uid 0 and the accounts `rt-test-svc` and `nobody`; run it in the throwaway container or on CI. The traversal check
-is stubbed: the scratch tree lives under pytest's `0700` base directory, which `rt-test-svc` cannot search, and
-`test_access_posix.py` covers the check with real accounts.
+is stubbed except in the last two tests: the scratch tree lives under pytest's `0700` base directory, which
+`rt-test-svc` cannot search. Those two build their tree under `/tmp` instead, so the real check can pass.
 """
 
 import dataclasses
 import grp
 import os
 import pwd
+import shutil
 import stat
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -176,3 +179,39 @@ def test_the_detached_install_log_is_the_operator_s_and_0640(host_tree):
     assert install(host_tree.config, allow_self_disconnect=True, services=services) == 0
     assert seen == [os.stat(host_tree.root / "install.log").st_ino]
     assert owner_and_mode(host_tree.root / "install.log") == (OPERATOR, 0o640)
+
+
+# The traversal check, unstubbed ---------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def open_tree(request, monkeypatch):
+    """A host tree under a `/tmp` directory every account can search, with the real traversal check. Not `tmp_path`:
+    pytest's base directory is `0700`."""
+    base = Path(tempfile.mkdtemp(prefix="rt-preflight-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(base))
+    base.chmod(0o755)
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    built = build_host(base, monkeypatch, RT_SERVICE_USER=SERVICE)
+    hand_to_operator(built.root)
+    for directory in (built.root, built.root / "host"):
+        directory.chmod(0o755)
+    (built.root / "host" / "frpc.toml").chmod(0o644)
+    return built
+
+
+def test_preflight_passes_an_open_tree_with_the_real_traversal_check(open_tree):
+    assert host.preflight(open_tree.config, services=open_tree.services).mode is AccountMode.SEPARATE
+
+
+def test_preflight_refuses_a_closed_parent_with_the_real_traversal_check_and_changes_nothing(open_tree):
+    base = open_tree.root.parent
+    base.chmod(0o700)
+    before = (tree(open_tree.root), ownership(open_tree.root))
+    with pytest.raises(InstallError) as raised:
+        host.preflight(open_tree.config, services=open_tree.services)
+    assert f"{base} is not searchable by {SERVICE}" in str(raised.value)
+    assert (tree(open_tree.root), ownership(open_tree.root)) == before and open_tree.fake.calls == []
+    with pytest.raises(InstallError, match="not searchable"):
+        run_install(open_tree)
+    assert not (open_tree.root / "secrets").exists()
