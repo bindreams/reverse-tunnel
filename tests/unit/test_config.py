@@ -48,7 +48,7 @@ def valid_values(role: Role, **overrides: str | None) -> dict[str, str]:
 
 def write_env(root: Path, values: dict[str, str]) -> Path:
     path = root / ".env"
-    path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+    path.write_text("".join(f"{key}={value}\n" for key, value in values.items()), newline="\n")
     return path
 
 
@@ -141,7 +141,7 @@ def test_missing_env_file_is_an_error_naming_the_path(tmp_path):
 
 
 def test_a_syntax_error_in_env_is_a_config_error_naming_file_and_line(tmp_path):
-    (tmp_path / ".env").write_text("ROLE=host\nbroken\n")
+    (tmp_path / ".env").write_text("ROLE=host\nbroken\n", newline="\n")
     with pytest.raises(ConfigError) as raised:
         Config.load(tmp_path)
     assert f"{tmp_path / '.env'}:2" in str(raised.value)

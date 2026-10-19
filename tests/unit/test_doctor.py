@@ -167,7 +167,7 @@ def test_an_env_file_that_cannot_be_read_is_the_same_named_failure(bridge, monke
 
 def test_a_broken_env_is_a_configuration_error_not_a_check(tmp_path):
     world = build_bridge(tmp_path)
-    (world.root / ".env").write_text("ROLE=nonsense\n", encoding="utf-8")
+    (world.root / ".env").write_text("ROLE=nonsense\n", encoding="utf-8", newline="\n")
     with pytest.raises(ConfigError, match="ROLE"):
         doctor.diagnose(world.root, world.probes())
 

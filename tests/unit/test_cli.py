@@ -381,7 +381,7 @@ def test_the_child_ends_its_log_with_the_failure(host_root, monkeypatch, capsys,
 
 
 def test_the_child_reports_a_broken_configuration(host_root, capsys):
-    (host_root / ".env").write_text("ROLE=host\n")
+    (host_root / ".env").write_text("ROLE=host\n", newline="\n")
     assert main(CHILD, root=host_root) == 1
     assert last_line(capsys).startswith("apply finished: failed: ")
 

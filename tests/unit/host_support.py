@@ -123,7 +123,8 @@ class HostTree:
             key, _, value = line.partition("=")
             env[key] = value
         env.update(values)
-        (self.root / ".env").write_text("".join(f"{key}={value}\n" for key, value in env.items()), encoding="utf-8")
+        (self.root /
+         ".env").write_text("".join(f"{key}={value}\n" for key, value in env.items()), encoding="utf-8", newline="\n")
 
 
 def hand_to(root: Path, entry) -> None:
