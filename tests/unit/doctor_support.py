@@ -4,6 +4,7 @@ Each fake encodes a belief about the outside world (docker's JSON, frps's answer
 why the belief is spelled out here once instead of in every test. Task 11 forces each condition for real.
 """
 
+import copy
 import dataclasses
 import hashlib
 import json
@@ -33,6 +34,13 @@ PS_ENTRY = {
 PORT_BINDINGS = {
     "8001/tcp": [{"HostIp": "", "HostPort": "7000"}],
     "8001/udp": [{"HostIp": "", "HostPort": "7000"}],
+    "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}],
+    "7500/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7500"}],
+}
+# What the daemon actually published, as `NetworkSettings.Ports` reports it (a port nothing is published for maps to null).
+ACTUAL_PORTS = {
+    "8001/tcp": [{"HostIp": "0.0.0.0", "HostPort": "7000"}, {"HostIp": "::", "HostPort": "7000"}],
+    "8001/udp": [{"HostIp": "0.0.0.0", "HostPort": "7000"}, {"HostIp": "::", "HostPort": "7000"}],
     "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}],
     "7500/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7500"}],
 }
@@ -67,6 +75,7 @@ def hardened_container(root: Path, *, restart: str = "unless-stopped", bindings:
         ],
         "HostConfig": {
             "RestartPolicy": {"Name": restart},
+            "PublishAllPorts": False,
             "PortBindings": PORT_BINDINGS if bindings is None else bindings,
             "CapDrop": ["ALL"],
             "CapAdd": ["DAC_READ_SEARCH"],
@@ -86,6 +95,7 @@ def hardened_container(root: Path, *, restart: str = "unless-stopped", bindings:
             "DeviceRequests": None,
             "Runtime": RUNTIME,
         },
+        "NetworkSettings": {"Ports": copy.deepcopy(ACTUAL_PORTS)},
     }
 
 

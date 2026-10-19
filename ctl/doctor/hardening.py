@@ -82,7 +82,8 @@ def violations(container: Mapping[str, Any], *, image: Mapping[str, Any], runtim
         problems += config_violations(config, image)
     else:
         problems.append("`docker inspect` has no Config for the container, so its settings cannot be confirmed")
-    return problems + mount_violations(container.get("Mounts"), root)
+    return problems + network_violations(container.get("NetworkSettings")
+                                         ) + mount_violations(container.get("Mounts"), root)
 
 
 def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
@@ -125,14 +126,24 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
         "compose.yaml sets cgroup: private, because a daemon's default may be the host's namespace",
     )
     check("Runtime", text(host.get("Runtime")) == runtime, f"compose.yaml uses the daemon's default runtime, {runtime}")
-    published = listing(mapping(host.get("PortBindings")).get(ADMIN_PORT))
-    exposed = [text(mapping(entry).get("HostIp")) for entry in published]
-    if any(address != LOOPBACK for address in exposed):
-        problems.append(
-            f"HostConfig.PortBindings[{ADMIN_PORT}] publishes on {shown(exposed)}; compose.yaml publishes the admin "
-            f"port on {LOOPBACK} only"
-        )
+    # `docker run -P` publishes every EXPOSEd port, the admin port among them, with no entry in PortBindings.
+    check("PublishAllPorts", not host.get("PublishAllPorts"), "compose.yaml does not publish every exposed port")
+    problems += admin_binding_violations("HostConfig.PortBindings", mapping(host.get("PortBindings")))
     return problems
+
+
+def network_violations(network: Any) -> list[str]:
+    """The ports the daemon actually published, which `HostConfig` alone does not show."""
+    return admin_binding_violations("NetworkSettings.Ports", mapping(mapping(network).get("Ports")))
+
+
+def admin_binding_violations(field: str, bindings: Mapping[str, Any]) -> list[str]:
+    exposed = [text(mapping(entry).get("HostIp")) for entry in listing(bindings.get(ADMIN_PORT))]
+    if all(address == LOOPBACK for address in exposed):
+        return []
+    return [
+        f"{field}[{ADMIN_PORT}] publishes on {shown(exposed)}; compose.yaml publishes the admin port on {LOOPBACK} only"
+    ]
 
 
 def config_violations(config: Mapping[str, Any], image: Mapping[str, Any]) -> list[str]:

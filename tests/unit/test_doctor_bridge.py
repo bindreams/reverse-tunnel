@@ -217,6 +217,10 @@ def config(**fields):
     return lambda document: document["Config"].update(fields)
 
 
+def network_ports(**ports):
+    return lambda document: document["NetworkSettings"]["Ports"].update(ports)
+
+
 def mounts(change):
     return lambda document: change(document["Mounts"])
 
@@ -361,6 +365,21 @@ HARDENING_VIOLATIONS = [
         "HostConfig.PortBindings[7500/tcp]",
         '["0.0.0.0"]',
         id="admin-port-on-the-wildcard",
+    ),
+    pytest.param(host_config(PublishAllPorts=True), "HostConfig.PublishAllPorts", "true", id="publish-all-ports"),
+    pytest.param(
+        network_ports(**{"7500/tcp": [{"HostIp": "0.0.0.0", "HostPort": "49153"}]}),
+        "NetworkSettings.Ports[7500/tcp]",
+        '["0.0.0.0"]',
+        id="admin-port-published-on-the-wildcard",
+    ),
+    pytest.param(
+        network_ports(
+            **{"7500/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7500"}, {"HostIp": "::", "HostPort": "7500"}]}
+        ),
+        "NetworkSettings.Ports[7500/tcp]",
+        '["127.0.0.1", "::"]',
+        id="admin-port-published-on-every-ipv6-interface",
     ),
 ]
 
@@ -519,6 +538,28 @@ def test_container_hardening_reads_a_capability_however_it_is_spelled(world, cap
 
 def test_container_hardening_passes_when_the_admin_port_is_not_published(world):
     world.docker.altered(host_config(PortBindings={}))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("published", [None, False], ids=["null", "false"])
+def test_container_hardening_reads_a_null_publish_all_ports_as_false(world, published):
+    world.docker.altered(host_config(PublishAllPorts=published))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_container_hardening_reads_an_absent_publish_all_ports_as_false(world):
+    world.docker.altered(lambda document: document["HostConfig"].pop("PublishAllPorts"))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("ports", [None, {}, {"7500/tcp": None}], ids=["null", "empty", "admin-port-null"])
+def test_container_hardening_passes_when_the_daemon_published_nothing(world, ports):
+    world.docker.altered(lambda document: document["NetworkSettings"].update(Ports=ports))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_container_hardening_passes_without_network_settings(world):
+    world.docker.altered(lambda document: document.pop("NetworkSettings"))
     assert hardening(world).outcome is Outcome.PASS
 
 
