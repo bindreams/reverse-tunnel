@@ -395,18 +395,20 @@ def test_preflight_detects_the_separate_account_mode(host_tree, monkeypatch):
     assert host.preflight(host_tree.config, services=host_tree.services).mode is AccountMode.SEPARATE
 
 
-def test_preflight_fails_closed_in_separate_account_mode_before_mutating(host_tree):
-    """Until the owner decides how a separate account reaches the deployment, the seam refuses."""
+def test_preflight_refuses_an_untraversable_separate_account_path_before_mutating(host_tree, monkeypatch):
+    """The parent of the root stands for a `0700` home: the service account cannot search it."""
+    closed = host_tree.root.parent
+    monkeypatch.setattr(access, "account_can", lambda account, flag, path: path != closed)
     host_tree.edit_env(RT_SERVICE_USER="nobody")
     before = tree(host_tree.root)
     contents = {path: (host_tree.root / path).read_bytes() for path, kind in before.items() if kind == "file"}
     with pytest.raises(InstallError) as raised:
         host.preflight(host_tree.config, services=host_tree.services)
-    assert "not yet available" in str(raised.value) and "nobody" in str(raised.value)
+    assert str(closed) in str(raised.value) and "nobody" in str(raised.value)
     assert tree(host_tree.root) == before
     assert {path: (host_tree.root / path).read_bytes() for path in contents} == contents
     assert host_tree.fake.calls == []
-    with pytest.raises(InstallError, match="not yet available"):
+    with pytest.raises(InstallError, match="not searchable"):
         run_install(host_tree)
     assert not (host_tree.root / "secrets").exists()
 

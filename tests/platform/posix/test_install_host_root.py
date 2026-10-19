@@ -1,9 +1,9 @@
 """A host install in the separate-account mode, with real accounts: root runs it, the repository belongs to an
 operator, and the daemons run as another account.
 
-Needs uid 0 and the accounts `rt-test-svc` and `nobody`; run it in the throwaway container or on CI. The traversal seam
-is stubbed: until the owner decides how a separate account reaches the deployment it refuses every such install, and
-this file tests what happens once it does not.
+Needs uid 0 and the accounts `rt-test-svc` and `nobody`; run it in the throwaway container or on CI. The traversal check
+is stubbed: the scratch tree lives under pytest's `0700` base directory, which `rt-test-svc` cannot search, and
+`test_access_posix.py` covers the check with real accounts.
 """
 
 import dataclasses
