@@ -2,7 +2,9 @@
 #   COMPOSE_FILE=compose.yaml:compose.traefik.yaml:compose.override.yaml   (`;` instead of `:` on Windows)
 # For a Traefik v3 that sets TLS per router rather than per entrypoint. The names `websecure` and `letsencrypt`, and
 # the `expose` label, are this example's: use your Traefik's entrypoint, certificate resolver and constraint label.
-# Leave what `ctl doctor`'s `container_hardening` checks alone (service name, mounts, hardening settings, no `env_file`).
+# `ctl doctor`'s `container_hardening` fails on what lets the container reach past itself: another bind mount, a volume
+# backed by a host path or network storage (`driver_opts`), privileges, capabilities, host namespaces, devices, an admin
+# port beyond loopback, `env_file`. Keep the service name. A writable root, anonymous volumes and tmpfs mounts are yours.
 services:
   frps:
     labels:
