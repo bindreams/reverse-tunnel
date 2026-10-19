@@ -284,6 +284,27 @@ def test_write_secret_replaces_a_hardened_secret_and_keeps_the_acl(tmp_path):
     assert [entry.name for entry in tmp_path.iterdir()] == ["token"]
 
 
+def test_a_non_elevated_operator_replaces_the_token(tmp_path, standard_user):
+    """Replacing deletes the old token. Elevated, Administrators' full access allows it; the operator's ACE must."""
+    import win32security
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    make_owner(root, standard_user)
+    folder = root / "secrets"
+    converge_dir(folder, None, 0o711, frozenset({SID_LOCAL_SERVICE}), root=root)
+    path = folder / "token"
+    write_secret(path, b"old", None, frozenset({SID_LOCAL_SERVICE}), root=root)
+    assert standard_user.sid in principals(path)
+    win32security.ImpersonateLoggedOnUser(standard_user.token)
+    try:
+        write_secret(path, b"new", None, frozenset({SID_LOCAL_SERVICE}), root=root)
+    finally:
+        win32security.RevertToSelf()
+    assert path.read_bytes() == b"new"
+    assert [entry.name for entry in folder.iterdir()] == ["token"]
+
+
 # Directories ==========================================================================================================
 
 
