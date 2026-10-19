@@ -6,6 +6,7 @@ import pytest
 from tests.unit.doctor_support import World, build_client, by_name, failures
 
 from ctl import doctor
+from ctl.client import WEBSOCAT
 from ctl.doctor import Outcome
 
 
@@ -25,14 +26,14 @@ def test_a_client_runs_no_docker_no_network_and_no_goetia(world):
 
 
 def test_digest_drift_in_bin_is_a_failure(world):
-    (world.root / "bin" / "websocat").write_bytes(b"tampered")
+    (world.root / "bin" / WEBSOCAT).write_bytes(b"tampered")
     check = checks_of(world)["bin_digests_match_record"]
     assert check.outcome is Outcome.FAIL and "websocat" in check.detail
 
 
 def test_a_client_that_was_never_installed_says_so(world):
     (world.root / "bin" / ".digests.json").unlink()
-    (world.root / "bin" / "websocat").unlink()
+    (world.root / "bin" / WEBSOCAT).unlink()
     check = checks_of(world)["bin_digests_match_record"]
     assert check.outcome is Outcome.FAIL and "ctl install" in check.detail
 

@@ -18,6 +18,7 @@ from tests.unit.deployment_support import GOOD_TOKEN, REPO_ROOT, write_env
 from tests.unit.host_support import HostTree, build_host
 
 from ctl import perms
+from ctl.client import WEBSOCAT
 from ctl.config import Config, Role
 from ctl.doctor import Check, Outcome
 from ctl.doctor.probes import Probes, TcpResult, TlsProbeError
@@ -212,7 +213,7 @@ class FakeTls:
 def install_secrets(root: Path, token: str = GOOD_TOKEN) -> None:
     """`secrets/token` as `ctl install` leaves it. Modes and owners are the platform tests' business, see `World.principals`."""
     (root / "secrets").mkdir(exist_ok=True)
-    (root / "secrets" / "token").write_text(token + "\n", encoding="utf-8")
+    (root / "secrets" / "token").write_text(token + "\n", encoding="utf-8", newline="\n")
 
 
 @dataclasses.dataclass
@@ -303,6 +304,6 @@ def build_client(tmp_path: Path) -> World:
     root.mkdir()
     write_env(root, Role.CLIENT)
     (root / "bin").mkdir()
-    (root / "bin" / "websocat").write_bytes(b"websocat bytes")
-    (root / "bin" / ".digests.json").write_text(json.dumps({"websocat": sha256(b"websocat bytes")}), encoding="utf-8")
+    (root / "bin" / WEBSOCAT).write_bytes(b"websocat bytes")
+    (root / "bin" / ".digests.json").write_text(json.dumps({WEBSOCAT: sha256(b"websocat bytes")}), encoding="utf-8")
     return World(root)
