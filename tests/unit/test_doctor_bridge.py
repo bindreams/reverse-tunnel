@@ -40,20 +40,29 @@ def checks_of(world: World, **overrides):
 
 @pytest.mark.parametrize(
     "arrange", [
-        pytest.param(lambda docker: docker.raises("version", error=FileNotFoundError("docker")), id="not-installed"),
         pytest.param(
-            lambda docker: docker.on("version", returncode=1, stderr="Cannot connect to the Docker daemon"),
+            lambda docker, command: docker.raises(command, error=FileNotFoundError("docker")), id="not-installed"
+        ),
+        pytest.param(
+            lambda docker, command: docker.on(command, returncode=1, stderr="Cannot connect to the Docker daemon"),
             id="daemon-down",
         ),
-        pytest.param(lambda docker: docker.raises("version", error=subprocess.TimeoutExpired("docker", 60)), id="hung"),
+        pytest.param(
+            lambda docker, command: docker.raises(command, error=subprocess.TimeoutExpired("docker", 60)), id="hung"
+        ),
     ]
 )
 def test_docker_unavailable_is_one_named_failure_not_ten(world, arrange):
-    arrange(world.docker)
+    # `docker info` is as unusable as `docker version`, so a check that asks the daemon first cannot hide behind it.
+    for command in ("version", "info"):
+        arrange(world.docker, command)
     checks = checks_of(world)
     assert failures(list(checks.values())) == ["docker_reachable"]
     assert "Docker" in checks["docker_reachable"].detail
-    for name in ("container_healthy", "restart_policy", "control_port_published", "config_skew", "token_skew"):
+    for name in (
+        "container_healthy", "restart_policy", "container_hardening", "control_port_published", "config_skew",
+        "token_skew"
+    ):
         assert checks[name].outcome is Outcome.NOT_APPLICABLE
         assert "docker_reachable" in checks[name].detail
 
@@ -396,6 +405,12 @@ def test_container_hardening_passes_when_the_admin_port_is_not_published(world):
 
 def test_container_hardening_skips_when_there_is_no_container(world):
     world.docker.on("ps", stdout="")
+    assert hardening(world).outcome is Outcome.NOT_APPLICABLE
+
+
+def test_container_hardening_skips_when_there_is_no_container_and_the_daemon_cannot_say_its_defaults(world):
+    world.docker.on("ps", stdout="")
+    world.docker.on("info", returncode=1, stderr="permission denied while trying to connect")
     assert hardening(world).outcome is Outcome.NOT_APPLICABLE
 
 

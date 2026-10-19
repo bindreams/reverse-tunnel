@@ -279,9 +279,10 @@ class Bridge:
     def container_hardening(self) -> Verdict:
         """The live container against compose.yaml's security settings, however the container came to be started."""
         try:
+            container = self.inspected  # first, so no container or no Docker is n/a whatever `docker info` says
             runtime, cgroup_version = self.daemon_defaults
             problems = hardening.violations(
-                self.inspected,
+                container,
                 image_env=self.image_env_names,
                 runtime=runtime,
                 cgroup_version=cgroup_version,
