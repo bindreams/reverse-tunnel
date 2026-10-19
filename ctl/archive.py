@@ -144,7 +144,8 @@ def _entries(path: Path, fmt: ArchiveFormat) -> Iterator[tuple[str, str, Callabl
     if fmt is ArchiveFormat.ZIP:
         with zipfile.ZipFile(path) as zipped:
             for entry in zipped.infolist():
-                yield entry.filename, _zip_kind(entry), partial(zipped.open, entry)
+                # On Windows `filename` has a backslash rewritten to `/`; the unsafe-name check needs the name as stored.
+                yield entry.orig_filename, _zip_kind(entry), partial(zipped.open, entry)
     else:
         with tarfile.open(path, TAR_MODES[fmt]) as tarred:
             for member in tarred:

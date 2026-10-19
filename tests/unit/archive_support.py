@@ -37,8 +37,17 @@ def other(name: str, kind: bytes, target: str = "elsewhere") -> tuple[tarfile.Ta
 def write_zip(path: Path, entries: list[tuple[str | zipfile.ZipInfo, bytes]]) -> Path:
     with zipfile.ZipFile(path, "w") as archive, pytest.warns(UserWarning) if _has_duplicates(entries) else _nothing():
         for name, data in entries:
-            archive.writestr(name, data)
+            archive.writestr(_verbatim(name), data)
     return path
+
+
+def _verbatim(name: str | zipfile.ZipInfo) -> str | zipfile.ZipInfo:
+    """On Windows `ZipInfo` rewrites a backslash to `/`; set the name afterwards so it reaches the archive as given."""
+    if not isinstance(name, str) or "\\" not in name:
+        return name
+    info = zipfile.ZipInfo(name)
+    info.filename = name
+    return info
 
 
 def write_archive(path: Path, fmt: ArchiveFormat, entries: list[Any]) -> Path:
