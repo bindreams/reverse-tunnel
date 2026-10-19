@@ -33,9 +33,16 @@ def get(url: str, **kwargs) -> httpx.Response:
         return client.get(url, **kwargs)
 
 
+COMPOSE_VARIABLES = ("COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "COMPOSE_ENV_FILES")
+
+
 def clean_environment() -> dict[str, str]:
-    """The process environment minus every `RT_*`, which compose would let override the project's `.env`."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("RT_")}
+    """The process environment minus every `RT_*` and the `COMPOSE_*` variables that choose files; compose would let
+    them override the project's `.env`."""
+    return {
+        key: value
+        for key, value in os.environ.items() if not key.startswith("RT_") and key not in COMPOSE_VARIABLES
+    }
 
 
 def run(*args: str, cwd: Path | None = None, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -246,7 +253,7 @@ def make_project(
 ) -> Project:
     """A scratch deployment. With `root_name`, the compose project is named after the directory, as `ctl` runs it.
 
-    `copy_in` maps a file name in the project to the source it is copied from, for example `compose.override.yaml`.
+    `copy_in` adds files to the project, keyed by their name in it (for example `compose.override.yaml`).
     """
     root = directory / (root_name or "deployment")
     root.mkdir()

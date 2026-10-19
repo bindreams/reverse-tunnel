@@ -1,9 +1,15 @@
 import json
+import uuid
 
 import pytest
-from bridge_support import GOOD_TOKEN, REPO_ROOT, Project, make_project
+from bridge_support import COMPOSE_VARIABLES, GOOD_TOKEN, REPO_ROOT, Project, make_project
+
+from ctl.config import Config
+from ctl.doctor.bridge import Bridge
+from ctl.doctor.probes import Probes
 
 TRAEFIK_LABELS = "traefik.docker.network"
+OVERRIDE = "compose.override.yaml"
 
 
 def ports(config: dict) -> set[tuple[str | None, str, int, str]]:
@@ -148,27 +154,49 @@ def bare_labels(project: Project) -> dict[str, str]:
     return json.loads(result.stdout)["services"]["frps"].get("labels", {})
 
 
-def test_compose_file_in_env_selects_the_override_for_every_compose_call(tmp_path):
-    project = make_project(tmp_path)
+def test_compose_file_in_env_selects_the_override_for_every_compose_call(tmp_path, monkeypatch):
+    for name in COMPOSE_VARIABLES:
+        monkeypatch.delenv(name, raising=False)  # ctl's own calls inherit this process's environment
+    # ctl refuses port 0, so these are fixed; a busy port fails `up` rather than the test passing wrongly.
+    project = make_project(
+        tmp_path,
+        root_name=f"rt-e2e-composefile-{uuid.uuid4().hex[:8]}",
+        RT_CONTROL_PORT="17821",
+        RT_VHOST_PORT="17822",
+        RT_ADMIN_PORT="17823",
+    )
+    project.values |= {"ROLE": "bridge", "RT_TOKEN": GOOD_TOKEN, "COMPOSE_PATH_SEPARATOR": ":"}
     override = "services:\n  frps:\n    labels:\n      rt.e2e.override: present\n"
-    (project.root / "compose.override.yaml").write_text(override, newline="\n")
+    (project.root / OVERRIDE).write_text(override, newline="\n")
     # Without COMPOSE_FILE, Compose would load the override on its own; with a list that omits it, it does not.
     project.values["COMPOSE_FILE"] = "compose.yaml"
     assert "rt.e2e.override" not in bare_labels(project)
-    project.values["COMPOSE_FILE"] = "compose.yaml:compose.override.yaml"
-    # No `-f` here: this is how `ctl`'s own calls (doctor's `ps` and `exec`, uninstall's `down`) run, so they load the
-    # same files as the operator's.
+    project.values["COMPOSE_FILE"] = f"compose.yaml:{OVERRIDE}"
     assert bare_labels(project)["rt.e2e.override"] == "present"
+    try:
+        project.up(extra_files=(OVERRIDE, ))
+        # `ctl`'s own calls: its argv and its working directory, with no `-f`.
+        bridge = Bridge(Config.load(project.root), Probes())
+        rendered = bridge.docker("compose", "config", "--format", "json")
+        assert rendered.returncode == 0, rendered.stderr
+        assert json.loads(rendered.stdout)["services"]["frps"]["labels"]["rt.e2e.override"] == "present"
+        container = bridge.found.container
+        assert container is not None, bridge.found.problem
+        inspected = bridge.docker("inspect", container["ID"])
+        assert inspected.returncode == 0, inspected.stderr
+        assert json.loads(inspected.stdout)[0]["Config"]["Labels"]["rt.e2e.override"] == "present"
+    finally:
+        project.down(extra_files=(OVERRIDE, ))
 
 
 def test_the_example_override_merges_with_the_traefik_overlay(tmp_path):
-    project = make_project(
-        tmp_path, copy_in={"compose.override.yaml": REPO_ROOT / "examples" / "compose.override.yaml"}
-    )
-    project.values["COMPOSE_FILE"] = "compose.yaml:compose.traefik.yaml:compose.override.yaml"
+    project = make_project(tmp_path, copy_in={OVERRIDE: REPO_ROOT / "examples" / "compose.override.yaml"})
+    project.values["COMPOSE_PATH_SEPARATOR"] = ":"
+    project.values["COMPOSE_FILE"] = f"compose.yaml:compose.traefik.yaml:{OVERRIDE}"
+    domain, control_host = project.values["RT_DOMAIN"], project.values["RT_CONTROL_HOST"]
     labels = bare_labels(project)
     assert labels["traefik.http.routers.rt-vhost.tls.certresolver"] == "letsencrypt"
-    assert labels["traefik.http.routers.rt-vhost.tls.domains[0].sans"] == "*.tunnel.example.com"
-    assert labels["traefik.http.routers.rt-control.tls.domains[0].main"] == "bridge.example.com"
+    assert labels["traefik.http.routers.rt-vhost.tls.domains[0].sans"] == f"*.{domain}"
+    assert labels["traefik.http.routers.rt-control.tls.domains[0].main"] == control_host
     # The overlay's own labels survive the merge.
     assert labels["traefik.http.routers.rt-vhost.service"] == "rt-vhost"
