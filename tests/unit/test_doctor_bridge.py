@@ -576,7 +576,9 @@ def test_a_volume_inspect_that_fails_fails_the_check_closed_with_dockers_words(w
     world.docker.altered(mounted(volume_mount()))
     world.docker.on("volume", "inspect", "data", returncode=1, stderr="permission denied while trying to connect")
     check = hardening(world)
-    assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
+    assert check.outcome is Outcome.FAIL
+    assert check.detail.startswith("the container's security settings could not be checked: ")
+    assert "permission denied" in check.detail
 
 
 @pytest.mark.parametrize(("stderr", "reason"), [
@@ -607,7 +609,9 @@ def test_with_nothing_else_wrong_a_failed_volume_lookup_outranks_a_vanished_volu
     world.docker.on("volume", "inspect", "a", returncode=1, stderr="No such volume: a")
     world.docker.on("volume", "inspect", "b", returncode=1, stderr="permission denied")
     check = hardening(world)
-    assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
+    assert check.outcome is Outcome.FAIL
+    assert check.detail.startswith("the container's security settings could not be checked: ")
+    assert "permission denied" in check.detail
 
 
 @pytest.mark.parametrize("document", ["[null]", "[[]]", '["x"]', "[]", "{}", "not json"])
