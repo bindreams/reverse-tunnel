@@ -402,6 +402,13 @@ def test_container_hardening_names_each_violation(world, change, field, value):
     assert any(value in line for line in lines), f"no line names {field} with {value}: {check.detail!r}"
 
 
+def test_the_hardening_failure_says_recreating_from_compose_yaml_fixes_a_container_with_no_override(world):
+    world.docker.altered(host_config(Privileged=True))
+    detail = hardening(world).detail
+    assert "created before an upgrade that tightened these rules" in detail
+    assert "recreate" in detail.lower() and "docker compose up -d --force-recreate" in detail
+
+
 def test_an_env_file_that_adds_variables_is_named_by_variable_and_never_by_value(world):
     world.docker.altered(
         lambda document: document["Config"]["Env"].extend(["RT_TOKEN=sekrit-token-value", "RT_LABEL=alpha"])
