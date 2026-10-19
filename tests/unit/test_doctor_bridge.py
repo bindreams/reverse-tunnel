@@ -9,6 +9,8 @@ import httpx
 import pytest
 from tests.unit.deployment_support import write_env
 from tests.unit.doctor_support import (
+    IMAGE_ENV,
+    IMAGE_ID,
     PORT_BINDINGS,
     PS_ENTRY,
     World,
@@ -173,9 +175,7 @@ def test_only_always_and_unless_stopped_pass(world, policy):
 
 
 def test_a_null_restart_policy_is_its_own_named_failure(world):
-    world.docker.on(
-        "inspect", stdout=json.dumps([{"HostConfig": {"RestartPolicy": None, "PortBindings": PORT_BINDINGS}}])
-    )
+    world.docker.altered(lambda document: document["HostConfig"].update(RestartPolicy=None))
     check = checks_of(world)["restart_policy"]
     assert check.outcome is Outcome.FAIL and "RestartPolicy" in check.detail and "null" in check.detail
 
@@ -193,6 +193,222 @@ def test_the_control_port_published_somewhere_else_fails(world):
     world.docker.healthy(bindings=bindings)
     check = checks_of(world)["control_port_published"]
     assert check.outcome is Outcome.FAIL and "9999" in check.detail
+
+
+# The container's security settings ====================================================================================
+
+
+def host_config(**fields):
+    return lambda document: document["HostConfig"].update(fields)
+
+
+def config(**fields):
+    return lambda document: document["Config"].update(fields)
+
+
+def mounts(change):
+    return lambda document: change(document["Mounts"])
+
+
+def hardening(world: World):
+    return checks_of(world)["container_hardening"]
+
+
+def test_container_hardening_passes_for_the_shipped_compose_shape(world):
+    check = hardening(world)
+    assert check.outcome is Outcome.PASS
+    assert check.detail == "the container matches compose.yaml's security settings"
+
+
+DOCKER_SOCKET = {"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True}
+HARDENING_VIOLATIONS = [
+    pytest.param(host_config(CapDrop=[]), "HostConfig.CapDrop", id="no-cap-drop"),
+    pytest.param(host_config(CapDrop=["NET_RAW"]), "HostConfig.CapDrop", id="cap-drop-without-all"),
+    pytest.param(host_config(CapAdd=["DAC_READ_SEARCH", "SYS_ADMIN"]), "SYS_ADMIN", id="extra-capability"),
+    pytest.param(host_config(CapAdd=[]), "HostConfig.CapAdd", id="capability-missing"),
+    pytest.param(host_config(Privileged=True), "HostConfig.Privileged", id="privileged"),
+    pytest.param(host_config(SecurityOpt=["seccomp=unconfined"]), "seccomp=unconfined", id="seccomp-unconfined-alone"),
+    pytest.param(
+        host_config(SecurityOpt=["no-new-privileges:true", "seccomp=unconfined"]),
+        "seccomp=unconfined",
+        id="seccomp-unconfined-beside-no-new-privileges",
+    ),
+    pytest.param(host_config(SecurityOpt=[]), "HostConfig.SecurityOpt", id="no-new-privileges-missing"),
+    pytest.param(host_config(SecurityOpt=["no-new-privileges:false"]), "no-new-privileges:false", id="npp-false"),
+    pytest.param(host_config(ReadonlyRootfs=False), "HostConfig.ReadonlyRootfs", id="writable-rootfs"),
+    pytest.param(host_config(NetworkMode="host"), "HostConfig.NetworkMode", id="host-network"),
+    pytest.param(host_config(NetworkMode="none"), "HostConfig.NetworkMode", id="no-network"),
+    pytest.param(host_config(NetworkMode="container:abc123"), "HostConfig.NetworkMode", id="shared-network"),
+    pytest.param(host_config(PidMode="host"), "HostConfig.PidMode", id="host-pid"),
+    pytest.param(host_config(UsernsMode="host"), "HostConfig.UsernsMode", id="host-userns"),
+    pytest.param(host_config(IpcMode="host"), "HostConfig.IpcMode", id="host-ipc"),
+    pytest.param(host_config(IpcMode="container:abc123"), "HostConfig.IpcMode", id="shared-ipc"),
+    pytest.param(host_config(UTSMode="host"), "HostConfig.UTSMode", id="host-uts"),
+    pytest.param(host_config(CgroupnsMode="host"), "HostConfig.CgroupnsMode", id="host-cgroupns-on-cgroup-v2"),
+    pytest.param(host_config(Devices=[{"PathOnHost": "/dev/mem"}]), "HostConfig.Devices", id="device"),
+    pytest.param(host_config(Sysctls={"net.ipv4.ip_forward": "1"}), "HostConfig.Sysctls", id="sysctl"),
+    pytest.param(host_config(DeviceCgroupRules=["c *:* rwm"]), "HostConfig.DeviceCgroupRules", id="device-cgroup-rule"),
+    pytest.param(host_config(DeviceRequests=[{"Driver": "nvidia"}]), "HostConfig.DeviceRequests", id="device-request"),
+    pytest.param(host_config(Runtime="nvidia"), "HostConfig.Runtime", id="another-runtime"),
+    pytest.param(host_config(Runtime=""), "HostConfig.Runtime", id="no-runtime"),
+    pytest.param(config(User="root"), "Config.User", id="user"),
+    pytest.param(host_config(Tmpfs={"/run/rt": "mode=0700", "/tmp": ""}), "/tmp", id="extra-tmpfs"),
+    pytest.param(host_config(Tmpfs={}), "HostConfig.Tmpfs", id="tmpfs-missing"),
+    pytest.param(host_config(Tmpfs={"/run/other": ""}), "/run/other", id="tmpfs-elsewhere"),
+    pytest.param(mounts(lambda found: found.append(DOCKER_SOCKET)), "/var/run/docker.sock", id="docker-socket"),
+    pytest.param(
+        mounts(lambda found: found.append({"Type": "volume", "Name": "data", "Destination": "/data", "RW": True})),
+        "/data",
+        id="volume",
+    ),
+    pytest.param(mounts(lambda found: found[0].update(RW=True)), "/rt/secrets/token", id="writable-token-mount"),
+    pytest.param(mounts(lambda found: found[1].update(RW=True)), "/rt/bridge/frps.toml", id="writable-config-mount"),
+    pytest.param(mounts(lambda found: found.pop()), "/rt/bridge/frps.toml", id="config-mount-missing"),
+    pytest.param(
+        mounts(lambda found: found[0].update(Source="/etc/shadow")),
+        "/etc/shadow",
+        id="token-mount-from-elsewhere",
+    ),
+    pytest.param(
+        host_config(PortBindings=PORT_BINDINGS | {"7500/tcp": [{"HostIp": "", "HostPort": "7500"}]}),
+        "7500/tcp",
+        id="admin-port-on-every-interface",
+    ),
+    pytest.param(
+        host_config(PortBindings=PORT_BINDINGS | {"7500/tcp": [{"HostIp": "0.0.0.0", "HostPort": "7500"}]}),
+        "7500/tcp",
+        id="admin-port-on-the-wildcard",
+    ),
+]
+
+
+@pytest.mark.parametrize(("change", "cause"), HARDENING_VIOLATIONS)
+def test_container_hardening_names_each_violation(world, change, cause):
+    world.docker.altered(change)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert cause in check.detail and "compose.yaml" in check.detail
+
+
+def test_an_env_file_that_adds_variables_is_named_by_variable_and_never_by_value(world):
+    world.docker.altered(
+        lambda document: document["Config"]["Env"].extend(["RT_TOKEN=sekrit-token-value", "RT_LABEL=alpha"])
+    )
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "RT_TOKEN" in check.detail and "RT_LABEL" in check.detail
+    assert "sekrit-token-value" not in check.detail and "alpha" not in check.detail
+
+
+def test_a_variable_the_image_declares_is_not_a_violation(world):
+    # Present in the shipped document already; a second copy is no new name.
+    world.docker.altered(lambda document: document["Config"]["Env"].append(IMAGE_ENV[0]))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_the_image_is_asked_by_the_containers_image_id_not_by_its_tag(world):
+    hardening(world)
+    assert ["image", "inspect", IMAGE_ID] in [call[:3] for call in world.docker.calls]
+
+
+def test_an_image_inspect_that_fails_fails_the_check_closed_with_dockers_words(world):
+    world.docker.on("image", "inspect", returncode=1, stderr="No such image")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "No such image" in check.detail
+
+
+def test_a_daemon_that_cannot_say_its_defaults_fails_the_check_closed_with_dockers_words(world):
+    world.docker.on("info", returncode=1, stderr="permission denied while trying to connect")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
+
+
+def test_a_host_cgroupns_passes_on_a_cgroup_v1_daemon(world):
+    world.docker.on("info", stdout=json.dumps({"DefaultRuntime": "runc", "CgroupVersion": "1"}))
+    world.docker.altered(host_config(CgroupnsMode="host"))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_the_runtime_the_daemon_defaults_to_is_the_one_the_container_must_use(world):
+    world.docker.on("info", stdout=json.dumps({"DefaultRuntime": "crun", "CgroupVersion": "2"}))
+    world.docker.altered(host_config(Runtime="crun"))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_a_mount_source_is_compared_resolved_on_both_sides(world):
+    world.docker.altered(
+        mounts(lambda found: found[0].update(Source=str(world.root / "elsewhere" / ".." / "secrets" / "token")))
+    )
+    assert hardening(world).outcome is Outcome.PASS
+
+
+NULLED = [
+    pytest.param(host_config(CapDrop=None), "HostConfig.CapDrop", id="CapDrop"),
+    pytest.param(host_config(SecurityOpt=None), "HostConfig.SecurityOpt", id="SecurityOpt"),
+    pytest.param(lambda document: document.update(Mounts=None), "Mounts", id="Mounts"),
+    pytest.param(host_config(Tmpfs=None), "HostConfig.Tmpfs", id="Tmpfs"),
+    pytest.param(host_config(CapAdd=None), "HostConfig.CapAdd", id="CapAdd"),
+    pytest.param(host_config(ReadonlyRootfs=None), "HostConfig.ReadonlyRootfs", id="ReadonlyRootfs"),
+    pytest.param(lambda document: document.update(Config=None), "Config", id="null-Config"),
+    pytest.param(lambda document: document.pop("HostConfig"), "HostConfig", id="missing-HostConfig"),
+    pytest.param(lambda document: document.update(HostConfig=None), "HostConfig", id="null-HostConfig"),
+    pytest.param(lambda document: document.pop("Image"), "Image", id="missing-Image"),
+]
+
+
+@pytest.mark.parametrize(("change", "cause"), NULLED)
+def test_container_hardening_fails_closed_on_null_fields(world, change, cause):
+    world.docker.altered(change)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and cause in check.detail
+
+
+def test_container_hardening_lists_every_violation_at_once(world):
+
+    def weaken(document):
+        document["HostConfig"].update(Privileged=True, NetworkMode="host", SecurityOpt=["seccomp=unconfined"])
+        document["Config"]["Env"].append("RT_TOKEN=x")
+        document["Mounts"].append(DOCKER_SOCKET)
+
+    world.docker.altered(weaken)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    for cause in ("Privileged", "NetworkMode", "seccomp=unconfined", "RT_TOKEN", "/var/run/docker.sock"):
+        assert cause in check.detail
+
+
+@pytest.mark.parametrize("spelling", ["no-new-privileges", "no-new-privileges:true", "no-new-privileges=true"])
+def test_container_hardening_accepts_every_no_new_privileges_spelling(world, spelling):
+    world.docker.altered(host_config(SecurityOpt=[spelling]))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("capability", ["dac_read_search", "CAP_DAC_READ_SEARCH", "cap_dac_read_search"])
+def test_container_hardening_reads_a_capability_however_it_is_spelled(world, capability):
+    world.docker.altered(host_config(CapAdd=[capability]))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_container_hardening_passes_when_the_admin_port_is_not_published(world):
+    world.docker.altered(host_config(PortBindings={}))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_container_hardening_skips_when_there_is_no_container(world):
+    world.docker.on("ps", stdout="")
+    assert hardening(world).outcome is Outcome.NOT_APPLICABLE
+
+
+def test_container_hardening_fails_with_dockers_words_when_the_container_cannot_be_inspected(world):
+    world.docker.on("inspect", returncode=1, stderr="No such object")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "No such object" in check.detail
+
+
+def test_an_image_inspect_answer_is_not_displaced_by_a_container_inspect_rule(world):
+    world.docker.on("inspect", returncode=1, stderr="No such object")  # `image inspect` contains this token too
+    answered = world.docker(["image", "inspect", IMAGE_ID], cwd=world.root)
+    assert answered.returncode == 0 and "Env" in answered.stdout
 
 
 # frps answers =========================================================================================================

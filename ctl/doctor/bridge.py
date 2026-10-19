@@ -19,7 +19,7 @@ import httpx
 
 from ctl.atomic import read_file
 from ctl.config import Config
-from ctl.doctor import frps_api
+from ctl.doctor import frps_api, hardening
 from ctl.doctor.model import Check, Skip, Verdict, execute, fail, not_applicable, ok
 from ctl.doctor.permissions import Permissions
 from ctl.doctor.probes import DOCKER_TIMEOUT, Probes
@@ -80,6 +80,7 @@ class Bridge:
             ("docker_reachable", self.docker_reachable),
             ("container_healthy", self.container_healthy),
             ("restart_policy", self.restart_policy),
+            ("container_hardening", self.container_hardening),
             ("control_port_published", self.control_port_published),
             ("admin_healthz", self.admin_healthz),
             ("vhost_answers_404", self.vhost_answers_404),
@@ -139,15 +140,65 @@ class Bridge:
         return Found(next((entry for entry in listing if entry.get("Service") == SERVICE), None))
 
     @functools.cached_property
-    def host_config(self) -> dict[str, Any]:
+    def inspected(self) -> dict[str, Any]:
+        """The whole `docker inspect` document of the container."""
         container = self.require_container()
         result = self.docker("inspect", str(container.get("ID", SERVICE)))
         if result.returncode != 0:
             raise DockerProblem(f"`docker inspect` failed (exit {result.returncode}): {self.said(result)}")
         try:
-            return json.loads(result.stdout)[0]["HostConfig"]
+            document = json.loads(result.stdout)[0]
         except (ValueError, LookupError, TypeError):
-            raise DockerProblem("`docker inspect` printed something that is not a container's configuration") from None
+            document = None
+        if not isinstance(document, dict):
+            raise DockerProblem("`docker inspect` printed something that is not a container's configuration")
+        return document
+
+    @functools.cached_property
+    def host_config(self) -> dict[str, Any]:
+        host_config = self.inspected.get("HostConfig")
+        if not isinstance(host_config, dict):
+            raise DockerProblem("`docker inspect` printed something that is not a container's configuration")
+        return host_config
+
+    @functools.cached_property
+    def image_env_names(self) -> frozenset[str]:
+        """The variables the container's image declares, read from the image the container was made from.
+
+        That is the container's image ID: `Config.Image` is a tag, which may have moved to a rebuilt image since.
+        """
+        image = self.inspected.get("Image")
+        if not isinstance(image, str) or not image:
+            raise DockerProblem(
+                "`docker inspect` has no Image (the ID of the container's image), so the variables the image "
+                "declares are unknown"
+            )
+        document = self.docker_json("image inspect", "image", "inspect", image)
+        config = document[0].get("Config") if isinstance(document, list) and document else None
+        if not isinstance(config, dict):
+            raise DockerProblem("`docker image inspect` printed something that is not an image's configuration")
+        environment = config.get("Env")
+        return frozenset(entry.partition("=")[0] for entry in environment
+                         if isinstance(entry, str)) if isinstance(environment, list) else frozenset()
+
+    @functools.cached_property
+    def daemon_defaults(self) -> tuple[str, str]:
+        """The daemon's default runtime and cgroup version, which a container made without asking for either gets."""
+        document = self.docker_json("info", "info", "--format", "{{json .}}")
+        runtime = document.get("DefaultRuntime") if isinstance(document, dict) else None
+        if not isinstance(runtime, str) or not runtime:
+            raise DockerProblem("`docker info` does not name the daemon's default runtime")
+        version = document.get("CgroupVersion")
+        return runtime, version if isinstance(version, str) else ""
+
+    def docker_json(self, shown: str, *args: str) -> Any:
+        result = self.docker(*args)
+        if result.returncode != 0:
+            raise DockerProblem(f"`docker {shown}` failed (exit {result.returncode}): {self.said(result)}")
+        try:
+            return json.loads(result.stdout)
+        except ValueError:
+            raise DockerProblem(f"`docker {shown}` printed something that is not JSON") from None
 
     def require_container(self) -> dict[str, Any]:
         if self.docker_problem:
@@ -224,6 +275,27 @@ class Bridge:
                 "recreate the container with `docker compose up -d`"
             )
         return ok(f"the container's restart policy is {name}")
+
+    def container_hardening(self) -> Verdict:
+        """The live container against compose.yaml's security settings, however the container came to be started."""
+        try:
+            runtime, cgroup_version = self.daemon_defaults
+            problems = hardening.violations(
+                self.inspected,
+                image_env=self.image_env_names,
+                runtime=runtime,
+                cgroup_version=cgroup_version,
+                root=self.root
+            )
+        except DockerProblem as exc:
+            return fail(f"the container's security settings could not be checked: {exc}")
+        if problems:
+            lines = "".join(f"\n- {problem}" for problem in problems)
+            return fail(
+                f"the container departs from compose.yaml's security settings. Remove the cause (a compose override, "
+                f"or a container started some other way), then recreate it with `{RECREATE}`:{lines}"
+            )
+        return ok("the container matches compose.yaml's security settings")
 
     def control_port_published(self) -> Verdict:
         try:
