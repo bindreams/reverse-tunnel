@@ -32,8 +32,8 @@ RECREATE = "docker compose up -d --force-recreate"
 LOOPBACK = "127.0.0.1"
 CONTROL, VHOST = "8001", "8080/tcp"
 # What `docker inspect` says of an object that no longer exists ("No such object", or "No such container" from older
-# daemons).
-GONE = re.compile(r"no such (?:object|container)", re.IGNORECASE)
+# daemons), and `docker volume inspect` of a volume ("No such volume").
+GONE = re.compile(r"no such (?:object|container|volume)", re.IGNORECASE)
 DIGEST = re.compile(r"[0-9a-f]{64}", re.ASCII)
 WILDCARDS = {"0.0.0.0": LOOPBACK, "::": "::1", "0:0:0:0:0:0:0:0": "::1"}
 # Not a label any host would use; frps answers 404 for a name no proxy has registered.
@@ -151,13 +151,27 @@ class Bridge:
             if GONE.search(result.stderr):  # removed or recreated since `docker compose ps` listed it
                 raise Skip(f"the {SERVICE} container is gone (see container_healthy)")
             raise DockerProblem(f"`docker inspect` failed (exit {result.returncode}): {self.said(result)}")
+        return self.first_document(result, "inspect", "a container's configuration")
+
+    @staticmethod
+    def first_document(result: subprocess.CompletedProcess[str], shown: str, what: str) -> dict[str, Any]:
+        """The first object of the JSON array an `inspect` command prints."""
         try:
             document = json.loads(result.stdout)[0]
         except (ValueError, LookupError, TypeError):
             document = None
         if not isinstance(document, dict):
-            raise DockerProblem("`docker inspect` printed something that is not a container's configuration")
+            raise DockerProblem(f"`docker {shown}` printed something that is not {what}")
         return document
+
+    def volume_inspected(self, name: str) -> dict[str, Any]:
+        """The `docker volume inspect` document of a volume the container mounts, which holds its driver options."""
+        result = self.docker("volume", "inspect", name)
+        if result.returncode != 0:
+            if GONE.search(result.stderr):  # removed since the container was inspected
+                raise Skip(f"the volume {name} is gone (see container_healthy)")
+            raise DockerProblem(f"`docker volume inspect` failed (exit {result.returncode}): {self.said(result)}")
+        return self.first_document(result, "volume inspect", "a volume's configuration")
 
     @functools.cached_property
     def host_config(self) -> dict[str, Any]:
@@ -284,7 +298,9 @@ class Bridge:
         try:
             container = self.inspected  # first, so no container or no Docker is n/a whatever `docker info` says
             runtime = self.default_runtime
-            problems = hardening.violations(container, image=self.image_config, runtime=runtime, root=self.root)
+            problems = hardening.violations(
+                container, image=self.image_config, runtime=runtime, root=self.root, volume=self.volume_inspected
+            )
         except DockerProblem as exc:
             return fail(f"the container's security settings could not be checked: {exc}")
         if problems:

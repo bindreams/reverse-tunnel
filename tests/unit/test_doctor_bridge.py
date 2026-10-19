@@ -337,14 +337,8 @@ HARDENING_VIOLATIONS = [
     pytest.param(
         mounts(lambda found: found.append(DOCKER_SOCKET)),
         "Mounts",
-        "a bind of /var/run/docker.sock at /var/run/docker.sock",
+        "a bind of /var/run/docker.sock at /var/run/docker.sock, which reaches the host",
         id="docker-socket",
-    ),
-    pytest.param(
-        mounts(lambda found: found.append({"Type": "volume", "Name": "data", "Destination": "/data", "RW": True})),
-        "Mounts",
-        "a volume of data at /data",
-        id="volume",
     ),
     pytest.param(
         mounts(lambda found: found[0].update(RW=True)),
@@ -511,6 +505,106 @@ def test_a_volume_at_a_wanted_target_is_a_violation(world):
     detail = hardening(world).detail
     assert "\n- Mounts has a volume of data at /rt/secrets/token;" in detail
     assert "\n- Mounts has no /rt/secrets/token;" in detail
+
+
+# Mounts beyond the two binds ------------------------------------------------------------------------------------------
+
+
+def volume_mount(name: str = "data", target: str = "/data") -> dict:
+    return {
+        "Type": "volume", "Name": name, "Driver": "local", "Source": f"/var/lib/docker/volumes/{name}/_data",
+        "Destination": target, "RW": True
+    }
+
+
+def mounted(*extra: dict):
+    return mounts(lambda found: found.extend(extra))
+
+
+@pytest.mark.parametrize("options", [None, {}])
+def test_an_anonymous_local_volume_with_no_options_passes(world, options):
+    world.docker.altered(mounted(volume_mount("a1b2c3")))
+    world.docker.volume("a1b2c3", options=options)
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_the_volume_is_asked_for_its_options_by_name(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.volume("data")
+    hardening(world)
+    assert ["volume", "inspect", "data"] in world.docker.calls
+
+
+@pytest.mark.parametrize(
+    "options", [
+        pytest.param({"type": "none", "o": "bind", "device": "/etc"}, id="bind-to-a-host-path"),
+        pytest.param({"type": "nfs", "o": "addr=nas.example.com,rw", "device": ":/export"}, id="nfs"),
+    ]
+)
+def test_a_local_volume_with_driver_options_fails_naming_the_volume_and_the_options(world, options):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.volume("data", options=options)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- Mounts has a volume of data at /data, " in check.detail
+    assert "driver options" in check.detail and options["type"] in check.detail
+
+
+def test_a_volume_of_another_driver_fails_naming_the_volume_and_the_driver(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.volume("data", driver="rexray/ebs")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- Mounts has a volume of data at /data, " in check.detail and "rexray/ebs" in check.detail
+
+
+def test_a_volume_that_vanished_before_volume_inspect_is_not_applicable_not_a_docker_problem(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.on(
+        "volume", "inspect", "data", returncode=1, stderr="Error response from daemon: No such volume: data"
+    )
+    check = hardening(world)
+    assert check.outcome is Outcome.NOT_APPLICABLE and "container_healthy" in check.detail
+
+
+def test_a_volume_inspect_that_fails_fails_the_check_closed_with_dockers_words(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.on("volume", "inspect", "data", returncode=1, stderr="permission denied while trying to connect")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
+
+
+@pytest.mark.parametrize("document", ["[null]", "[[]]", '["x"]', "[]", "{}", "not json"])
+def test_a_volume_inspect_that_is_not_an_object_fails_the_check_with_a_message(world, document):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.on("volume", "inspect", "data", stdout=document)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "`docker volume inspect` printed something that is not a volume's configuration" in check.detail
+
+
+def test_a_volume_mount_with_no_name_fails_since_its_options_cannot_be_read(world):
+    world.docker.altered(mounted(volume_mount() | {"Name": ""}))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "\n- Mounts has a volume of nothing at /data, " in check.detail
+
+
+def test_a_read_only_bind_of_the_docker_socket_fails(world):
+    world.docker.altered(mounted(DOCKER_SOCKET | {"RW": False, "Mode": "ro"}))
+    detail = hardening(world).detail
+    assert "\n- Mounts has a bind of /var/run/docker.sock at /var/run/docker.sock" in detail
+
+
+@pytest.mark.parametrize("kind", ["image", "npipe", "cluster", "devpts", ""])
+def test_a_mount_of_any_other_type_fails_closed(world, kind):
+    world.docker.altered(mounted({"Type": kind, "Source": "x", "Destination": "/x", "RW": False}))
+    detail = hardening(world).detail
+    assert f"\n- Mounts has a {kind or 'mount'} of x at /x" in detail
+
+
+def test_a_tmpfs_mount_passes(world):
+    world.docker.altered(mounted({"Type": "tmpfs", "Destination": "/scratch", "RW": True}))
+    assert hardening(world).outcome is Outcome.PASS
 
 
 def test_a_second_mount_at_a_wanted_target_is_a_violation(world):
