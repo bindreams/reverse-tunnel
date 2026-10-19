@@ -157,10 +157,26 @@ def test_every_compose_variable_is_required_with_a_message(path):
         assert re.fullmatch(r"\$\{[A-Z][A-Z0-9_]*:\?[^}$]+\}", reference), reference
 
 
+def untagged(loader: yaml.SafeLoader, tag: str, node: yaml.Node) -> object:
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    return loader.construct_scalar(node)
+
+
+class ComposeLoader(yaml.SafeLoader):
+    """Reads Compose's merge tags (`!override`, `!reset`) as the plain value they wrap."""
+
+
+ComposeLoader.add_multi_constructor("!", untagged)
+
+
 @pytest.mark.parametrize("path", COMPOSE_FILES, ids=lambda path: path.name)
 def test_compose_files_do_not_load_env_file(path):
-    # Comments are dropped: examples/compose.override.yaml names `env_file` to forbid it.
-    assert "env_file" not in re.sub(r"#.*", "", path.read_text(encoding="utf-8"))
+    services = yaml.load(path.read_text(encoding="utf-8"), Loader=ComposeLoader).get("services", {})
+    assert services
+    assert [name for name, service in services.items() if "env_file" in service] == []
 
 
 def frps_service() -> dict:
@@ -176,6 +192,14 @@ def test_compose_pins_a_private_cgroup_namespace():
 def test_compose_pins_a_private_ipc_namespace():
     # The daemon's default may be `shareable`; container_hardening requires `private`.
     assert frps_service()["ipc"] == hardening.IPC_MODE == "private"
+
+
+def test_compose_publishes_the_admin_port_on_the_loopback_address_the_check_expects():
+    # The `${...}` in a port entry holds colons, so the host side is matched as a prefix and the container side as a suffix.
+    container_port = f":{hardening.ADMIN_PORT}"
+    published = [entry for entry in frps_service()["ports"] if entry.endswith(container_port)]
+    assert len(published) == 1
+    assert published[0].startswith(f"{hardening.LOOPBACK}:")
 
 
 def test_compose_capabilities_are_the_ones_the_allow_list_holds_the_container_to():
