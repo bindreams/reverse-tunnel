@@ -1,10 +1,6 @@
 # This file is part of reverse-tunnel, licensed under AGPL-3.0-or-later; see LICENSE.md.
-"""The allow-list `container_hardening` holds a live bridge container to: what `compose.yaml` produces, field by field.
-
-Nothing here asks how the container was started. An override file, `docker run` and a hand edit weaken it the same way,
-and each shows in `docker inspect`. A field that is null or absent reads as empty (an empty list or map, `""`, false),
-and the rule then applies, so a required value that is missing fails and nothing raises. Environment values are never
-reported, only names: the variables an `env_file` adds include the token.
+"""Inspects the live container, not how it was started: an override file, `docker run` and a hand edit all show in
+`docker inspect`. A null or absent field reads as empty, so a missing required value fails rather than raises.
 """
 
 import json
@@ -13,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 TOKEN_TARGET, CONFIG_TARGET = "/rt/secrets/token", "/rt/bridge/frps.toml"
+# Where compose.yaml mounts them from, relative to the deployment.
+TOKEN_SOURCE, CONFIG_SOURCE = "secrets/token", "bridge/frps.toml"
 # compose.yaml's `tmpfs: [/run/rt:mode=0700]`, which Docker stores as the map {path: options}.
 TMPFS, TMPFS_OPTIONS = "/run/rt", "mode=0700"
 ENVIRONMENT = frozenset({"RT_DOMAIN", "RT_ADMIN_PASSWORD"})
@@ -21,7 +19,18 @@ NO_NEW_PRIVILEGES = "no-new-privileges"
 # What Go's strconv.ParseBool reads as true, which is how Docker reads the value after `:` or `=`.
 GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 ADMIN_PORT, LOOPBACK = "7500/tcp", "127.0.0.1"
-# Each is empty in compose.yaml; the name is what the message points at.
+# compose.yaml pins both: a daemon's default for either may be the host's namespace.
+CGROUPNS_MODE = IPC_MODE = "private"
+# Docker's default masked and read-only paths for an unprivileged container (moby `daemon/pkg/oci/defaults.go`). Compose
+# turns `systempaths=unconfined` into empty lists here and drops it from SecurityOpt. Only the long-standing entries are
+# required: `/proc/interrupts`, `/sys/devices/virtual/powercap` and the per-CPU `thermal_throttle` are missing from an
+# older daemon's default.
+MASKED_PATHS = frozenset({
+    "/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys", "/proc/latency_stats", "/proc/sched_debug", "/proc/scsi",
+    "/proc/timer_list", "/proc/timer_stats", "/sys/firmware"
+})
+READONLY_PATHS = frozenset({"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"})
+# Each is empty in compose.yaml.
 EMPTY_STRINGS = ("PidMode", "UsernsMode", "UTSMode")
 EMPTY_COLLECTIONS = ("Devices", "Sysctls", "DeviceCgroupRules", "DeviceRequests", "GroupAdd")
 
@@ -58,21 +67,21 @@ def shares(mode: str) -> bool:
     return mode == "host" or mode.startswith("container:")
 
 
-def same_path(found: str, wanted: Path) -> bool:
-    """Equal once both are resolved, as the mount is the same file whatever route compose reached it by."""
+def mismatch(found: str, wanted: Path) -> str | None:
+    """How a mount's source differs from `wanted`, or None if it is the same file whatever route compose reached it by."""
     if not found:
-        return False
+        return "coming from nothing"
     try:
-        return Path(found).resolve() == wanted.resolve()
-    except (OSError, RuntimeError):
-        return Path(found) == wanted
+        if Path(found).resolve() == wanted.resolve():
+            return None
+    except (OSError, RuntimeError) as exc:
+        return f"coming from {found}, which cannot be resolved ({exc})"
+    return f"coming from {found}"
 
 
 def violations(container: Mapping[str, Any], *, image: Mapping[str, Any], runtime: str, root: Path) -> list[str]:
-    """Every way the `docker inspect` document `container` departs from compose.yaml's security settings.
-
-    `image` is the image's own `Config` and `runtime` the daemon's default runtime.
-    """
+    """Departures of the `docker inspect` document `container` from compose.yaml. `image` is the image's own `Config`;
+    `runtime` the daemon's default runtime."""
     host, config = container.get("HostConfig"), container.get("Config")
     problems = []
     if isinstance(host, dict):
@@ -83,8 +92,10 @@ def violations(container: Mapping[str, Any], *, image: Mapping[str, Any], runtim
         problems += config_violations(config, image)
     else:
         problems.append("`docker inspect` has no Config for the container, so its settings cannot be confirmed")
-    return problems + network_violations(container.get("NetworkSettings")
-                                         ) + mount_violations(container.get("Mounts"), root)
+    # An exited container may report no ports; a running one that reports none is not shown to publish loopback only.
+    running = mapping(container.get("State")).get("Running") is not False
+    return problems + network_violations(container.get("NetworkSettings"),
+                                         running=running) + mount_violations(container.get("Mounts"), root)
 
 
 def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
@@ -114,7 +125,13 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
         network != "none" and not shares(network),
         "compose.yaml uses a network of its own, not the host's, none or another container's",
     )
-    check("IpcMode", not shares(text(host.get("IpcMode"))), "compose.yaml shares no IPC namespace")
+    check("IpcMode", host.get("IpcMode") == IPC_MODE, f"compose.yaml sets ipc: {IPC_MODE}")
+    for field, defaults in (("MaskedPaths", MASKED_PATHS), ("ReadonlyPaths", READONLY_PATHS)):
+        missing = sorted(defaults - {text(path) for path in listing(host.get(field))})
+        check(
+            field, not missing,
+            f"it lacks {', '.join(missing)}, which Docker applies by default; compose.yaml sets no `systempaths=unconfined`"
+        )
     for field in EMPTY_STRINGS:
         check(field, text(host.get(field)) == "", "compose.yaml sets none")
     for field in EMPTY_COLLECTIONS:
@@ -125,23 +142,27 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
     )
     check(
         "CgroupnsMode",
-        host.get("CgroupnsMode") == "private",
-        "compose.yaml sets cgroup: private, because a daemon's default may be the host's namespace",
+        host.get("CgroupnsMode") == CGROUPNS_MODE,
+        f"compose.yaml sets cgroup: {CGROUPNS_MODE}, because a daemon's default may be the host's namespace",
     )
     check("Runtime", text(host.get("Runtime")) == runtime, f"compose.yaml uses the daemon's default runtime, {runtime}")
-    # `docker run -P` publishes every EXPOSEd port, the admin port among them, with no entry in PortBindings.
+    # `docker run -P` publishes every EXPOSEd port with no entry in PortBindings.
     check("PublishAllPorts", not host.get("PublishAllPorts"), "compose.yaml does not publish every exposed port")
     problems += admin_binding_violations("HostConfig.PortBindings", mapping(host.get("PortBindings")))
     return problems
 
 
-def network_violations(network: Any) -> list[str]:
+def network_violations(network: Any, *, running: bool) -> list[str]:
     """The ports the daemon actually published, which `HostConfig` alone does not show."""
-    return admin_binding_violations("NetworkSettings.Ports", mapping(mapping(network).get("Ports")))
+    return admin_binding_violations("NetworkSettings.Ports", mapping(mapping(network).get("Ports")), required=running)
 
 
-def admin_binding_violations(field: str, bindings: Mapping[str, Any]) -> list[str]:
+def admin_binding_violations(field: str, bindings: Mapping[str, Any], *, required: bool = True) -> list[str]:
     exposed = [text(mapping(entry).get("HostIp")) for entry in listing(bindings.get(ADMIN_PORT))]
+    if not exposed:
+        if not required:
+            return []
+        return [f"{field}[{ADMIN_PORT}] is not published; compose.yaml publishes the admin port on {LOOPBACK} only"]
     if all(address == LOOPBACK for address in exposed):
         return []
     return [
@@ -173,7 +194,7 @@ def config_violations(config: Mapping[str, Any], image: Mapping[str, Any]) -> li
 
 
 def mount_violations(mounts: Any, root: Path) -> list[str]:
-    wanted = {TOKEN_TARGET: root / "secrets" / "token", CONFIG_TARGET: root / "bridge" / "frps.toml"}
+    wanted = {TOKEN_TARGET: root / TOKEN_SOURCE, CONFIG_TARGET: root / CONFIG_SOURCE}
     both = f"compose.yaml mounts only {TOKEN_TARGET} and {CONFIG_TARGET}, read-only, from this deployment"
     problems, seen = [], set()
     for mount in map(mapping, listing(mounts)):
@@ -183,11 +204,10 @@ def mount_violations(mounts: Any, root: Path) -> list[str]:
             problems.append(f"Mounts has a {kind or 'mount'} of {source or 'nothing'} at {target}; {both}")
             continue
         seen.add(target)
-        if mount.get("RW"):
-            problems.append(f"Mounts has {target} writable; {both}")
-        if not same_path(source, wanted[target]):
-            problems.append(
-                f"Mounts has {target} coming from {source or 'nothing'}; compose.yaml mounts {wanted[target]}"
-            )
+        if mount.get("RW") is not False:
+            problems.append(f"Mounts has {target} not read-only (RW is {shown(mount.get('RW'))}); {both}")
+        different = mismatch(source, wanted[target])
+        if different:
+            problems.append(f"Mounts has {target} {different}; compose.yaml mounts {wanted[target]}")
     problems += [f"Mounts has no {target}; {both}" for target in wanted if target not in seen]
     return problems

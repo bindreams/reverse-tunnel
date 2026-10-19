@@ -31,6 +31,9 @@ SERVICE = "frps"
 RECREATE = "docker compose up -d --force-recreate"
 LOOPBACK = "127.0.0.1"
 CONTROL, VHOST = "8001", "8080/tcp"
+# What `docker inspect` says of an object that no longer exists ("No such object", or "No such container" from older
+# daemons).
+GONE = re.compile(r"no such (?:object|container)", re.IGNORECASE)
 DIGEST = re.compile(r"[0-9a-f]{64}", re.ASCII)
 WILDCARDS = {"0.0.0.0": LOOPBACK, "::": "::1", "0:0:0:0:0:0:0:0": "::1"}
 # Not a label any host would use; frps answers 404 for a name no proxy has registered.
@@ -145,6 +148,8 @@ class Bridge:
         container = self.require_container()
         result = self.docker("inspect", str(container.get("ID", SERVICE)))
         if result.returncode != 0:
+            if GONE.search(result.stderr):  # removed or recreated since `docker compose ps` listed it
+                raise Skip(f"the {SERVICE} container is gone (see container_healthy)")
             raise DockerProblem(f"`docker inspect` failed (exit {result.returncode}): {self.said(result)}")
         try:
             document = json.loads(result.stdout)[0]
@@ -174,7 +179,8 @@ class Bridge:
                 "declares are unknown"
             )
         document = self.docker_json("image inspect", "image", "inspect", image)
-        config = document[0].get("Config") if isinstance(document, list) and document else None
+        first = document[0] if isinstance(document, list) and document else None
+        config = first.get("Config") if isinstance(first, dict) else None
         if not isinstance(config, dict):
             raise DockerProblem("`docker image inspect` printed something that is not an image's configuration")
         return config

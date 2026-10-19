@@ -91,6 +91,7 @@ def test_service_is_hardened(config_project: Project):
     assert service["security_opt"] == ["no-new-privileges:true"]
     assert service["read_only"] is True
     assert service["cgroup"] == "private"
+    assert service["ipc"] == "private"
     assert service["tmpfs"] == ["/run/rt:mode=0700"]
 
 
