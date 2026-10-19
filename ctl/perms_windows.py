@@ -8,9 +8,7 @@ through that handle and opened relative to it, and every entry is vetted before 
 
 ACLs are written with `NtSetSecurityObject`, which propagates to no child; the inherited ACEs of each object are
 computed here (`winacl.inherited_for`) and written to that object through its own handle. The Win32 `SetSecurityInfo`
-would instead walk the whole subtree before any of it could be vetted. Nothing is granted to a child that was not
-opened here. NTFS on Windows Server 2025 does turn the inherited ACEs of an untouched direct child into explicit,
-protected ones when its parent gains an inheritable ACE; the child's access is the same, and it gains nothing.
+would instead walk the whole subtree before any of it could be vetted.
 
 The owner field of an object is deliberately left as created (Administrators when the process is elevated). Ownership
 is expressed by the ACL alone, with explicit grants for the principals that matter; `operator_sid` names the one that
