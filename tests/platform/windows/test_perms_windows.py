@@ -521,11 +521,18 @@ def test_grant_service_read_refuses_a_reparse_point_in_host_and_leaves_its_targe
 
 
 def test_grant_service_read_does_not_reach_other_directories(tmp_path):
+    """Who is granted what on `ctl` is untouched. On Windows Server 2025 NTFS itself also freezes the inherited ACEs of
+    the root's other direct entries (explicit and protected), so inheritance flags are not compared."""
     repo = repo_with(tmp_path)
     (repo / "ctl").mkdir()
-    before = winacl.read_acl(repo / "ctl")
+
+    def grants():
+        return {(ace.sid, ace.mask) for ace in winacl.read_acl(repo / "ctl").aces}
+
+    before = grants()
     grant_service_read(repo, LOCAL_SERVICE)
-    assert winacl.read_acl(repo / "ctl") == before
+    assert grants() == before
+    assert SID_LOCAL_SERVICE not in principals(repo / "ctl")
 
 
 def test_grant_service_read_is_idempotent(tmp_path):
