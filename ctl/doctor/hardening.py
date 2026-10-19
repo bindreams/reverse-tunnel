@@ -23,7 +23,7 @@ GO_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
 ADMIN_PORT, LOOPBACK = "7500/tcp", "127.0.0.1"
 # Each is empty in compose.yaml; the name is what the message points at.
 EMPTY_STRINGS = ("PidMode", "UsernsMode", "UTSMode")
-EMPTY_COLLECTIONS = ("Devices", "Sysctls", "DeviceCgroupRules", "DeviceRequests")
+EMPTY_COLLECTIONS = ("Devices", "Sysctls", "DeviceCgroupRules", "DeviceRequests", "GroupAdd")
 
 
 def listing(value: Any) -> list[Any]:

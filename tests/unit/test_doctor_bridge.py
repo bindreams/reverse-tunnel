@@ -306,6 +306,8 @@ HARDENING_VIOLATIONS = [
         '[{"Driver": "nvidia"}]',
         id="device-request",
     ),
+    pytest.param(host_config(GroupAdd=["0"]), "HostConfig.GroupAdd", '["0"]', id="group-add-root"),
+    pytest.param(host_config(GroupAdd=["disk", "42"]), "HostConfig.GroupAdd", '["disk", "42"]', id="group-add-several"),
     pytest.param(host_config(Runtime="nvidia"), "HostConfig.Runtime", '"nvidia"', id="another-runtime"),
     pytest.param(host_config(Runtime=""), "HostConfig.Runtime", '""', id="no-runtime"),
     pytest.param(config(User="root"), "Config.User", '"root"', id="user"),
@@ -545,6 +547,12 @@ def test_container_hardening_reads_a_capability_however_it_is_spelled(world, cap
 
 def test_container_hardening_passes_when_the_admin_port_is_not_published(world):
     world.docker.altered(host_config(PortBindings={}))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("groups", [None, []], ids=["null", "empty"])
+def test_container_hardening_reads_a_null_and_an_empty_group_add_as_none(world, groups):
+    world.docker.altered(host_config(GroupAdd=groups))
     assert hardening(world).outcome is Outcome.PASS
 
 
