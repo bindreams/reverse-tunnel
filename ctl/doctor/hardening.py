@@ -80,8 +80,9 @@ def mismatch(found: str, wanted: Path) -> str | None:
 
 
 def violations(container: Mapping[str, Any], *, image: Mapping[str, Any], runtime: str, root: Path) -> list[str]:
-    """Departures of the `docker inspect` document `container` from compose.yaml. `image` is the image's own `Config`;
-    `runtime` the daemon's default runtime."""
+    """Departures of the `docker inspect` document `container` from compose.yaml. `image` is the image's own `Config`,
+    whose `Env` names the variables the container may carry besides compose.yaml's; `runtime` the daemon's default
+    runtime. The image and command the container runs are not checked: only its confinement."""
     host, config = container.get("HostConfig"), container.get("Config")
     problems = []
     if isinstance(host, dict):
@@ -182,14 +183,6 @@ def config_violations(config: Mapping[str, Any], image: Mapping[str, Any]) -> li
             f"Config.Env carries {', '.join(extra)}, which neither the image nor compose.yaml sets (compose.yaml sets "
             f"only {', '.join(sorted(ENVIRONMENT))}; an `env_file` would hand the container the whole of .env)"
         )
-    # compose.yaml sets neither, so the container runs the image's entrypoint, whose token and tmpfs checks fail closed.
-    for field in ("Entrypoint", "Cmd"):
-        found, wanted = config.get(field) or [], image.get(field) or []
-        if found != wanted:
-            problems.append(
-                f"Config.{field} is {shown(found)}; the image's is {shown(wanted)}, and compose.yaml sets no "
-                f"{'entrypoint' if field == 'Entrypoint' else 'command'}"
-            )
     return problems
 
 
