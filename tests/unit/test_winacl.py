@@ -184,6 +184,47 @@ def test_an_ace_with_neither_creator_sid_nor_generic_bits_stays_one_ace():
     assert as_set(inherit(parent, directory=True)) == {("S-1-5-32-545", FILE_GENERIC_READ, ID | OI | CI)}
 
 
+ADMINISTRATORS = "S-1-5-32-544"
+
+
+def owned_by_administrators(parent, *, directory):
+    return winacl.inherited_for(parent, directory=directory, owner=ADMINISTRATORS, group=GROUP)
+
+
+def test_a_file_does_not_inherit_an_effective_ace_it_already_has_through_its_owner():
+    """NTFS on an elevated runner, where the owner is Administrators and the parent also grants Administrators."""
+    parent = [
+        entry(OI | CI | IO, mask=FILE_ALL_ACCESS, sid=CREATOR_OWNER),
+        entry(ID | OI | CI, mask=FILE_ALL_ACCESS, sid=ADMINISTRATORS),
+    ]
+    assert [(e.sid, e.mask, e.flags)
+            for e in owned_by_administrators(parent, directory=False)] == [(ADMINISTRATORS, FILE_ALL_ACCESS, ID)]
+
+
+def test_a_directory_keeps_only_the_inheritable_half_of_an_ace_it_already_has_through_its_owner():
+    parent = [
+        entry(OI | CI | IO, mask=FILE_ALL_ACCESS, sid=CREATOR_OWNER),
+        entry(ID | OI | CI, mask=FILE_ALL_ACCESS, sid=ADMINISTRATORS),
+    ]
+    assert [(e.sid, e.mask, e.flags) for e in owned_by_administrators(parent, directory=True)] == [
+        (ADMINISTRATORS, FILE_ALL_ACCESS, ID),
+        (CREATOR_OWNER, FILE_ALL_ACCESS, ID | OI | CI | IO),
+        (ADMINISTRATORS, FILE_ALL_ACCESS, ID | OI | CI | IO),
+    ]
+
+
+def test_an_ace_with_another_mask_or_type_is_not_a_duplicate():
+    parent = [
+        entry(OI | CI | IO, mask=FILE_ALL_ACCESS, sid=CREATOR_OWNER),
+        entry(OI | CI, mask=FILE_GENERIC_READ, sid=ADMINISTRATORS),
+        entry(OI | CI, ace_type=DENY, mask=FILE_ALL_ACCESS, sid=ADMINISTRATORS),
+    ]
+    assert [(e.ace_type, e.mask, e.flags) for e in owned_by_administrators(parent, directory=True)[2:]] == [
+        (ALLOW, FILE_GENERIC_READ, ID | OI | CI),
+        (DENY, FILE_ALL_ACCESS, ID | OI | CI),
+    ]
+
+
 def test_a_creator_ace_without_the_owner_it_needs_is_an_error():
     parent = [entry(OI | CI, mask=FILE_ALL_ACCESS, sid=CREATOR_OWNER)]
     with pytest.raises(ValueError):

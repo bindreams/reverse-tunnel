@@ -137,27 +137,40 @@ def inherited_for(
     A file takes every object-inheritable ACE. A directory takes a container-inheritable one, and an object-only one
     as an inherit-only ACE for its own files. Every result carries INHERITED_ACE. The effective ACE for the child maps
     CREATOR OWNER and CREATOR GROUP to `owner` and `group` and generic rights to file rights. A directory that passes
-    such an ACE on keeps the original, unmapped, as a second inherit-only ACE. OWNER RIGHTS is passed on as any other
-    SID. The result follows the order of `parent`, which holds all of the parent's ACEs, its own inherited ones
-    included, as they are on disk. An inheritable CREATOR OWNER SERVER or CREATOR GROUP SERVER ACE raises
-    `UnsupportedInheritance` naming `parent_label`.
+    such an ACE on keeps the original, unmapped, as a second inherit-only ACE. An effective ACE the child already has
+    (the same type, SID and mask, as when `owner` is a SID the parent also names) is not listed twice: a file drops it
+    and a directory keeps only its inheritable half, inherit-only. OWNER RIGHTS is passed on as any other SID. The
+    result follows the order of `parent`, which holds all of the parent's ACEs, its own inherited ones included, as they
+    are on disk. An inheritable CREATOR OWNER SERVER or CREATOR GROUP SERVER ACE raises `UnsupportedInheritance` naming
+    `parent_label`.
     """
     parent = list(parent)
     refuse_unsupported(parent, parent_label)
-    result = []
+    result: list[Entry] = []
+    granted: set[tuple[int, str, int]] = set()  # (type, sid, mask) of the effective ACEs so far
+
+    def add_effective(ace: Entry, propagate: int = 0) -> None:
+        """A child never lists the same effective ACE twice. The inheritable half of a repeat is kept, inherit-only."""
+        key = (ace.ace_type, ace.sid, ace.mask)
+        if key not in granted:
+            granted.add(key)
+            result.append(ace._replace(flags=INHERITED_ACE | propagate))
+        elif propagate:
+            result.append(ace._replace(flags=INHERITED_ACE | INHERIT_ONLY_ACE | propagate))
+
     for ace in parent:
         flags = ace.flags
         if not directory:
             if flags & OBJECT_INHERIT_ACE:
-                result.append(_effective(ace, owner, group))
+                add_effective(_effective(ace, owner, group))
         elif flags & CONTAINER_INHERIT_ACE:
             propagate = 0 if flags & NO_PROPAGATE_INHERIT_ACE else flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
             effective = _effective(ace, owner, group)
             if propagate and (ace.sid in (SID_CREATOR_OWNER, SID_CREATOR_GROUP) or ace.mask & GENERIC_MASK):
-                result.append(effective)
+                add_effective(effective)
                 result.append(ace._replace(flags=INHERITED_ACE | INHERIT_ONLY_ACE | propagate))
             else:
-                result.append(effective._replace(flags=INHERITED_ACE | propagate))
+                add_effective(effective, propagate)
         elif flags & OBJECT_INHERIT_ACE and not flags & NO_PROPAGATE_INHERIT_ACE:
             result.append(ace._replace(flags=INHERITED_ACE | OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE))
     return result
