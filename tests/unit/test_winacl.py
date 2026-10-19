@@ -286,11 +286,16 @@ def test_plan_refuses_an_unsupported_parent_ace_before_returning_anything():
 
 # Grants ===============================================================================================================
 
-DELETE = 0x10000
+OPERATOR_SID = "S-1-5-21-1-2-3-1001"
+READER_SID = "S-1-5-21-1-2-3-1002"
 
 
 def test_the_operator_may_delete_a_file_it_was_granted_because_replacing_a_secret_deletes_the_old_one():
-    """A non-elevated operator is not an Administrator, so only their own ACE lets `os.replace` move over the token."""
-    operator = "S-1-5-21-1-2-3-1001"
-    granted = winacl.grants(directory=False, operator=operator, readers=(), writers=())
-    assert granted[operator] & DELETE
+    granted = winacl.grants(directory=False, operator=OPERATOR_SID, readers=(READER_SID, ), writers=())
+    assert granted[OPERATOR_SID] == winacl.READ_WRITE | winacl.DELETE
+    assert not granted[READER_SID] & winacl.DELETE
+
+
+def test_the_operator_keeps_modify_on_a_directory():
+    granted = winacl.grants(directory=True, operator=OPERATOR_SID, readers=(READER_SID, ), writers=())
+    assert granted[OPERATOR_SID] == winacl.MODIFY
