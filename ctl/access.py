@@ -49,7 +49,7 @@ def account_can(account: Account, flag: str, path: Path) -> bool:
     command = [*as_account, "sh", "-c", f'test "$1" "$2"; echo "{SENTINEL}$?"', "sh", flag, posix_path]
     rendered = " ".join(map(shlex.quote, command))
     try:
-        run = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        run = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace")
     except OSError as error:
         raise InstallError(
             f"could not ask whether {account.name} can `test {flag} {posix_path}`: {error} ({rendered})"
