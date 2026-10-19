@@ -707,6 +707,74 @@ def test_the_staging_directory_is_gone_after_a_failed_download(running, monkeypa
     assert not (running.root / "bin" / ".staging").exists()
 
 
+# The Windows service's read ===========================================================================================
+#
+# On Windows the service reads `bin/` and `host/` through ACEs `ctl` writes to each object, none of them inheritable, so
+# a file created or replaced there has no access until `ctl` gives it. The grants are no-ops on POSIX; these tests record
+# when they are called.
+
+
+@pytest.fixture
+def grants(monkeypatch):
+    """Everything the install does to give the service read, in order, with the state at the time of the call."""
+    events = []
+    converge_dir = perms.converge_dir
+
+    def spy_converge(path, *args, **kwargs):
+        events.append(("converge", path))
+        return converge_dir(path, *args, **kwargs)
+
+    monkeypatch.setattr(perms, "converge_dir", spy_converge)
+    monkeypatch.setattr(
+        perms, "grant_service_read", lambda root, account: events.append(("grant", root, (root / "bin").is_dir()))
+    )
+    monkeypatch.setattr(
+        perms, "grant_service_read_file",
+        lambda path, account: events.append(("file", path, path.read_bytes() if path.is_file() else None))
+    )
+    return events
+
+
+def test_bin_exists_and_is_converged_before_the_service_is_granted_read_and_not_converged_again(host_tree, grants):
+    """`converge_dir` rewrites the whole ACL of `bin`, which would drop the service's ACE on it."""
+    run_install(host_tree)
+    bin_dir = host_tree.root / "bin"
+    (granted, ) = [i for i, event in enumerate(grants) if event[0] == "grant"]
+    assert grants[granted][2] is True
+    assert [i for i, event in enumerate(grants) if event == ("converge", bin_dir)] != []
+    assert all(i < granted for i, event in enumerate(grants) if event == ("converge", bin_dir))
+
+
+def test_every_binary_and_the_record_are_granted_the_service_read_after_they_are_written(host_tree, grants):
+    run_install(host_tree)
+    bin_dir = host_tree.root / "bin"
+    files = {event[1]: event[2] for event in grants if event[0] == "file"}
+    assert set(files) == {bin_dir / name for name in host_tree.pins} | {bin_dir / DIGESTS}
+    for name in host_tree.pins:
+        assert files[bin_dir / name] == host_tree.pinned_bytes(name)
+    assert files[bin_dir / DIGESTS] == (bin_dir / DIGESTS).read_bytes()
+    assert [event[0] for event in grants].index("grant") < [event[0] for event in grants].index("file")
+
+
+def test_an_install_that_replaces_and_records_nothing_grants_no_file(host_tree, grants):
+    run_install(host_tree)
+    settle(host_tree)
+    grants.clear()
+    run_install(host_tree)
+    assert [event for event in grants if event[0] == "file"] == []
+    assert [event[0] for event in grants if event[0] == "grant"] == ["grant"]
+
+
+def test_only_the_binary_that_was_replaced_is_granted_the_service_read(host_tree, grants, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
+    run_install(host_tree)
+    settle(host_tree)
+    (host_tree.root / "bin" / "frpc").write_bytes(b"tampered")
+    grants.clear()
+    run_install(host_tree)
+    assert [event[1] for event in grants if event[0] == "file"] == [host_tree.root / "bin" / "frpc"]
+
+
 # bin/ is the installer's ==============================================================================================
 
 

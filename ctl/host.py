@@ -305,15 +305,15 @@ def stage(config: Config, plan: Plan, *, services: Services) -> None:
     """Make the tree ready without disturbing anything running. The order matters.
 
     Whatever a failed run left in `bin/.staging` goes first: on Windows `grant_service_read` refuses a subdirectory of
-    `bin\\`. `secrets/` and `logs/` come before the token, which is created inside the first, and goetia must never be
-    handed a `logs/` owned by root. `.env` is tightened last, after everything that could fail.
+    `bin\\`. `bin/` is converged before that grant and never again: converging rewrites its whole ACL, which would drop
+    the service's ACE on it. `secrets/` and `logs/` come before the token, which is created inside the first, and goetia
+    must never be handed a `logs/` owned by root. `.env` is tightened last, after everything that could fail.
     """
     root = config.root
     service = perms.service_account(config)
     readers = _service_readers(root)
     _clear_staging(root)
-    if os.path.lexists(root / "bin"):
-        _converge_bin(root)
+    _converge_bin(root)
     perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
     perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
     perms.write_secret(root / "secrets" / "token", _token_bytes(config), service, readers, root=root)
@@ -327,7 +327,6 @@ def _download(root: Path, plan: Plan, services: Services) -> None:
         return
     staging = root / "bin" / STAGING
     try:
-        _converge_bin(root)
         perms.converge_dir(staging, _installer(), STAGING_MODE, frozenset(), isolate=False, root=root)
         with services.fetcher() as fetch:
             for pin in plan.pins:
@@ -357,7 +356,12 @@ def _step(description: str, action: Callable[..., None], *args, **kwargs) -> Non
         raise InstallError(f"{description}: {exc}") from exc
 
 
-def _promote(root: Path, plan: Plan) -> None:
+def _promote(root: Path, plan: Plan, service: Account) -> None:
+    """Replace each binary in `bin/` with its staged, pinned bytes, and give the service read of the new file.
+
+    A file created in `bin\\` has no ACE for the service: the one `grant_service_read` wrote to its parent is not
+    inheritable.
+    """
     bin_dir, staging = root / "bin", root / "bin" / STAGING
     for pin in plan.pins:
         if pin.install_name not in plan.binaries_to_replace:
@@ -372,6 +376,7 @@ def _promote(root: Path, plan: Plan) -> None:
                 f"{staging / pin.install_name} is not the pinned {pin.install_name}; it was changed after staging"
             )
         replace_file(bin_dir, pin.install_name, io.BytesIO(content), BIN_MODE)
+        perms.grant_service_read_file(bin_dir / pin.install_name, service)
 
 
 def apply(config: Config, plan: Plan, *, services: Services) -> None:
@@ -383,6 +388,7 @@ def apply(config: Config, plan: Plan, *, services: Services) -> None:
     removed whatever happens.
     """
     root, bin_dir = config.root, config.root / "bin"
+    service = perms.service_account(config)
     try:
         if STOP_BEFORE_REPLACE:
             for daemon_id in plan.daemons_to_converge:
@@ -392,7 +398,7 @@ def apply(config: Config, plan: Plan, *, services: Services) -> None:
                 }
                 if daemon_id in plan.installed and runs & set(plan.binaries_to_replace):
                     _step(f"stopping {daemon_id}", goetia.daemon_stop, root, daemon_id)
-        _promote(root, plan)
+        _promote(root, plan, service)
         for daemon_id in plan.daemons_to_converge:
             _step(f"installing {daemon_id}", goetia.daemon_install, root, daemon_id, enable=True)
             _step(f"restarting {daemon_id}", goetia.daemon_restart, root, daemon_id)
@@ -401,6 +407,7 @@ def apply(config: Config, plan: Plan, *, services: Services) -> None:
         if read_digests(bin_dir) != expected:
             record_digests(bin_dir, plan.pins, plan.inputs)
             perms.assign_file(bin_dir / DIGESTS, perms.operator_account(root), RECORD_MODE, root=root)
+            perms.grant_service_read_file(bin_dir / DIGESTS, service)
     finally:
         _clear_staging_quietly(root)
     if not plan.daemons_to_converge:
