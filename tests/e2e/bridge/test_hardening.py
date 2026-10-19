@@ -4,9 +4,11 @@ import uuid
 
 from bridge_support import FRPS_READY, GOOD_TOKEN, Project, make_project
 
-from ctl import cli, doctor
+from ctl import cli
 from ctl.config import Config
 from ctl.doctor import Outcome
+from ctl.doctor.bridge import Bridge
+from ctl.doctor.model import execute
 from ctl.doctor.probes import Probes
 
 WEAKENING = """\
@@ -27,8 +29,9 @@ def start(project: Project) -> None:
 
 
 def hardening(project: Project):
-    checks = {check.name: check for check in doctor.run(Config.load(project.root), Probes())}
-    return checks["container_hardening"]
+    """Just `container_hardening`, through the wrapper doctor runs every check in, without the network probes."""
+    bridge = Bridge(Config.load(project.root), Probes())
+    return execute([("container_hardening", bridge.container_hardening)])[0]
 
 
 def test_doctor_names_an_override_that_weakens_the_container(tmp_path):
