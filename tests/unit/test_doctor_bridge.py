@@ -9,6 +9,8 @@ import httpx
 import pytest
 from tests.unit.deployment_support import write_env
 from tests.unit.doctor_support import (
+    COMMAND,
+    ENTRYPOINT,
     IMAGE_ENV,
     IMAGE_ID,
     PORT_BINDINGS,
@@ -261,6 +263,10 @@ HARDENING_VIOLATIONS = [
     pytest.param(host_config(Runtime="nvidia"), "HostConfig.Runtime", id="another-runtime"),
     pytest.param(host_config(Runtime=""), "HostConfig.Runtime", id="no-runtime"),
     pytest.param(config(User="root"), "Config.User", id="user"),
+    pytest.param(config(Entrypoint=["/bin/sh"]), "Config.Entrypoint", id="entrypoint-override"),
+    pytest.param(config(Entrypoint=None), "Config.Entrypoint", id="entrypoint-removed"),
+    pytest.param(config(Cmd=["frps", "-c", "other.toml"]), "Config.Cmd", id="command-override"),
+    pytest.param(config(Cmd=[]), "Config.Cmd", id="command-removed"),
     pytest.param(host_config(Tmpfs={"/run/rt": "mode=0700", "/tmp": ""}), "/tmp", id="extra-tmpfs"),
     pytest.param(host_config(Tmpfs={}), "HostConfig.Tmpfs", id="tmpfs-missing"),
     pytest.param(host_config(Tmpfs={"/run/other": ""}), "/run/other", id="tmpfs-elsewhere"),
@@ -345,6 +351,29 @@ def test_the_runtime_the_daemon_defaults_to_is_the_one_the_container_must_use(wo
     world.docker.on("info", stdout=json.dumps({"DefaultRuntime": "crun"}))
     world.docker.altered(host_config(Runtime="crun"))
     assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize(("field", "found"), [("Entrypoint", ["/bin/sh"]), ("Cmd", ["frps", "-c", "other.toml"])],
+                         ids=["entrypoint", "command"])
+def test_an_overridden_entrypoint_or_command_names_the_field_and_both_values(world, field, found):
+    world.docker.altered(config(**{field: found}))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert f"Config.{field} is {json.dumps(found)}" in check.detail
+    assert json.dumps(ENTRYPOINT if field == "Entrypoint" else COMMAND) in check.detail
+
+
+@pytest.mark.parametrize("empty", [None, []], ids=["null", "empty"])
+def test_a_null_and_an_empty_entrypoint_or_command_are_the_same_on_both_sides(world, empty):
+    world.docker.on("image", "inspect", stdout=json.dumps([{"Config": {"Env": IMAGE_ENV, "Entrypoint": empty}}]))
+    world.docker.altered(config(Entrypoint=[] if empty is None else None, Cmd=None))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_an_entrypoint_the_image_does_not_have_is_a_violation(world):
+    world.docker.on("image", "inspect", stdout=json.dumps([{"Config": {"Env": IMAGE_ENV}}]))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "Config.Entrypoint" in check.detail
 
 
 def test_a_mount_source_is_compared_resolved_on_both_sides(world):

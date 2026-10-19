@@ -39,6 +39,8 @@ PORT_BINDINGS = {
 SSH_BANNER = "SSH-2.0-OpenSSH_9.6"
 IMAGE_ID = "sha256:" + "ab" * 32
 IMAGE_ENV = ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "SSL_CERT_FILE=/etc/ssl/cert.pem"]
+ENTRYPOINT = ["/usr/local/bin/bridge-entrypoint"]
+COMMAND = ["frps", "-c", "bridge/frps.toml"]
 RUNTIME = "runc"
 
 
@@ -49,6 +51,8 @@ def hardened_container(root: Path, *, restart: str = "unless-stopped", bindings:
         "Config": {
             "Image": "reverse-tunnel-frps",
             "User": "",
+            "Entrypoint": ENTRYPOINT,
+            "Cmd": COMMAND,
             "Env": [f"RT_DOMAIN={DOMAIN}", "RT_ADMIN_PASSWORD=not-a-real-password", *IMAGE_ENV],
         },
         "Mounts": [
@@ -144,7 +148,11 @@ class FakeDocker:
         self.on("version", stdout="27.0.0\n")
         self.on("ps", stdout=json.dumps(entry) + "\n")
         self.on("inspect", stdout=json.dumps([hardened_container(self.root, restart=restart, bindings=bindings)]))
-        self.on("image", "inspect", stdout=json.dumps([{"Config": {"Env": IMAGE_ENV}}]))
+        self.on(
+            "image",
+            "inspect",
+            stdout=json.dumps([{"Config": {"Env": IMAGE_ENV, "Entrypoint": ENTRYPOINT, "Cmd": COMMAND}}])
+        )
         self.on("info", stdout=json.dumps({"DefaultRuntime": RUNTIME}))
 
     def altered(self, change: Callable[[dict], None]) -> None:

@@ -8,7 +8,7 @@ reported, only names: the variables an `env_file` adds include the token.
 """
 
 import json
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -67,10 +67,10 @@ def same_path(found: str, wanted: Path) -> bool:
         return Path(found) == wanted
 
 
-def violations(container: Mapping[str, Any], *, image_env: Collection[str], runtime: str, root: Path) -> list[str]:
+def violations(container: Mapping[str, Any], *, image: Mapping[str, Any], runtime: str, root: Path) -> list[str]:
     """Every way the `docker inspect` document `container` departs from compose.yaml's security settings.
 
-    `image_env` is the variable names the image itself declares and `runtime` the daemon's default runtime.
+    `image` is the image's own `Config` and `runtime` the daemon's default runtime.
     """
     host, config = container.get("HostConfig"), container.get("Config")
     problems = []
@@ -79,7 +79,7 @@ def violations(container: Mapping[str, Any], *, image_env: Collection[str], runt
     else:
         problems.append("`docker inspect` has no HostConfig for the container, so its settings cannot be confirmed")
     if isinstance(config, dict):
-        problems += config_violations(config, image_env)
+        problems += config_violations(config, image)
     else:
         problems.append("`docker inspect` has no Config for the container, so its settings cannot be confirmed")
     return problems + mount_violations(container.get("Mounts"), root)
@@ -135,17 +135,26 @@ def host_violations(host: Mapping[str, Any], *, runtime: str) -> list[str]:
     return problems
 
 
-def config_violations(config: Mapping[str, Any], image_env: Collection[str]) -> list[str]:
+def config_violations(config: Mapping[str, Any], image: Mapping[str, Any]) -> list[str]:
     problems = []
     if text(config.get("User")) != "":
         problems.append(f"Config.User is {shown(config.get('User'))}; compose.yaml sets no user")
     names = {text(entry).partition("=")[0] for entry in listing(config.get("Env"))}
-    extra = sorted(names - ENVIRONMENT - set(image_env))
+    image_env = {text(entry).partition("=")[0] for entry in listing(image.get("Env"))}
+    extra = sorted(names - ENVIRONMENT - image_env)
     if extra:
         problems.append(
             f"Config.Env carries {', '.join(extra)}, which neither the image nor compose.yaml sets (compose.yaml sets "
             f"only {', '.join(sorted(ENVIRONMENT))}; an `env_file` would hand the container the whole of .env)"
         )
+    # compose.yaml sets neither, so the container runs the image's entrypoint, whose token and tmpfs checks fail closed.
+    for field in ("Entrypoint", "Cmd"):
+        found, wanted = config.get(field) or [], image.get(field) or []
+        if found != wanted:
+            problems.append(
+                f"Config.{field} is {shown(found)}; the image's is {shown(wanted)}, and compose.yaml sets no "
+                f"{'entrypoint' if field == 'Entrypoint' else 'command'}"
+            )
     return problems
 
 

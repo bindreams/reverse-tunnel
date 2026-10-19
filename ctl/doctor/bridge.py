@@ -162,8 +162,8 @@ class Bridge:
         return host_config
 
     @functools.cached_property
-    def image_env_names(self) -> frozenset[str]:
-        """The variables the container's image declares, read from the image the container was made from.
+    def image_config(self) -> dict[str, Any]:
+        """The `Config` of the image the container was made from: what the container gets when nothing overrides it.
 
         That is the container's image ID: `Config.Image` is a tag, which may have moved to a rebuilt image since.
         """
@@ -177,9 +177,7 @@ class Bridge:
         config = document[0].get("Config") if isinstance(document, list) and document else None
         if not isinstance(config, dict):
             raise DockerProblem("`docker image inspect` printed something that is not an image's configuration")
-        environment = config.get("Env")
-        return frozenset(entry.partition("=")[0] for entry in environment
-                         if isinstance(entry, str)) if isinstance(environment, list) else frozenset()
+        return config
 
     @functools.cached_property
     def default_runtime(self) -> str:
@@ -280,7 +278,7 @@ class Bridge:
         try:
             container = self.inspected  # first, so no container or no Docker is n/a whatever `docker info` says
             runtime = self.default_runtime
-            problems = hardening.violations(container, image_env=self.image_env_names, runtime=runtime, root=self.root)
+            problems = hardening.violations(container, image=self.image_config, runtime=runtime, root=self.root)
         except DockerProblem as exc:
             return fail(f"the container's security settings could not be checked: {exc}")
         if problems:
