@@ -172,11 +172,16 @@ class ComposeLoader(yaml.SafeLoader):
 ComposeLoader.add_multi_constructor("!", untagged)
 
 
+def compose_services(path) -> dict:
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=ComposeLoader).get("services") or {}
+
+
 @pytest.mark.parametrize("path", COMPOSE_FILES, ids=lambda path: path.name)
 def test_compose_files_do_not_load_env_file(path):
-    services = yaml.load(path.read_text(encoding="utf-8"), Loader=ComposeLoader).get("services", {})
+    services = compose_services(path)
     assert services
-    assert [name for name, service in services.items() if "env_file" in service] == []
+    # A service written as an empty mapping parses to None.
+    assert [name for name, service in services.items() if "env_file" in (service or {})] == []
 
 
 def frps_service() -> dict:
@@ -194,10 +199,15 @@ def test_compose_pins_a_private_ipc_namespace():
     assert frps_service()["ipc"] == hardening.IPC_MODE == "private"
 
 
-def test_compose_publishes_the_admin_port_on_the_loopback_address_the_check_expects():
-    # The `${...}` in a port entry holds colons, so the host side is matched as a prefix and the container side as a suffix.
-    container_port = f":{hardening.ADMIN_PORT}"
-    published = [entry for entry in frps_service()["ports"] if entry.endswith(container_port)]
+# The `${...}` in a port entry holds colons, so the host side is matched as a prefix and the container side as a suffix.
+@pytest.mark.parametrize(
+    "path",
+    [path for path in COMPOSE_FILES if "ports" in (compose_services(path).get("frps") or {})],
+    ids=lambda path: path.name,
+)
+def test_compose_publishes_the_admin_port_on_the_loopback_address_the_check_expects(path):
+    ports = compose_services(path)["frps"]["ports"]
+    published = [entry for entry in ports if entry.endswith(f":{hardening.ADMIN_PORT}")]
     assert len(published) == 1
     assert published[0].startswith(f"{hardening.LOOPBACK}:")
 
