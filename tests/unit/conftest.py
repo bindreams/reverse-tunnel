@@ -36,7 +36,6 @@ def not_root(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
-    """Unit tests are offline, so a live call cannot slip in unnoticed."""
     refuse_network(monkeypatch)
 
 

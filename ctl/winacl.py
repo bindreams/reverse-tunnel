@@ -323,9 +323,8 @@ def grants(
 ) -> dict[str, int]:
     """The explicit grants: Administrators full, then `operator`, `writers` and `readers`, strongest first.
 
-    Files give `operator` read, write and delete (replacing a secret deletes the old file, which a non-elevated operator
-    may do only with their own ACE), and `readers` read. Directories give `operator` and `writers` modify and
-    `readers` read and execute.
+    Files give `operator` read, write and delete (replacing a secret deletes the old file), and `readers` read.
+    Directories give `operator` and `writers` modify and `readers` read and execute.
     """
     wanted = {SID_ADMINISTRATORS: FULL}
     if operator is not None:

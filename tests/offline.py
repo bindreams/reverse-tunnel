@@ -1,4 +1,4 @@
-"""The network guard shared by tests/unit and tests/platform: any socket connection, send or name lookup fails the test."""
+"""Network guard for tests: any socket connection, send or name lookup fails the test."""
 
 import socket
 

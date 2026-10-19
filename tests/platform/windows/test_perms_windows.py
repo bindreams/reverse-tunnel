@@ -291,8 +291,8 @@ def test_a_non_elevated_operator_replaces_the_token(tmp_path, standard_user):
     root = tmp_path / "repo"
     root.mkdir()
     make_owner(root, standard_user)
-    # A real operator can open the root of a repository in their profile; ownership alone grants no FILE_READ_ATTRIBUTES.
-    # Not inheritable and without DELETE, so the only DELETE the user holds below is the one ctl grants.
+    # Ownership alone grants no FILE_READ_ATTRIBUTES. Not inheritable and without DELETE, so the only DELETE below is
+    # ctl's.
     subprocess.run(["icacls", str(root), "/grant", f"*{standard_user.sid}:(RX)"], check=True, capture_output=True)
     folder = root / "secrets"
     converge_dir(folder, None, 0o711, frozenset({SID_LOCAL_SERVICE}), root=root)
