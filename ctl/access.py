@@ -81,12 +81,22 @@ def verify_traversable(root: Path, service: Account) -> None:
     blocked = first_untraversable(posix_root, lambda flag, path: account_can(service, flag, Path(path)))
     if blocked is None:
         return
-    action = "readable" if blocked == posix_root / "host" / "frpc.toml" else "searchable"
+    config = posix_root / "host" / "frpc.toml"
+    action = "readable" if blocked == config else "searchable"
+    if blocked in (posix_root / "host", config):
+        bit = "r" if blocked == config else "x"
+        remedy = (
+            f"Grant {service.name} access to it, for example `chmod o+{bit} {blocked}`, or give a group "
+            f"{service.name} belongs to access to it"
+        )
+    else:
+        remedy = (
+            f"Move the deployment to a location whose every parent directory {service.name} can search, such as "
+            "/opt/reverse-tunnel or /srv/reverse-tunnel, or set RT_SERVICE_USER to the account that owns it"
+        )
     raise InstallError(
         f"{blocked} is not {action} by {service.name}, the account the daemons run as ({_describe(blocked)}), so they "
-        f"could not start from {posix_root}. Nothing was changed. Move the deployment to a location "
-        f"whose every parent directory {service.name} can search, such as /opt/reverse-tunnel or /srv/reverse-tunnel, or set "
-        "RT_SERVICE_USER to the account that owns it"
+        f"could not start from {posix_root}. Nothing was changed. {remedy}"
     )
 
 
