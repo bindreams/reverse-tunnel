@@ -51,6 +51,8 @@ def test_uninstall_names_the_bad_compose_file_entry_when_down_fails(tmp_path, ca
     err = capsys.readouterr().err
     assert "docker compose down failed (exit 1)" in err
     assert "COMPOSE_FILE" in err and MISSING in err and "--force" in err
+    # `down` can fail for reasons of its own, so the hint reports the problems without claiming they caused it.
+    assert "cannot read" not in err
 
 
 def test_uninstall_without_a_compose_file_problem_does_not_mention_it(tmp_path, capsys):

@@ -210,7 +210,7 @@ def _uninstall_bridge(config: Config, run: Runner, force: bool) -> int:
             return 1
         if status != 0:
             reasons = compose_file_problems(config.root, config.values)
-            hint = f" Compose cannot read its files ({'; '.join(reasons)}); fix .env, or pass --force." if reasons else ""
+            hint = f" COMPOSE_FILE has problems ({'; '.join(reasons)}); fix it, or pass --force." if reasons else ""
             print(f"docker compose down failed (exit {status}); secrets/ is kept.{hint}", file=sys.stderr)
             return 1
     removed = remove_directory(config.root, "secrets")

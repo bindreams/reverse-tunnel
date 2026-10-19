@@ -2,7 +2,7 @@
 """Checks on `COMPOSE_FILE`, the variable through which `.env` chooses the bridge's compose files.
 
 Compose reads it from `.env` for the operator's `docker compose` and for `ctl`'s alike, so every call loads the same
-set. `ctl install` is the one place that insists on it being sound; `doctor` and `uninstall` must still run when it is
+set. An exported `COMPOSE_FILE` takes precedence over `.env` in Compose, so it is the one judged when present. `ctl install` is the one place that insists on it being sound; `doctor` and `uninstall` must still run when it is
 not, so they never call this.
 """
 
@@ -13,21 +13,24 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 PRIMARY = "compose.yaml"
 
 
-def compose_file_problems(root: Path, values: Mapping[str, str]) -> list[str]:
+def compose_file_problems(root: Path, values: Mapping[str, str], environ: Mapping[str, str] | None = None) -> list[str]:
     """What is wrong with `COMPOSE_FILE` in `values`, one message per problem; empty when it is fine or unset.
 
     Each entry must be a relative path, free of `..`, naming a regular file under `root`, and the first must be
     `compose.yaml`. A message names `COMPOSE_FILE` and the entry, and quotes nothing else from the environment.
     """
-    raw = values.get("COMPOSE_FILE", "")
+    environ = os.environ if environ is None else environ
+    exported = "COMPOSE_FILE" in environ
+    raw = environ["COMPOSE_FILE"] if exported else values.get("COMPOSE_FILE", "")
     if not raw:
         return []
-    separator = values.get("COMPOSE_PATH_SEPARATOR") or os.pathsep
+    separator = environ.get("COMPOSE_PATH_SEPARATOR") or values.get("COMPOSE_PATH_SEPARATOR") or os.pathsep
+    name = "COMPOSE_FILE (exported, so it takes precedence over .env)" if exported else "COMPOSE_FILE"
     problems: list[str] = []
     for index, entry in enumerate(raw.split(separator)):
         problem = _entry_problem(root, entry, first=index == 0)
         if problem:
-            problems.append(f"COMPOSE_FILE entry {entry!r}: {problem}" if entry else f"COMPOSE_FILE: {problem}")
+            problems.append(f"{name} entry {entry!r}: {problem}" if entry else f"{name}: {problem}")
     return problems
 
 
