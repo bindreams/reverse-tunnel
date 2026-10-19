@@ -5,6 +5,7 @@ import pytest
 import yaml
 
 from ctl import config
+from ctl.doctor import hardening
 from ctl.env import GO_TEMPLATE_REFERENCE
 from ctl.config import EXAMPLE_ADMIN_PASSWORD, EXAMPLE_TOKEN
 from scanner_support import REPO_ROOT
@@ -158,13 +159,48 @@ def test_every_compose_variable_is_required_with_a_message(path):
 
 @pytest.mark.parametrize("path", COMPOSE_FILES, ids=lambda path: path.name)
 def test_compose_files_do_not_load_env_file(path):
-    assert "env_file" not in path.read_text(encoding="utf-8")
+    # Comments are dropped: examples/compose.override.yaml names `env_file` to forbid it.
+    assert "env_file" not in re.sub(r"#.*", "", path.read_text(encoding="utf-8"))
 
 
+def frps_service() -> dict:
+    return yaml.safe_load((REPO_ROOT / "compose.yaml").read_text(encoding="utf-8"))["services"]["frps"]
+
+
+# `ctl doctor`'s container_hardening holds the live container to these constants, so compose.yaml must agree with them.
 def test_compose_pins_a_private_cgroup_namespace():
     # The daemon's default may be `host`, which `docker info` does not show; container_hardening requires `private`.
-    compose = yaml.safe_load((REPO_ROOT / "compose.yaml").read_text(encoding="utf-8"))
-    assert compose["services"]["frps"]["cgroup"] == "private"
+    assert frps_service()["cgroup"] == hardening.CGROUPNS_MODE == "private"
+
+
+def test_compose_pins_a_private_ipc_namespace():
+    # The daemon's default may be `shareable`; container_hardening requires `private`.
+    assert frps_service()["ipc"] == hardening.IPC_MODE == "private"
+
+
+def test_compose_capabilities_are_the_ones_the_allow_list_holds_the_container_to():
+    service = frps_service()
+    assert service["cap_add"] == [hardening.CAPABILITY]
+    assert service["cap_drop"] == ["ALL"]
+
+
+def test_compose_security_settings_are_the_ones_the_allow_list_holds_the_container_to():
+    service = frps_service()
+    assert service["security_opt"] == [f"{hardening.NO_NEW_PRIVILEGES}:true"]
+    assert service["read_only"] is True
+    assert service["tmpfs"] == [f"{hardening.TMPFS}:{hardening.TMPFS_OPTIONS}"]
+
+
+def test_compose_mounts_are_the_ones_the_allow_list_holds_the_container_to():
+    volumes = frps_service()["volumes"]
+    assert [(volume["type"], volume["source"], volume["target"], volume["read_only"]) for volume in volumes] == [
+        ("bind", f"./{hardening.TOKEN_SOURCE}", hardening.TOKEN_TARGET, True),
+        ("bind", f"./{hardening.CONFIG_SOURCE}", hardening.CONFIG_TARGET, True),
+    ]
+
+
+def test_compose_environment_names_are_the_ones_the_allow_list_permits():
+    assert set(frps_service()["environment"]) == hardening.ENVIRONMENT
 
 
 # front proxy examples =================================================================================================
