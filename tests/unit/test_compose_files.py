@@ -82,3 +82,16 @@ def test_an_empty_entry_is_a_problem(tmp_path):
     root = deployment(tmp_path, "compose.yaml")
     problems = compose_file_problems(root, joined("compose.yaml", ""))
     assert len(problems) == 1 and "COMPOSE_FILE" in problems[0]
+
+
+def test_an_exported_compose_file_is_judged_instead_of_the_env_file(tmp_path, monkeypatch):
+    root = deployment(tmp_path, "compose.yaml")
+    monkeypatch.setenv("COMPOSE_FILE", "missing.yaml")
+    (problem, ) = compose_file_problems(root, joined("compose.yaml"))
+    assert "missing.yaml" in problem and "exported" in problem
+
+
+def test_an_exported_separator_is_honoured(tmp_path, monkeypatch):
+    root = deployment(tmp_path, "compose.yaml", "compose.override.yaml")
+    monkeypatch.setenv("COMPOSE_PATH_SEPARATOR", "|")
+    assert compose_file_problems(root, joined("compose.yaml", "compose.override.yaml", separator="|")) == []
