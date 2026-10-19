@@ -1,5 +1,4 @@
 import hashlib
-import socket
 from pathlib import Path
 
 import pytest
@@ -10,6 +9,7 @@ from sigstore.models import TrustedRoot
 from sigstore.verify import Verifier
 
 from ctl import binaries, cli
+from tests.offline import refuse_network
 
 
 @pytest.fixture
@@ -42,24 +42,8 @@ def not_root(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
-    """Unit tests are offline: any socket connection fails the test, so a live call cannot slip in unnoticed."""
-
-    def refuse(self, address, *args, **kwargs):
-        pytest.fail(f"unit tests must not touch the network (connect to {address!r})", pytrace=False)
-
-    def refuse_lookup(host, *args, **kwargs):
-        pytest.fail(f"unit tests must not touch the network (name lookup of {host!r})", pytrace=False)
-
-    def refuse_send(self, *args, **kwargs):
-        pytest.fail("unit tests must not touch the network (send to an address)", pytrace=False)
-
-    # Code that imports the C module `_socket` directly is out of reach of these patches; nothing here does.
-    for method in ("connect", "connect_ex"):
-        monkeypatch.setattr(socket.socket, method, refuse)
-    for method in ("sendto", "sendmsg"):
-        monkeypatch.setattr(socket.socket, method, refuse_send)
-    for function in ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo"):
-        monkeypatch.setattr(socket, function, refuse_lookup)
+    """Unit tests are offline, so a live call cannot slip in unnoticed."""
+    refuse_network(monkeypatch)
 
 
 # Pinned binaries ======================================================================================================
