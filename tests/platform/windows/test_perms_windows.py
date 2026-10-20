@@ -1,6 +1,7 @@
 import io
 import os
 import secrets
+import signal
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -8,9 +9,11 @@ from typing import Any
 from pathlib import Path
 
 import pytest
+from tests.platform.windows.service_access import can_open
 
 from ctl import perms_windows, winacl
 from ctl.atomic import replace_file
+from ctl.download import DIGESTS, record_digests
 from ctl.perms import (
     SID_ADMINISTRATORS,
     SID_AUTHENTICATED_USERS,
@@ -635,6 +638,17 @@ def test_a_file_replaced_in_bin_loses_the_service_read_until_it_is_given_again(t
     assert [(e.mask, e.flags) for e in service_entries(binary, directory=False)] == [(winacl.READ_EXECUTE, 0)]
 
 
+def test_the_record_of_digests_is_written_with_the_service_read_already_on_it(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    record = repo / "bin" / DIGESTS
+    record_digests(repo / "bin", [], {"token": "a" * 64}, service=LOCAL_SERVICE)
+    assert can_open(record)
+    record_digests(repo / "bin", [], {"token": "b" * 64}, service=LOCAL_SERVICE)  # replacing it keeps the access
+    assert can_open(record)
+    assert [(e.mask, e.flags) for e in service_entries(record, directory=False)] == [(winacl.READ_EXECUTE, 0)]
+
+
 def test_grant_service_read_file_keeps_every_other_entry_and_is_idempotent(tmp_path):
     repo = repo_with(tmp_path)
     grant_service_read(repo, LOCAL_SERVICE)
@@ -660,12 +674,126 @@ def test_grant_service_read_file_refuses_a_hard_linked_file_and_leaves_the_forei
     assert winacl.read_acl(foreign) == before
 
 
-def test_grant_service_read_keeps_an_explicit_deny_for_the_service(tmp_path):
+def test_grant_service_read_keeps_an_explicit_deny_of_what_the_service_never_needs(tmp_path):
     repo = repo_with(tmp_path)
-    subprocess.run(["icacls", str(repo), "/deny", f"*{SID_LOCAL_SERVICE}:(W)"], check=True, capture_output=True)
+    subprocess.run(["icacls", str(repo), "/deny", f"*{SID_LOCAL_SERVICE}:(WD)"], check=True, capture_output=True)
     grant_service_read(repo, LOCAL_SERVICE)
     kept = [e for e in entries_of(repo) if e.sid == SID_LOCAL_SERVICE]
     assert {e.ace_type for e in kept} == {winacl.ACCESS_ALLOWED_ACE_TYPE, winacl.ACCESS_DENIED_ACE_TYPE}
+
+
+# A deny for the service on what it reads ==============================================================================
+
+
+@pytest.mark.parametrize("where", [".", "bin", "bin/frpc.exe", "host", "host/frpc.toml"])
+def test_grant_service_read_refuses_a_deny_of_what_the_service_reads_naming_the_path_and_changes_nothing(
+    tmp_path, where
+):
+    repo = repo_with(tmp_path)
+    path = repo / where
+    icacls(str(path), "/deny", f"*{SID_LOCAL_SERVICE}:(RX)")
+    before = {p: whole_entries(p, directory=p.is_dir()) for p in [repo, *repo.rglob("*")]}
+    with pytest.raises(PermsError) as raised:
+        grant_service_read(repo, LOCAL_SERVICE)
+    assert str(path) in str(raised.value) and "denied" in str(raised.value)
+    assert {p: whole_entries(p, directory=p.is_dir()) for p in [repo, *repo.rglob("*")]} == before
+
+
+# A child NTFS made protected ==========================================================================================
+
+
+def make_protected(path: Path, *, service: bool) -> None:
+    """What NTFS leaves a child when its directory gains an inheritable ACE: explicit, protected copies of its ACEs."""
+    entries, _ = whole_entries(path, directory=False)
+    copies = [e._replace(flags=e.flags & ~INHERITED_ACE) for e in entries if service or e.sid != SID_LOCAL_SERVICE]
+    with perms_windows._handle(path, directory=False, access=perms_windows.ACL_ACCESS) as handle:
+        winacl.set_dacl(handle, copies, protected=True)
+
+
+def others(path: Path) -> list[winacl.Entry]:
+    return [e for e in whole_entries(path, directory=False)[0] if e.sid != SID_LOCAL_SERVICE]
+
+
+@pytest.mark.parametrize("service", [True, False], ids=["holds-a-copy", "holds-none"])
+@pytest.mark.parametrize("where", ["bin/frpc.exe", "host/frpc.toml"])
+def test_grant_service_read_keeps_a_protected_file_protected_and_gives_it_the_service_read(tmp_path, where, service):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    path = repo / where
+    make_protected(path, service=service)
+    before = others(path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert whole_acl(path)[1], "the file must stay protected"
+    assert [(e.mask, e.flags) for e in service_entries(path, directory=False)] == [(winacl.READ_EXECUTE, 0)]
+    assert others(path) == before
+    assert can_open(path)
+    again = whole_acl(path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert whole_acl(path) == again
+
+
+@pytest.mark.parametrize("service", [True, False], ids=["holds-a-copy", "holds-none"])
+def test_converging_bin_keeps_a_protected_file_protected_and_gives_it_the_service_read(tmp_path, service):
+    repo = repo_with(tmp_path)
+    binary = repo / "bin" / "frpc.exe"
+    make_protected(binary, service=service)
+    before = others(binary)
+    converge_bin(repo)
+    assert whole_acl(binary)[1], "the file must stay protected"
+    assert [(e.mask, e.flags) for e in service_entries(binary, directory=False)] == [(winacl.READ_EXECUTE, 0)]
+    assert others(binary) == before
+    assert can_open(binary)
+
+
+# Ctrl-C between the writes of one operation ===========================================================================
+
+
+def record_writes(monkeypatch, *, ctrl_c: bool) -> list:
+    """Collect every `winacl.set_dacl` call; with `ctrl_c`, SIGINT arrives right after the first one has written."""
+    real = winacl.set_dacl
+    calls = []
+
+    def writing(handle, entries, *, protected):
+        real(handle, entries, protected=protected)
+        calls.append(handle)
+        if ctrl_c and len(calls) == 1:
+            signal.raise_signal(signal.SIGINT)
+
+    monkeypatch.setattr(winacl, "set_dacl", writing)
+    return calls
+
+
+def converge_logs(repo: Path) -> None:
+    converge_tree(repo / "logs", LOCAL_SERVICE, 0o750, root=repo)
+
+
+OPERATIONS = {
+    "grant_service_read": lambda repo: grant_service_read(repo, LOCAL_SERVICE),
+    "converge_dir": lambda repo: converge_bin(repo),
+    "converge_tree": converge_logs,
+}
+
+
+@pytest.mark.parametrize("operation", OPERATIONS)
+def test_ctrl_c_does_not_land_between_the_writes_of_one_operation(tmp_path, monkeypatch, operation):
+    run = OPERATIONS[operation]
+    repos = []
+    for name in ("whole", "interrupted"):
+        repo = repo_with(tmp_path / name)
+        (repo / "bin" / "extra.exe").write_bytes(b"")
+        (repo / "logs").mkdir()
+        (repo / "logs" / "a.log").write_bytes(b"")
+        (repo / "logs" / "b.log").write_bytes(b"")
+        repos.append(repo)
+    whole, interrupted = repos
+    with monkeypatch.context() as patch:
+        calls = record_writes(patch, ctrl_c=False)
+        run(whole)
+    with monkeypatch.context() as patch:
+        calls_with_ctrl_c = record_writes(patch, ctrl_c=True)
+        with pytest.raises(KeyboardInterrupt):
+            run(interrupted)
+    assert len(calls_with_ctrl_c) == len(calls) > 1
 
 
 # Writing in an order that never leaves the service without access =====================================================

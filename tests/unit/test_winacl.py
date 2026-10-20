@@ -340,3 +340,32 @@ def test_the_operator_may_delete_a_file_it_was_granted_because_replacing_a_secre
 def test_the_operator_keeps_modify_on_a_directory():
     granted = winacl.grants(directory=True, operator=OPERATOR_SID, readers=(READER_SID, ), writers=())
     assert granted[OPERATOR_SID] == winacl.MODIFY
+
+
+# What an account is granted ===========================================================================================
+
+SERVICE = winacl.SID_LOCAL_SERVICE
+ALLOW, DENY = winacl.ACCESS_ALLOWED_ACE_TYPE, winacl.ACCESS_DENIED_ACE_TYPE
+
+
+def test_an_allow_for_the_account_grants_its_mask_and_another_sid_grants_nothing():
+    entries = [winacl.Entry(ALLOW, 0, winacl.READ_EXECUTE, SERVICE), winacl.Entry(ALLOW, 0, winacl.FULL, OPERATOR_SID)]
+    assert winacl.effective_access(entries, SERVICE) == winacl.READ_EXECUTE
+
+
+def test_a_deny_before_the_allow_removes_the_bits_it_names():
+    entries = [winacl.Entry(DENY, 0, 0x1, SERVICE), winacl.Entry(ALLOW, 0, winacl.READ_EXECUTE, SERVICE)]
+    assert winacl.effective_access(entries, SERVICE) == winacl.READ_EXECUTE & ~0x1
+
+
+def test_a_deny_after_an_allow_does_not_take_back_what_the_allow_granted():
+    entries = [winacl.Entry(ALLOW, 0, winacl.READ_EXECUTE, SERVICE), winacl.Entry(DENY, 0, 0x1, SERVICE)]
+    assert winacl.effective_access(entries, SERVICE) == winacl.READ_EXECUTE
+
+
+def test_an_inherit_only_ace_grants_and_denies_nothing_to_the_object_itself():
+    entries = [
+        winacl.Entry(DENY, winacl.INHERIT_ONLY_ACE | winacl.OBJECT_INHERIT_ACE, winacl.FULL, SERVICE),
+        winacl.Entry(ALLOW, winacl.INHERIT_ONLY_ACE | winacl.OBJECT_INHERIT_ACE, winacl.FULL, SERVICE),
+    ]
+    assert winacl.effective_access(entries, SERVICE) == 0
