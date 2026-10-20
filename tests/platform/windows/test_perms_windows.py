@@ -721,36 +721,35 @@ def test_grant_service_read_refuses_an_inherit_only_deny_on_host_that_a_new_file
     assert snapshot_of(repo) == before
 
 
-def write_in_order(path: Path, aces: list[tuple[bool, str, int]]) -> None:
-    """Replace the DACL of `path` with exactly these (allow, sid, mask) ACEs, in this order, inheritance broken."""
-    import win32security
-
-    dacl = win32security.ACL()
-    for allow, sid, mask in aces:
-        add = dacl.AddAccessAllowedAce if allow else dacl.AddAccessDeniedAce
-        add(win32security.ACL_REVISION, mask, win32security.ConvertStringSidToSid(sid))
-    win32security.SetNamedSecurityInfo(
-        str(path), win32security.SE_FILE_OBJECT,
-        win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION, None, None, dacl,
-        None
-    )
+def write_in_order(path: Path, entries: list[winacl.Entry], monkeypatch) -> None:
+    """Replace the DACL of `path` with exactly `entries`, in this order, inheritance broken (`set_dacl` sorts denies
+    first, which is what an operator's tool need not do)."""
+    monkeypatch.setattr(winacl, "canonical", list)
+    with perms_windows._handle(path, directory=False, access=perms_windows.ACL_ACCESS) as handle:
+        winacl.set_dacl(handle, entries, protected=True)
+    monkeypatch.undo()
 
 
-def allow_before_a_group_deny(repo: Path) -> Path:
+def allow_before_a_group_deny(repo: Path, monkeypatch) -> Path:
     """`bin/frpc.exe` holding the service's allow before a deny for Users, as an operator may have left it."""
     binary = repo / "bin" / "frpc.exe"
+    allow, deny = winacl.ACCESS_ALLOWED_ACE_TYPE, winacl.ACCESS_DENIED_ACE_TYPE
     write_in_order(
-        binary, [(True, SID_LOCAL_SERVICE, winacl.READ_EXECUTE), (False, SID_USERS, FILE_EXECUTE),
-                 (True, SID_ADMINISTRATORS, winacl.FULL)]
+        binary, [
+            winacl.Entry(allow, 0, winacl.READ_EXECUTE, SID_LOCAL_SERVICE),
+            winacl.Entry(deny, 0, FILE_EXECUTE, SID_USERS),
+            winacl.Entry(allow, 0, winacl.FULL, SID_ADMINISTRATORS),
+        ], monkeypatch
     )
+    assert whole_entries(binary, directory=False)[0][0].sid == SID_LOCAL_SERVICE, "the order must be kept"
     assert can_open(binary), "the setup must leave the service able to read, which is what the install must keep"
     return binary
 
 
-def test_grant_service_read_does_not_turn_an_allow_before_a_group_deny_into_a_denial(tmp_path):
+def test_grant_service_read_does_not_turn_an_allow_before_a_group_deny_into_a_denial(tmp_path, monkeypatch):
     """Writing the DACL sorts denies before allows: that would deny the service what it read."""
     repo = repo_with(tmp_path)
-    binary = allow_before_a_group_deny(repo)
+    binary = allow_before_a_group_deny(repo, monkeypatch)
     before = snapshot_of(repo)
     with pytest.raises(PermsError) as raised:
         grant_service_read(repo, LOCAL_SERVICE)
@@ -759,9 +758,9 @@ def test_grant_service_read_does_not_turn_an_allow_before_a_group_deny_into_a_de
     assert can_open(binary)
 
 
-def test_converging_bin_does_not_turn_an_allow_before_a_group_deny_into_a_denial(tmp_path):
+def test_converging_bin_does_not_turn_an_allow_before_a_group_deny_into_a_denial(tmp_path, monkeypatch):
     repo = repo_with(tmp_path)
-    binary = allow_before_a_group_deny(repo)
+    binary = allow_before_a_group_deny(repo, monkeypatch)
     before = snapshot_of(repo)
     with pytest.raises(PermsError) as raised:
         converge_bin(repo)

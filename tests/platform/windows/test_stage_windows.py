@@ -192,19 +192,22 @@ def unprotected(entries: list[winacl.Entry]) -> list[winacl.Entry]:
     return [e._replace(flags=e.flags & ~INHERITED_ACE) for e in entries]
 
 
-def differences(got, want) -> list[Path]:
-    """The paths whose ACL, ACE by ACE in stored order, differs. The one tolerated difference is a child that NTFS
-    protected when its directory gained an inheritable ACE and an interruption left so: its ACEs are the reference's,
-    written as explicit ones."""
+def differences(got, want) -> list[str]:
+    """The paths whose ACL differs, ACE by ACE in stored order, duplicates included, each with both ACLs.
+
+    The one tolerated difference is a child that NTFS protected when its directory gained an inheritable ACE and an
+    interruption left so: its ACEs are the reference's, now all explicit, and the order among them is `canonical`'s, not
+    the inheritance order. So they are compared as the same list of ACEs, duplicates included, in any order.
+    """
     differing = []
     for path in sorted(got.keys() | want.keys()):
         if got.get(path) == want.get(path):
             continue
         if path in got and path in want:
             (own, protected), (expected, expected_protected) = got[path], want[path]
-            if protected and not expected_protected and own == unprotected(expected):
+            if protected and not expected_protected and sorted(own) == sorted(unprotected(expected)):
                 continue
-        differing.append(path)
+        differing.append(f"{path}: got {got.get(path)}, want {want.get(path)}")
     return differing
 
 

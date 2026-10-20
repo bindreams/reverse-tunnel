@@ -29,6 +29,11 @@ def unnameable(sid: str) -> bool:
     return sid.startswith(UNNAMEABLE_PREFIXES) or (sid.startswith("S-1-5-32-") and sid.count("-") > 4)
 
 
+def run(*command: str) -> None:
+    done = subprocess.run(command, capture_output=True, text=True)
+    assert done.returncode == 0, f"{command}: {done.returncode}: {done.stdout}{done.stderr}"
+
+
 def real_groups(directory: Path) -> set[str]:
     """The group SIDs of a token that Windows makes for LocalService, listed by a task that runs as it."""
     import win32con
@@ -36,28 +41,25 @@ def real_groups(directory: Path) -> set[str]:
     import win32file
 
     directory.mkdir()
-    subprocess.run(["icacls", str(directory), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)M"],
-                   check=True,
-                   capture_output=True)
-    listing, done = directory / "groups.csv", directory / "done"
-    action = f'cmd.exe /c "whoami.exe /groups /fo csv > {listing} & echo x > {done}"'
+    run("icacls", str(directory), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)M")
+    listing, done, script = directory / "groups.csv", directory / "done", directory / "run.cmd"
+    # schtasks takes at most 261 characters of command, which a temporary path can use up by itself.
+    script.write_text(f'@whoami.exe /groups /fo csv > "{listing}"\r\n@echo x > "{done}"\r\n')
     notify = win32file.FindFirstChangeNotification(str(directory), False, win32con.FILE_NOTIFY_CHANGE_FILE_NAME)
     try:
-        subprocess.run([
-            "schtasks", "/create", "/tn", TASK, "/tr", action, "/sc", "once", "/st", "23:59", "/ru",
+        run(
+            "schtasks", "/create", "/tn", TASK, "/tr", f'"{script}"', "/sc", "once", "/st", "23:59", "/ru",
             r"NT AUTHORITY\LocalService", "/f"
-        ],
-                       check=True,
-                       capture_output=True)
+        )
         try:
-            subprocess.run(["schtasks", "/run", "/tn", TASK], check=True, capture_output=True)
+            run("schtasks", "/run", "/tn", TASK)
             while not done.exists():
                 # external-bound: the scheduled task writing its result
                 if win32event.WaitForSingleObject(notify, TASK_WAIT_MS) != win32event.WAIT_OBJECT_0:
                     raise AssertionError(f"the task {TASK} wrote nothing in {TASK_WAIT_MS // 1000} s")
                 win32file.FindNextChangeNotification(notify)
         finally:
-            subprocess.run(["schtasks", "/delete", "/tn", TASK, "/f"], check=True, capture_output=True)
+            run("schtasks", "/delete", "/tn", TASK, "/f")
     finally:
         win32file.FindCloseChangeNotification(notify)
     rows = csv.DictReader(io.StringIO(listing.read_text(encoding="utf-8", errors="replace")))
