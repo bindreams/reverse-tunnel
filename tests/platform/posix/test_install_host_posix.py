@@ -709,9 +709,10 @@ def test_the_staging_directory_is_gone_after_a_failed_download(running, monkeypa
 
 # The Windows service's read ===========================================================================================
 #
-# On Windows the service reads `bin/` and `host/` through ACEs `ctl` writes to each object, none of them inheritable, so
-# a file created or replaced there has no access until `ctl` gives it. The grants are no-ops on POSIX; these tests record
-# when they are called.
+# On Windows the service reads `bin/` and `host/` through ACEs `ctl` writes to each object, none of them inheritable in
+# `bin/`, so a file created or replaced there has no access until `ctl` gives it. The final name of a binary must never
+# exist without the grant, and `bin/` must never be left without its own ACE. The grants are no-ops on POSIX; these
+# tests record when and with what they are called.
 
 
 @pytest.fixture
@@ -719,12 +720,20 @@ def grants(monkeypatch):
     """Everything the install does to give the service read, in order, with the state at the time of the call."""
     events = []
     converge_dir = perms.converge_dir
+    replace_file = host.replace_file
 
     def spy_converge(path, *args, **kwargs):
-        events.append(("converge", path))
+        events.append(("converge", path, kwargs.get("service_read")))
         return converge_dir(path, *args, **kwargs)
 
+    def spy_replace(directory, name, source, mode, **kwargs):
+        content = source.getvalue()
+        events.append(("replace", directory / name, kwargs.get("service"), content))
+        source.seek(0)
+        return replace_file(directory, name, source, mode, **kwargs)
+
     monkeypatch.setattr(perms, "converge_dir", spy_converge)
+    monkeypatch.setattr(host, "replace_file", spy_replace)
     monkeypatch.setattr(
         perms, "grant_service_read", lambda root, account: events.append(("grant", root, (root / "bin").is_dir()))
     )
@@ -741,38 +750,48 @@ def test_bin_exists_and_is_converged_before_the_service_is_granted_read_and_not_
     bin_dir = host_tree.root / "bin"
     (granted, ) = [i for i, event in enumerate(grants) if event[0] == "grant"]
     assert grants[granted][2] is True
-    assert [i for i, event in enumerate(grants) if event == ("converge", bin_dir)] != []
-    assert all(i < granted for i, event in enumerate(grants) if event == ("converge", bin_dir))
+    converged = [i for i, event in enumerate(grants) if event[:2] == ("converge", bin_dir)]
+    assert converged != [] and all(i < granted for i in converged)
 
 
-def test_every_binary_and_the_record_are_granted_the_service_read_after_they_are_written(host_tree, grants):
+def test_bin_is_converged_with_the_service_read_in_the_same_write(host_tree, grants):
+    """Anything between the converge and a later grant that fails would leave `bin` without the service's ACE."""
     run_install(host_tree)
     bin_dir = host_tree.root / "bin"
-    files = {event[1]: event[2] for event in grants if event[0] == "file"}
-    assert set(files) == {bin_dir / name for name in host_tree.pins} | {bin_dir / DIGESTS}
-    for name in host_tree.pins:
-        assert files[bin_dir / name] == host_tree.pinned_bytes(name)
-    assert files[bin_dir / DIGESTS] == (bin_dir / DIGESTS).read_bytes()
-    assert [event[0] for event in grants].index("grant") < [event[0] for event in grants].index("file")
+    service = perms.service_account(host_tree.config)
+    assert [event[2] for event in grants if event[:2] == ("converge", bin_dir)] == [service]
 
 
-def test_an_install_that_replaces_and_records_nothing_grants_no_file(host_tree, grants):
+def test_every_binary_is_written_with_the_service_read_and_the_record_is_granted_after_it_is_written(host_tree, grants):
+    run_install(host_tree)
+    bin_dir = host_tree.root / "bin"
+    service = perms.service_account(host_tree.config)
+    replaced = {event[1]: (event[2], event[3]) for event in grants if event[0] == "replace"}
+    assert replaced == {bin_dir / name: (service, host_tree.pinned_bytes(name)) for name in host_tree.pins}
+    # The service reads no record, so it is granted after the fact, as before; no binary is granted that way.
+    assert [(event[1], event[2]) for event in grants
+            if event[0] == "file"] == [(bin_dir / DIGESTS, (bin_dir / DIGESTS).read_bytes())]
+    assert [event[0] for event in grants].index("grant") < [event[0] for event in grants].index("replace")
+
+
+def test_an_install_that_replaces_and_records_nothing_writes_and_grants_no_file(host_tree, grants):
     run_install(host_tree)
     settle(host_tree)
     grants.clear()
     run_install(host_tree)
-    assert [event for event in grants if event[0] == "file"] == []
+    assert [event for event in grants if event[0] in ("file", "replace")] == []
     assert [event[0] for event in grants if event[0] == "grant"] == ["grant"]
 
 
-def test_only_the_binary_that_was_replaced_is_granted_the_service_read(host_tree, grants, monkeypatch):
+def test_only_the_binary_that_was_replaced_is_written_with_the_service_read(host_tree, grants, monkeypatch):
     monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
     run_install(host_tree)
     settle(host_tree)
     (host_tree.root / "bin" / "frpc").write_bytes(b"tampered")
     grants.clear()
     run_install(host_tree)
-    assert [event[1] for event in grants if event[0] == "file"] == [host_tree.root / "bin" / "frpc"]
+    assert [event[1] for event in grants if event[0] == "replace"] == [host_tree.root / "bin" / "frpc"]
+    assert [event for event in grants if event[0] == "file"] == []
 
 
 # bin/ is the installer's ==============================================================================================

@@ -389,6 +389,7 @@ def converge_dir(
     *,
     writers: frozenset[str] = frozenset(),
     isolate: bool = True,
+    service_read: Account | None = None,
     root: Path,
 ) -> None:
     """Create `path` if absent and reassert its owner and mode, whatever state it was left in.

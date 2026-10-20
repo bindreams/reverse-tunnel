@@ -668,6 +668,68 @@ def test_grant_service_read_keeps_an_explicit_deny_for_the_service(tmp_path):
     assert {e.ace_type for e in kept} == {winacl.ACCESS_ALLOWED_ACE_TYPE, winacl.ACCESS_DENIED_ACE_TYPE}
 
 
+# Converging bin =======================================================================================================
+
+
+def converge_bin(repo: Path) -> None:
+    converge_dir(repo / "bin", None, 0o755, NO_READERS, isolate=False, root=repo, service_read=LOCAL_SERVICE)
+
+
+def test_converging_bin_writes_the_service_read_in_the_same_dacl(tmp_path):
+    """A host is often reachable only through the tunnel: bin must never be left without the service's ACE."""
+    repo = repo_with(tmp_path)
+    converge_bin(repo)
+    assert service_shape(repo / "bin") == [(winacl.READ_EXECUTE, 0)]
+    assert not winacl.read_acl(repo / "bin").protected
+
+
+def test_converging_bin_after_the_grant_keeps_the_service_read_and_is_idempotent(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    converge_bin(repo)
+    first = entries_of(repo / "bin")
+    assert service_shape(repo / "bin") == [(winacl.READ_EXECUTE, 0)]
+    converge_bin(repo)
+    assert entries_of(repo / "bin") == first
+
+
+def test_converging_bin_replaces_an_inheritable_service_ace_an_earlier_install_wrote(tmp_path):
+    repo = repo_with(tmp_path)
+    icacls(str(repo / "bin"), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)(RX)")
+    converge_bin(repo)
+    assert service_shape(repo / "bin") == [(winacl.READ_EXECUTE, 0)]
+
+
+# What NTFS rewrites when a directory gains inheritable ACEs ===========================================================
+
+
+def whole_acl(path: Path) -> tuple[list[winacl.Entry], bool]:
+    """Every ACE of the file `path` in stored order, and whether its inheritance is broken."""
+    with perms_windows._handle(path, directory=False, access=perms_windows.winfile.READ_CONTROL) as handle:
+        return winacl.read_entries(handle)
+
+
+@pytest.mark.parametrize("directory", ["bin", "secrets"])
+def test_converging_a_directory_does_not_make_ntfs_rewrite_a_file_ctl_never_opened(tmp_path, directory):
+    """`ctl` must never cause Windows to rewrite the ACL of anything it has not opened and vetted."""
+    repo = repo_with(tmp_path)
+    (repo / "secrets").mkdir()
+    extra = repo / directory / "extra.txt"
+    extra.write_bytes(b"")
+    before = whole_acl(extra)
+
+    def converge() -> None:
+        if directory == "bin":
+            converge_bin(repo)
+        else:
+            converge_dir(repo / "secrets", LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE}), root=repo)
+
+    converge()
+    after_first = whole_acl(extra)
+    converge()
+    assert (after_first == before, whole_acl(extra) == after_first) == (True, True)
+
+
 # Names outside the BMP ================================================================================================
 
 NON_BMP = "\U0001d4b3"
