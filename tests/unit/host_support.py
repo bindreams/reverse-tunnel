@@ -51,6 +51,7 @@ class HostTree:
     upstream: Upstream
     pins: dict[str, binaries.Pin]  # install name -> pin, for every binary a host installs
     served_before: int = 0  # requests answered while the lock was being generated
+    platform: str = PLATFORM
 
     @property
     def downloads(self) -> list:
@@ -78,7 +79,7 @@ class HostTree:
 
     def pinned_bytes(self, name: str) -> bytes:
         pin = self.pins[name]
-        return member_content(pin.tool, pin.version, PLATFORM, name)
+        return member_content(pin.tool, pin.version, self.platform, name)
 
     def token_digest(self, token: str = GOOD_TOKEN) -> str:
         return sha256(f"{token}\n".encode())
@@ -134,8 +135,11 @@ def hand_to(root: Path, entry) -> None:
             os.chown(os.path.join(directory, name), entry.pw_uid, entry.pw_gid)
 
 
-def build_host(tmp_path: Path, monkeypatch, **env: str) -> HostTree:
-    """A fresh, never-installed host deployment under `tmp_path/deployment`; goetia is the fake until a test says not."""
+def build_host(tmp_path: Path, monkeypatch, *, platform: str = PLATFORM, **env: str) -> HostTree:
+    """A fresh, never-installed host deployment under `tmp_path/deployment`; goetia is the fake until a test says not.
+
+    `platform` is the one the lock is read for; a binary's install name ends in `.exe` on Windows.
+    """
     root = tmp_path / "deployment"
     root.mkdir()
     (root / "host").mkdir()
@@ -157,16 +161,17 @@ def build_host(tmp_path: Path, monkeypatch, **env: str) -> HostTree:
     pins = {
         pin.install_name: pin
         for tool, names in BINARIES.items()
-        for pin in binaries.pins_for(lock, tool, PLATFORM) if pin.install_name in names
+        for pin in binaries.pins_for(lock, tool, platform) if pin.install_name.removesuffix(".exe") in names
     }
-    assert set(pins) == {"frpc", "websocat", "goetia", "goetia-shim"}
+    suffix = ".exe" if platform.startswith("windows") else ""
+    assert set(pins) == {f"{name}{suffix}" for name in ("frpc", "websocat", "goetia", "goetia-shim")}
 
     fake = FakeGoetia(tmp_path / "fake")
     monkeypatch.setattr(goetia, "command", lambda _root: fake.command)
     monkeypatch.setattr(goetia, "available", lambda root: (root / "bin" / "goetia").exists())
     services = Services(
         lock_path=lock_path,
-        platform=PLATFORM,
+        platform=platform,
         fetcher=lambda: Fetcher(transport=upstream.transport, attest=lambda artifact, bundle, policy: None),
     )
-    return HostTree(root, services, fake, upstream, pins, len(upstream.requests))
+    return HostTree(root, services, fake, upstream, pins, len(upstream.requests), platform)

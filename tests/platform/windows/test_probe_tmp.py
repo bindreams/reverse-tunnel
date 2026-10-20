@@ -3,6 +3,7 @@
 import ctypes
 import os
 import subprocess
+import sys
 from ctypes import wintypes
 from pathlib import Path
 
@@ -12,17 +13,67 @@ def run(*args):
     return f"$ {' '.join(args)}\nrc={done.returncode}\n{done.stdout}{done.stderr}"
 
 
+CHILD = r"""
+import ctypes, sys, traceback
+from ctypes import wintypes
+out = open(sys.argv[1], "w")
+try:
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = ctypes.c_void_p
+    adv.OpenProcessToken.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    adv.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    token = ctypes.c_void_p()
+    assert adv.OpenProcessToken(k32.GetCurrentProcess(), 8, ctypes.byref(token)), ctypes.WinError()
+    def info(cls):
+        size = wintypes.DWORD()
+        adv.GetTokenInformation(token, cls, None, 0, ctypes.byref(size))
+        buf = ctypes.create_string_buffer(size.value)
+        assert adv.GetTokenInformation(token, cls, buf, size, ctypes.byref(size)), ctypes.WinError()
+        return buf
+    def sidstr(address):
+        text = ctypes.c_wchar_p()
+        assert adv.ConvertSidToStringSidW(address, ctypes.byref(text))
+        return text.value
+    ptr = ctypes.sizeof(ctypes.c_void_p)
+    user = info(1)
+    out.write("user " + sidstr(ctypes.c_void_p.from_buffer(user).value) + 
+")
+    groups = info(2)
+    count = ctypes.c_uint32.from_buffer(groups).value
+    for i in range(count):
+        base = ctypes.addressof(groups) + ptr + i * 2 * ptr
+        address = ctypes.c_void_p.from_address(base).value
+        attributes = ctypes.c_uint32.from_address(base + ptr).value
+        out.write(f"group {sidstr(address)} attributes={attributes:#x}
+")
+    for label, cls in (("restricted", 11),):
+        buf = info(cls)
+        n = ctypes.c_uint32.from_buffer(buf).value
+        out.write(f"{label} count {n}
+")
+    out.write("integrity " + sidstr(ctypes.c_void_p.from_buffer(info(25)).value) + 
+")
+except BaseException:
+    out.write(traceback.format_exc())
+out.close()
+"""
+
+
 def service_groups(directory: Path, name: str, sidtype: str | None) -> str:
     log = [run("sc", "delete", name)]
     out = directory / f"{name}.txt"
-    command = f"cmd.exe /c (whoami /groups /fo csv & whoami /user /fo csv & whoami /priv /fo csv & echo done) > {out} 2>&1"
+    script = directory / "child.py"
+    script.write_text(CHILD)
+    command = f"{sys._base_executable} {script} {out}"
     log.append(run("sc", "create", name, "binPath=", command, "obj=", r"NT AUTHORITY\LocalService"))
     if sidtype:
         log.append(run("sc", "sidtype", name, sidtype))
     log.append(run("sc", "start", name))
-    log.append(f"--- {out}\n" + (out.read_text(errors="replace") if out.exists() else "<missing>"))
+    log.append(f"--- {out}" + chr(10) + (out.read_text(errors="replace") if out.exists() else "<missing>"))
     log.append(run("sc", "delete", name))
-    return "\n".join(log)
+    return chr(10).join(log)
 
 
 def authz_groups() -> str:
