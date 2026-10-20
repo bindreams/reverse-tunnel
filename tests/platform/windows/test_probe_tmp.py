@@ -15,8 +15,8 @@ def run(*args):
 def service_groups(directory: Path, name: str, sidtype: str | None) -> str:
     log = [run("sc", "delete", name)]
     out = directory / f"{name}.txt"
-    command = f"cmd.exe /c whoami /groups /fo csv > {out} & whoami /user /fo csv >> {out} & whoami /priv /fo csv >> {out}"
-    log.append(run("sc", "create", name, "binPath=", command, "obj=", "NT AUTHORITY\LocalService"))
+    command = f"cmd.exe /c (whoami /groups /fo csv & whoami /user /fo csv & whoami /priv /fo csv & echo done) > {out} 2>&1"
+    log.append(run("sc", "create", name, "binPath=", command, "obj=", r"NT AUTHORITY\LocalService"))
     if sidtype:
         log.append(run("sc", "sidtype", name, sidtype))
     log.append(run("sc", "start", name))

@@ -26,7 +26,6 @@ from ctl.perms import (
     converge_tree,
     describe,
     grant_service_read,
-    grant_service_read_file,
     harden_file,
     principals,
     write_secret,
@@ -628,13 +627,13 @@ def test_rerunning_replaces_the_non_inheritable_host_aces_an_earlier_install_wro
             ] == [(winacl.READ_EXECUTE, INHERITED_ACE)]
 
 
-def test_a_file_replaced_in_bin_loses_the_service_read_until_it_is_given_again(tmp_path):
+def test_a_file_replaced_in_bin_has_no_service_read_unless_it_is_replaced_with_the_service(tmp_path):
     repo = repo_with(tmp_path)
     grant_service_read(repo, LOCAL_SERVICE)
     binary = repo / "bin" / "frpc.exe"
     replace_file(repo / "bin", "frpc.exe", io.BytesIO(b"new"), 0o755)
     assert SID_LOCAL_SERVICE not in principals(binary)
-    grant_service_read_file(binary, LOCAL_SERVICE)
+    replace_file(repo / "bin", "frpc.exe", io.BytesIO(b"newer"), 0o755, service=LOCAL_SERVICE)
     assert [(e.mask, e.flags) for e in service_entries(binary, directory=False)] == [(winacl.READ_EXECUTE, 0)]
 
 
@@ -647,31 +646,6 @@ def test_the_record_of_digests_is_written_with_the_service_read_already_on_it(tm
     record_digests(repo / "bin", [], {"token": "b" * 64}, service=LOCAL_SERVICE)  # replacing it keeps the access
     assert can_open(record)
     assert [(e.mask, e.flags) for e in service_entries(record, directory=False)] == [(winacl.READ_EXECUTE, 0)]
-
-
-def test_grant_service_read_file_keeps_every_other_entry_and_is_idempotent(tmp_path):
-    repo = repo_with(tmp_path)
-    grant_service_read(repo, LOCAL_SERVICE)
-    new = repo / "bin" / "websocat.exe"
-    new.write_bytes(b"")
-    before = entries_of(new, directory=False)
-    grant_service_read_file(new, LOCAL_SERVICE)
-    granted = entries_of(new, directory=False)
-    assert [e for e in granted if e.sid != SID_LOCAL_SERVICE] == before
-    grant_service_read_file(new, LOCAL_SERVICE)
-    assert entries_of(new, directory=False) == granted
-
-
-def test_grant_service_read_file_refuses_a_hard_linked_file_and_leaves_the_foreign_file_alone(tmp_path):
-    repo = repo_with(tmp_path)
-    foreign = tmp_path / "foreign"
-    foreign.write_bytes(b"")
-    os.link(foreign, repo / "bin" / "extra.exe")
-    before = winacl.read_acl(foreign)
-    with pytest.raises(PermsError) as raised:
-        grant_service_read_file(repo / "bin" / "extra.exe", LOCAL_SERVICE)
-    assert "hard link" in str(raised.value)
-    assert winacl.read_acl(foreign) == before
 
 
 def test_grant_service_read_keeps_an_explicit_deny_of_what_the_service_never_needs(tmp_path):

@@ -26,7 +26,6 @@ from ctl.archive import ArchiveFormat, hash_binary, is_safe_member
 from ctl.atomic import replace_file
 from ctl.config import Role
 from ctl.errors import BinariesError, UpstreamUnavailable
-from ctl.perms import Account
 from ctl.github import (
     api_client,
     asset_named,
@@ -36,6 +35,7 @@ from ctl.github import (
     find_release,
     sha256_of,
 )
+from ctl.perms import Account
 
 LOCK_PATH = Path(__file__).resolve().parent.parent / "binaries.lock.toml"
 PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64")

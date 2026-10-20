@@ -741,10 +741,6 @@ def grants(monkeypatch):
     monkeypatch.setattr(host, "replace_file", spy_replace)
     monkeypatch.setattr(binaries, "replace_file", spy_record)
     monkeypatch.setattr(perms, "grant_service_read", lambda root, account: events.append(("grant", root)))
-    monkeypatch.setattr(
-        perms, "grant_service_read_file",
-        lambda path, account: events.append(("file", path, path.read_bytes() if path.is_file() else None))
-    )
     return events
 
 
@@ -765,26 +761,23 @@ def test_bin_is_converged_with_the_service_read_in_the_same_write(host_tree, gra
     assert [event[2] for event in grants if event[:2] == ("converge", bin_dir)] == [service]
 
 
-def test_every_binary_and_the_record_are_written_with_the_service_read_and_none_is_granted_after_the_fact(
-    host_tree, grants
-):
+def test_every_binary_and_the_record_are_written_with_the_service_read(host_tree, grants):
     run_install(host_tree)
     bin_dir = host_tree.root / "bin"
     service = perms.service_account(host_tree.config)
     replaced = {event[1]: (event[2], event[3]) for event in grants if event[0] == "replace"}
     assert replaced == {bin_dir / name: (service, host_tree.pinned_bytes(name)) for name in host_tree.pins}
-    # The record is replaced with the service's read already on it, so there is nothing to grant afterwards.
+    # The record is replaced with the service's read already on it.
     assert [(event[1], event[2]) for event in grants if event[0] == "record"] == [(bin_dir / DIGESTS, service)]
-    assert [event for event in grants if event[0] == "file"] == []
     assert [event[0] for event in grants].index("grant") < [event[0] for event in grants].index("replace")
 
 
-def test_an_install_that_replaces_and_records_nothing_writes_and_grants_no_file(host_tree, grants):
+def test_an_install_that_replaces_and_records_nothing_writes_no_file(host_tree, grants):
     run_install(host_tree)
     settle(host_tree)
     grants.clear()
     run_install(host_tree)
-    assert [event for event in grants if event[0] in ("file", "replace", "record")] == []
+    assert [event for event in grants if event[0] in ("replace", "record")] == []
     assert [event[0] for event in grants if event[0] == "grant"] == ["grant"]
 
 
@@ -796,7 +789,6 @@ def test_only_the_binary_that_was_replaced_is_written_with_the_service_read(host
     grants.clear()
     run_install(host_tree)
     assert [event[1] for event in grants if event[0] == "replace"] == [host_tree.root / "bin" / "frpc"]
-    assert [event for event in grants if event[0] == "file"] == []
 
 
 # bin/ is the installer's ==============================================================================================
