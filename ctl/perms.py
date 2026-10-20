@@ -397,6 +397,8 @@ def converge_dir(
     Leaving an existing directory alone is wrong here: another account that owns, or can write to, `secrets/` can
     replace the token inside it regardless of the token's own mode. A symlink at `path` is refused, never repaired.
     On Windows `isolate` breaks inheritance; only `.env`, `secrets/` and the token do, never the repository root.
+    On Windows every entry of an existing directory is opened and vetted first (a subdirectory, reparse point or
+    hard-linked file is refused), because NTFS rewrites the ACL of each child when a directory gains an inheritable ACE.
     `service_read` makes the one DACL write also hold that account's read-and-execute ACE on the directory itself, not
     inheritable (`bin/`, which the service reads, must not lose it between this and `grant_service_read`); POSIX ignores it.
     """

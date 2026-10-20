@@ -3,8 +3,9 @@
 
 Each path is opened once with `FILE_FLAG_OPEN_REPARSE_POINT`, which refuses a reparse point before anything is
 changed, and its ACL is then set and read back through that handle, so the object that was checked is the object that
-is changed. A directory whose entries are changed too is held open without `FILE_SHARE_DELETE`; its entries are listed
-through that handle and opened relative to it, and every entry is vetted before the first ACL is written.
+is changed. A directory whose entries are changed too, or that gains an inheritable ACE, is held open without
+`FILE_SHARE_DELETE`; its entries are listed through that handle and opened relative to it, and every entry is vetted
+before the first ACL is written.
 
 ACLs are written with `NtSetSecurityObject`, which propagates to no child; the inherited ACEs of each object are
 computed here (`winacl.inherited_for`) and written to that object through its own handle. The Win32 `SetSecurityInfo`
@@ -225,26 +226,64 @@ def converge_dir(
     root: Path,
     service_read: Account | None = None
 ) -> None:
-    """Converge the ACL of `path`. With `service_read`, the DACL written also holds that account's ACE for the directory
-    itself (not inheritable), so a directory the service must read is never without it, not even between two writes."""
+    """Converge the ACL of `path`, having opened and vetted every entry in it first.
+
+    Windows Server 2025 makes NTFS rewrite the ACL of each direct child of a directory that gains an inheritable ACE, so
+    `path` is held without `FILE_SHARE_DELETE`, each entry is opened relative to it (a subdirectory, a reparse point or a
+    hard-linked file is refused before anything is written), and each is then written back through its own handle: an
+    entry that inherits keeps its own ACEs and holds what it inherits from the new ACL, one whose inheritance is broken
+    is left exactly as it was.
+
+    With `service_read`, the DACL written also holds that account's ACE for the directory itself (not inheritable), so a
+    directory the service must read is never without it, not even between two writes.
+    """
     operator = _operator(owner, root)
     service = [] if service_read is None else _service_read([], _sid_of(service_read))
-    with _errors(path):
+    with _errors(path), ExitStack() as stack:
         parent = [] if isolate else _parent_entries(path.parent)
         winacl.refuse_unsupported(parent, str(path.parent))  # before the directory is created
-        with _handle(path, directory=True, create=True) as handle:
-            wanted = winacl.apply(
-                handle,
+        held = stack.enter_context(
+            _handle(
+                path,
                 directory=True,
-                operator=operator,
-                readers=readers,
-                writers=writers,
-                isolate=isolate,
-                parent=parent,
-                parent_label=str(path.parent),
-                extra=service
+                create=True,
+                access=ACL_ACCESS | winfile.FILE_LIST_DIRECTORY,
+                share=winfile.FILE_SHARE_READ_WRITE
             )
-            _verify(handle, path, wanted | {e.sid for e in service}, isolate=isolate)
+        )
+        children = _open_entries(stack, held, path)
+        owner_sid, group_sid = winacl.owner_and_group(held)
+        planned, wanted = winacl.plan(
+            directory=True,
+            operator=operator,
+            readers=readers,
+            writers=writers,
+            isolate=isolate,
+            parent=parent,
+            owner=owner_sid,
+            group=group_sid,
+            parent_label=str(path.parent),
+            extra=service
+        )
+        # Everything that can be refused is computed before the first write.
+        writes = []
+        for handle, label in children:
+            entries, protected = winacl.read_entries(handle)
+            if not protected:
+                child_owner, child_group = winacl.owner_and_group(handle)
+                entries = winacl.canonical(
+                    winacl.explicit(entries) + winacl.inherited_for(
+                        planned, directory=False, owner=child_owner, group=child_group, parent_label=str(path)
+                    )
+                )
+            writes.append((handle, label, entries, protected))
+        winacl.set_dacl(held, planned, protected=isolate)
+        _verify(held, path, wanted | {e.sid for e in service}, isolate=isolate)
+        for handle, label, entries, protected in writes:
+            if winacl.read_entries(handle) != (entries, protected):  # NTFS may already have written it as it should be
+                winacl.set_dacl(handle, entries, protected=protected)
+            if winacl.read_acl_handle(handle).protected != protected:
+                raise PermsError(f"{label}: inheritance is {'enabled' if protected else 'broken'} after the write")
 
 
 def _open_entries(stack: ExitStack, directory: int, where: Path) -> list[tuple[int, Path]]:

@@ -395,7 +395,6 @@ def apply(
     isolate: bool,
     parent: Iterable[Entry] = (),
     parent_label: str = "<parent>",
-    extra: Iterable[Entry] = (),
 ) -> frozenset[str]:
     """`plan` the DACL of the object behind `handle` (WRITE_DAC, READ_CONTROL) and write it. Returns the grants."""
     owner, group = owner_and_group(handle) if not isolate else (None, None)
@@ -408,8 +407,7 @@ def apply(
         parent=parent,
         owner=owner,
         group=group,
-        parent_label=parent_label,
-        extra=extra
+        parent_label=parent_label
     )
     set_dacl(handle, entries, protected=isolate)
     return wanted
