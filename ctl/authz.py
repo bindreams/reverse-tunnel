@@ -18,7 +18,6 @@ OWNER_GROUP_DACL = 0x7  # OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATIO
 AUTHZ_CONTEXT_INFO_GROUPS_SIDS = 2
 ERROR_INSUFFICIENT_BUFFER = 122
 SID_FIXED_BYTES = 8  # revision, sub-authority count and the 6-byte identifier authority
-TOKEN_GROUPS_OFFSET = 8  # of `Groups` in TOKEN_GROUPS: a DWORD count, padded to pointer alignment
 SE_GROUP_ENABLED = 0x7  # SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED
 _POINTER = ctypes.c_void_p
 
@@ -48,6 +47,13 @@ class _Reply(ctypes.Structure):
 
 class _SidAndAttributes(ctypes.Structure):
     _fields_ = [("sid", _POINTER), ("attributes", wintypes.DWORD)]
+
+
+class _TokenGroups(ctypes.Structure):
+    _fields_ = [("count", wintypes.DWORD), ("groups", _SidAndAttributes * 1)]
+
+
+TOKEN_GROUPS_OFFSET = _TokenGroups.groups.offset  # 4 on 32-bit Python, 8 on 64-bit
 
 
 def _library():
