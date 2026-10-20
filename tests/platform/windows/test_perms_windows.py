@@ -675,16 +675,16 @@ def test_grant_service_read_refuses_a_deny_of_what_the_service_reads_naming_the_
 
 # A deny for a group the service is in =================================================================================
 
-# What a LocalService service's token holds (see test_service_token_windows.py), and the service itself. A deny of
-# FILE_EXECUTE alone takes the service's read-and-execute and leaves the test process, which is in most of these groups,
-# able to list and change what it denied.
+# The service and the groups its token holds (`perms_windows.SERVICE_TOKEN_GROUPS`, pinned by
+# test_service_token_windows.py). A deny of FILE_EXECUTE alone takes the service's read-and-execute and leaves the test
+# process, which is in most of these groups, able to list and change what it denied.
 SERVICE_GROUPS = {
     "service": SID_LOCAL_SERVICE,
     "everyone": SID_EVERYONE,
     "users": SID_USERS,
     "authenticated-users": SID_AUTHENTICATED_USERS,
-    "SERVICE": "S-1-5-6",
-    "this-organization": "S-1-5-15",
+    "SERVICE": winacl.SID_SERVICE,
+    "this-organization": winacl.SID_THIS_ORGANIZATION,
     "LOCAL": winacl.SID_LOCAL,
     "console-logon": winacl.SID_CONSOLE_LOGON,
 }

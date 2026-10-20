@@ -18,13 +18,11 @@ from tests.platform.windows.service_access import service_token
 from tests.unit.dry_run_support import goetia_binary
 
 from ctl import authz, goetia, perms_windows, winacl
-from ctl.perms import SID_AUTHENTICATED_USERS, SID_EVERYONE, SID_LOCAL_SERVICE, SID_USERS
+from ctl.perms import SID_LOCAL_SERVICE
 
-SID_SERVICE = "S-1-5-6"
-SID_THIS_ORGANIZATION = "S-1-5-15"
-# Groups of a service token that name no ACE an operator can write: integrity labels, the logon session, the
-# per-service SID (a hash of the service's name) and the per-machine aliases `S-1-5-32-<eight sub-authorities>`.
-UNNAMEABLE_PREFIXES = ("S-1-16-", "S-1-5-5-", "S-1-5-80-", "S-1-5-87-")
+# Groups of a service token that name no ACE an operator can write: the integrity label and the per-machine aliases
+# `S-1-5-32-<eight sub-authorities>`. A logon-session or per-service (`S-1-5-80-`) SID would be nameable, so it counts.
+UNNAMEABLE_PREFIXES = ("S-1-16-", )
 ALL = 0x1F01FF
 DAEMON = "rttoken"
 SERVICE_WAIT_MS = 120_000

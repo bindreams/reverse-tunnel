@@ -43,10 +43,20 @@ from ctl.perms import (
 
 ACL_ACCESS = winfile.READ_CONTROL | winfile.WRITE_DAC
 LOCAL_SERVICE = "localservice"
-# Groups in the token of a process LocalService runs as a service (measured on a Windows Server 2025 runner, with a task
-# that runs as LocalService) that `authz.token` does not derive from the SID: LOCAL and CONSOLE LOGON. goetia gives its
-# services no per-service SID (SERVICE_SID_TYPE_NONE), so there is none to add.
-SERVICE_TOKEN_GROUPS = (winacl.SID_LOCAL, winacl.SID_CONSOLE_LOGON)
+# Every group, besides LocalService itself, in the token of a daemon the service manager starts through goetia-shim as
+# LocalService (measured on a Windows Server 2025 runner by `test_service_token_windows.py`, which compares the two both
+# ways), so the check does not depend on which of them a Windows build derives from the SID. The token holds no
+# per-service `NT SERVICE\<name>` SID (goetia installs with no service SID) and no logon-session SID; its integrity
+# label and per-machine aliases name no ACE an operator can write.
+SERVICE_TOKEN_GROUPS = (
+    winacl.SID_EVERYONE,
+    winacl.SID_USERS,
+    winacl.SID_SERVICE,
+    winacl.SID_CONSOLE_LOGON,
+    winacl.SID_AUTHENTICATED_USERS,
+    winacl.SID_THIS_ORGANIZATION,
+    winacl.SID_LOCAL,
+)
 FLAT = "; remove it, this directory holds regular files only"
 RETRY = "remove it, or close the process holding it, then rerun"
 
