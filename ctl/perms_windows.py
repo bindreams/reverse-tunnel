@@ -416,7 +416,8 @@ def grant_service_read(root: Path, account: Account) -> None:
     The set is known: `root`, `bin` and its direct files, `host` and its direct files. `root` and `bin` and `host` are
     held without `FILE_SHARE_DELETE`; their files are opened relative to them. Everything is vetted (a subdirectory, a
     reparse point, a hard-linked file, or an object whose inheritance is broken is refused) before the first ACL is
-    written.
+    written. The root is written last, after `bin` and `host` and their files: each of those then holds its own access
+    when the root stops granting it, and nothing else is touched by the root losing an inheritable ACE.
 
     `root` and `bin` get an ACE for themselves and each file in `bin` one of its own; nothing is inherited, so a file
     created or replaced in `bin` has no access until `ctl` gives it: `atomic.replace_file(service=)` before the rename,
@@ -461,7 +462,7 @@ def grant_service_read(root: Path, account: Account) -> None:
         # Compute every object's resulting ACL, in the order it will have on disk, before writing any of them: a
         # refusal (an unsupported inheritable ACE anywhere) then leaves nothing changed. Parents come before children.
         top.entries = _service_read(top.entries, sid)
-        writes = [(root_handle, top.entries, root_protected)]
+        writes = []
         for target in targets:
             assert target.parent is not None
             owner_sid, group_sid = winacl.owner_and_group(target.handle)
@@ -475,6 +476,8 @@ def grant_service_read(root: Path, account: Account) -> None:
                 )
             )
             writes.append((target.handle, target.entries, False))
+        # The root is last: by then everything the service reads holds its own access.
+        writes.append((root_handle, top.entries, root_protected))
         for handle, entries, protected in writes:
             winacl.set_dacl(handle, entries, protected=protected)
         for target in [top, *targets]:
