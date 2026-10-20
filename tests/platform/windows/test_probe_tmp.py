@@ -66,12 +66,14 @@ def service_groups(directory: Path, name: str, sidtype: str | None) -> str:
     out = directory / f"{name}.txt"
     script = directory / "child.py"
     script.write_text(CHILD)
-    command = f"{sys._base_executable} {script} {out}"
+    command = f"cmd.exe /c ({sys._base_executable} {script} {out} & echo rc=%errorlevel% & whoami /groups /fo csv & echo rc=%errorlevel%) > {out}.cmd.txt 2>&1"
     log.append(run("sc", "create", name, "binPath=", command, "obj=", r"NT AUTHORITY\LocalService"))
     if sidtype:
         log.append(run("sc", "sidtype", name, sidtype))
     log.append(run("sc", "start", name))
     log.append(f"--- {out}" + chr(10) + (out.read_text(errors="replace") if out.exists() else "<missing>"))
+    cmd = Path(str(out) + ".cmd.txt")
+    log.append(f"--- {cmd}" + chr(10) + (cmd.read_text(errors="replace") if cmd.exists() else "<missing>"))
     log.append(run("sc", "delete", name))
     return chr(10).join(log)
 
@@ -114,6 +116,20 @@ def authz_groups() -> str:
     return "\n".join(lines)
 
 
+def logon_groups() -> str:
+    import win32con
+    import win32security
+
+    try:
+        handle = win32security.LogonUser("LocalService", "NT AUTHORITY", "", win32con.LOGON32_LOGON_SERVICE, win32con.LOGON32_PROVIDER_DEFAULT)
+    except Exception as exc:
+        return f"LogonUser failed: {exc!r}"
+    lines = []
+    for sid, attributes in win32security.GetTokenInformation(handle, win32security.TokenGroups):
+        lines.append(f"group {win32security.ConvertSidToStringSid(sid)} attributes={attributes:#x}")
+    return chr(10).join(lines)
+
+
 def test_probe():
     base = Path(os.environ.get("RUNNER_TEMP", os.environ["TEMP"])) / "rtprobe"
     base.mkdir(exist_ok=True)
@@ -122,5 +138,6 @@ def test_probe():
         "=== service, default sid type ===", service_groups(base, "rtprobe1", None),
         "=== service, unrestricted sid type ===", service_groups(base, "rtprobe2", "unrestricted"),
         "=== authz groups of S-1-5-19 ===", authz_groups(),
+        "=== LogonUser LOGON32_LOGON_SERVICE token groups ===", logon_groups(),
     ]
     assert False, "\n".join(report)
