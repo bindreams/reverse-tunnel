@@ -24,7 +24,8 @@ stands for the repository's owner.
 
 import dataclasses
 import os
-from collections.abc import Generator
+import re
+from collections.abc import Generator, Iterable
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -43,11 +44,13 @@ from ctl.perms import (
 
 ACL_ACCESS = winfile.READ_CONTROL | winfile.WRITE_DAC
 LOCAL_SERVICE = "localservice"
-# Every group, besides LocalService itself, in the token of a daemon the service manager starts through goetia-shim as
-# LocalService (measured on a Windows Server 2025 runner by `test_service_token_windows.py`, which compares the two both
-# ways), so the check does not depend on which of them a Windows build derives from the SID. The token holds no
-# per-service `NT SERVICE\<name>` SID (goetia installs with no service SID) and no logon-session SID; its integrity
-# label and per-machine aliases name no ACE an operator can write.
+# Every well-known group, besides LocalService itself, in the token of a daemon the service manager starts through
+# goetia-shim as LocalService (measured on Windows Server 2022 and 2025 runners by `test_service_token_windows.py`, which
+# compares the two both ways), so the check does not depend on which of them a Windows build derives from the SID. The
+# token holds no per-service `NT SERVICE\<name>` SID (goetia installs with no service SID) and no logon-session SID. Its
+# integrity label is no group: a deny or an allow ACE naming it has no effect on what the service can open (measured).
+# The unnamed `S-1-5-32-<eight sub-authorities>` aliases the token also holds differ between builds (6 on Server 2022,
+# 8 on 2025), so `service_token_groups` reads them from the registry.
 SERVICE_TOKEN_GROUPS = (
     winacl.SID_EVERYONE,
     winacl.SID_USERS,
@@ -57,6 +60,10 @@ SERVICE_TOKEN_GROUPS = (
     winacl.SID_THIS_ORGANIZATION,
     winacl.SID_LOCAL,
 )
+# Where the LSA keeps the groups it adds to every token of an account, one `Group<n>` binary SID value per group, under a
+# key named by the account's SID. The set is the one a service's token holds (measured: equal on Server 2022 and 2025).
+LSA_GROUPS_KEY = r"SYSTEM\CurrentControlSet\Control\Lsa\ComponentUpdates\SecurityInstallationProvider"
+LSA_GROUP_VALUE = re.compile(r"Group\d+", re.IGNORECASE)
 FLAT = "; remove it, this directory holds regular files only"
 RETRY = "remove it, or close the process holding it, then rerun"
 
@@ -435,10 +442,44 @@ def _service_read(entries: list[winacl.Entry], sid: str, *, files: bool = False)
     return winacl.canonical(kept + granted)
 
 
+def lsa_group_sids(values: Iterable[tuple[str, object, int]]) -> list[str]:
+    """The group SIDs among registry `values` (name, data, type) under an account's key in `LSA_GROUPS_KEY`.
+
+    A `Group<n>` value that is not one binary SID is an error: the group it stands for could not be judged.
+    """
+    import winreg
+
+    groups = []
+    for name, data, kind in values:
+        if LSA_GROUP_VALUE.fullmatch(name):
+            if kind != winreg.REG_BINARY or not isinstance(data, bytes):
+                raise OSError(f"{LSA_GROUPS_KEY}: {name} is not a binary SID")
+            groups.append(authz.sid_to_string(data))
+    return groups
+
+
+def _lsa_groups(sid: str) -> list[str]:
+    """The groups the LSA adds to every token of the account `sid`; none when it has no key."""
+    import winreg
+
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f"{LSA_GROUPS_KEY}\\{sid}", 0, winreg.KEY_READ)
+    except FileNotFoundError:
+        return []
+    with key:
+        count = winreg.QueryInfoKey(key)[1]
+        return lsa_group_sids(winreg.EnumValue(key, index) for index in range(count))
+
+
+def service_token_groups(sid: str) -> tuple[str, ...]:
+    """Every group, besides `sid` itself, in the token of a daemon the service manager starts as the account `sid`."""
+    return (*SERVICE_TOKEN_GROUPS, *_lsa_groups(sid))
+
+
 @contextmanager
 def _service_token(sid: str) -> Generator[authz.Token]:
     """The access-check context of the service: its SID with every group a service's token holds."""
-    with authz.token(sid, SERVICE_TOKEN_GROUPS) as token:
+    with authz.token(sid, service_token_groups(sid)) as token:
         yield token
 
 

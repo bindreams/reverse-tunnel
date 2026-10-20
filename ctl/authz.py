@@ -17,6 +17,7 @@ AUTHZ_RM_FLAG_NO_AUDIT = 0x1
 OWNER_GROUP_DACL = 0x7  # OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
 AUTHZ_CONTEXT_INFO_GROUPS_SIDS = 2
 ERROR_INSUFFICIENT_BUFFER = 122
+SID_FIXED_BYTES = 8  # revision, sub-authority count and the 6-byte identifier authority
 TOKEN_GROUPS_OFFSET = 8  # of `Groups` in TOKEN_GROUPS: a DWORD count, padded to pointer alignment
 SE_GROUP_ENABLED = 0x7  # SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED
 _POINTER = ctypes.c_void_p
@@ -105,7 +106,7 @@ class Token:
         return error.value == 0 and granted.value & access == access
 
     def groups(self) -> frozenset[str]:
-        """The SIDs of the groups in the context, as the access check sees them (the account's own SID is not one)."""
+        """The SIDs of the groups in the context, as the access check sees them."""
         needed = wintypes.DWORD()
         if self._authz.AuthzGetInformationFromContext(
             self._context, AUTHZ_CONTEXT_INFO_GROUPS_SIDS, 0, ctypes.byref(needed), None
@@ -121,6 +122,15 @@ class Token:
         count = wintypes.DWORD.from_buffer(buffer).value
         entries = (_SidAndAttributes * count).from_buffer(buffer, TOKEN_GROUPS_OFFSET)
         return frozenset(_sid_string(entry.sid) for entry in entries)
+
+
+def sid_to_string(raw: bytes) -> str:
+    """The `S-1-...` form of the binary SID `raw`, which must be exactly one SID. Failures surface as `OSError`."""
+    revision, sub_authorities = (raw[0], raw[1]) if len(raw) >= 2 else (0, 0)
+    if revision != 1 or len(raw) != SID_FIXED_BYTES + 4 * sub_authorities:
+        raise OSError(f"not a binary SID: {raw.hex()}")
+    buffer = ctypes.create_string_buffer(raw, len(raw))
+    return _sid_string(ctypes.cast(buffer, _POINTER))
 
 
 def _sid_string(sid) -> str:

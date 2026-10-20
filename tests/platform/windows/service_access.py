@@ -14,7 +14,7 @@ from ctl import authz, perms_windows, winacl
 
 @contextmanager
 def service_token() -> Generator[authz.Token]:
-    with authz.token(winacl.SID_LOCAL_SERVICE, perms_windows.SERVICE_TOKEN_GROUPS) as token:
+    with authz.token(winacl.SID_LOCAL_SERVICE, perms_windows.service_token_groups(winacl.SID_LOCAL_SERVICE)) as token:
         yield token
 
 

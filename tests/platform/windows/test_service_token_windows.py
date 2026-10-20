@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import winreg
 from pathlib import Path
 
 import pytest
@@ -164,3 +165,35 @@ def test_an_allow_for_the_service_alone_leaves_it_with_read():
         assert token.grants(
             authz.descriptor_for(allowed, protected=True, owner=owner, group=owner), winacl.READ_EXECUTE
         )
+
+
+BUILTIN_USERS = bytes.fromhex("01020000000000052000000021020000")  # S-1-5-32-545
+
+
+def test_the_groups_among_registry_values_are_the_group_n_binary_sids():
+    values = [
+        ("Group1", BUILTIN_USERS, winreg.REG_BINARY),
+        ("GROUP12", BUILTIN_USERS, winreg.REG_BINARY),
+        ("Other", b"not a sid", winreg.REG_BINARY),
+        ("", "default", winreg.REG_SZ),
+    ]
+    assert perms_windows.lsa_group_sids(values) == ["S-1-5-32-545", "S-1-5-32-545"]
+
+
+@pytest.mark.parametrize(
+    "data,kind", [
+        (BUILTIN_USERS, winreg.REG_SZ),
+        ("S-1-5-32-545", winreg.REG_SZ),
+        (BUILTIN_USERS[:-1], winreg.REG_BINARY),
+        (BUILTIN_USERS + b"\0", winreg.REG_BINARY),
+        (b"", winreg.REG_BINARY),
+        (b"\x02" + BUILTIN_USERS[1:], winreg.REG_BINARY),
+    ]
+)
+def test_a_group_value_that_is_not_one_binary_sid_is_an_error(data, kind):
+    with pytest.raises(OSError):
+        perms_windows.lsa_group_sids([("Group1", data, kind)])
+
+
+def test_an_account_the_lsa_adds_no_groups_to_has_only_the_well_known_ones():
+    assert perms_windows.service_token_groups("S-1-5-20") == perms_windows.SERVICE_TOKEN_GROUPS
