@@ -13,7 +13,9 @@ would instead walk the whole subtree before any of it could be vetted. Windows S
 inheritable ACE on a directory makes NTFS turn the inherited ACEs of its direct children into explicit, protected ones.
 The repository root holds files `ctl` never opens, so the service's ACEs on it and on `bin` are never inheritable. The
 one on `host` is inherited by the files created in it: `ctl` opens and vets every entry of `host`, and git recreates
-`frpc.toml` there.
+`frpc.toml` there. An interruption between that write and `ctl` rewriting the entries leaves them protected. A file
+that is protected is not refused and not unprotected (NTFS's doing cannot be told from the operator's): it stays so and
+gets its own explicit ACE for the service.
 
 The owner field of an object is deliberately left as created (Administrators when the process is elevated). Ownership
 is expressed by the ACL alone, with explicit grants for the principals that matter; `operator_sid` names the one that
@@ -236,7 +238,8 @@ def converge_dir(
 
     With `service_read`, the DACL written to the directory and to each entry that inherits also holds that account's
     ACE for the object itself (not inheritable), so what the service must read is never without it, not even between
-    two writes, and not when it held the access only by inheriting it.
+    two writes, and not when it held the access only by inheriting it. An entry whose inheritance is broken (NTFS does
+    that to the children of a directory that just gained an inheritable ACE) stays so, and has that ACE added.
     """
     operator = _operator(owner, root)
     service_sid = None if service_read is None else _sid_of(service_read)
@@ -271,7 +274,10 @@ def converge_dir(
         writes = []
         for handle, label in children:
             entries, protected = winacl.read_entries(handle)
-            if not protected:
+            if protected:  # left as it is, except that the service's ACE is on it: NTFS may have just protected it
+                if service_sid is not None:
+                    entries = _service_read(entries, service_sid)
+            else:
                 child_owner, child_group = winacl.owner_and_group(handle)
                 own = winacl.explicit(entries)
                 if service_sid is not None:  # a file that held the service's access only by inheriting it keeps it
@@ -372,6 +378,7 @@ class _Target:
     entries: list[winacl.Entry]
     parent: "_Target | None" = None
     inherited_read: bool = False  # for a directory: its files hold the service's read by inheriting it
+    protected: bool = False  # inheritance is broken: NTFS does it to a file whose directory gains an inheritable ACE
 
 
 def _without_service_read(entries: list[winacl.Entry], sid: str) -> list[winacl.Entry]:
@@ -435,6 +442,10 @@ def grant_service_read(root: Path, account: Account) -> None:
     restart. So `host` also gets an ACE that its files inherit, and its files hold the service's access only by
     inheriting it. That is safe where an inheritable ACE on the root is not because every entry of `host` has been
     opened and vetted here, so the rewrite NTFS makes of a directory's children touches nothing else.
+
+    A file in `bin` or `host` whose inheritance is broken (NTFS does that to the children of a directory that just
+    gained an inheritable ACE, and an interruption can leave it so) is kept protected, with its own explicit ACE for the
+    service added to what it holds; it is not refused. A protected directory is refused.
     """
     sid = _sid_of(account)
     listing = ACL_ACCESS | winfile.FILE_LIST_DIRECTORY
@@ -465,8 +476,8 @@ def grant_service_read(root: Path, account: Account) -> None:
             targets += [_Target(h, where, False, [], directory) for h, where in _open_entries(stack, handle, label)]
         top.entries, root_protected = winacl.read_entries(root_handle)
         for target in targets:
-            target.entries, protected = winacl.read_entries(target.handle)
-            if protected:
+            target.entries, target.protected = winacl.read_entries(target.handle)
+            if target.protected and target.directory:
                 raise PermsError(f"{target.label}: inheritance is broken; the service could not read it")
         # Compute every object's resulting ACL, in the order it will have on disk, before writing any of them: a
         # refusal (an unsupported inheritable ACE anywhere, a deny for the service) then leaves nothing changed.
@@ -476,18 +487,21 @@ def grant_service_read(root: Path, account: Account) -> None:
         writes = []
         for target in targets:
             assert target.parent is not None
-            owner_sid, group_sid = winacl.owner_and_group(target.handle)
-            target.entries = winacl.canonical(
-                _explicit_service_read(target, sid) + winacl.inherited_for(
-                    target.parent.entries,
-                    directory=target.directory,
-                    owner=owner_sid,
-                    group=group_sid,
-                    parent_label=str(target.parent.label)
+            if target.protected:  # a file NTFS protected: it keeps the flag and its ACEs, and holds its own ACE
+                target.entries = _service_read(target.entries, sid)
+            else:
+                owner_sid, group_sid = winacl.owner_and_group(target.handle)
+                target.entries = winacl.canonical(
+                    _explicit_service_read(target, sid) + winacl.inherited_for(
+                        target.parent.entries,
+                        directory=target.directory,
+                        owner=owner_sid,
+                        group=group_sid,
+                        parent_label=str(target.parent.label)
+                    )
                 )
-            )
             _require_service_read(target.entries, target.label, sid)
-            writes.append((target.handle, target.entries, False))
+            writes.append((target.handle, target.entries, target.protected))
         # The root is last: by then everything the service reads holds its own access.
         writes.append((root_handle, top.entries, root_protected))
         for handle, entries, protected in writes:
