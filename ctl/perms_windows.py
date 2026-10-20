@@ -228,17 +228,19 @@ def converge_dir(
 ) -> None:
     """Converge the ACL of `path`, having opened and vetted every entry in it first.
 
-    Windows Server 2025 makes NTFS rewrite the ACL of each direct child of a directory that gains an inheritable ACE, so
-    `path` is held without `FILE_SHARE_DELETE`, each entry is opened relative to it (a subdirectory, a reparse point or a
-    hard-linked file is refused before anything is written), and each is then written back through its own handle: an
-    entry that inherits keeps its own ACEs and holds what it inherits from the new ACL, one whose inheritance is broken
-    is left exactly as it was.
+    Windows Server 2025 makes NTFS rewrite the ACL of each direct child of a directory that gains an inheritable ACE,
+    so `path` is held without `FILE_SHARE_DELETE`, each entry is opened relative to it (a subdirectory, a reparse point
+    or a hard-linked file is refused before anything is written), and each is then written back through its own handle:
+    an entry that inherits keeps its own ACEs and holds what it inherits from the new ACL, one whose inheritance is
+    broken is left exactly as it was.
 
-    With `service_read`, the DACL written also holds that account's ACE for the directory itself (not inheritable), so a
-    directory the service must read is never without it, not even between two writes.
+    With `service_read`, the DACL written to the directory and to each entry that inherits also holds that account's
+    ACE for the object itself (not inheritable), so what the service must read is never without it, not even between
+    two writes, and not when it held the access only by inheriting it.
     """
     operator = _operator(owner, root)
-    service = [] if service_read is None else _service_read([], _sid_of(service_read))
+    service_sid = None if service_read is None else _sid_of(service_read)
+    service = [] if service_sid is None else _service_read([], service_sid)
     with _errors(path), ExitStack() as stack:
         parent = [] if isolate else _parent_entries(path.parent)
         winacl.refuse_unsupported(parent, str(path.parent))  # before the directory is created
@@ -271,8 +273,11 @@ def converge_dir(
             entries, protected = winacl.read_entries(handle)
             if not protected:
                 child_owner, child_group = winacl.owner_and_group(handle)
+                own = winacl.explicit(entries)
+                if service_sid is not None:  # a file that held the service's access only by inheriting it keeps it
+                    own = _service_read(own, service_sid)
                 entries = winacl.canonical(
-                    winacl.explicit(entries) + winacl.inherited_for(
+                    own + winacl.inherited_for(
                         planned, directory=False, owner=child_owner, group=child_group, parent_label=str(path)
                     )
                 )
