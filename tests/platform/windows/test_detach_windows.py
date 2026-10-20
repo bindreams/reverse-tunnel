@@ -104,8 +104,8 @@ handshake.signal(int(sys.argv[3]), refusal=problem)
 
 
 def test_a_child_started_from_the_venv_starts_in_no_job_or_says_exactly_why_not(tmp_path):
-    """On a console the child is in no job and starts. Under a CI runner or an ssh session it can be in an outer job that
-    breakaway from the venv launcher's own job does not leave, and then it must decline, saying so."""
+    """On a console the child is in no job and starts. Under a CI runner or an ssh session it can be in an outer job
+    that breakaway from the venv launcher's own job does not leave, and then it must decline, saying so."""
     from ctl import handshake
 
     pipe = handshake.Pipe()

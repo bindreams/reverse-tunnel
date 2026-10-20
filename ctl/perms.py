@@ -456,7 +456,7 @@ def grant_service_read(root: Path, account: Account) -> None:
 
 
 def grant_service_read_file(path: Path, account: Account) -> None:
-    """Give `account` read-and-execute on the one file `path` in `bin`, which was just created or replaced; POSIX: nothing.
+    """Give `account` read-and-execute on the one file `path` in `bin`, just created or replaced; POSIX: nothing.
 
     The file keeps its other ACEs. A reparse point or a hard-linked file is refused. A file `ctl` writes with
     `atomic.replace_file` gets the grant before it is renamed into place, not through this.

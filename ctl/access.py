@@ -21,9 +21,9 @@ def verify_traversable(root: Path, service: Account) -> None:
     """Raise unless `service` can reach the binary and config under `root` at exec time.
 
     Windows always passes: traversal is guaranteed by construction. `perms.grant_service_read` gives LocalService a
-    read-and-execute ACE on the repository root, `bin`, `host` and their files (the files in `host` inherit it, since git
-    recreates them), and LocalService holds SeChangeNotifyPrivilege, which bypasses traverse checking, so the ancestors
-    of the root need no ACE.
+    read-and-execute ACE on the repository root, `bin`, `host` and their files (the files in `host` inherit it, since
+    git recreates them), and LocalService holds SeChangeNotifyPrivilege, which bypasses traverse checking, so the
+    ancestors of the root need no ACE.
 
     On POSIX the kernel checks execute permission, as the service account, on every component of the path, so a checkout under
     a `0700` home is unreachable to any account but its owner. Whether to document that as a requirement, to relocate the

@@ -250,7 +250,7 @@ def test_a_secret_is_never_written_under_the_permissive_inherited_acl(tmp_path):
     path = folder / "token"
     write_secret(path, b"secret", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}), root=tmp_path)
     assert winacl.read_acl(path).protected
-    # Administrators are always granted, and are the operator on an elevated run; nothing else is, the operator included.
+    # Administrators are always granted, and are the operator on an elevated run; nothing else is, not the operator.
     assert principals(path) == {SID_LOCAL_SERVICE, SID_ADMINISTRATORS}
 
 
@@ -798,7 +798,7 @@ def converged_directory(request, tmp_path):
 
 
 def test_converging_a_directory_again_changes_neither_it_nor_a_file_in_it(converged_directory):
-    """The first converge writes the file (it was opened and vetted); one where the ACEs are present rewrites nothing."""
+    """The first converge writes the file (it was opened and vetted); one where the ACEs exist rewrites nothing."""
     repo, directory, extra = converged_directory
     converge_for(repo, directory)
     first = (whole_acl(extra), entries_of(repo / directory))

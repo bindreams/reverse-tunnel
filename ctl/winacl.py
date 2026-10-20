@@ -372,10 +372,10 @@ def plan(
 ) -> tuple[list[Entry], frozenset[str]]:
     """The DACL an object should end up with, and the SIDs it grants explicitly. Nothing is written.
 
-    The explicit ACEs are the `grants`, inheritable by children if it is a directory, and `extra`, which are written
-    as given. With `isolate`, inheritance
-    from the parent is broken, so they are the whole ACL. Without it, the ACEs `parent` (all of the parent's ACEs, as
-    on disk) passes down to an object owned by `owner` with primary group `group` follow them, inherited.
+    The explicit ACEs are the `grants`, inheritable by children if it is a directory, and `extra`, which are written as
+    given. With `isolate`, inheritance from the parent is broken, so they are the whole ACL. Without it, the ACEs
+    `parent` (all of the parent's ACEs, as on disk) passes down to an object owned by `owner` with primary group
+    `group` follow them, inherited.
     """
     wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers)
     inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
