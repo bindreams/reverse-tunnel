@@ -217,9 +217,18 @@ def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozen
 
 
 def converge_dir(
-    path: Path, owner: Account | None, readers: frozenset[str], writers: frozenset[str], isolate: bool, root: Path
+    path: Path,
+    owner: Account | None,
+    readers: frozenset[str],
+    writers: frozenset[str],
+    isolate: bool,
+    root: Path,
+    service_read: Account | None = None
 ) -> None:
+    """Converge the ACL of `path`. With `service_read`, the DACL written also holds that account's ACE for the directory
+    itself (not inheritable), so a directory the service must read is never without it, not even between two writes."""
     operator = _operator(owner, root)
+    service = [] if service_read is None else _service_read([], _sid_of(service_read))
     with _errors(path):
         parent = [] if isolate else _parent_entries(path.parent)
         winacl.refuse_unsupported(parent, str(path.parent))  # before the directory is created
@@ -232,9 +241,10 @@ def converge_dir(
                 writers=writers,
                 isolate=isolate,
                 parent=parent,
-                parent_label=str(path.parent)
+                parent_label=str(path.parent),
+                extra=service
             )
-            _verify(handle, path, wanted, isolate=isolate)
+            _verify(handle, path, wanted | {e.sid for e in service}, isolate=isolate)
 
 
 def _open_entries(stack: ExitStack, directory: int, where: Path) -> list[tuple[int, Path]]:

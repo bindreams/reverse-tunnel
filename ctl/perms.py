@@ -397,11 +397,13 @@ def converge_dir(
     Leaving an existing directory alone is wrong here: another account that owns, or can write to, `secrets/` can
     replace the token inside it regardless of the token's own mode. A symlink at `path` is refused, never repaired.
     On Windows `isolate` breaks inheritance; only `.env`, `secrets/` and the token do, never the repository root.
+    `service_read` makes the one DACL write also hold that account's read-and-execute ACE on the directory itself, not
+    inheritable (`bin/`, which the service reads, must not lose it between this and `grant_service_read`); POSIX ignores it.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_dir(path, owner, readers, writers, isolate, root)
+        perms_windows.converge_dir(path, owner, readers, writers, isolate, root, service_read)
         return
     with _converged(path, owner, mode):
         pass

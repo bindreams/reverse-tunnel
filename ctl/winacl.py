@@ -368,16 +368,18 @@ def plan(
     owner: str | None = None,
     group: str | None = None,
     parent_label: str = "<parent>",
+    extra: Iterable[Entry] = (),
 ) -> tuple[list[Entry], frozenset[str]]:
     """The DACL an object should end up with, and the SIDs it grants explicitly. Nothing is written.
 
-    The explicit ACEs are the `grants`, inheritable by children if it is a directory. With `isolate`, inheritance
+    The explicit ACEs are the `grants`, inheritable by children if it is a directory, and `extra`, which are written
+    as given. With `isolate`, inheritance
     from the parent is broken, so they are the whole ACL. Without it, the ACEs `parent` (all of the parent's ACEs, as
     on disk) passes down to an object owned by `owner` with primary group `group` follow them, inherited.
     """
     wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers)
     inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
-    entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()]
+    entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()] + list(extra)
     if not isolate:
         entries += inherited_for(parent, directory=directory, owner=owner, group=group, parent_label=parent_label)
     return canonical(entries), frozenset(wanted)
@@ -393,6 +395,7 @@ def apply(
     isolate: bool,
     parent: Iterable[Entry] = (),
     parent_label: str = "<parent>",
+    extra: Iterable[Entry] = (),
 ) -> frozenset[str]:
     """`plan` the DACL of the object behind `handle` (WRITE_DAC, READ_CONTROL) and write it. Returns the grants."""
     owner, group = owner_and_group(handle) if not isolate else (None, None)
@@ -405,7 +408,8 @@ def apply(
         parent=parent,
         owner=owner,
         group=group,
-        parent_label=parent_label
+        parent_label=parent_label,
+        extra=extra
     )
     set_dacl(handle, entries, protected=isolate)
     return wanted
