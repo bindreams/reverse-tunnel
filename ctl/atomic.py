@@ -257,9 +257,9 @@ def _replace_windows(directory: Path, name: str, source: IO[bytes], service: Acc
         created.value = None
         _write(fd, source)
         os.fsync(fd)
+        winfile.rename_over(msvcrt.get_osfhandle(fd), handle, name, label=directory / name, error=BinariesError)
         if service is not None:
             perms_windows.grant_service_read_handle(msvcrt.get_osfhandle(fd), directory / name, service)
-        winfile.rename_over(msvcrt.get_osfhandle(fd), handle, name, label=directory / name, error=BinariesError)
         os.close(fd)
         fd = -1
     except BaseException:
