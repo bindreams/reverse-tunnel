@@ -178,23 +178,6 @@ def inherited_for(
     return result
 
 
-def effective_access(entries: Iterable[Entry], sid: str) -> int:
-    """The rights the ACEs in `entries`, taken in the order given, leave to `sid` itself (its groups are not asked).
-
-    An ACE applies in order: an allow grants the bits no earlier deny took, a deny takes the bits no earlier allow
-    granted. An inherit-only ACE does not apply to the object it is on.
-    """
-    granted = denied = 0
-    for ace in entries:
-        if ace.sid != sid or ace.flags & INHERIT_ONLY_ACE:
-            continue
-        if ace.ace_type == ACCESS_ALLOWED_ACE_TYPE:
-            granted |= ace.mask & ~denied
-        else:
-            denied |= ace.mask & ~granted
-    return granted
-
-
 def explicit(entries: Iterable[Entry]) -> list[Entry]:
     return [ace for ace in entries if not ace.flags & INHERITED_ACE]
 

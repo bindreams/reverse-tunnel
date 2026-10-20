@@ -29,7 +29,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from ctl import _winfile as winfile
-from ctl import winacl
+from ctl import authz, winacl
 from ctl.atomic import deferred_interrupts
 from ctl.perms import (
     SID_LOCAL_SERVICE,
@@ -245,11 +245,15 @@ def converge_dir(
     ACE for the object itself (not inheritable), so what the service must read is never without it, not even between
     two writes, and not when it held the access only by inheriting it. An entry whose inheritance is broken (NTFS does
     that to the children of a directory that just gained an inheritable ACE) stays so, and has that ACE added.
+    Windows' own access check then judges, before the first write and after the last, that the service is granted
+    read-and-execute under every DACL written: the sort of explicit denies before allows can turn an order that
+    granted it into one that does not.
     """
     operator = _operator(owner, root)
     service_sid = None if service_read is None else _sid_of(service_read)
     service = [] if service_sid is None else _service_read([], service_sid)
     with _errors(path), ExitStack() as stack:
+        token = None if service_sid is None else stack.enter_context(_service_token(service_sid))
         parent = [] if isolate else _parent_entries(path.parent)
         winacl.refuse_unsupported(parent, str(path.parent))  # before the directory is created
         held = stack.enter_context(
@@ -276,14 +280,16 @@ def converge_dir(
             extra=service
         )
         # Everything that can be refused is computed before the first write.
+        if token is not None:
+            _require_planned(token, path, planned, isolate, owner_sid, group_sid)
         writes = []
         for handle, label in children:
             entries, protected = winacl.read_entries(handle)
+            child_owner, child_group = winacl.owner_and_group(handle)
             if protected:  # left as it is, except that the service's ACE is on it: NTFS may have just protected it
                 if service_sid is not None:
                     entries = _service_read(entries, service_sid)
             else:
-                child_owner, child_group = winacl.owner_and_group(handle)
                 own = winacl.explicit(entries)
                 if service_sid is not None:  # a file that held the service's access only by inheriting it keeps it
                     own = _service_read(own, service_sid)
@@ -292,6 +298,8 @@ def converge_dir(
                         planned, directory=False, owner=child_owner, group=child_group, parent_label=str(path)
                     )
                 )
+            if token is not None:
+                _require_planned(token, label, entries, protected, child_owner, child_group)
             writes.append((handle, label, entries, protected))
         with deferred_interrupts():  # Ctrl-C waits for the last write
             winacl.set_dacl(held, planned, protected=isolate)
@@ -301,6 +309,9 @@ def converge_dir(
                     winacl.set_dacl(handle, entries, protected=protected)
                 if winacl.read_acl_handle(handle).protected != protected:
                     raise PermsError(f"{label}: inheritance is {'enabled' if protected else 'broken'} after the write")
+            if token is not None:
+                for handle, label in [(held, path), *children]:
+                    _require_on_disk(token, handle, label)
 
 
 def _open_entries(stack: ExitStack, directory: int, where: Path) -> list[tuple[int, Path]]:
@@ -414,13 +425,36 @@ def _service_read(entries: list[winacl.Entry], sid: str, *, files: bool = False)
     return winacl.canonical(kept + granted)
 
 
-def _require_service_read(entries: list[winacl.Entry], label: Path, sid: str) -> None:
-    """Fail unless `entries`, taken in order, grant the service read-and-execute; a deny for it is the usual cause."""
-    if winacl.effective_access(entries, sid) & winacl.READ_EXECUTE != winacl.READ_EXECUTE:
+@contextmanager
+def _service_token(sid: str) -> Generator[authz.Token]:
+    """The access-check context of the service: its SID with every group a service's token holds."""
+    with authz.token(sid, SERVICE_TOKEN_GROUPS) as token:
+        yield token
+
+
+def _require_service_read(token: authz.Token, label: Path, descriptor: bytes) -> None:
+    """Fail unless Windows' own access check grants the service read-and-execute under `descriptor`.
+
+    A deny for the service or for any group its token holds is the usual cause, whichever ACE order the DACL has.
+    """
+    if not token.grants(descriptor, winacl.READ_EXECUTE):
         raise PermsError(
-            f"{label}: the service is denied read-and-execute (an ACE denying it, explicit or inherited); "
-            "remove that ACE, then rerun"
+            f"{label}: the service is denied read-and-execute (an ACE denying it or a group it is in, explicit or "
+            "inherited, or a DACL that does not grant it); remove that ACE, then rerun"
         )
+
+
+def _require_planned(
+    token: authz.Token, label: Path, entries: list[winacl.Entry], protected: bool, owner: str, group: str
+) -> None:
+    """`_require_service_read` for the DACL `entries` that is about to be written to an object of this owner and group,
+    in the order that `winacl.set_dacl` writes them."""
+    _require_service_read(token, label, authz.descriptor_for(entries, protected=protected, owner=owner, group=group))
+
+
+def _require_on_disk(token: authz.Token, handle: int, label: Path) -> None:
+    """`_require_service_read` for the DACL the object behind `handle` holds now."""
+    _require_service_read(token, label, authz.descriptor_of(handle))
 
 
 def _explicit_service_read(target: _Target, sid: str) -> list[winacl.Entry]:
@@ -450,13 +484,18 @@ def grant_service_read(root: Path, account: Account) -> None:
     inheriting it. That is safe where an inheritable ACE on the root is not because every entry of `host` has been
     opened and vetted here, so the rewrite NTFS makes of a directory's children touches nothing else.
 
-    A file in `bin` or `host` whose inheritance is broken (NTFS does that to the children of a directory that just
-    gained an inheritable ACE, and an interruption can leave it so) is kept protected, with its own explicit ACE for the
-    service added to what it holds; it is not refused. A protected directory is refused.
+    A file or directory in `root` that is `bin` or `host`, or a file in them, whose inheritance is broken (NTFS does
+    that to the children of a directory that just gained an inheritable ACE, and an interruption can leave it so) is kept
+    protected, with its own explicit ACE for the service added to what it holds (for `host`, both); it is not refused.
+
+    Windows' own access check, for the service's token with its groups, judges every DACL before it is written and
+    after: on the root, `bin` and `host` and their files, and on the DACL a file created in `host` would inherit. A
+    deny for the service or a group it is in, wherever the ACE stands, fails the call with the path, nothing written.
     """
     sid = _sid_of(account)
     listing = ACL_ACCESS | winfile.FILE_LIST_DIRECTORY
     with _errors(root), ExitStack() as stack:
+        token = stack.enter_context(_service_token(sid))
         root_handle = stack.enter_context(
             _handle(root, directory=True, access=listing, share=winfile.FILE_SHARE_READ_WRITE)
         )
@@ -484,20 +523,18 @@ def grant_service_read(root: Path, account: Account) -> None:
         top.entries, root_protected = winacl.read_entries(root_handle)
         for target in targets:
             target.entries, target.protected = winacl.read_entries(target.handle)
-            if target.protected and target.directory:
-                raise PermsError(f"{target.label}: inheritance is broken; the service could not read it")
         # Compute every object's resulting ACL, in the order it will have on disk, before writing any of them: a
         # refusal (an unsupported inheritable ACE anywhere, a deny for the service) then leaves nothing changed.
         # Parents come before children.
         top.entries = _service_read(top.entries, sid)
-        _require_service_read(top.entries, top.label, sid)
+        _require_planned(token, top.label, top.entries, root_protected, *winacl.owner_and_group(root_handle))
         writes = []
         for target in targets:
             assert target.parent is not None
-            if target.protected:  # a file NTFS protected: it keeps the flag and its ACEs, and holds its own ACE
-                target.entries = _service_read(target.entries, sid)
+            owner_sid, group_sid = winacl.owner_and_group(target.handle)
+            if target.protected:  # NTFS protected it: it keeps the flag and its ACEs, and holds its own ACE
+                target.entries = _service_read(target.entries, sid, files=target.directory and target.inherited_read)
             else:
-                owner_sid, group_sid = winacl.owner_and_group(target.handle)
                 target.entries = winacl.canonical(
                     _explicit_service_read(target, sid) + winacl.inherited_for(
                         target.parent.entries,
@@ -507,7 +544,12 @@ def grant_service_read(root: Path, account: Account) -> None:
                         parent_label=str(target.parent.label)
                     )
                 )
-            _require_service_read(target.entries, target.label, sid)
+            _require_planned(token, target.label, target.entries, target.protected, owner_sid, group_sid)
+            if target.directory and target.inherited_read:  # a file created there inherits this
+                created = winacl.inherited_for(
+                    target.entries, directory=False, owner=owner_sid, group=group_sid, parent_label=str(target.label)
+                )
+                _require_planned(token, target.label / "<a new file>", created, False, owner_sid, group_sid)
             writes.append((target.handle, target.entries, target.protected))
         # The root is last: by then everything the service reads holds its own access.
         writes.append((root_handle, top.entries, root_protected))
@@ -515,7 +557,7 @@ def grant_service_read(root: Path, account: Account) -> None:
             for handle, entries, protected in writes:
                 winacl.set_dacl(handle, entries, protected=protected)
             for target in [top, *targets]:
-                _require_service_read(winacl.read_entries(target.handle)[0], target.label, sid)
+                _require_on_disk(token, target.handle, target.label)
 
 
 def grant_service_read_handle(handle: int, label: Path, account: Account) -> None:
@@ -525,9 +567,9 @@ def grant_service_read_handle(handle: int, label: Path, account: Account) -> Non
     in place yet: `atomic.replace_file` calls it on its temporary file, so the final name never exists without the grant.
     """
     sid = _sid_of(account)
-    with _errors(label):
+    with _errors(label), _service_token(sid) as token:
         entries, protected = winacl.read_entries(handle)
         granted = _service_read(entries, sid)
-        _require_service_read(granted, label, sid)
+        _require_planned(token, label, granted, protected, *winacl.owner_and_group(handle))
         winacl.set_dacl(handle, granted, protected=protected)
-        _require_service_read(winacl.read_entries(handle)[0], label, sid)
+        _require_on_disk(token, handle, label)
