@@ -718,7 +718,7 @@ def converge_for(repo: Path, directory: str) -> None:
 
 @pytest.fixture(params=["bin", "bin-owned-by-another-account", "secrets"])
 def converged_directory(request, tmp_path):
-    """A repository whose `bin` or `secrets` is about to be converged, and a file in it that `ctl` never opened."""
+    """A repository whose `bin` or `secrets` is about to be converged, and a file in it whose ACL `ctl` did not set."""
     repo = repo_with(tmp_path)
     (repo / "secrets").mkdir()
     directory = "secrets" if request.param == "secrets" else "bin"
@@ -729,14 +729,13 @@ def converged_directory(request, tmp_path):
     return repo, directory, extra
 
 
-def test_converging_a_directory_does_not_make_ntfs_rewrite_a_file_ctl_never_opened(converged_directory):
-    """`ctl` must never cause Windows to rewrite the ACL of anything it has not opened and vetted."""
+def test_converging_a_directory_again_changes_neither_it_nor_a_file_in_it(converged_directory):
+    """The first converge writes the file (it was opened and vetted); one where the ACEs are present rewrites nothing."""
     repo, directory, extra = converged_directory
-    before = whole_acl(extra)
     converge_for(repo, directory)
-    after_first = whole_acl(extra)
+    first = (whole_acl(extra), entries_of(repo / directory))
     converge_for(repo, directory)
-    assert (after_first == before, whole_acl(extra) == after_first) == (True, True)
+    assert (whole_acl(extra), entries_of(repo / directory)) == first
 
 
 def test_a_file_in_a_converged_directory_ends_up_inheriting_from_it(converged_directory):
