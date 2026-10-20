@@ -709,25 +709,66 @@ def whole_acl(path: Path) -> tuple[list[winacl.Entry], bool]:
         return winacl.read_entries(handle)
 
 
-@pytest.mark.parametrize("directory", ["bin", "secrets"])
-def test_converging_a_directory_does_not_make_ntfs_rewrite_a_file_ctl_never_opened(tmp_path, directory):
-    """`ctl` must never cause Windows to rewrite the ACL of anything it has not opened and vetted."""
+def converge_for(repo: Path, directory: str) -> None:
+    if directory == "secrets":
+        converge_dir(repo / "secrets", LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE}), root=repo)
+    else:
+        converge_bin(repo)
+
+
+@pytest.fixture(params=["bin", "bin-owned-by-another-account", "secrets"])
+def converged_directory(request, tmp_path):
+    """A repository whose `bin` or `secrets` is about to be converged, and a file in it that `ctl` never opened."""
     repo = repo_with(tmp_path)
     (repo / "secrets").mkdir()
+    directory = "secrets" if request.param == "secrets" else "bin"
+    if request.param == "bin-owned-by-another-account":
+        make_owner(repo, request.getfixturevalue("standard_user"))  # so bin gains an inheritable ACE of a new SID
     extra = repo / directory / "extra.txt"
     extra.write_bytes(b"")
+    return repo, directory, extra
+
+
+def test_converging_a_directory_does_not_make_ntfs_rewrite_a_file_ctl_never_opened(converged_directory):
+    """`ctl` must never cause Windows to rewrite the ACL of anything it has not opened and vetted."""
+    repo, directory, extra = converged_directory
     before = whole_acl(extra)
-
-    def converge() -> None:
-        if directory == "bin":
-            converge_bin(repo)
-        else:
-            converge_dir(repo / "secrets", LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE}), root=repo)
-
-    converge()
+    converge_for(repo, directory)
     after_first = whole_acl(extra)
-    converge()
+    converge_for(repo, directory)
     assert (after_first == before, whole_acl(extra) == after_first) == (True, True)
+
+
+def test_a_file_in_a_converged_directory_ends_up_inheriting_from_it(converged_directory):
+    """Vetted and written through its own handle, the file holds what NTFS inheritance from the new ACL gives it."""
+    repo, directory, extra = converged_directory
+    converge_for(repo, directory)
+    with perms_windows._handle(extra, directory=False, access=perms_windows.winfile.READ_CONTROL) as handle:
+        owner, group = winacl.owner_and_group(handle)
+    expected = winacl.inherited_for(entries_of(repo / directory), directory=False, owner=owner, group=group)
+    assert whole_acl(extra) == (expected, False)
+
+
+@pytest.mark.parametrize("directory", ["bin", "secrets"])
+def test_converging_a_directory_refuses_a_subdirectory_and_changes_nothing(tmp_path, directory):
+    repo = repo_with(tmp_path)
+    (repo / "secrets").mkdir()
+    (repo / directory / "old").mkdir()
+    before = acls_under(repo)
+    with pytest.raises(PermsError) as raised:
+        converge_for(repo, directory)
+    assert str(repo / directory / "old") in str(raised.value)
+    assert acls_under(repo) == before
+
+
+def test_converging_secrets_leaves_a_file_with_broken_inheritance_as_it_was(tmp_path):
+    repo = repo_with(tmp_path)
+    token = repo / "secrets" / "token"
+    converge_for(repo, "secrets")
+    write_secret(token, b"secret", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}), root=repo)
+    before = whole_acl(token)
+    converge_for(repo, "secrets")
+    assert whole_acl(token) == before and before[1]
 
 
 # Names outside the BMP ================================================================================================
