@@ -734,9 +734,7 @@ def grants(monkeypatch):
 
     monkeypatch.setattr(perms, "converge_dir", spy_converge)
     monkeypatch.setattr(host, "replace_file", spy_replace)
-    monkeypatch.setattr(
-        perms, "grant_service_read", lambda root, account: events.append(("grant", root, (root / "bin").is_dir()))
-    )
+    monkeypatch.setattr(perms, "grant_service_read", lambda root, account: events.append(("grant", root)))
     monkeypatch.setattr(
         perms, "grant_service_read_file",
         lambda path, account: events.append(("file", path, path.read_bytes() if path.is_file() else None))
@@ -744,18 +742,17 @@ def grants(monkeypatch):
     return events
 
 
-def test_bin_exists_and_is_converged_before_the_service_is_granted_read_and_not_converged_again(host_tree, grants):
-    """`converge_dir` rewrites the whole ACL of `bin`, which would drop the service's ACE on it."""
+def test_the_service_is_granted_read_before_bin_is_converged_once(host_tree, grants):
+    """The grant removes what an earlier install wrote on the root before any directory records it as inherited."""
     run_install(host_tree)
     bin_dir = host_tree.root / "bin"
     (granted, ) = [i for i, event in enumerate(grants) if event[0] == "grant"]
-    assert grants[granted][2] is True
     converged = [i for i, event in enumerate(grants) if event[:2] == ("converge", bin_dir)]
-    assert converged != [] and all(i < granted for i in converged)
+    assert len(converged) == 1 and converged[0] > granted
 
 
 def test_bin_is_converged_with_the_service_read_in_the_same_write(host_tree, grants):
-    """Anything between the converge and a later grant that fails would leave `bin` without the service's ACE."""
+    """A converge that rewrites the whole ACL of `bin` must not drop the service's ACE, even for an instant."""
     run_install(host_tree)
     bin_dir = host_tree.root / "bin"
     service = perms.service_account(host_tree.config)

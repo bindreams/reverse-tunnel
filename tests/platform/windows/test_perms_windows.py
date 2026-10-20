@@ -807,12 +807,15 @@ def test_converging_a_directory_again_changes_neither_it_nor_a_file_in_it(conver
 
 
 def test_a_file_in_a_converged_directory_ends_up_inheriting_from_it(converged_directory):
-    """Vetted and written through its own handle, the file holds what NTFS inheritance from the new ACL gives it."""
+    """Vetted and written through its own handle, the file holds what NTFS inheritance from the new ACL gives it, and
+    in `bin` its own ACE for the service besides."""
     repo, directory, extra = converged_directory
     converge_for(repo, directory)
     with perms_windows._handle(extra, directory=False, access=perms_windows.winfile.READ_CONTROL) as handle:
         owner, group = winacl.owner_and_group(handle)
     expected = winacl.inherited_for(entries_of(repo / directory), directory=False, owner=owner, group=group)
+    if directory == "bin":
+        expected = [winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, 0, winacl.READ_EXECUTE, SID_LOCAL_SERVICE)] + expected
     assert whole_acl(extra) == (expected, False)
 
 
