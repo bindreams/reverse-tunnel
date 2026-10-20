@@ -12,8 +12,8 @@ computed here (`winacl.inherited_for`) and written to that object through its ow
 would instead walk the whole subtree before any of it could be vetted. Windows Server 2025 does not stop there: a new
 inheritable ACE on a directory makes NTFS turn the inherited ACEs of its direct children into explicit, protected ones.
 The repository root holds files `ctl` never opens, so the service's ACEs on it and on `bin` are never inheritable. The
-one on `host` is inherited by files only: `ctl` opens and vets every entry of `host`, and git recreates `frpc.toml`
-there.
+one on `host` is inherited by the files created in it: `ctl` opens and vets every entry of `host`, and git recreates
+`frpc.toml` there.
 
 The owner field of an object is deliberately left as created (Administrators when the process is elevated). Ownership
 is expressed by the ACL alone, with explicit grants for the principals that matter; `operator_sid` names the one that
@@ -380,8 +380,9 @@ def _without_service_read(entries: list[winacl.Entry], sid: str) -> list[winacl.
 def _service_read(entries: list[winacl.Entry], sid: str, *, files: bool = False) -> list[winacl.Entry]:
     """`entries` with the service's read-and-execute ACE, which applies to the object alone and is never inherited.
 
-    `files` adds a second ACE that only the files created in the directory inherit (and not the directory itself,
-    subdirectories or the files' own children): `OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE`.
+    `files` adds a second ACE that the files created in the directory inherit and the directory itself does not apply:
+    `OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE`. A subdirectory would get it as an inherit-only copy for its own files;
+    `ctl` refuses subdirectories in `host`, so there is none.
 
     Only an earlier explicit allow for the service is replaced (including the inheritable one an older install wrote on
     the root); a deny for it, or an inherited ACE, stays.
@@ -414,12 +415,11 @@ def grant_service_read(root: Path, account: Account) -> None:
 
     `root` and `bin` get an ACE for themselves and each file in `bin` one of its own; nothing is inherited, so a file
     created or replaced in `bin` has no access until `ctl` gives it: `atomic.replace_file(service=)` before the rename,
-    or `grant_service_read_file`. `bin` is written only by `ctl`. `host` is written by git as well: a `git pull`
-    deletes and recreates `frpc.toml`, and a file with no ACE for the service would leave the tunnel down after the next
-    restart. So `host` also gets an ACE that its files
-    inherit (not its subdirectories, which `ctl` refuses), and its files hold the service's access only by inheriting
-    it. That is safe where an inheritable ACE on the root is not because every entry of `host` has been opened and
-    vetted here, so the rewrite NTFS makes of a directory's children touches nothing else.
+    or `grant_service_read_file`. `bin` is written only by `ctl`. `host` is written by git as well: a `git pull` deletes
+    and recreates `frpc.toml`, and a file with no ACE for the service would leave the tunnel down after the next
+    restart. So `host` also gets an ACE that its files inherit, and its files hold the service's access only by
+    inheriting it. That is safe where an inheritable ACE on the root is not because every entry of `host` has been
+    opened and vetted here, so the rewrite NTFS makes of a directory's children touches nothing else.
     """
     sid = _sid_of(account)
     listing = ACL_ACCESS | winfile.FILE_LIST_DIRECTORY
