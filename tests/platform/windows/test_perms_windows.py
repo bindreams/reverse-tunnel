@@ -717,7 +717,10 @@ def test_grant_service_read_refuses_an_inherit_only_deny_on_host_that_a_new_file
     before = snapshot_of(repo)
     with pytest.raises(PermsError) as raised:
         grant_service_read(repo, LOCAL_SERVICE)
-    assert str(repo / "host") in str(raised.value) and "denied" in str(raised.value)
+    assert str(raised.value) == (
+        f"{repo / 'host'}: a file created here would deny the service read-and-execute (an inheritable ACE on host or "
+        "above); remove that ACE, then rerun"
+    )
     assert snapshot_of(repo) == before
 
 
