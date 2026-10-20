@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ctl import _winfile as winfile
 from ctl import winacl
+from ctl.atomic import deferred_interrupts
 from ctl.perms import (
     SID_LOCAL_SERVICE,
     Account,
@@ -288,13 +289,14 @@ def converge_dir(
                     )
                 )
             writes.append((handle, label, entries, protected))
-        winacl.set_dacl(held, planned, protected=isolate)
-        _verify(held, path, wanted | {e.sid for e in service}, isolate=isolate)
-        for handle, label, entries, protected in writes:
-            if winacl.read_entries(handle) != (entries, protected):  # NTFS may already have written it as it should be
-                winacl.set_dacl(handle, entries, protected=protected)
-            if winacl.read_acl_handle(handle).protected != protected:
-                raise PermsError(f"{label}: inheritance is {'enabled' if protected else 'broken'} after the write")
+        with deferred_interrupts():  # Ctrl-C waits for the last write
+            winacl.set_dacl(held, planned, protected=isolate)
+            _verify(held, path, wanted | {e.sid for e in service}, isolate=isolate)
+            for handle, label, entries, protected in writes:
+                if winacl.read_entries(handle) != (entries, protected):  # NTFS may already have written it so
+                    winacl.set_dacl(handle, entries, protected=protected)
+                if winacl.read_acl_handle(handle).protected != protected:
+                    raise PermsError(f"{label}: inheritance is {'enabled' if protected else 'broken'} after the write")
 
 
 def _open_entries(stack: ExitStack, directory: int, where: Path) -> list[tuple[int, Path]]:
@@ -362,12 +364,13 @@ def converge_tree(path: Path, owner: Account | None, root: Path) -> None:
                     planned, directory=False, owner=entry_owner, group=entry_group, parent_label=str(path)
                 )
             ))
-        winacl.set_dacl(held, planned, protected=False)
-        _verify(held, path, wanted, isolate=False)
-        for handle, label, inherited in writes:
-            winacl.set_dacl(handle, inherited, protected=False)
-            if winacl.read_acl_handle(handle).protected:
-                raise PermsError(f"{label}: inheritance is still broken after the reset")
+        with deferred_interrupts():  # Ctrl-C waits for the last write
+            winacl.set_dacl(held, planned, protected=False)
+            _verify(held, path, wanted, isolate=False)
+            for handle, label, inherited in writes:
+                winacl.set_dacl(handle, inherited, protected=False)
+                if winacl.read_acl_handle(handle).protected:
+                    raise PermsError(f"{label}: inheritance is still broken after the reset")
 
 
 @dataclasses.dataclass
@@ -504,10 +507,11 @@ def grant_service_read(root: Path, account: Account) -> None:
             writes.append((target.handle, target.entries, target.protected))
         # The root is last: by then everything the service reads holds its own access.
         writes.append((root_handle, top.entries, root_protected))
-        for handle, entries, protected in writes:
-            winacl.set_dacl(handle, entries, protected=protected)
-        for target in [top, *targets]:
-            _require_service_read(winacl.read_entries(target.handle)[0], target.label, sid)
+        with deferred_interrupts():  # Ctrl-C waits for the last write
+            for handle, entries, protected in writes:
+                winacl.set_dacl(handle, entries, protected=protected)
+            for target in [top, *targets]:
+                _require_service_read(winacl.read_entries(target.handle)[0], target.label, sid)
 
 
 def grant_service_read_file(path: Path, account: Account) -> None:
