@@ -1,5 +1,7 @@
 """Who may read what: the POSIX owner and mode, and on Windows the SIDs and the rights each was given."""
 
+from pathlib import Path
+
 import pytest
 from tests.unit.doctor_support import World, build_bridge, build_host_world
 
@@ -20,12 +22,19 @@ def acl(*aces: tuple[str, int, int], protected: bool = True) -> Acl:
     return Acl(tuple(Ace(sid, mask, flags) for sid, mask, flags in aces), protected)
 
 
-def windows(acls: dict[str, Acl], operator: str = OPERATOR) -> Probes:
-    """Probes that read `acls` as the real ones read an ACL: `acl` leaves the inherit-only ACEs out, `entries` does not."""
+def windows(acls: dict[str, Acl], operator: str = OPERATOR, denies: dict[str, tuple[Ace, ...]] | None = None) -> Probes:
+    """Probes that read `acls` (and the deny ACEs in `denies`) as the real ones do.
+
+    `acl` leaves the inherit-only ACEs out and `entries` does not.
+    """
 
     def entries(path) -> tuple[list[winacl.Entry], bool]:
         found = acls[path.name]
-        return [
+        denied = [
+            winacl.Entry(winacl.ACCESS_DENIED_ACE_TYPE, a.flags, a.mask, a.sid)
+            for a in (denies or {}).get(path.name, ())
+        ]
+        return denied + [
             winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, a.flags, a.mask, a.sid) for a in found.aces
         ], found.protected
 
@@ -178,8 +187,8 @@ HOST_DIR = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_FILES)
 
 
 def service_acls(world: World, **changes: Acl) -> dict[str, Acl]:
-    """What `ctl install` leaves. The root, `bin` and its files hold the service's ACE, none inheritable. `host` holds it
-    for itself and for the files created in it, which inherit it."""
+    """What `ctl install` leaves. The root, `bin` and its files hold the service's ACE, none inheritable. `host` holds
+    it for itself and for the files created in it, which inherit it."""
     root = world.config.root
     acls = {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_READ) for p in [root, root / "bin"]}
     acls |= {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_READ) for p in (root / "bin").iterdir() if p.is_file()}
@@ -188,8 +197,8 @@ def service_acls(world: World, **changes: Acl) -> dict[str, Acl]:
     return acls | changes
 
 
-def service_read(world: World, acls: dict[str, Acl]):
-    return Permissions(world.config, windows(acls)).service_read()
+def service_read(world: World, acls: dict[str, Acl], denies: dict[str, tuple[Ace, ...]] | None = None):
+    return Permissions(world.config, windows(acls, denies=denies)).service_read()
 
 
 def test_the_service_read_install_writes_passes(host):
@@ -310,3 +319,49 @@ def test_a_directory_left_in_bin_is_not_a_file_the_service_reads(host):
 def test_the_service_read_is_not_applicable_on_posix(host):
     outcome, _ = Permissions(host.config, Probes(windows=False)).service_read()
     assert outcome is Outcome.NOT_APPLICABLE
+
+
+# A deny, or an ACE written twice ======================================================================================
+
+FILE_WRITE_DATA = 0x2
+
+
+def places(world: World) -> dict[str, Path]:
+    """Each kind of path the service reads. The fake ACLs are keyed on the last component."""
+    root = world.config.root
+    (binary, *_) = sorted(p for p in (root / "bin").iterdir() if p.is_file())
+    return {
+        "root": root, "bin": root / "bin", "file in bin": binary, "host": root / "host",
+        "file in host": root / "host" / "frpc.toml"
+    }
+
+
+@pytest.mark.parametrize("kind", ["root", "bin", "file in bin", "host", "file in host"])
+@pytest.mark.parametrize("flags", [0, winacl.INHERITED_ACE, FILES_ONLY], ids=["explicit", "inherited", "inherit-only"])
+def test_a_deny_for_the_service_on_any_path_it_needs_fails_naming_the_path(host, kind, flags):
+    path = places(host)[kind]
+    outcome, detail = service_read(host, service_acls(host), {path.name: (Ace(SERVICE, FILE_WRITE_DATA, flags), )})
+    assert outcome is Outcome.FAIL
+    assert f"{path}: LocalService is denied" in detail and "ctl install" in detail
+
+
+@pytest.mark.parametrize("kind", ["root", "bin", "file in bin", "file in host"])
+def test_two_identical_explicit_service_aces_fail_naming_the_path(host, kind):
+    path = places(host)[kind]
+    twice = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_READ)
+    outcome, detail = service_read(host, service_acls(host, **{path.name: twice}))
+    assert outcome is Outcome.FAIL
+    assert f"{path}: {SERVICE} (LocalService):(RX) is written twice" in detail
+
+
+def test_two_identical_explicit_service_aces_on_host_fail(host):
+    twice = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_FILES, SERVICE_FILES)
+    outcome, detail = service_read(host, service_acls(host, host=twice))
+    assert outcome is Outcome.FAIL
+    assert f"{host.config.root / 'host'}: {SERVICE} (LocalService):(OI)(IO)(RX) is written twice" in detail
+
+
+def test_a_file_in_host_that_inherits_the_ace_and_holds_it_explicitly_too_is_not_a_duplicate(host):
+    both = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_INHERITED)
+    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": both}))
+    assert outcome is Outcome.PASS, detail

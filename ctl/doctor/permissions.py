@@ -8,7 +8,7 @@ owner and a mode; on Windows it is the set of SIDs *and the rights each holds*, 
 the installer builds the ACL with, so a token ACE widened from `(R)` to `(F)` is a failure even though no new SID appears.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ctl import perms, winacl
@@ -120,7 +120,8 @@ class Permissions:
         On the root, `bin` and the files in `bin` it is explicit and not inheritable: the inheritable one an earlier
         `ctl install` wrote on the root makes NTFS rewrite every other entry there. `host` holds it twice, once for
         itself and once for its files only (`(OI)(IO)`), so a `frpc.toml` that git recreates is readable; a file in
-        `host` may hold it by inheritance.
+        `host` may hold it by inheritance. On any of them a deny for the service, or the same explicit ACE written
+        twice, is a failure.
         """
         if not self.probes.windows:
             return not_applicable("only Windows gives the service its access by ACE; POSIX uses the owner and mode")
@@ -132,19 +133,35 @@ class Permissions:
             if directory.is_dir():
                 paths.append((directory, own))
                 paths += [(p, entry) for p in sorted(directory.iterdir()) if p.is_file() and not p.is_symlink()]
-        problems = [problem for path, check in paths for problem in check(path)]
+        problems = [problem for path, check in paths for problem in self._ace_problems(path, check)]
         if problems:
             summary = f"the service's read access is wrong on {len(problems)} path(s); {INSTALL}"
             return fail("\n".join([summary, *problems]))
         return ok(f"LocalService reads {self.root}, bin, host and their files; only the files in host inherit it")
 
-    def _service_aces(self, path: Path) -> tuple[list[Ace], list[Ace]]:
-        """The service's ACEs on `path`: the explicit ones, then the inherited ones."""
+    def _ace_problems(self, path: Path, check: Callable[[Path, list[winacl.Entry]], list[str]]) -> list[str]:
+        """What is wrong on `path` whatever its kind, then what `check` finds for its kind."""
         entries, _ = self.probes.entries(path)  # not `acl`: it omits the inherit-only ACE on `host`
-        mine = [(e.sid, e.mask, e.flags) for e in entries
-                if e.sid == winacl.SID_LOCAL_SERVICE and e.ace_type == winacl.ACCESS_ALLOWED_ACE_TYPE]
-        inherited = [ace for ace in mine if ace[2] & winacl.INHERITED_ACE]
-        return [ace for ace in mine if ace not in inherited], inherited
+        mine = [e for e in entries if e.sid == winacl.SID_LOCAL_SERVICE]
+        denies = [
+            f"{path}: LocalService is denied {_describe((e.sid, e.mask, e.flags))}; remove the deny" for e in mine
+            if e.ace_type == winacl.ACCESS_DENIED_ACE_TYPE
+        ]
+        return denies + self._doubled(path, mine) + check(path, mine)
+
+    @staticmethod
+    def _doubled(path: Path, mine: list[winacl.Entry]) -> list[str]:
+        """An explicit allow written twice, which `ctl install` never does."""
+        allows = [(e.sid, e.mask, e.flags) for e in mine
+                  if e.ace_type == winacl.ACCESS_ALLOWED_ACE_TYPE and not e.flags & winacl.INHERITED_ACE]
+        return [f"{path}: {_describe(ace)} is written twice" for ace in dict.fromkeys(allows) if allows.count(ace) > 1]
+
+    @staticmethod
+    def _service_aces(mine: list[winacl.Entry]) -> tuple[list[Ace], list[Ace]]:
+        """The service's allow ACEs among `mine`: the explicit ones, then the inherited ones."""
+        allows = [(e.sid, e.mask, e.flags) for e in mine if e.ace_type == winacl.ACCESS_ALLOWED_ACE_TYPE]
+        inherited = [ace for ace in allows if ace[2] & winacl.INHERITED_ACE]
+        return [ace for ace in allows if ace not in inherited], inherited
 
     @staticmethod
     def _wrong_mask(path: Path, aces: list[Ace]) -> list[str]:
@@ -153,9 +170,9 @@ class Permissions:
             if ace[1] != winacl.READ_EXECUTE
         ]
 
-    def _service_ace_problems(self, path: Path) -> list[str]:
+    def _service_ace_problems(self, path: Path, mine: list[winacl.Entry]) -> list[str]:
         """The root, `bin` and the files in `bin`: an explicit ACE that is not inheritable."""
-        explicit, _ = self._service_aces(path)
+        explicit, _ = self._service_aces(mine)
         if not explicit:
             return [f"{path}: LocalService has no ACE of its own"]
         problems = [
@@ -164,9 +181,9 @@ class Permissions:
         ]
         return problems + self._wrong_mask(path, explicit)
 
-    def _host_ace_problems(self, path: Path) -> list[str]:
+    def _host_ace_problems(self, path: Path, mine: list[winacl.Entry]) -> list[str]:
         """`host`: an ACE for itself and one that only its files inherit, and nothing else."""
-        explicit, _ = self._service_aces(path)
+        explicit, _ = self._service_aces(mine)
         if not explicit:
             return [f"{path}: LocalService has no ACE of its own"]
         flags = {ace[2] & INHERITING for ace in explicit}
@@ -180,9 +197,9 @@ class Permissions:
             problems.append(f"{path}: LocalService has no (OI)(IO) ACE, so a file created in it has no access")
         return problems + self._wrong_mask(path, explicit)
 
-    def _host_file_ace_problems(self, path: Path) -> list[str]:
+    def _host_file_ace_problems(self, path: Path, mine: list[winacl.Entry]) -> list[str]:
         """A file in `host`: the service's ACE, inherited or (from an earlier install) explicit, never inheritable."""
-        explicit, inherited = self._service_aces(path)
+        explicit, inherited = self._service_aces(mine)
         if not explicit and not inherited:
             return [f"{path}: LocalService has no ACE"]
         problems = [f"{path}: {_describe(ace)} is inheritable" for ace in explicit if ace[2] & INHERITING]
