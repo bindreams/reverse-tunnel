@@ -19,7 +19,7 @@ from tests.platform.windows.service_access import service_token
 from tests.unit.dry_run_support import goetia_binary
 
 from ctl import authz, goetia, perms_windows, winacl
-from ctl.perms import SID_LOCAL_SERVICE
+from ctl.perms import SID_LOCAL_SERVICE, Account, PermsError
 
 # The integrity label in a service token is no group: measured, a deny ACE naming it does not stop the service and an
 # allow ACE naming it does not let the service in. Every other SID the token lists is a group an ACE can name,
@@ -141,7 +141,8 @@ def test_the_groups_of_the_check_context_are_the_groups_of_a_real_service_token(
     real = groups_of(rows, user)
     with service_token() as token:
         context = token.groups() - {user}
-    assert context == real, f"only in the context: {sorted(context - real)}; only in the token: {sorted(real - context)}"
+    extra, missing = sorted(context - real), sorted(real - context)
+    assert context == real, f"only in the context: {extra}; only in the token: {missing}"
 
 
 @pytest.mark.goetia
@@ -196,4 +197,18 @@ def test_a_group_value_that_is_not_one_binary_sid_is_an_error(data, kind):
 
 
 def test_an_account_the_lsa_adds_no_groups_to_has_only_the_well_known_ones():
-    assert perms_windows.service_token_groups("S-1-5-20") == perms_windows.SERVICE_TOKEN_GROUPS
+    # A well-formed SID that no machine has an LSA key for.
+    assert perms_windows.service_token_groups("S-1-5-21-1-2-3-4") == perms_windows.SERVICE_TOKEN_GROUPS
+
+
+def test_a_failure_to_open_the_lsa_key_names_the_key_not_only_the_path_being_installed(tmp_path, monkeypatch):
+
+    def refuse(*args):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(winreg, "OpenKey", refuse)
+    with pytest.raises(PermsError) as raised:
+        perms_windows.grant_service_read(tmp_path, Account("LocalService", None, None))
+    message = str(raised.value)
+    assert f"{perms_windows.LSA_GROUPS_KEY}\\{SID_LOCAL_SERVICE}" in message
+    assert "Access is denied" in message
