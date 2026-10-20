@@ -1,28 +1,38 @@
-"""The groups the install assumes the service's token holds, checked against a token Windows makes for LocalService.
+"""The groups the install assumes the service's token holds, checked against the token of a real service.
 
-A scheduled task run as LocalService gets a service logon, like the one the service manager gives a daemon; `whoami`
-inside it lists the groups of that token.
+The service manager starts a daemon the way goetia installs it: through `goetia-shim`, as LocalService, which runs the
+daemon's command. The test installs such a service whose command lists the groups of its own token, then uninstalls it.
 """
 
 import csv
 import io
+import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 from tests.platform.windows.service_access import service_token
+from tests.unit.dry_run_support import goetia_binary
 
-from ctl import authz, perms_windows, winacl
+from ctl import authz, goetia, perms_windows, winacl
 from ctl.perms import SID_AUTHENTICATED_USERS, SID_EVERYONE, SID_LOCAL_SERVICE, SID_USERS
 
 SID_SERVICE = "S-1-5-6"
 SID_THIS_ORGANIZATION = "S-1-5-15"
-# Groups of a LocalService token that name no ACE an operator can write: integrity labels, the task's own SID and the
-# per-machine aliases `S-1-5-32-<eight sub-authorities>` the task host adds.
-UNNAMEABLE_PREFIXES = ("S-1-16-", "S-1-5-87-")
+# Groups of a service token that name no ACE an operator can write: integrity labels, the logon session, the
+# per-service SID (a hash of the service's name) and the per-machine aliases `S-1-5-32-<eight sub-authorities>`.
+UNNAMEABLE_PREFIXES = ("S-1-16-", "S-1-5-5-", "S-1-5-80-", "S-1-5-87-")
 ALL = 0x1F01FF
-TASK = "rttoken"
-TASK_WAIT_MS = 120_000
+DAEMON = "rttoken"
+SERVICE_WAIT_MS = 120_000
+SCRIPT = """@whoami.exe /groups /fo csv > groups.csv
+@whoami.exe /user /fo csv > user.csv
+@echo x > done
+@waitfor.exe /t 99999 rttokenhold
+"""
 
 
 def unnameable(sid: str) -> bool:
@@ -34,36 +44,60 @@ def run(*command: str) -> None:
     assert done.returncode == 0, f"{command}: {done.returncode}: {done.stdout}{done.stderr}"
 
 
-def real_groups(directory: Path) -> set[str]:
-    """The group SIDs of a token that Windows makes for LocalService, listed by a task that runs as it."""
+def rows_of(path: Path) -> list[dict[str, str]]:
+    return list(csv.DictReader(io.StringIO(path.read_text(encoding="utf-8", errors="replace"))))
+
+
+def service_token_rows(root: Path, binaries: Path) -> tuple[list[dict[str, str]], str]:
+    """The groups of a token the service manager gives LocalService, and its user SID, as the daemon itself lists them.
+
+    `root` is a deployment of one daemon, `rttoken`, installed through goetia like the real ones and started by it; its
+    command writes `whoami /groups` and `whoami /user` into `root/out`, then stays up until it is uninstalled.
+    """
     import win32con
     import win32event
     import win32file
 
-    directory.mkdir()
-    run("icacls", str(directory), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)M")
-    listing, done, script = directory / "groups.csv", directory / "done", directory / "run.cmd"
-    # schtasks takes at most 261 characters of command, which a temporary path can use up by itself.
-    script.write_text(f'@whoami.exe /groups /fo csv > "{listing}"\r\n@echo x > "{done}"\r\n')
-    notify = win32file.FindFirstChangeNotification(str(directory), False, win32con.FILE_NOTIFY_CHANGE_FILE_NAME)
+    root.mkdir()
+    run("icacls", str(root), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)M")
+    (root / "bin").mkdir()
+    for member in binaries.iterdir():
+        shutil.copy(member, root / "bin" / member.name)
+    out = root / "out"
+    out.mkdir()
+    script = out / "run.cmd"
+    script.write_text(SCRIPT, newline="\r\n")
+    command = [str(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"), "/c", str(script)]
+    manifest = {
+        "daemons": {
+            DAEMON: {
+                "command": command,
+                "cwd": str(out),
+                "logs": str(out / "service.log"),
+                "backend-specific": {"scm": {"user": "LocalService"}},
+            }
+        }
+    }
+    (root / goetia.MANIFEST).write_text(yaml.safe_dump(manifest))
+    done = out / "done"
+    notify = win32file.FindFirstChangeNotification(str(out), False, win32con.FILE_NOTIFY_CHANGE_FILE_NAME)
     try:
-        run(
-            "schtasks", "/create", "/tn", TASK, "/tr", f'"{script}"', "/sc", "once", "/st", "23:59", "/ru",
-            r"NT AUTHORITY\LocalService", "/f"
-        )
+        goetia.daemon_install(root, DAEMON, enable=True)
         try:
-            run("schtasks", "/run", "/tn", TASK)
+            goetia.daemon_start(root, DAEMON)
             while not done.exists():
-                # external-bound: the scheduled task writing its result
-                if win32event.WaitForSingleObject(notify, TASK_WAIT_MS) != win32event.WAIT_OBJECT_0:
-                    raise AssertionError(f"the task {TASK} wrote nothing in {TASK_WAIT_MS // 1000} s")
+                # external-bound: the service writing its result
+                if win32event.WaitForSingleObject(notify, SERVICE_WAIT_MS) != win32event.WAIT_OBJECT_0:
+                    log = (out / "service.log").read_text(errors="replace") if (out / "service.log").exists() else ""
+                    raise AssertionError(f"the service {DAEMON} wrote nothing in {SERVICE_WAIT_MS // 1000} s: {log}")
                 win32file.FindNextChangeNotification(notify)
         finally:
-            run("schtasks", "/delete", "/tn", TASK, "/f")
+            goetia.daemon_uninstall(root, [DAEMON])
     finally:
         win32file.FindCloseChangeNotification(notify)
-    rows = csv.DictReader(io.StringIO(listing.read_text(encoding="utf-8", errors="replace")))
-    return {row["SID"] for row in rows}
+    users = rows_of(out / "user.csv")
+    assert len(users) == 1, users
+    return rows_of(out / "groups.csv"), users[0]["SID"]
 
 
 def denying(sid: str) -> bytes:
@@ -76,20 +110,35 @@ def denying(sid: str) -> bytes:
     return authz.descriptor_for(entries, protected=True, owner=owner, group=owner)
 
 
-def test_a_deny_for_each_group_of_a_real_localservice_token_is_caught(tmp_path):
-    groups = {sid for sid in real_groups(tmp_path / "out") if not unnameable(sid)}
-    assert groups, "the task listed no groups"
+@pytest.fixture(scope="module")
+def measured(tmp_path_factory):
+    """(rows of `whoami /groups`, user SID) from the token of a service installed through the pinned goetia."""
+    binaries = goetia_binary(tmp_path_factory).parent
+    return service_token_rows(tmp_path_factory.mktemp("service") / "deployment", binaries)
+
+
+def table(rows: list[dict[str, str]]) -> str:
+    return json.dumps([[r["Group Name"], r["SID"], r["Attributes"]] for r in rows], indent=1)
+
+
+@pytest.mark.goetia
+def test_the_nameable_groups_of_a_real_service_token_are_the_ones_the_install_assumes(measured):
+    rows, user = measured
+    named = {row["SID"] for row in rows if not unnameable(row["SID"])}
+    assert user == SID_LOCAL_SERVICE
+    assert named | {user} == {SID_LOCAL_SERVICE, *perms_windows.SERVICE_TOKEN_GROUPS}, table(rows)
+
+
+@pytest.mark.goetia
+def test_a_deny_for_each_group_of_a_real_service_token_is_caught(measured):
+    rows, user = measured
+    named = {row["SID"] for row in rows if not unnameable(row["SID"])} | {user}
     with service_token() as token:
-        missed = sorted(sid for sid in groups if token.grants(denying(sid), winacl.READ_EXECUTE))
-    assert not missed, f"the install's idea of the service's token lacks {missed}"
+        missed = sorted(sid for sid in named if token.grants(denying(sid), winacl.READ_EXECUTE))
+    assert not missed, f"the install's idea of the service's token lacks {missed}: {table(rows)}"
 
 
-@pytest.mark.parametrize(
-    "sid", [
-        SID_LOCAL_SERVICE, SID_EVERYONE, SID_USERS, SID_AUTHENTICATED_USERS, SID_SERVICE, SID_THIS_ORGANIZATION,
-        *perms_windows.SERVICE_TOKEN_GROUPS
-    ]
-)
+@pytest.mark.parametrize("sid", [SID_LOCAL_SERVICE, *perms_windows.SERVICE_TOKEN_GROUPS])
 def test_a_deny_for_the_service_or_a_group_it_is_in_leaves_it_without_read(sid):
     with service_token() as token:
         assert not token.grants(denying(sid), winacl.READ_EXECUTE)
