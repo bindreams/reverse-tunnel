@@ -433,8 +433,8 @@ def grant_service_read(root: Path, account: Account) -> None:
 
     The root and `bin` get an ACE applying to it alone, and so does each file in `bin`; none is inheritable, so nothing
     is propagated by the OS and NTFS has no reason to rewrite an entry that was not opened here. A file created or
-    replaced in `bin` has no ACE for the account until this runs again or `grant_service_read_file` is called on it, and
-    that is enough because only `ctl` writes `bin`.
+    replaced in `bin` has no ACE for the account until `atomic.replace_file` writes it with `service=`, or this or
+    `grant_service_read_file` is run; that is enough because only `ctl` writes `bin`.
 
     `host` also gets an ACE that only the files created in it inherit, and its files hold the account's access by
     inheriting it. Git writes `host`: a `git pull` deletes and recreates `frpc.toml`, and a file with no ACE would leave
@@ -453,7 +453,8 @@ def grant_service_read(root: Path, account: Account) -> None:
 def grant_service_read_file(path: Path, account: Account) -> None:
     """Give `account` read-and-execute on the one file `path` in `bin`, which was just created or replaced; POSIX: nothing.
 
-    The file keeps its other ACEs. A reparse point or a hard-linked file is refused.
+    The file keeps its other ACEs. A reparse point or a hard-linked file is refused. A file `ctl` writes with
+    `atomic.replace_file` gets the grant before it is renamed into place, not through this.
     """
     if sys.platform != "win32":
         return

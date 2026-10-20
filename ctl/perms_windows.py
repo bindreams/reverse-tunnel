@@ -364,9 +364,10 @@ def grant_service_read(root: Path, account: Account) -> None:
     written.
 
     `root` and `bin` get an ACE for themselves and each file in `bin` one of its own; nothing is inherited, so a file
-    created or replaced in `bin` has no access until `grant_service_read_file` gives it. `bin` is written only by `ctl`,
-    which calls that. `host` is written by git as well: a `git pull` deletes and recreates `frpc.toml`, and a file with no
-    ACE for the service would leave the tunnel down after the next restart. So `host` also gets an ACE that its files
+    created or replaced in `bin` has no access until `ctl` gives it: `atomic.replace_file(service=)` before the rename,
+    or `grant_service_read_file`. `bin` is written only by `ctl`. `host` is written by git as well: a `git pull`
+    deletes and recreates `frpc.toml`, and a file with no ACE for the service would leave the tunnel down after the next
+    restart. So `host` also gets an ACE that its files
     inherit (not its subdirectories, which `ctl` refuses), and its files hold the service's access only by inheriting
     it. That is safe where an inheritable ACE on the root is not because every entry of `host` has been opened and
     vetted here, so the rewrite NTFS makes of a directory's children touches nothing else.
@@ -433,9 +434,19 @@ def grant_service_read_file(path: Path, account: Account) -> None:
     The file keeps every ACE it has; only an earlier explicit allow for the service is replaced. It is opened without
     following a reparse point, and a file with another name is refused.
     """
-    sid = _sid_of(account)
     with _errors(path), _handle(path, directory=False, single_link=True) as handle:
+        grant_service_read_handle(handle, path, account)
+
+
+def grant_service_read_handle(handle: int, label: Path, account: Account) -> None:
+    """`grant_service_read_file` for the file open as `handle` (READ_CONTROL, WRITE_DAC), named `label` in errors.
+
+    For a file that is not in place yet: `atomic.replace_file` calls it on its temporary file, so the final name never
+    exists without the grant.
+    """
+    sid = _sid_of(account)
+    with _errors(label):
         entries, protected = winacl.read_entries(handle)
         winacl.set_dacl(handle, _service_read(entries, sid), protected=protected)
         if sid not in winacl.read_acl_handle(handle).sids:
-            raise PermsError(f"{path}: the service still has no access after the grant")
+            raise PermsError(f"{label}: the service still has no access after the grant")

@@ -90,12 +90,16 @@ def replace_file(
     A symlink, a directory or anything else that is not a regular file at `name` is refused, never followed. Nothing but
     the old file or the complete new one is ever visible, and a failure leaves no temporary behind. On POSIX the mode is
     set on the open descriptor before the first byte, so the umask never matters; Windows has no mode to set.
+
+    `service` (Windows only; POSIX has the mode) gives that account read-and-execute on the temporary file before it is
+    renamed, so `name` never exists without it: a crash between a rename and a later grant would leave a binary the
+    service cannot read, and a host reachable only through its tunnel locked out at the next boot.
     """
     if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
         raise BinariesError(f"{directory / name}: not a single directory entry name")
     with deferred_interrupts():
         if sys.platform == "win32":
-            _replace_windows(directory, name, source)
+            _replace_windows(directory, name, source, service)
         else:
             _replace_posix(directory, name, source, mode)
     return directory / name
@@ -228,10 +232,11 @@ def _open_directory_windows(directory: Path, winfile, *, missing_ok: bool = Fals
         raise BinariesError(f"{directory}: not an existing directory: {exc.strerror or exc}") from exc
 
 
-def _replace_windows(directory: Path, name: str, source: IO[bytes]) -> None:
+def _replace_windows(directory: Path, name: str, source: IO[bytes], service: Account | None) -> None:
     import msvcrt
 
     from ctl import _winfile as winfile
+    from ctl import perms_windows
 
     handle = _open_directory_windows(directory, winfile)
     temporary = f".{name}.{secrets.token_hex(8)}.tmp"
@@ -243,7 +248,7 @@ def _replace_windows(directory: Path, name: str, source: IO[bytes]) -> None:
             handle,
             temporary,
             label=directory / temporary,
-            access=winfile.GENERIC_WRITE | winfile.DELETE,
+            access=winfile.GENERIC_WRITE | winfile.DELETE | (perms_windows.ACL_ACCESS if service else 0),
             error=BinariesError,
             into=created
         )
@@ -252,6 +257,8 @@ def _replace_windows(directory: Path, name: str, source: IO[bytes]) -> None:
         created.value = None
         _write(fd, source)
         os.fsync(fd)
+        if service is not None:
+            perms_windows.grant_service_read_handle(msvcrt.get_osfhandle(fd), directory / name, service)
         winfile.rename_over(msvcrt.get_osfhandle(fd), handle, name, label=directory / name, error=BinariesError)
         os.close(fd)
         fd = -1

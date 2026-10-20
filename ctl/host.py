@@ -357,10 +357,11 @@ def _step(description: str, action: Callable[..., None], *args, **kwargs) -> Non
 
 
 def _promote(root: Path, plan: Plan, service: Account) -> None:
-    """Replace each binary in `bin/` with its staged, pinned bytes, and give the service read of the new file.
+    """Replace each binary in `bin/` with its staged, pinned bytes, the service's read already on the new file.
 
     A file created in `bin\\` has no ACE for the service: the one `grant_service_read` wrote to its parent is not
-    inheritable.
+    inheritable. So the grant is made on the temporary file, before the rename, and the final name never exists
+    without it.
     """
     bin_dir, staging = root / "bin", root / "bin" / STAGING
     for pin in plan.pins:
@@ -375,8 +376,7 @@ def _promote(root: Path, plan: Plan, service: Account) -> None:
             raise BinariesError(
                 f"{staging / pin.install_name} is not the pinned {pin.install_name}; it was changed after staging"
             )
-        replace_file(bin_dir, pin.install_name, io.BytesIO(content), BIN_MODE)
-        perms.grant_service_read_file(bin_dir / pin.install_name, service)
+        replace_file(bin_dir, pin.install_name, io.BytesIO(content), BIN_MODE, service=service)
 
 
 def apply(config: Config, plan: Plan, *, services: Services) -> None:
