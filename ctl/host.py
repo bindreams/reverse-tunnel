@@ -291,8 +291,8 @@ def _installer() -> Account | None:
 
 
 def _converge_bin(root: Path, service: Account) -> None:
-    """Converge `bin/`, its DACL written once with the service's ACE in it: nothing between this and the grant that
-    follows can leave the directory the service reads without it."""
+    """Converge `bin/`, its DACL and each file's written once with the service's ACE in them: converging never leaves
+    what the service reads without access."""
     perms.converge_dir(
         root / "bin", _installer(), BIN_MODE, frozenset(), isolate=False, service_read=service, root=root
     )
@@ -309,7 +309,9 @@ def stage(config: Config, plan: Plan, *, services: Services) -> None:
     """Make the tree ready without disturbing anything running. The order matters.
 
     Whatever a failed run left in `bin/.staging` goes first: on Windows `grant_service_read` refuses a subdirectory of
-    `bin\\`. `bin/` is converged before that grant and never again, with the service's ACE in the same write:
+    `bin\\`. That grant comes next, before anything inherits from the repository root: an install that finds the
+    inheritable ACE an earlier one wrote there removes it, and a directory converged before that would keep recording
+    it as inherited until the next run. `bin/` is converged after it with the service's ACE in the same write, since
     converging rewrites its whole ACL. `secrets/` and `logs/` come before the token, which is created inside the first,
     and goetia must never be handed a `logs/` owned by root. `.env` is tightened last, after everything that could
     fail.
@@ -318,11 +320,11 @@ def stage(config: Config, plan: Plan, *, services: Services) -> None:
     service = perms.service_account(config)
     readers = _service_readers(root)
     _clear_staging(root)
+    perms.grant_service_read(root, service)
     _converge_bin(root, service)
     perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
     perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
     perms.write_secret(root / "secrets" / "token", _token_bytes(config), service, readers, root=root)
-    perms.grant_service_read(root, service)
     _download(root, plan, services)
     perms.harden_file(root / ".env", None, frozenset(), root=root)
 
