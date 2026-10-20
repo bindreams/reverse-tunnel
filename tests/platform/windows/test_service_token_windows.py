@@ -128,6 +128,15 @@ def test_the_nameable_groups_of_a_real_service_token_are_the_ones_the_install_as
 
 
 @pytest.mark.goetia
+def test_the_groups_of_the_check_context_are_the_nameable_groups_of_a_real_service_token(measured):
+    rows, user = measured
+    real = {row["SID"] for row in rows if not unnameable(row["SID"])} - {user}
+    with service_token() as token:
+        context = token.groups() - {user}
+    assert context == real, f"only in the context: {sorted(context - real)}; only in the token: {sorted(real - context)}"
+
+
+@pytest.mark.goetia
 def test_a_deny_for_each_group_of_a_real_service_token_is_caught(measured):
     rows, user = measured
     named = {row["SID"] for row in rows if not unnameable(row["SID"])} | {user}

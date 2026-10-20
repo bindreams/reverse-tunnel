@@ -15,6 +15,9 @@ from ctl import winacl
 
 AUTHZ_RM_FLAG_NO_AUDIT = 0x1
 OWNER_GROUP_DACL = 0x7  # OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+AUTHZ_CONTEXT_INFO_GROUPS_SIDS = 2
+ERROR_INSUFFICIENT_BUFFER = 122
+TOKEN_GROUPS_OFFSET = 8  # of `Groups` in TOKEN_GROUPS: a DWORD count, padded to pointer alignment
 SE_GROUP_ENABLED = 0x7  # SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED
 _POINTER = ctypes.c_void_p
 
@@ -66,6 +69,10 @@ def _library():
         ctypes.POINTER(_Request), _POINTER, _POINTER, _POINTER, wintypes.DWORD,
         ctypes.POINTER(_Reply), _POINTER
     ]
+    authz.AuthzGetInformationFromContext.argtypes = [
+        _POINTER, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), _POINTER
+    ]
     authz.AuthzFreeContext.argtypes = [_POINTER]
     authz.AuthzFreeResourceManager.argtypes = [_POINTER]
     return authz
@@ -96,6 +103,39 @@ class Token:
         ):
             raise ctypes.WinError(ctypes.get_last_error())
         return error.value == 0 and granted.value & access == access
+
+    def groups(self) -> frozenset[str]:
+        """The SIDs of the groups in the context, as the access check sees them (the account's own SID is not one)."""
+        needed = wintypes.DWORD()
+        if self._authz.AuthzGetInformationFromContext(
+            self._context, AUTHZ_CONTEXT_INFO_GROUPS_SIDS, 0, ctypes.byref(needed), None
+        ):
+            raise OSError("AuthzGetInformationFromContext succeeded with no buffer")
+        if (error := ctypes.get_last_error()) != ERROR_INSUFFICIENT_BUFFER:
+            raise ctypes.WinError(error)
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not self._authz.AuthzGetInformationFromContext(
+            self._context, AUTHZ_CONTEXT_INFO_GROUPS_SIDS, needed.value, ctypes.byref(needed), buffer
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        count = wintypes.DWORD.from_buffer(buffer).value
+        entries = (_SidAndAttributes * count).from_buffer(buffer, TOKEN_GROUPS_OFFSET)
+        return frozenset(_sid_string(entry.sid) for entry in entries)
+
+
+def _sid_string(sid) -> str:
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.ConvertSidToStringSidW.argtypes = [_POINTER, ctypes.POINTER(ctypes.c_void_p)]
+    kernel32.LocalFree.argtypes = [_POINTER]
+    kernel32.LocalFree.restype = _POINTER
+    text = ctypes.c_void_p()
+    if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.wstring_at(text)
+    finally:
+        kernel32.LocalFree(text)
 
 
 @contextlib.contextmanager
