@@ -21,7 +21,17 @@ def acl(*aces: tuple[str, int, int], protected: bool = True) -> Acl:
 
 
 def windows(acls: dict[str, Acl], operator: str = OPERATOR) -> Probes:
-    return Probes(windows=True, acl=lambda path: acls[path.name], operator_sid=lambda root: operator)
+    """Probes that read `acls` as the real ones read an ACL: `acl` leaves the inherit-only ACEs out, `entries` does not."""
+
+    def entries(path) -> tuple[list[winacl.Entry], bool]:
+        found = acls[path.name]
+        return [
+            winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, a.flags, a.mask, a.sid) for a in found.aces
+        ], found.protected
+
+    return Probes(
+        windows=True, acl=lambda path: winacl._acl(*entries(path)), entries=entries, operator_sid=lambda root: operator
+    )
 
 
 # What install writes, spelled out independently of `winacl.grants` so a wrong expectation fails here ==================
@@ -185,6 +195,14 @@ def service_read(world: World, acls: dict[str, Acl]):
 def test_the_service_read_install_writes_passes(host):
     outcome, detail = service_read(host, service_acls(host))
     assert outcome is Outcome.PASS, detail
+
+
+def test_the_files_only_ace_on_host_is_read_from_every_entry_because_acl_leaves_it_out(host):
+    probes = windows(service_acls(host))
+    host_dir = host.config.root / "host"
+    assert not [a for a in probes.acl(host_dir).aces if a.flags & winacl.INHERIT_ONLY_ACE]  # as `winacl.read_acl`
+    assert [e for e in probes.entries(host_dir)[0] if e.flags & winacl.INHERIT_ONLY_ACE]
+    assert Permissions(host.config, probes).service_read()[0] is Outcome.PASS
 
 
 def test_an_inheritable_service_ace_on_the_root_from_an_earlier_install_fails_asking_to_reinstall(host):

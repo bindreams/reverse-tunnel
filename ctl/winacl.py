@@ -260,14 +260,22 @@ def _acl(entries: Sequence[Entry], protected: bool) -> Acl:
     return Acl(tuple(ace for ace in aces if not ace.flags & INHERIT_ONLY_ACE), protected)
 
 
-def read_acl(path) -> Acl:
-    """The allow entries that apply to `path` itself, inherited ones included. A missing DACL grants everyone."""
+def read_dacl(path) -> tuple[list[Entry], bool]:
+    """Every ACE of `path` in stored order, inherit-only ones included, and whether its inheritance is broken.
+
+    A missing DACL grants everyone everything.
+    """
     import win32security
 
     descriptor = win32security.GetNamedSecurityInfo(
         str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
     )
-    return _acl(*_parse(descriptor, path))
+    return _parse(descriptor, path)
+
+
+def read_acl(path) -> Acl:
+    """The allow entries that apply to `path` itself, inherited ones included. A missing DACL grants everyone."""
+    return _acl(*read_dacl(path))
 
 
 def read_acl_handle(handle: int) -> Acl:

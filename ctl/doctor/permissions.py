@@ -140,8 +140,9 @@ class Permissions:
 
     def _service_aces(self, path: Path) -> tuple[list[Ace], list[Ace]]:
         """The service's ACEs on `path`: the explicit ones, then the inherited ones."""
-        mine = [(ace.sid, ace.mask, ace.flags) for ace in self.probes.acl(path).aces
-                if ace.sid == winacl.SID_LOCAL_SERVICE]
+        entries, _ = self.probes.entries(path)  # not `acl`: it omits the inherit-only ACE on `host`
+        mine = [(e.sid, e.mask, e.flags) for e in entries
+                if e.sid == winacl.SID_LOCAL_SERVICE and e.ace_type == winacl.ACCESS_ALLOWED_ACE_TYPE]
         inherited = [ace for ace in mine if ace[2] & winacl.INHERITED_ACE]
         return [ace for ace in mine if ace not in inherited], inherited
 
