@@ -40,9 +40,12 @@ FILE_EXECUTE = 0x20
 DELETE = 0x10000
 OBJECT_INHERIT_ACE = 0x1
 CONTAINER_INHERIT_ACE = 0x2
+INHERIT_ONLY_ACE = 0x8
 INHERITED_ACE = 0x10
 INHERITING = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
 WRITING = FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE
+# What `host` holds for the service: one ACE for the directory and one that only the files created in it inherit.
+HOST_SERVICE_ACES = sorted([(winacl.READ_EXECUTE, 0), (winacl.READ_EXECUTE, OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE)])
 
 
 @dataclass
@@ -470,9 +473,12 @@ def test_grant_service_read_reaches_the_repository_and_leaves_its_ancestors_alon
     assert ace.mask & FILE_EXECUTE and ace.mask & FILE_READ_DATA
     assert not ace.mask & WRITING
     assert not ace.flags & INHERITING
+    explicit = ace_for(repo / "bin", SID_LOCAL_SERVICE)
+    assert explicit.mask == winacl.READ_EXECUTE and not explicit.flags & (INHERITING | INHERITED_ACE)
+    assert service_shape(repo / "host") == HOST_SERVICE_ACES
+    inherited = ace_for(repo / "host" / "frpc.toml", SID_LOCAL_SERVICE)
+    assert (inherited.mask, inherited.flags) == (winacl.READ_EXECUTE, INHERITED_ACE)
     for path in (repo / "bin", repo / "host", repo / "host" / "frpc.toml"):
-        explicit = ace_for(path, SID_LOCAL_SERVICE)
-        assert explicit.mask == winacl.READ_EXECUTE and not explicit.flags & (INHERITING | INHERITED_ACE), path
         assert not winacl.read_acl(path).protected, path
     assert SID_LOCAL_SERVICE not in principals(env)
 
@@ -558,8 +564,13 @@ def service_entries(path: Path, *, directory: bool = True) -> list[winacl.Entry]
     return [e for e in entries_of(path, directory=directory) if e.sid == SID_LOCAL_SERVICE]
 
 
-@pytest.mark.parametrize("where", [".", "bin", "host"])
-def test_no_service_ace_on_the_root_bin_or_host_is_inheritable(tmp_path, where):
+def service_shape(path: Path, *, directory: bool = True) -> list[tuple[int, int]]:
+    """The service's ACEs on `path` as (mask, flags), in a fixed order."""
+    return sorted((e.mask, e.flags) for e in service_entries(path, directory=directory))
+
+
+@pytest.mark.parametrize("where", [".", "bin"])
+def test_no_service_ace_on_the_root_or_bin_is_inheritable(tmp_path, where):
     """Any inheritable ACE written on a directory can make NTFS rewrite the children `ctl` never opened."""
     repo = repo_with(tmp_path)
     grant_service_read(repo, LOCAL_SERVICE)
@@ -567,15 +578,51 @@ def test_no_service_ace_on_the_root_bin_or_host_is_inheritable(tmp_path, where):
     assert service and not any(e.flags & INHERITING for e in service)
 
 
+def test_host_holds_one_ace_for_the_service_itself_and_one_that_only_its_files_inherit(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert service_shape(repo / "host") == HOST_SERVICE_ACES
+
+
+def test_a_file_git_recreates_in_host_inherits_the_service_read(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    config = repo / "host" / "frpc.toml"
+    config.unlink()
+    config.write_bytes(b"new")
+    assert [(e.mask, e.flags)
+            for e in service_entries(config, directory=False)] == [(winacl.READ_EXECUTE, INHERITED_ACE)]
+
+
+def test_a_file_created_in_bin_after_the_grant_has_no_service_access(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    created = repo / "bin" / "websocat.exe"
+    created.write_bytes(b"")
+    assert SID_LOCAL_SERVICE not in principals(created)
+
+
 def test_rerunning_replaces_the_inheritable_root_ace_an_earlier_install_wrote(tmp_path):
     repo = repo_with(tmp_path)
     icacls(str(repo), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)(RX)")  # the shape of the earlier install
     assert any(e.flags & INHERITED_ACE for e in service_entries(repo / "bin" / "frpc.exe", directory=False))
     grant_service_read(repo, LOCAL_SERVICE)
-    for path, directory in ((repo, True), (repo / "bin", True), (repo / "host", True),
-                            (repo / "bin" / "frpc.exe", False), (repo / "host" / "frpc.toml", False)):
+    for path, directory in ((repo, True), (repo / "bin", True), (repo / "bin" / "frpc.exe", False)):
         assert [(e.mask, e.flags)
                 for e in service_entries(path, directory=directory)] == [(winacl.READ_EXECUTE, 0)], path
+    assert service_shape(repo / "host") == HOST_SERVICE_ACES
+    assert [(e.mask, e.flags) for e in service_entries(repo / "host" / "frpc.toml", directory=False)
+            ] == [(winacl.READ_EXECUTE, INHERITED_ACE)]
+
+
+def test_rerunning_replaces_the_non_inheritable_host_aces_an_earlier_install_wrote(tmp_path):
+    repo = repo_with(tmp_path)
+    for path in (repo / "host", repo / "host" / "frpc.toml"):
+        icacls(str(path), "/grant", f"*{SID_LOCAL_SERVICE}:(RX)")  # the shape of the previous install
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert service_shape(repo / "host") == HOST_SERVICE_ACES
+    assert [(e.mask, e.flags) for e in service_entries(repo / "host" / "frpc.toml", directory=False)
+            ] == [(winacl.READ_EXECUTE, INHERITED_ACE)]
 
 
 def test_a_file_replaced_in_bin_loses_the_service_read_until_it_is_given_again(tmp_path):
