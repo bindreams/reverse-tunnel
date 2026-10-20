@@ -400,6 +400,15 @@ def _service_read(entries: list[winacl.Entry], sid: str, *, files: bool = False)
     return winacl.canonical(kept + granted)
 
 
+def _require_service_read(entries: list[winacl.Entry], label: Path, sid: str) -> None:
+    """Fail unless `entries`, taken in order, grant the service read-and-execute; a deny for it is the usual cause."""
+    if winacl.effective_access(entries, sid) & winacl.READ_EXECUTE != winacl.READ_EXECUTE:
+        raise PermsError(
+            f"{label}: the service is denied read-and-execute (an ACE denying it, explicit or inherited); "
+            "remove that ACE, then rerun"
+        )
+
+
 def _explicit_service_read(target: _Target, sid: str) -> list[winacl.Entry]:
     """The explicit ACEs `target` is left with. A file whose directory is inherited from holds no ACE of its own for
     the service: the one it inherits is what a file git creates there holds too."""
@@ -460,8 +469,10 @@ def grant_service_read(root: Path, account: Account) -> None:
             if protected:
                 raise PermsError(f"{target.label}: inheritance is broken; the service could not read it")
         # Compute every object's resulting ACL, in the order it will have on disk, before writing any of them: a
-        # refusal (an unsupported inheritable ACE anywhere) then leaves nothing changed. Parents come before children.
+        # refusal (an unsupported inheritable ACE anywhere, a deny for the service) then leaves nothing changed.
+        # Parents come before children.
         top.entries = _service_read(top.entries, sid)
+        _require_service_read(top.entries, top.label, sid)
         writes = []
         for target in targets:
             assert target.parent is not None
@@ -475,14 +486,14 @@ def grant_service_read(root: Path, account: Account) -> None:
                     parent_label=str(target.parent.label)
                 )
             )
+            _require_service_read(target.entries, target.label, sid)
             writes.append((target.handle, target.entries, False))
         # The root is last: by then everything the service reads holds its own access.
         writes.append((root_handle, top.entries, root_protected))
         for handle, entries, protected in writes:
             winacl.set_dacl(handle, entries, protected=protected)
         for target in [top, *targets]:
-            if sid not in winacl.read_acl_handle(target.handle).sids:
-                raise PermsError(f"{target.label}: the service still has no access after the grant")
+            _require_service_read(winacl.read_entries(target.handle)[0], target.label, sid)
 
 
 def grant_service_read_file(path: Path, account: Account) -> None:
@@ -504,6 +515,7 @@ def grant_service_read_handle(handle: int, label: Path, account: Account) -> Non
     sid = _sid_of(account)
     with _errors(label):
         entries, protected = winacl.read_entries(handle)
-        winacl.set_dacl(handle, _service_read(entries, sid), protected=protected)
-        if sid not in winacl.read_acl_handle(handle).sids:
-            raise PermsError(f"{label}: the service still has no access after the grant")
+        granted = _service_read(entries, sid)
+        _require_service_read(granted, label, sid)
+        winacl.set_dacl(handle, granted, protected=protected)
+        _require_service_read(winacl.read_entries(handle)[0], label, sid)
