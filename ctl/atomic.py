@@ -20,6 +20,7 @@ from types import FrameType
 from typing import IO
 
 from ctl.errors import BinariesError
+from ctl.perms import Account
 
 CHUNK = 1 << 20
 DEFAULT_MODE = 0o644
@@ -81,7 +82,9 @@ def require_directory(directory: Path) -> None:
         os.close(_open_directory(directory))
 
 
-def replace_file(directory: Path, name: str, source: IO[bytes], mode: int | None) -> Path:
+def replace_file(
+    directory: Path, name: str, source: IO[bytes], mode: int | None, *, service: Account | None = None
+) -> Path:
     """Atomically make `directory/name` hold the bytes of `source`, with `mode` (kept from the old file if `None`).
 
     A symlink, a directory or anything else that is not a regular file at `name` is refused, never followed. Nothing but
