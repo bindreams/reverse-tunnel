@@ -60,7 +60,8 @@ def service_token_rows(root: Path, binaries: Path) -> tuple[list[dict[str, str]]
     run("icacls", str(root), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)M")
     (root / "bin").mkdir()
     for member in binaries.iterdir():
-        shutil.copy(member, root / "bin" / member.name)
+        if member.is_file():
+            shutil.copy(member, root / "bin" / member.name)
     out = root / "out"
     out.mkdir()
     script = out / "run.cmd"
@@ -80,8 +81,8 @@ def service_token_rows(root: Path, binaries: Path) -> tuple[list[dict[str, str]]
     done = out / "done"
     notify = win32file.FindFirstChangeNotification(str(out), False, win32con.FILE_NOTIFY_CHANGE_FILE_NAME)
     try:
-        goetia.daemon_install(root, DAEMON, enable=True)
         try:
+            goetia.daemon_install(root, DAEMON, enable=True)
             goetia.daemon_start(root, DAEMON)
             while not done.exists():
                 # external-bound: the service writing its result
