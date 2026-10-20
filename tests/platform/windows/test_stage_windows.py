@@ -1,8 +1,7 @@
 """`stage` and `apply` on a repository an earlier install left: no interruption strands the service, a rerun converges.
 
-The service's access is judged by `ctl.authz` (see `service_access`). It reads: the repository root, `bin` and every
-file in it but the record `.digests.json` (only `ctl` reads that, as the operator), `host` and `host/frpc.toml`,
-`secrets/token`, and it writes into `logs`.
+The service's access is judged by Windows' own access check (see `service_access`). It reads: `bin` and every file in
+it, `host` and `host/frpc.toml`, `secrets/token`, and it writes into `logs`. The repository root is not on the list.
 """
 
 import os
@@ -10,19 +9,20 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.platform.windows.acl_support import owned_shape
 from tests.platform.windows.service_access import descriptor_of, service_token
 from tests.unit.host_support import HostTree, build_host
 
 from ctl import _winfile as winfile
 from ctl import binaries, host, perms_windows, winacl
-from ctl.download import DIGESTS
 from ctl.perms import SID_LOCAL_SERVICE, AccountMode
 from ctl.services import Services
 
 OBJECT_INHERIT_ACE = winacl.OBJECT_INHERIT_ACE
+CONTAINER_INHERIT_ACE = winacl.CONTAINER_INHERIT_ACE
 INHERIT_ONLY_ACE = winacl.INHERIT_ONLY_ACE
 INHERITED_ACE = winacl.INHERITED_ACE
-READ_EXECUTE = winacl.READ_EXECUTE
+INHERITING = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
 
 PLATFORM = "windows-x86_64"
 # The rights each kind of object is asked for. The service starts `bin/*.exe`, reads its configuration and the token,
@@ -34,6 +34,7 @@ EXECUTE = 0x1 | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE  # FILE_READ_
 READ = winacl.READ
 ADD_TO = LIST | FILE_ADD_FILE
 APPEND = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+VARIANTS = ["fresh", "installed", "earlier", "previous"]
 
 
 class Interrupted(Exception):
@@ -52,23 +53,60 @@ def acls(root: Path) -> dict[Path, tuple[list[winacl.Entry], bool]]:
 # A host to install into ===============================================================================================
 
 
-def build(variant: str, base: Path, monkeypatch) -> HostTree:
-    """A repository as the three installs leave it: never installed, installed, and installed by the earlier version.
+def add_service_aces(path: Path, *added: winacl.Entry) -> None:
+    """`path` with `added` among its explicit ACEs; every other ACE and the inheritance state are kept."""
+    with perms_windows._handle(path, directory=path.is_dir(), access=perms_windows.ACL_ACCESS) as handle:
+        entries, protected = winacl.read_entries(handle)
+        winacl.set_dacl(handle, winacl.canonical(entries + list(added)), protected=protected)
 
-    The earlier version put an inheritable `(OI)(CI)(RX)` ACE for the service on the repository root.
+
+def write_previous_shape(root: Path) -> None:
+    """What the previous version of the install wrote: the service's read-and-execute, explicit, on the root, on `bin`
+    and each file in it, and on `host`, which also holds an ACE that its files inherit."""
+    allow = winacl.ACCESS_ALLOWED_ACE_TYPE
+
+    def service(flags: int) -> winacl.Entry:
+        return winacl.Entry(allow, flags, winacl.READ_EXECUTE, SID_LOCAL_SERVICE)
+
+    add_service_aces(root, service(0))
+    for directory in (root / "bin", root / "host"):
+        add_service_aces(
+            directory, service(0), *([service(OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE)] * (directory.name == "host"))
+        )
+    for path in sorted((root / "bin").iterdir()):
+        add_service_aces(path, service(0))
+    with perms_windows._handle(root / "host", directory=True, access=winfile.READ_CONTROL) as handle:
+        parent, _ = winacl.read_entries(handle)
+    for path in sorted((root / "host").iterdir()):
+        with perms_windows._handle(path, directory=False, access=perms_windows.ACL_ACCESS) as handle:
+            entries, protected = winacl.read_entries(handle)
+            inherited = winacl.inherited_for(parent, directory=False)
+            winacl.set_dacl(handle, winacl.canonical(winacl.explicit(entries) + inherited), protected=protected)
+
+
+def build(variant: str, base: Path, monkeypatch) -> HostTree:
+    """A repository in one of four states: never installed, installed, and installed by either earlier version.
+
+    The oldest put an inheritable `(OI)(CI)(RX)` ACE for the service on the repository root; the one before this put
+    explicit, mostly non-inheritable ACEs on the root, `bin`, `host` and their files (`write_previous_shape`).
     """
     base.mkdir()
     tree = build_host(base, monkeypatch, platform=PLATFORM)
+    (tree.root / "ctl").mkdir()
+    (tree.root / "ctl" / "module.py").write_bytes(b"")
     if variant == "installed":
         install(tree)
-    elif variant == "earlier":
+    elif variant in ("earlier", "previous"):
         tree.write_binaries()
         tree.record()
         (tree.root / "logs").mkdir()
         (tree.root / "logs" / "frpc.log").write_bytes(b"")
-        subprocess.run(["icacls", str(tree.root), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)(RX)"],
-                       check=True,
-                       capture_output=True)
+        if variant == "earlier":
+            subprocess.run(["icacls", str(tree.root), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)(RX)"],
+                           check=True,
+                           capture_output=True)
+        else:
+            write_previous_shape(tree.root)
     return tree
 
 
@@ -104,14 +142,14 @@ def install(tree: HostTree) -> None:
 
 def needed(root: Path) -> dict[Path, int]:
     """The objects of the install that exist now that the service opens, each with the rights it is asked for."""
-    wanted: dict[Path, int] = {Path("."): LIST}
+    wanted: dict[Path, int] = {}
     for directory, access in (("bin", LIST), ("host", LIST), ("secrets", LIST), ("logs", ADD_TO)):
         if (root / directory).is_dir():
             wanted[Path(directory)] = access
     for directory, access in (("bin", EXECUTE), ("logs", APPEND)):
         if (root / directory).is_dir():
             for entry in sorted((root / directory).iterdir()):
-                if entry.is_file() and entry.name != DIGESTS:
+                if entry.is_file():
                     wanted[entry.relative_to(root)] = access
     for name, access in (("host/frpc.toml", READ), ("secrets/token", READ)):
         if (root / name).is_file():
@@ -125,25 +163,48 @@ def readable(root: Path) -> set[Path]:
         return {path for path, access in needed(root).items() if token.grants(descriptor_of(root / path), access)}
 
 
-def service_aces(found: dict[Path, tuple[list[winacl.Entry], bool]], name: str) -> list[tuple[int, int]]:
-    """The service's ACEs on the relative path `name` as (mask, flags), in a fixed order."""
-    entries, _ = found[Path(name)]
-    return sorted((e.mask, e.flags) for e in entries if e.sid == SID_LOCAL_SERVICE)
+# The shape of the result ==============================================================================================
 
 
-def test_one_install_converges_a_repository_an_earlier_install_granted_and_a_second_changes_nothing(
-    tmp_path, monkeypatch
+def shape(found: dict[Path, tuple[list[winacl.Entry], bool]], name: str) -> tuple[set[tuple[str, int, int]], bool]:
+    """The ACEs on the relative path `name` as (sid, mask, flags), and whether its inheritance is broken."""
+    entries, protected = found[Path(name)]
+    return {(e.sid, e.mask, e.flags) for e in entries}, protected
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_one_install_gives_the_owned_directories_their_fixed_acls_and_a_second_changes_nothing(
+    tmp_path, monkeypatch, variant
 ):
-    tree = build("earlier", tmp_path / "earlier", monkeypatch)
+    tree = build(variant, tmp_path / variant, monkeypatch)
     install(tree)
     first = acls(tree.root)
-    for name in (".", "bin", "bin/frpc.exe"):  # nothing the root or bin hold for the service is inheritable
-        assert service_aces(first, name) == [(READ_EXECUTE, 0)], name
-    assert service_aces(first, "host") == sorted([(READ_EXECUTE, 0),
-                                                  (READ_EXECUTE, OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE)])
-    assert service_aces(first, "host/frpc.toml") == [(READ_EXECUTE, INHERITED_ACE)]
+    for directory, mask, files in ((
+        "bin", winacl.READ_EXECUTE, ("frpc.exe", "websocat.exe", "goetia-shim.exe", "goetia.exe", ".digests.json")
+    ), ("host", winacl.READ_EXECUTE, ("frpc.toml", )), ("logs", winacl.MODIFY, ())):
+        assert shape(first, directory) == (owned_shape(tree.root, mask, INHERITING), True), directory
+        for name in files:
+            assert shape(first, f"{directory}/{name}") == (owned_shape(tree.root, mask, INHERITED_ACE), False), name
     install(tree)
     assert acls(tree.root) == first
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_the_service_holds_no_ace_on_the_repository_root_after_an_install(tmp_path, monkeypatch, variant):
+    tree = build(variant, tmp_path / variant, monkeypatch)
+    install(tree)
+    entries, _ = acls(tree.root)[Path(".")]
+    assert [e for e in entries if e.sid == SID_LOCAL_SERVICE] == []
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_the_other_children_of_the_root_keep_their_whole_acls_through_an_install(tmp_path, monkeypatch, variant):
+    """A file and a directory `ctl` never opens, whichever ACE the root loses."""
+    tree = build(variant, tmp_path / variant, monkeypatch)
+    names = [Path("goetia.yaml"), Path("ctl"), Path("ctl/module.py")]
+    before = {name: acls(tree.root)[name] for name in names}
+    install(tree)
+    assert {name: acls(tree.root)[name] for name in names} == before
 
 
 # Events ===============================================================================================================
@@ -184,34 +245,15 @@ class Events:
             raise Interrupted
 
 
-# Comparing ============================================================================================================
-
-
-def unprotected(entries: list[winacl.Entry]) -> list[winacl.Entry]:
-    """`entries` as NTFS leaves them on a child it protects: what it inherited is explicit now. Order is kept."""
-    return [e._replace(flags=e.flags & ~INHERITED_ACE) for e in entries]
-
-
 def differences(got, want) -> list[str]:
-    """The paths whose ACL differs, ACE by ACE in stored order, duplicates included, each with both ACLs.
-
-    The one tolerated difference is a child that NTFS protected when its directory gained an inheritable ACE and an
-    interruption left so: its ACEs are the reference's, now all explicit, and the order among them is `canonical`'s, not
-    the inheritance order. So they are compared as the same list of ACEs, duplicates included, in any order.
-    """
-    differing = []
-    for path in sorted(got.keys() | want.keys()):
-        if got.get(path) == want.get(path):
-            continue
-        if path in got and path in want:
-            (own, protected), (expected, expected_protected) = got[path], want[path]
-            if protected and not expected_protected and sorted(own) == sorted(unprotected(expected)):
-                continue
-        differing.append(f"{path}: got {got.get(path)}, want {want.get(path)}")
-    return differing
+    """The paths whose ACL differs, ACE by ACE in stored order, duplicates included, each with both ACLs."""
+    return [
+        f"{path}: got {got.get(path)}, want {want.get(path)}" for path in sorted(got.keys() | want.keys())
+        if got.get(path) != want.get(path)
+    ]
 
 
-@pytest.mark.parametrize("variant", ["fresh", "installed", "earlier"])
+@pytest.mark.parametrize("variant", VARIANTS)
 def test_no_interruption_of_an_install_takes_the_service_read_from_what_it_needs_and_the_next_run_converges(
     tmp_path, monkeypatch, variant
 ):
@@ -232,6 +274,8 @@ def test_no_interruption_of_an_install_takes_the_service_read_from_what_it_needs
                 install(tree)
         held = readable(tree.root)
         assert before <= held, f"event {number}: the service lost {sorted(before - held)}"
+        in_bin = {path for path in needed(tree.root) if path.parts[0] == "bin"}
+        assert in_bin <= held, f"event {number}: a file in bin exists without the service's access: {sorted(in_bin - held)}"
         install(tree)  # the rerun converges in one run
         missing = set(needed(tree.root)) - readable(tree.root)
         assert not missing, f"after the rerun of event {number} the service cannot open {sorted(missing)}"

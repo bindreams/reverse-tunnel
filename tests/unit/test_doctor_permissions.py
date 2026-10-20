@@ -1,5 +1,6 @@
 """Who may read what: the POSIX owner and mode, and on Windows the SIDs and the rights each was given."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ from tests.unit.doctor_support import World, build_bridge, build_host_world
 
 from ctl import winacl
 from ctl.doctor import Outcome
-from ctl.doctor.permissions import Permissions
+from ctl.doctor.permissions import RIGHTS, Permissions
 from ctl.doctor.probes import Probes
 from ctl.winacl import Ace, Acl
 
@@ -177,23 +178,45 @@ def test_a_legacy_env_whose_operator_ace_lacks_delete_fails_asking_to_reinstall(
     )
 
 
-# The service's read of the deployment =================================================================================
+# The service's access to what it needs ================================================================================
 
-SERVICE_READ = (SERVICE, winacl.READ_EXECUTE, 0)
+ID = winacl.INHERITED_ACE
 FILES_ONLY = winacl.OBJECT_INHERIT_ACE | winacl.INHERIT_ONLY_ACE
-SERVICE_FILES = (SERVICE, winacl.READ_EXECUTE, FILES_ONLY)
-SERVICE_INHERITED = (SERVICE, winacl.READ_EXECUTE, winacl.INHERITED_ACE)
-HOST_DIR = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_FILES)
+FILE_WRITE_DATA = 0x2
+SERVICE_NEEDS = {
+    "bin": winacl.READ_EXECUTE,
+    "frpc.exe": winacl.READ_EXECUTE,
+    "websocat.exe": winacl.READ_EXECUTE,
+    "goetia-shim.exe": winacl.READ_EXECUTE,
+    "host": winacl.READ_EXECUTE,
+    "frpc.toml": winacl.READ,
+    "token": winacl.READ,
+    "logs": winacl.MODIFY,
+}
 
 
-def service_acls(world: World, **changes: Acl) -> dict[str, Acl]:
-    """What `ctl install` leaves. The root, `bin` and its files hold the service's ACE, none inheritable. `host` holds
-    it for itself and for the files created in it, which inherit it."""
-    root = world.config.root
-    acls = {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_READ) for p in [root, root / "bin"]}
-    acls |= {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_READ) for p in (root / "bin").iterdir() if p.is_file()}
-    acls |= {"host": HOST_DIR}
-    acls |= {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_INHERITED) for p in (root / "host").iterdir() if p.is_file()}
+def owned(mask: int) -> Acl:
+    """A directory `ctl install` owns: protected, the operator and Administrators in full, the service with `mask`."""
+    return acl((ADMINS, winacl.FULL, INHERIT), (OPERATOR, winacl.FULL, INHERIT), (SERVICE, mask, INHERIT))
+
+
+def owned_file(mask: int) -> Acl:
+    """A file in one: it holds what it inherits, so it is not protected."""
+    return acl((ADMINS, winacl.FULL, ID), (OPERATOR, winacl.FULL, ID), (SERVICE, mask, ID), protected=False)
+
+
+def service_acls(**changes: Acl) -> dict[str, Acl]:
+    """What `ctl install` leaves, keyed by the last component of each path the fake reads (the root is never read)."""
+    acls = {
+        "bin": owned(winacl.READ_EXECUTE),
+        "host": owned(winacl.READ_EXECUTE),
+        "logs": owned(winacl.MODIFY),
+        "token": HOST_TOKEN,
+        ".digests.json": owned_file(winacl.READ_EXECUTE),
+        "goetia.exe": owned_file(winacl.READ_EXECUTE),
+        "frpc.toml": owned_file(winacl.READ_EXECUTE),
+    }
+    acls |= {name: owned_file(winacl.READ_EXECUTE) for name in ("frpc.exe", "websocat.exe", "goetia-shim.exe")}
     return acls | changes
 
 
@@ -201,128 +224,16 @@ def service_read(world: World, acls: dict[str, Acl], denies: dict[str, tuple[Ace
     return Permissions(world.config, windows(acls, denies=denies)).service_read()
 
 
-def test_the_service_read_install_writes_passes(host):
-    outcome, detail = service_read(host, service_acls(host))
-    assert outcome is Outcome.PASS, detail
+def place(world: World, name: str) -> Path:
+    root = world.config.root
+    where = {
+        "frpc.exe": "bin", "websocat.exe": "bin", "goetia-shim.exe": "bin", "frpc.toml": "host", "token": "secrets"
+    }
+    return root / where[name] / name if name in where else root / name
 
 
-def test_the_files_only_ace_on_host_is_read_from_every_entry_because_acl_leaves_it_out(host):
-    probes = windows(service_acls(host))
-    host_dir = host.config.root / "host"
-    assert not [a for a in probes.acl(host_dir).aces if a.flags & winacl.INHERIT_ONLY_ACE]  # as `winacl.read_acl`
-    assert [e for e in probes.entries(host_dir)[0] if e.flags & winacl.INHERIT_ONLY_ACE]
-    assert Permissions(host.config, probes).service_read()[0] is Outcome.PASS
-
-
-def test_an_inheritable_service_ace_on_the_root_from_an_earlier_install_fails_asking_to_reinstall(host):
-    old = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ_EXECUTE, INHERIT))
-    outcome, detail = service_read(host, service_acls(host, **{host.config.root.name: old}))
-    assert outcome is Outcome.FAIL
-    assert f"{host.config.root}: {SERVICE} (LocalService):(OI)(CI)(RX) is inheritable" in detail
-    assert "ctl install" in detail
-
-
-def test_an_inheritable_service_ace_on_bin_fails(host):
-    old = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ_EXECUTE, INHERIT))
-    outcome, detail = service_read(host, service_acls(host, bin=old))
-    assert outcome is Outcome.FAIL and f"{host.config.root / 'bin'}: " in detail and "is inheritable" in detail
-
-
-def test_a_files_only_service_ace_on_bin_fails(host):
-    old = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_FILES)
-    outcome, detail = service_read(host, service_acls(host, bin=old))
-    assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(OI)(IO)(RX) is inheritable" in detail
-
-
-@pytest.mark.parametrize(
-    "flags", [
-        INHERIT, INHERIT | winacl.INHERIT_ONLY_ACE, winacl.OBJECT_INHERIT_ACE,
-        FILES_ONLY | winacl.NO_PROPAGATE_INHERIT_ACE
-    ]
-)
-def test_a_service_ace_on_host_that_is_not_files_only_fails(host, flags):
-    wrong = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, (SERVICE, winacl.READ_EXECUTE, flags))
-    outcome, detail = service_read(host, service_acls(host, host=wrong))
-    assert outcome is Outcome.FAIL
-    assert f"{host.config.root / 'host'}: " in detail and "(OI)(IO)" in detail and "ctl install" in detail
-
-
-def test_host_without_the_ace_its_new_files_inherit_fails(host):
-    old = acl((ADMINS, winacl.FULL, 0), SERVICE_READ)  # the shape of the previous install
-    outcome, detail = service_read(host, service_acls(host, host=old))
-    assert outcome is Outcome.FAIL
-    assert f"{host.config.root / 'host'}: LocalService has no (OI)(IO) ACE" in detail and "ctl install" in detail
-
-
-def test_host_without_the_ace_for_the_directory_itself_fails(host):
-    only_files = acl((ADMINS, winacl.FULL, 0), SERVICE_FILES)
-    outcome, detail = service_read(host, service_acls(host, host=only_files))
-    assert outcome is Outcome.FAIL
-    assert f"{host.config.root / 'host'}: LocalService has no ACE of its own for the directory" in detail
-
-
-def test_host_with_no_service_ace_fails(host):
-    outcome, detail = service_read(host, service_acls(host, host=acl((ADMINS, winacl.FULL, 0))))
-    assert outcome is Outcome.FAIL and f"{host.config.root / 'host'}: LocalService has no ACE of its own" in detail
-
-
-def test_a_frpc_toml_replaced_without_the_service_ace_fails_naming_it(host):
-    bare = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.MODIFY, 0))
-    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": bare}))
-    toml = host.config.root / "host" / "frpc.toml"
-    assert outcome is Outcome.FAIL and f"{toml}: LocalService has no ACE" in detail and "ctl install" in detail
-
-
-def test_a_frpc_toml_the_previous_install_gave_its_own_ace_passes(host):
-    outcome, detail = service_read(
-        host, service_acls(host, **{"frpc.toml": acl((ADMINS, winacl.FULL, 0), SERVICE_READ)})
-    )
-    assert outcome is Outcome.PASS, detail
-
-
-@pytest.mark.parametrize("where", ["frpc.toml", "frpc.exe"])
-def test_a_file_ntfs_made_protected_that_holds_the_service_ace_explicitly_passes(host, where):
-    """NTFS makes what a file inherited explicit when its directory gains an inheritable ACE; `ctl` keeps it so."""
-    protected = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.MODIFY, 0), SERVICE_READ, protected=True)
-    bin_file = next(p.name for p in (host.config.root / "bin").iterdir() if p.is_file())
-    name = bin_file if where == "frpc.exe" else where
-    outcome, detail = service_read(host, service_acls(host, **{name: protected}))
-    assert outcome is Outcome.PASS, detail
-
-
-def test_an_inheritable_service_ace_on_a_file_in_host_fails(host):
-    wrong = acl((ADMINS, winacl.FULL, 0), SERVICE_INHERITED, (SERVICE, winacl.READ_EXECUTE, FILES_ONLY))
-    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": wrong}))
-    assert outcome is Outcome.FAIL and "is inheritable" in detail
-
-
-def test_an_inherited_service_ace_that_is_not_read_and_execute_on_a_file_in_host_fails(host):
-    widened = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.MODIFY, winacl.INHERITED_ACE))
-    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": widened}))
-    assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(M) is not (RX)" in detail
-
-
-def test_a_service_ace_that_is_not_read_and_execute_fails(host):
-    widened = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.MODIFY, 0))
-    outcome, detail = service_read(host, service_acls(host, bin=widened))
-    assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(M) is not (RX)" in detail
-
-
-def test_a_service_ace_on_host_that_is_not_read_and_execute_fails(host):
-    widened = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.MODIFY, 0), (SERVICE, winacl.MODIFY, FILES_ONLY))
-    outcome, detail = service_read(host, service_acls(host, host=widened))
-    assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(M) is not (RX)" in detail
-
-
-def test_a_service_ace_that_only_comes_from_the_parent_does_not_count_on_a_file_in_bin(host):
-    inherited = acl((ADMINS, winacl.FULL, 0), SERVICE_INHERITED)
-    outcome, detail = service_read(host, service_acls(host, **{".digests.json": inherited}))
-    assert outcome is Outcome.FAIL and "has no ACE" in detail
-
-
-def test_a_directory_left_in_bin_is_not_a_file_the_service_reads(host):
-    (host.config.root / "bin" / ".staging").mkdir()
-    outcome, detail = service_read(host, service_acls(host))
+def test_the_acls_install_writes_give_the_service_what_it_needs(host):
+    outcome, detail = service_read(host, service_acls())
     assert outcome is Outcome.PASS, detail
 
 
@@ -331,47 +242,114 @@ def test_the_service_read_is_not_applicable_on_posix(host):
     assert outcome is Outcome.NOT_APPLICABLE
 
 
-# A deny, or an ACE written twice ======================================================================================
-
-FILE_WRITE_DATA = 0x2
-
-
-def places(world: World) -> dict[str, Path]:
-    """Each kind of path the service reads. The fake ACLs are keyed on the last component."""
-    root = world.config.root
-    (binary, *_) = sorted(p for p in (root / "bin").iterdir() if p.is_file())
-    return {
-        "root": root, "bin": root / "bin", "file in bin": binary, "host": root / "host",
-        "file in host": root / "host" / "frpc.toml"
-    }
-
-
-@pytest.mark.parametrize("kind", ["root", "bin", "file in bin", "host", "file in host"])
-@pytest.mark.parametrize("flags", [0, winacl.INHERITED_ACE, FILES_ONLY], ids=["explicit", "inherited", "inherit-only"])
-def test_a_deny_for_the_service_on_any_path_it_needs_fails_naming_the_path(host, kind, flags):
-    path = places(host)[kind]
-    outcome, detail = service_read(host, service_acls(host), {path.name: (Ace(SERVICE, FILE_WRITE_DATA, flags), )})
+@pytest.mark.parametrize("name", SERVICE_NEEDS)
+@pytest.mark.parametrize("flags", [0, ID, FILES_ONLY], ids=["explicit", "inherited", "inherit-only"])
+@pytest.mark.parametrize("sid", [SERVICE, winacl.SID_EVERYONE, OTHER], ids=["service", "everyone", "another"])
+def test_a_deny_ace_of_any_kind_on_anything_the_service_needs_fails_naming_the_path_and_whom_it_denies(
+    host, name, flags, sid
+):
+    outcome, detail = service_read(host, service_acls(), {name: (Ace(sid, FILE_WRITE_DATA, flags), )})
     assert outcome is Outcome.FAIL
-    assert f"{path}: LocalService is denied" in detail and "ctl install" in detail
+    assert f"{place(host, name)}: has a deny ACE for {sid}" in detail and "ctl install" in detail
 
 
-@pytest.mark.parametrize("kind", ["root", "bin", "file in bin", "file in host"])
-def test_two_identical_explicit_service_aces_fail_naming_the_path(host, kind):
-    path = places(host)[kind]
-    twice = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_READ)
-    outcome, detail = service_read(host, service_acls(host, **{path.name: twice}))
+@pytest.mark.parametrize("name", SERVICE_NEEDS)
+def test_an_object_with_no_allow_for_the_service_fails_naming_the_path(host, name):
+    bare = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0))
+    outcome, detail = service_read(host, service_acls(**{name: bare}))
     assert outcome is Outcome.FAIL
-    assert f"{path}: {SERVICE} (LocalService):(RX) is written twice" in detail
+    assert f"{place(host, name)}: LocalService is not allowed" in detail and "it holds no allow" in detail
+    assert "ctl install" in detail
 
 
-def test_two_identical_explicit_service_aces_on_host_fail(host):
-    twice = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_FILES, SERVICE_FILES)
-    outcome, detail = service_read(host, service_acls(host, host=twice))
+def test_a_frpc_toml_moved_into_host_keeps_its_old_acl_and_fails(host):
+    """A file moved in from elsewhere keeps the DACL it had, which is the operator's and not the service's."""
+    moved = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0), protected=False)
+    outcome, detail = service_read(host, service_acls(**{"frpc.toml": moved}))
+    toml = host.config.root / "host" / "frpc.toml"
+    assert outcome is Outcome.FAIL and f"{toml}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize(
+    "name,narrow", [
+        ("bin", winacl.READ),
+        ("frpc.exe", winacl.READ),
+        ("host", winacl.READ),
+        ("logs", winacl.READ_EXECUTE),
+    ]
+)
+def test_an_allow_that_does_not_cover_what_the_service_needs_fails_saying_what_it_holds(host, name, narrow):
+    narrowed = acl((ADMINS, winacl.FULL, INHERIT), (SERVICE, narrow, INHERIT))
+    outcome, detail = service_read(host, service_acls(**{name: narrowed}))
     assert outcome is Outcome.FAIL
-    assert f"{host.config.root / 'host'}: {SERVICE} (LocalService):(OI)(IO)(RX) is written twice" in detail
+    assert f"{place(host, name)}: LocalService is not allowed" in detail
+    assert f"it holds ({RIGHTS[narrow]})" in detail
 
 
-def test_a_file_in_host_that_inherits_the_ace_and_holds_it_explicitly_too_is_not_a_duplicate(host):
-    both = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_INHERITED)
-    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": both}))
+def test_allows_for_the_service_that_together_cover_what_it_needs_pass(host):
+    split = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ, 0), (SERVICE, 0x20, 0))  # read, then execute
+    outcome, detail = service_read(host, service_acls(**{"frpc.exe": split}))
     assert outcome is Outcome.PASS, detail
+
+
+def test_an_allow_the_service_holds_only_by_inheriting_it_counts(host):
+    inherited = acl((ADMINS, winacl.FULL, ID), (SERVICE, winacl.READ_EXECUTE, ID), protected=False)
+    outcome, detail = service_read(host, service_acls(**{"frpc.toml": inherited}))
+    assert outcome is Outcome.PASS, detail
+
+
+def test_an_allow_that_applies_only_to_new_files_does_not_count_for_the_directory(host):
+    files_only = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ_EXECUTE, FILES_ONLY))
+    outcome, detail = service_read(host, service_acls(host=files_only))
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'host'}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize("group", [winacl.SID_EVERYONE, winacl.SID_USERS, winacl.SID_AUTHENTICATED_USERS])
+def test_an_allow_for_a_group_the_service_is_in_is_not_an_allow_for_the_service(host, group):
+    via_group = acl((ADMINS, winacl.FULL, 0), (group, winacl.READ_EXECUTE, 0))
+    outcome, detail = service_read(host, service_acls(bin=via_group))
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'bin'}: LocalService is not allowed" in detail
+
+
+def test_files_the_service_never_reads_are_not_judged(host):
+    """`goetia.exe` is run by `ctl`, and `.digests.json` is read by doctor, as the operator."""
+    bare = acl((ADMINS, winacl.FULL, 0))
+    denied = (Ace(SERVICE, FILE_WRITE_DATA, 0), )
+    outcome, detail = service_read(
+        host, service_acls(**{"goetia.exe": bare, ".digests.json": bare}),
+        {"goetia.exe": denied, ".digests.json": denied}
+    )
+    assert outcome is Outcome.PASS, detail
+
+
+def test_every_failing_object_is_reported_with_a_count(host):
+    bare = acl((ADMINS, winacl.FULL, 0))
+    outcome, detail = service_read(host, service_acls(bin=bare, logs=bare))
+    assert outcome is Outcome.FAIL
+    assert "wrong on 2 path(s)" in detail and f"{host.config.root / 'bin'}:" in detail
+    assert f"{host.config.root / 'logs'}:" in detail
+
+
+def reading(world: World, fail_on: str, error: OSError):
+    """The service check with every object readable but the one called `fail_on`, which raises `error`."""
+    probes = windows(service_acls())
+    read = probes.entries
+
+    def entries(path):
+        if path.name == fail_on:
+            raise error
+        return read(path)
+
+    return Permissions(world.config, dataclasses.replace(probes, entries=entries)).service_read()
+
+
+@pytest.mark.parametrize("name", SERVICE_NEEDS)
+def test_an_object_that_is_missing_fails_saying_to_install(host, name):
+    outcome, detail = reading(host, name, FileNotFoundError(2, "The system cannot find the file specified"))
+    assert outcome is Outcome.FAIL
+    assert f"{place(host, name)}: missing" in detail and "ctl install" in detail
+
+
+def test_an_object_doctor_cannot_read_fails_instead_of_crashing(host):
+    outcome, detail = reading(host, "frpc.toml", PermissionError(5, "Access is denied"))
+    assert outcome is Outcome.FAIL and "Access is denied" in detail

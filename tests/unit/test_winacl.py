@@ -340,3 +340,30 @@ def test_the_operator_may_delete_a_file_it_was_granted_because_replacing_a_secre
 def test_the_operator_keeps_modify_on_a_directory():
     granted = winacl.grants(directory=True, operator=OPERATOR_SID, readers=(READER_SID, ), writers=())
     assert granted[OPERATOR_SID] == winacl.MODIFY
+
+
+def test_full_control_is_granted_to_each_sid_named_for_it_besides_administrators():
+    granted = winacl.grants(directory=True, operator=None, readers=(READER_SID, ), writers=(), full=(OPERATOR_SID, ))
+    assert granted == {
+        winacl.SID_ADMINISTRATORS: winacl.FULL,
+        OPERATOR_SID: winacl.FULL,
+        READER_SID: winacl.READ_EXECUTE,
+    }
+
+
+def test_a_sid_given_full_control_holds_it_once_even_if_it_is_named_in_another_role():
+    granted = winacl.grants(directory=True, operator=OPERATOR_SID, readers=(), writers=(), full=(OPERATOR_SID, ))
+    assert granted == {winacl.SID_ADMINISTRATORS: winacl.FULL, OPERATOR_SID: winacl.FULL}
+
+
+def test_plan_isolated_with_full_control_lists_every_grant_inheritable_and_nothing_else():
+    acl, wanted = winacl.plan(
+        directory=True, operator=None, readers=(), writers=(READER_SID, ), full=(OPERATOR_SID, ), isolate=True
+    )
+    inherit = OI | CI
+    assert acl == [
+        winacl.Entry(ALLOW, inherit, winacl.FULL, winacl.SID_ADMINISTRATORS),
+        winacl.Entry(ALLOW, inherit, winacl.FULL, OPERATOR_SID),
+        winacl.Entry(ALLOW, inherit, winacl.MODIFY, READER_SID),
+    ]
+    assert wanted == {winacl.SID_ADMINISTRATORS, OPERATOR_SID, READER_SID}

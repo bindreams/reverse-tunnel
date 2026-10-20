@@ -665,19 +665,19 @@ def test_the_flag_does_not_detach_an_uninstall_that_cannot_disconnect_anyone(run
 # Staging directory ====================================================================================================
 
 
-def test_stage_empties_the_staging_directory_before_granting_the_service_read(running, monkeypatch):
-    """On Windows `grant_service_read` refuses a subdirectory of `bin\\`, and a failed run leaves exactly that."""
+def test_stage_empties_the_staging_directory_before_converging_the_owned_directories(running, monkeypatch):
+    """On Windows `converge_owned` refuses a subdirectory of `bin\`, and a failed run leaves exactly that."""
     staging = running.root / "bin" / ".staging"
     (staging / "leftover-directory").mkdir(parents=True)
     (staging / "leftover").write_bytes(b"x")
     seen = []
-    original = perms.grant_service_read
+    original = perms.converge_owned
     monkeypatch.setattr(
-        perms, "grant_service_read",
-        lambda root, account: seen.append((root / "bin" / ".staging").exists()) or original(root, account)
+        perms, "converge_owned", lambda path, *args, **kwargs: seen.append((running.root / "bin" / ".staging").exists())
+        or original(path, *args, **kwargs)
     )
     run_install(running)
-    assert seen == [False]
+    assert seen and set(seen) == {False}
 
 
 def test_the_staging_directory_is_gone_after_a_failed_apply(running, monkeypatch):
@@ -707,88 +707,99 @@ def test_the_staging_directory_is_gone_after_a_failed_download(running, monkeypa
     assert not (running.root / "bin" / ".staging").exists()
 
 
-# The Windows service's read ===========================================================================================
+# The owned directories ================================================================================================
 #
-# On Windows the service reads `bin/` and `host/` through ACEs `ctl` writes to each object, none of them inheritable in
-# `bin/`, so a file created or replaced there has no access until `ctl` gives it. The final name of a binary must never
-# exist without the grant, and `bin/` must never be left without its own ACE. The grants are no-ops on POSIX; these
-# tests record when and with what they are called.
+# On Windows `bin/`, `host/` and `logs/` are the install's outright: each is written whole, with the service's access in
+# the same write, and the service's ACE is taken from the repository root only when all of them are done. These
+# operations are no-ops on POSIX, where `bin/` and `logs/` have an owner and a mode; these tests record when and with
+# what they are called.
 
 
 @pytest.fixture
-def grants(monkeypatch):
-    """Everything the install does to give the service read, in order, with the state at the time of the call."""
+def events(monkeypatch):
+    """Every permission operation of the install that the Windows install shapes, in order, with its path."""
     events = []
-    converge_dir = perms.converge_dir
+    for name in ("converge_owned", "converge_dir", "converge_tree", "revoke_root"):
+        real = getattr(perms, name)
+
+        def spy(path, *args, _name=name, _real=real, **kwargs):
+            events.append((_name, path, kwargs))
+            return _real(path, *args, **kwargs)
+
+        monkeypatch.setattr(perms, name, spy)
+    return events
+
+
+def test_bin_and_host_are_converged_as_owned_directories(host_tree, events):
+    run_install(host_tree)
+    owned = [path for name, path, _ in events if name == "converge_owned"]
+    assert owned == [host_tree.root / "bin", host_tree.root / "host"]
+
+
+def test_the_service_is_taken_off_the_root_after_every_owned_directory_is_converged(host_tree, events):
+    run_install(host_tree)
+    root = host_tree.root
+    names = [(name, path) for name, path, _ in events]
+    revoked = [index for index, event in enumerate(names) if event[0] == "revoke_root"]
+    assert len(revoked) == 1 and names[revoked[0]] == ("revoke_root", root)
+    for done in (("converge_owned", root / "bin"), ("converge_owned", root / "host"),
+                 ("converge_dir", root / "secrets"), ("converge_tree", root / "logs")):
+        assert names.index(done) < revoked[0], done
+
+
+def test_host_is_converged_with_no_mode_so_git_s_directory_keeps_its_own_on_posix(host_tree, events):
+    (host_tree.root / "host").chmod(0o775)
+    run_install(host_tree)
+    assert mode_of(host_tree.root / "host") == 0o775
+    (kwargs, ) = [kwargs for name, path, kwargs in events if name == "converge_owned" and path.name == "host"]
+    assert kwargs.get("mode") is None
+
+
+@pytest.fixture
+def replacements(monkeypatch):
+    """Every file the install writes into `bin/` through `replace_file`, with the bytes it was given."""
+    events = []
     replace_file = host.replace_file
     replace_record = binaries.replace_file
 
-    def spy_converge(path, *args, **kwargs):
-        events.append(("converge", path, kwargs.get("service_read")))
-        return converge_dir(path, *args, **kwargs)
-
     def spy_replace(directory, name, source, mode, **kwargs):
-        content = source.getvalue()
-        events.append(("replace", directory / name, kwargs.get("service"), content))
+        events.append((directory / name, source.getvalue()))
         source.seek(0)
         return replace_file(directory, name, source, mode, **kwargs)
 
     def spy_record(directory, name, source, mode, **kwargs):
-        events.append(("record", directory / name, kwargs.get("service")))
+        events.append((directory / name, None))
         return replace_record(directory, name, source, mode, **kwargs)
 
-    monkeypatch.setattr(perms, "converge_dir", spy_converge)
     monkeypatch.setattr(host, "replace_file", spy_replace)
     monkeypatch.setattr(binaries, "replace_file", spy_record)
-    monkeypatch.setattr(perms, "grant_service_read", lambda root, account: events.append(("grant", root)))
     return events
 
 
-def test_the_service_is_granted_read_before_bin_is_converged_once(host_tree, grants):
-    """The grant removes what an earlier install wrote on the root before any directory records it as inherited."""
+def test_every_binary_and_the_record_are_written_into_bin(host_tree, replacements):
     run_install(host_tree)
     bin_dir = host_tree.root / "bin"
-    (granted, ) = [i for i, event in enumerate(grants) if event[0] == "grant"]
-    converged = [i for i, event in enumerate(grants) if event[:2] == ("converge", bin_dir)]
-    assert len(converged) == 1 and converged[0] > granted
+    written = {path: content for path, content in replacements}
+    assert written == {bin_dir / name: host_tree.pinned_bytes(name)
+                       for name in host_tree.pins} | {bin_dir / DIGESTS: None}
 
 
-def test_bin_is_converged_with_the_service_read_in_the_same_write(host_tree, grants):
-    """A converge that rewrites the whole ACL of `bin` must not drop the service's ACE, even for an instant."""
-    run_install(host_tree)
-    bin_dir = host_tree.root / "bin"
-    service = perms.service_account(host_tree.config)
-    assert [event[2] for event in grants if event[:2] == ("converge", bin_dir)] == [service]
-
-
-def test_every_binary_and_the_record_are_written_with_the_service_read(host_tree, grants):
-    run_install(host_tree)
-    bin_dir = host_tree.root / "bin"
-    service = perms.service_account(host_tree.config)
-    replaced = {event[1]: (event[2], event[3]) for event in grants if event[0] == "replace"}
-    assert replaced == {bin_dir / name: (service, host_tree.pinned_bytes(name)) for name in host_tree.pins}
-    # The record is replaced with the service's read already on it.
-    assert [(event[1], event[2]) for event in grants if event[0] == "record"] == [(bin_dir / DIGESTS, service)]
-    assert [event[0] for event in grants].index("grant") < [event[0] for event in grants].index("replace")
-
-
-def test_an_install_that_replaces_and_records_nothing_writes_no_file(host_tree, grants):
+def test_an_install_that_replaces_and_records_nothing_writes_no_file(host_tree, replacements):
     run_install(host_tree)
     settle(host_tree)
-    grants.clear()
+    replacements.clear()
     run_install(host_tree)
-    assert [event for event in grants if event[0] in ("replace", "record")] == []
-    assert [event[0] for event in grants if event[0] == "grant"] == ["grant"]
+    assert replacements == []
 
 
-def test_only_the_binary_that_was_replaced_is_written_with_the_service_read(host_tree, grants, monkeypatch):
+def test_only_the_binary_that_was_replaced_is_written(host_tree, replacements, monkeypatch):
     monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
     run_install(host_tree)
     settle(host_tree)
     (host_tree.root / "bin" / "frpc").write_bytes(b"tampered")
-    grants.clear()
+    replacements.clear()
     run_install(host_tree)
-    assert [event[1] for event in grants if event[0] == "replace"] == [host_tree.root / "bin" / "frpc"]
+    assert [path for path, _ in replacements if path.name != DIGESTS] == [host_tree.root / "bin" / "frpc"]
 
 
 # bin/ is the installer's ==============================================================================================

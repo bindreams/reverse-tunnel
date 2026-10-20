@@ -18,14 +18,13 @@ from binaries_support import (
     tool_assets,
 )
 
-from ctl import binaries, download
+from ctl import download
 from ctl.archive import ArchiveFormat
 from ctl.binaries import Pin, bundle_for, load_lock, pins_for, refresh
 from sigstore.verify import Verifier
 
 from ctl.download import Fetcher, TrustLevel, fetch, read_digests, record_digests
 from ctl.errors import AttestationError, BinariesError, UpstreamUnavailable
-from ctl.perms import Account
 
 SHAPES = [("frp", "linux-x86_64"), ("goetia", "linux-x86_64"), ("frp", "windows-x86_64"), ("goetia", "windows-x86_64")]
 
@@ -460,23 +459,6 @@ def test_record_digests_replaces_the_previous_record(lock, dest):
     record_digests(dest, pins_for(lock, "frp", "linux-x86_64"))
     record_digests(dest, [the_pin(lock, "websocat", "linux-x86_64")])
     assert set(read_digests(dest)) == {"websocat"}
-
-
-def test_record_digests_hands_the_service_account_to_the_replace_so_the_file_never_lacks_its_access(
-    lock, dest, monkeypatch
-):
-    seen = []
-    monkeypatch.setattr(binaries, "replace_file", lambda *args, **kwargs: seen.append(kwargs))
-    account = Account("LocalService", None, None)
-    record_digests(dest, [], service=account)
-    assert seen == [{"service": account}]
-
-
-def test_record_digests_without_a_service_account_replaces_as_before(lock, dest, monkeypatch):
-    seen = []
-    monkeypatch.setattr(binaries, "replace_file", lambda *args, **kwargs: seen.append(kwargs))
-    record_digests(dest, [])
-    assert seen == [{"service": None}]
 
 
 def test_two_pins_for_one_name_with_different_digests_are_refused(lock, dest):

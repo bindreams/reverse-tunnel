@@ -5,6 +5,6 @@ from ctl.perms import Account
 
 
 def test_the_seam_does_not_refuse_local_service(tmp_path):
-    """Traversal is guaranteed by construction: `grant_service_read` gives LocalService a read-and-execute ACE on the
-    repository root, and LocalService holds SeChangeNotifyPrivilege, so the ancestors need no ACE."""
+    """The service needs nothing on the repository root: its working directory is `logs`, and LocalService holds
+    SeChangeNotifyPrivilege, so the ancestors of `bin`, `host` and `logs` need no ACE either."""
     access.verify_traversable(tmp_path, Account("LocalService", None, None))
