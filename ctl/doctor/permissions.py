@@ -21,6 +21,14 @@ ENV_MODE, SECRETS_MODE, TOKEN_MODE = 0o600, 0o711, 0o600
 INSTALL = "run `ctl install` to restore it"
 INHERITANCE = winacl.OBJECT_INHERIT_ACE | winacl.CONTAINER_INHERIT_ACE
 INHERITANCE_FLAGS = INHERITANCE | winacl.NO_PROPAGATE_INHERIT_ACE
+INHERITING = INHERITANCE_FLAGS | winacl.INHERIT_ONLY_ACE  # every flag that says where an ACE applies
+FILES_ONLY = winacl.OBJECT_INHERIT_ACE | winacl.INHERIT_ONLY_ACE
+INHERIT_TOKENS = (
+    (winacl.OBJECT_INHERIT_ACE, "(OI)"),
+    (winacl.CONTAINER_INHERIT_ACE, "(CI)"),
+    (winacl.NO_PROPAGATE_INHERIT_ACE, "(NP)"),
+    (winacl.INHERIT_ONLY_ACE, "(IO)"),
+)
 SID_NAMES = {
     winacl.SID_ADMINISTRATORS: "Administrators",
     winacl.SID_LOCAL_SERVICE: "LocalService",
@@ -43,7 +51,7 @@ Ace = tuple[str, int, int]  # sid, rights mask, inheritance flags
 def _describe(ace: Ace) -> str:
     sid, mask, flags = ace
     name = f" ({SID_NAMES[sid]})" if sid in SID_NAMES else ""
-    inherit = "(OI)(CI)" if flags & INHERITANCE == INHERITANCE else ""
+    inherit = "".join(token for bit, token in INHERIT_TOKENS if flags & bit)
     return f"{sid}{name}:{inherit}({RIGHTS.get(mask, hex(mask))})"
 
 
@@ -107,36 +115,77 @@ class Permissions:
         )
 
     def service_read(self) -> Verdict:
-        """The service's own read-and-execute ACE on the root, `bin`, `host` and each file in them, none inheritable.
+        """The service's read-and-execute ACE on the root, `bin`, `host` and each file in them.
 
-        The inheritable one an earlier `ctl install` wrote on the root makes NTFS rewrite every other entry there.
+        On the root, `bin` and the files in `bin` it is explicit and not inheritable: the inheritable one an earlier
+        `ctl install` wrote on the root makes NTFS rewrite every other entry there. `host` holds it twice, once for
+        itself and once for its files only (`(OI)(IO)`), so a `frpc.toml` that git recreates is readable; a file in
+        `host` may hold it by inheritance.
         """
         if not self.probes.windows:
             return not_applicable("only Windows gives the service its access by ACE; POSIX uses the owner and mode")
-        paths = [self.root]
-        for directory in (self.root / "bin", self.root / "host"):
+        paths = [(self.root, self._service_ace_problems)]
+        for directory, own, entry in (
+            (self.root / "bin", self._service_ace_problems, self._service_ace_problems),
+            (self.root / "host", self._host_ace_problems, self._host_file_ace_problems),
+        ):
             if directory.is_dir():
-                paths.append(directory)
-                paths += sorted(p for p in directory.iterdir() if p.is_file() and not p.is_symlink())
-        problems = [problem for path in paths for problem in self._service_ace_problems(path)]
+                paths.append((directory, own))
+                paths += [(p, entry) for p in sorted(directory.iterdir()) if p.is_file() and not p.is_symlink()]
+        problems = [problem for path, check in paths for problem in check(path)]
         if problems:
             summary = f"the service's read access is wrong on {len(problems)} path(s); {INSTALL}"
             return fail("\n".join([summary, *problems]))
-        return ok(f"LocalService reads {self.root}, bin, host and their files, with nothing inheritable")
+        return ok(f"LocalService reads {self.root}, bin, host and their files; only the files in host inherit it")
+
+    def _service_aces(self, path: Path) -> tuple[list[Ace], list[Ace]]:
+        """The service's ACEs on `path`: the explicit ones, then the inherited ones."""
+        mine = [(ace.sid, ace.mask, ace.flags) for ace in self.probes.acl(path).aces
+                if ace.sid == winacl.SID_LOCAL_SERVICE]
+        inherited = [ace for ace in mine if ace[2] & winacl.INHERITED_ACE]
+        return [ace for ace in mine if ace not in inherited], inherited
+
+    @staticmethod
+    def _wrong_mask(path: Path, aces: list[Ace]) -> list[str]:
+        return [
+            f"{path}: {_describe(ace)} is not ({RIGHTS[winacl.READ_EXECUTE]})" for ace in aces
+            if ace[1] != winacl.READ_EXECUTE
+        ]
 
     def _service_ace_problems(self, path: Path) -> list[str]:
-        mine = [ace for ace in self.probes.acl(path).aces if ace.sid == winacl.SID_LOCAL_SERVICE]
-        explicit = [ace for ace in mine if not ace.flags & winacl.INHERITED_ACE]
+        """The root, `bin` and the files in `bin`: an explicit ACE that is not inheritable."""
+        explicit, _ = self._service_aces(path)
         if not explicit:
             return [f"{path}: LocalService has no ACE of its own"]
-        problems = []
-        for ace in explicit:
-            described = _describe((ace.sid, ace.mask, ace.flags))
-            if ace.flags & INHERITANCE:
-                problems.append(f"{path}: {described} is inheritable; an earlier install wrote it")
-            if ace.mask != winacl.READ_EXECUTE:
-                problems.append(f"{path}: {described} is not ({RIGHTS[winacl.READ_EXECUTE]})")
-        return problems
+        problems = [
+            f"{path}: {_describe(ace)} is inheritable; an earlier install wrote it" for ace in explicit
+            if ace[2] & INHERITING
+        ]
+        return problems + self._wrong_mask(path, explicit)
+
+    def _host_ace_problems(self, path: Path) -> list[str]:
+        """`host`: an ACE for itself and one that only its files inherit, and nothing else."""
+        explicit, _ = self._service_aces(path)
+        if not explicit:
+            return [f"{path}: LocalService has no ACE of its own"]
+        flags = {ace[2] & INHERITING for ace in explicit}
+        problems = [
+            f"{path}: {_describe(ace)} is neither the ACE for the directory nor the (OI)(IO) one for its files"
+            for ace in explicit if ace[2] & INHERITING not in (0, FILES_ONLY)
+        ]
+        if 0 not in flags:
+            problems.append(f"{path}: LocalService has no ACE of its own for the directory")
+        if FILES_ONLY not in flags:
+            problems.append(f"{path}: LocalService has no (OI)(IO) ACE, so a file created in it has no access")
+        return problems + self._wrong_mask(path, explicit)
+
+    def _host_file_ace_problems(self, path: Path) -> list[str]:
+        """A file in `host`: the service's ACE, inherited or (from an earlier install) explicit, never inheritable."""
+        explicit, inherited = self._service_aces(path)
+        if not explicit and not inherited:
+            return [f"{path}: LocalService has no ACE"]
+        problems = [f"{path}: {_describe(ace)} is inheritable" for ace in explicit if ace[2] & INHERITING]
+        return problems + self._wrong_mask(path, explicit + inherited)
 
     def _check(self, path: Path, mode: int, *, directory: bool, owner, grants) -> Verdict:
         try:

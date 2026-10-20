@@ -161,14 +161,21 @@ def test_a_legacy_env_whose_operator_ace_lacks_delete_fails_asking_to_reinstall(
 # The service's read of the deployment =================================================================================
 
 SERVICE_READ = (SERVICE, winacl.READ_EXECUTE, 0)
+FILES_ONLY = winacl.OBJECT_INHERIT_ACE | winacl.INHERIT_ONLY_ACE
+SERVICE_FILES = (SERVICE, winacl.READ_EXECUTE, FILES_ONLY)
+SERVICE_INHERITED = (SERVICE, winacl.READ_EXECUTE, winacl.INHERITED_ACE)
+HOST_DIR = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_FILES)
 
 
 def service_acls(world: World, **changes: Acl) -> dict[str, Acl]:
-    """What `ctl install` leaves: an ACE for the service on the root, `bin`, `host` and each file in them, none inherited."""
+    """What `ctl install` leaves. The root, `bin` and its files hold the service's ACE, none inheritable. `host` holds it
+    for itself and for the files created in it, which inherit it."""
     root = world.config.root
-    paths = [root, root / "bin", root / "host"]
-    paths += [p for directory in (root / "bin", root / "host") for p in directory.iterdir() if p.is_file()]
-    return {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_READ) for p in paths} | changes
+    acls = {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_READ) for p in [root, root / "bin"]}
+    acls |= {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_READ) for p in (root / "bin").iterdir() if p.is_file()}
+    acls |= {"host": HOST_DIR}
+    acls |= {p.name: acl((ADMINS, winacl.FULL, 0), SERVICE_INHERITED) for p in (root / "host").iterdir() if p.is_file()}
+    return acls | changes
 
 
 def service_read(world: World, acls: dict[str, Acl]):
@@ -188,11 +195,48 @@ def test_an_inheritable_service_ace_on_the_root_from_an_earlier_install_fails_as
     assert "ctl install" in detail
 
 
-@pytest.mark.parametrize("name", ["bin", "host"])
-def test_an_inheritable_service_ace_on_bin_or_host_fails(host, name):
+def test_an_inheritable_service_ace_on_bin_fails(host):
     old = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ_EXECUTE, INHERIT))
-    outcome, detail = service_read(host, service_acls(host, **{name: old}))
-    assert outcome is Outcome.FAIL and f"{host.config.root / name}: " in detail and "is inheritable" in detail
+    outcome, detail = service_read(host, service_acls(host, bin=old))
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'bin'}: " in detail and "is inheritable" in detail
+
+
+def test_a_files_only_service_ace_on_bin_fails(host):
+    old = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, SERVICE_FILES)
+    outcome, detail = service_read(host, service_acls(host, bin=old))
+    assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(OI)(IO)(RX) is inheritable" in detail
+
+
+@pytest.mark.parametrize(
+    "flags", [
+        INHERIT, INHERIT | winacl.INHERIT_ONLY_ACE, winacl.OBJECT_INHERIT_ACE,
+        FILES_ONLY | winacl.NO_PROPAGATE_INHERIT_ACE
+    ]
+)
+def test_a_service_ace_on_host_that_is_not_files_only_fails(host, flags):
+    wrong = acl((ADMINS, winacl.FULL, 0), SERVICE_READ, (SERVICE, winacl.READ_EXECUTE, flags))
+    outcome, detail = service_read(host, service_acls(host, host=wrong))
+    assert outcome is Outcome.FAIL
+    assert f"{host.config.root / 'host'}: " in detail and "(OI)(IO)" in detail and "ctl install" in detail
+
+
+def test_host_without_the_ace_its_new_files_inherit_fails(host):
+    old = acl((ADMINS, winacl.FULL, 0), SERVICE_READ)  # the shape of the previous install
+    outcome, detail = service_read(host, service_acls(host, host=old))
+    assert outcome is Outcome.FAIL
+    assert f"{host.config.root / 'host'}: LocalService has no (OI)(IO) ACE" in detail and "ctl install" in detail
+
+
+def test_host_without_the_ace_for_the_directory_itself_fails(host):
+    only_files = acl((ADMINS, winacl.FULL, 0), SERVICE_FILES)
+    outcome, detail = service_read(host, service_acls(host, host=only_files))
+    assert outcome is Outcome.FAIL
+    assert f"{host.config.root / 'host'}: LocalService has no ACE of its own for the directory" in detail
+
+
+def test_host_with_no_service_ace_fails(host):
+    outcome, detail = service_read(host, service_acls(host, host=acl((ADMINS, winacl.FULL, 0))))
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'host'}: LocalService has no ACE of its own" in detail
 
 
 def test_a_frpc_toml_replaced_without_the_service_ace_fails_naming_it(host):
@@ -202,15 +246,40 @@ def test_a_frpc_toml_replaced_without_the_service_ace_fails_naming_it(host):
     assert outcome is Outcome.FAIL and f"{toml}: LocalService has no ACE" in detail and "ctl install" in detail
 
 
+def test_a_frpc_toml_the_previous_install_gave_its_own_ace_passes(host):
+    outcome, detail = service_read(
+        host, service_acls(host, **{"frpc.toml": acl((ADMINS, winacl.FULL, 0), SERVICE_READ)})
+    )
+    assert outcome is Outcome.PASS, detail
+
+
+def test_an_inheritable_service_ace_on_a_file_in_host_fails(host):
+    wrong = acl((ADMINS, winacl.FULL, 0), SERVICE_INHERITED, (SERVICE, winacl.READ_EXECUTE, FILES_ONLY))
+    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": wrong}))
+    assert outcome is Outcome.FAIL and "is inheritable" in detail
+
+
+def test_an_inherited_service_ace_that_is_not_read_and_execute_on_a_file_in_host_fails(host):
+    widened = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.MODIFY, winacl.INHERITED_ACE))
+    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": widened}))
+    assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(M) is not (RX)" in detail
+
+
 def test_a_service_ace_that_is_not_read_and_execute_fails(host):
     widened = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.MODIFY, 0))
     outcome, detail = service_read(host, service_acls(host, bin=widened))
     assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(M) is not (RX)" in detail
 
 
-def test_a_service_ace_that_only_comes_from_the_parent_does_not_count(host):
-    inherited = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ_EXECUTE, winacl.INHERITED_ACE))
-    outcome, detail = service_read(host, service_acls(host, **{"frpc.toml": inherited}))
+def test_a_service_ace_on_host_that_is_not_read_and_execute_fails(host):
+    widened = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.MODIFY, 0), (SERVICE, winacl.MODIFY, FILES_ONLY))
+    outcome, detail = service_read(host, service_acls(host, host=widened))
+    assert outcome is Outcome.FAIL and f"{SERVICE} (LocalService):(M) is not (RX)" in detail
+
+
+def test_a_service_ace_that_only_comes_from_the_parent_does_not_count_on_a_file_in_bin(host):
+    inherited = acl((ADMINS, winacl.FULL, 0), SERVICE_INHERITED)
+    outcome, detail = service_read(host, service_acls(host, **{".digests.json": inherited}))
     assert outcome is Outcome.FAIL and "has no ACE" in detail
 
 
