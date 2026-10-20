@@ -1,5 +1,6 @@
 """Reading and comparing ACLs, shared by the Windows platform tests."""
 
+import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -32,11 +33,18 @@ def entries_of(path: Path) -> list[winacl.Entry]:
 
 
 def snapshot(*paths: Path) -> dict[Path, tuple[list[winacl.Entry], bool]]:
-    """`whole_entries` of each path and, for a directory, of everything under it."""
+    """`whole_entries` of each path and, for a directory, of everything under it. A reparse point is left out, and so
+    is whatever lies behind it: it is not opened, which is the point of refusing it."""
     found = {}
     for top in paths:
-        for path in [top, *(top.rglob("*") if top.is_dir() else [])]:
+        pending = [top]
+        while pending:
+            path = pending.pop()
+            if path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                continue
             found[path] = whole_entries(path)
+            if path.is_dir():
+                pending += path.iterdir()
     return found
 
 
