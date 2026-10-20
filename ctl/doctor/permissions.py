@@ -198,7 +198,10 @@ class Permissions:
         return problems + self._wrong_mask(path, explicit)
 
     def _host_file_ace_problems(self, path: Path, mine: list[winacl.Entry]) -> list[str]:
-        """A file in `host`: the service's ACE, inherited or (from an earlier install) explicit, never inheritable."""
+        """A file in `host`: the service's ACE, inherited or explicit, never inheritable.
+
+        A file NTFS made protected, or one an earlier install wrote, holds it explicitly.
+        """
         explicit, inherited = self._service_aces(mine)
         if not explicit and not inherited:
             return [f"{path}: LocalService has no ACE"]

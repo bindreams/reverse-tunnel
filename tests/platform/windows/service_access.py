@@ -1,7 +1,7 @@
 """What LocalService can actually open: an access check of its token's rights against a path's security descriptor.
 
-`AuthzAccessCheck` evaluates the DACL as the kernel does (order, denies, inheritance flags, group memberships), so a test
-that asks it needs no reading of ACEs. Authz needs no privilege and no logon.
+`AuthzAccessCheck` evaluates the DACL as the kernel does (order, denies, inheritance flags, group memberships), so a
+test that asks it needs no reading of ACEs. Authz needs no privilege and no logon.
 """
 
 import ctypes

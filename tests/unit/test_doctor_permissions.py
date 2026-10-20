@@ -282,7 +282,7 @@ def test_a_frpc_toml_the_previous_install_gave_its_own_ace_passes(host):
 
 @pytest.mark.parametrize("where", ["frpc.toml", "frpc.exe"])
 def test_a_file_ntfs_made_protected_that_holds_the_service_ace_explicitly_passes(host, where):
-    """NTFS turns what a file inherited into explicit ACEs when its directory gains an inheritable one; `ctl` keeps it so."""
+    """NTFS makes what a file inherited explicit when its directory gains an inheritable ACE; `ctl` keeps it so."""
     protected = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.MODIFY, 0), SERVICE_READ, protected=True)
     bin_file = next(p.name for p in (host.config.root / "bin").iterdir() if p.is_file())
     name = bin_file if where == "frpc.exe" else where

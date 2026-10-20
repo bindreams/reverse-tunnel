@@ -433,10 +433,10 @@ def _write_tool(document: tomlkit.TOMLDocument, tool: str, pinned: dict[str, lis
 
 
 def write_atomically(path: Path, text: str, *, service: Account | None = None) -> None:
-    """Replace `path` whole, so a failed write never leaves a half-written file; keeps the file's mode, never follows a link.
+    """Replace `path` whole, so a failed write never leaves a half-written file.
 
-    `service` is passed to `atomic.replace_file`: on Windows that account holds read access to the new file before it has
-    its final name.
+    Keeps the file's mode and never follows a link. `service` is passed to `atomic.replace_file`: on Windows that
+    account can read the new file before it is named.
     """
     replace_file(path.parent, path.name, io.BytesIO(text.encode("utf-8")), None, service=service)
 

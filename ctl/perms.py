@@ -401,7 +401,8 @@ def converge_dir(
     hard-linked file is refused), because NTFS rewrites the ACL of each child when a directory gains an inheritable ACE.
     `service_read` makes the DACL write, and the write of each file in the directory, also hold that account's
     read-and-execute ACE for the object itself, not inheritable (`bin/` and its files, which the service reads, must
-    not lose it, not even one that held it only by inheriting); POSIX ignores it.
+    not lose it, not even one that held it only by inheriting); POSIX ignores it. An entry whose inheritance is broken
+    is left so, with that ACE added.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
@@ -444,7 +445,9 @@ def grant_service_read(root: Path, account: Account) -> None:
     `host` also gets an ACE that only the files created in it inherit, and its files hold the account's access by
     inheriting it. Git writes `host`: a `git pull` deletes and recreates `frpc.toml`, and a file with no ACE would leave
     the tunnel down at the next restart. The NTFS rewrite of `host`'s children touches only entries opened and vetted
-    here. A subdirectory, reparse point or hard-linked file inside `bin` or `host` is refused. Ancestors of `root` get
+    here. A subdirectory, reparse point or hard-linked file inside `bin` or `host` is refused, and so is an ACE that
+    denies the account read-and-execute on anything it needs (nothing is written then). A file there whose inheritance
+    is broken (NTFS's doing, or an interrupted run's) is kept so and gets the ACE of its own. Ancestors of `root` get
     no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository under a
     user profile is reachable without exposing the profile.
     """
