@@ -20,9 +20,10 @@ from tests.unit.dry_run_support import goetia_binary
 from ctl import authz, goetia, perms_windows, winacl
 from ctl.perms import SID_LOCAL_SERVICE
 
-# Groups of a service token that name no ACE an operator can write: the integrity label and the per-machine aliases
-# `S-1-5-32-<eight sub-authorities>`. A logon-session or per-service (`S-1-5-80-`) SID would be nameable, so it counts.
-UNNAMEABLE_PREFIXES = ("S-1-16-", )
+# The integrity label in a service token is no group: measured, a deny ACE naming it does not stop the service and an
+# allow ACE naming it does not let the service in. Every other SID the token lists is a group an ACE can name,
+# including the unnamed per-build aliases `S-1-5-32-<eight sub-authorities>` (a deny for one stops the service).
+LABEL_PREFIX = "S-1-16-"
 ALL = 0x1F01FF
 DAEMON = "rttoken"
 SERVICE_WAIT_MS = 120_000
@@ -33,8 +34,13 @@ SCRIPT = """@whoami.exe /groups /fo csv > groups.csv
 """
 
 
-def unnameable(sid: str) -> bool:
-    return sid.startswith(UNNAMEABLE_PREFIXES) or (sid.startswith("S-1-5-32-") and sid.count("-") > 4)
+def groups_of(rows: list[dict[str, str]], user: str) -> set[str]:
+    """The SIDs of the token's rows that are groups an ACE can name, without the account's own SID."""
+    return {row["SID"] for row in rows if not row["SID"].startswith(LABEL_PREFIX)} - {user}
+
+
+def alias(sid: str) -> bool:
+    return sid.startswith("S-1-5-32-") and sid.count("-") > 4
 
 
 def run(*command: str) -> None:
@@ -121,17 +127,17 @@ def table(rows: list[dict[str, str]]) -> str:
 
 
 @pytest.mark.goetia
-def test_the_nameable_groups_of_a_real_service_token_are_the_ones_the_install_assumes(measured):
+def test_the_well_known_groups_of_a_real_service_token_are_the_ones_the_install_assumes(measured):
     rows, user = measured
-    named = {row["SID"] for row in rows if not unnameable(row["SID"])}
     assert user == SID_LOCAL_SERVICE
-    assert named | {user} == {SID_LOCAL_SERVICE, *perms_windows.SERVICE_TOKEN_GROUPS}, table(rows)
+    well_known = {sid for sid in groups_of(rows, user) if not alias(sid)}
+    assert well_known == set(perms_windows.SERVICE_TOKEN_GROUPS), table(rows)
 
 
 @pytest.mark.goetia
-def test_the_groups_of_the_check_context_are_the_nameable_groups_of_a_real_service_token(measured):
+def test_the_groups_of_the_check_context_are_the_groups_of_a_real_service_token(measured):
     rows, user = measured
-    real = {row["SID"] for row in rows if not unnameable(row["SID"])} - {user}
+    real = groups_of(rows, user)
     with service_token() as token:
         context = token.groups() - {user}
     assert context == real, f"only in the context: {sorted(context - real)}; only in the token: {sorted(real - context)}"
@@ -140,9 +146,8 @@ def test_the_groups_of_the_check_context_are_the_nameable_groups_of_a_real_servi
 @pytest.mark.goetia
 def test_a_deny_for_each_group_of_a_real_service_token_is_caught(measured):
     rows, user = measured
-    named = {row["SID"] for row in rows if not unnameable(row["SID"])} | {user}
     with service_token() as token:
-        missed = sorted(sid for sid in named if token.grants(denying(sid), winacl.READ_EXECUTE))
+        missed = sorted(sid for sid in groups_of(rows, user) if token.grants(denying(sid), winacl.READ_EXECUTE))
     assert not missed, f"the install's idea of the service's token lacks {missed}: {table(rows)}"
 
 
