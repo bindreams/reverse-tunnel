@@ -62,19 +62,21 @@ out.close()
 
 
 def service_groups(directory: Path, name: str, sidtype: str | None) -> str:
-    log = [run("sc", "delete", name)]
+    import time
+
     out = directory / f"{name}.txt"
-    script = directory / "child.py"
-    script.write_text(CHILD)
-    command = f"cmd.exe /c ({sys._base_executable} {script} {out} & echo rc=%errorlevel% & whoami /groups /fo csv & echo rc=%errorlevel%) > {out}.cmd.txt 2>&1"
-    log.append(run("sc", "create", name, "binPath=", command, "obj=", r"NT AUTHORITY\LocalService"))
-    if sidtype:
-        log.append(run("sc", "sidtype", name, sidtype))
-    log.append(run("sc", "start", name))
+    out.unlink(missing_ok=True)
+    inner = f"C:\Windows\System32\whoami.exe /groups /fo csv > {out} 2>&1 & echo done >> {out}"
+    log = [run("schtasks", "/delete", "/tn", name, "/f")]
+    log.append(run("schtasks", "/create", "/tn", name, "/tr", f'cmd.exe /c "{inner}"', "/sc", "once", "/st", "23:59", "/ru", r"NT AUTHORITY\LocalService", "/f"))
+    log.append(run("schtasks", "/run", "/tn", name))
+    start = time.monotonic()
+    while time.monotonic() - start < 120:
+        if out.exists() and "done" in out.read_text(errors="replace"):
+            break
     log.append(f"--- {out}" + chr(10) + (out.read_text(errors="replace") if out.exists() else "<missing>"))
-    cmd = Path(str(out) + ".cmd.txt")
-    log.append(f"--- {cmd}" + chr(10) + (cmd.read_text(errors="replace") if cmd.exists() else "<missing>"))
-    log.append(run("sc", "delete", name))
+    log.append(run("schtasks", "/query", "/tn", name, "/v", "/fo", "list"))
+    log.append(run("schtasks", "/delete", "/tn", name, "/f"))
     return chr(10).join(log)
 
 
@@ -136,8 +138,7 @@ def test_probe():
     subprocess.run(["icacls", str(base), "/grant", "*S-1-5-19:(OI)(CI)M"], check=True, capture_output=True)
     report = [
         "=== service, default sid type ===", service_groups(base, "rtprobe1", None),
-        "=== service, unrestricted sid type ===", service_groups(base, "rtprobe2", "unrestricted"),
-        "=== authz groups of S-1-5-19 ===", authz_groups(),
+                "=== authz groups of S-1-5-19 ===", authz_groups(),
         "=== LogonUser LOGON32_LOGON_SERVICE token groups ===", logon_groups(),
     ]
     assert False, "\n".join(report)
