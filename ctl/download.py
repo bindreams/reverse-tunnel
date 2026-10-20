@@ -22,7 +22,6 @@ from ctl.atomic import read_file, replace_file, require_directory
 from ctl.binaries import HEX64, TOOLS, Pin, write_atomically
 from ctl.errors import AttestationError, BinariesError, UpstreamUnavailable
 from ctl.github import download, download_client
-from ctl.perms import Account
 
 # Attestation ==========================================================================================================
 
@@ -288,17 +287,10 @@ def is_plain_name(name: str) -> bool:
     return is_safe_member(name) and PurePosixPath(name).name == name and name not in (".", "..")
 
 
-def record_digests(
-    bin_dir: Path,
-    pins: Iterable[Pin],
-    inputs: Mapping[str, str] | None = None,
-    *,
-    service: Account | None = None
-) -> None:
+def record_digests(bin_dir: Path, pins: Iterable[Pin], inputs: Mapping[str, str] | None = None) -> None:
     """Replace `bin/.digests.json` with each pin's install name mapped to the `member_sha256` it was installed from.
 
-    `inputs` adds the digests of other files a daemon reads once at startup, under plain names of their own. `service`
-    (Windows) gets read access to the file before it has its name, so it never exists without it.
+    `inputs` adds the digests of other files a daemon reads once at startup, under plain names of their own.
     """
     recorded: dict[str, str] = {}
     for pin in pins:
@@ -308,7 +300,7 @@ def record_digests(
         if not is_plain_name(name) or not HEX64.fullmatch(digest) or name in recorded:
             raise BinariesError(f"{name}: not a plain name of its own with a sha256 digest")
         recorded[name] = digest
-    write_atomically(bin_dir / DIGESTS, json.dumps(recorded, indent=2, sort_keys=True) + "\n", service=service)
+    write_atomically(bin_dir / DIGESTS, json.dumps(recorded, indent=2, sort_keys=True) + "\n")
 
 
 def read_digests(bin_dir: Path) -> dict[str, str]:

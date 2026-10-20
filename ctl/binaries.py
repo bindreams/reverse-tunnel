@@ -35,7 +35,6 @@ from ctl.github import (
     find_release,
     sha256_of,
 )
-from ctl.perms import Account
 
 LOCK_PATH = Path(__file__).resolve().parent.parent / "binaries.lock.toml"
 PLATFORMS = ("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64")
@@ -432,13 +431,12 @@ def _write_tool(document: tomlkit.TOMLDocument, tool: str, pinned: dict[str, lis
         table[BUNDLE] = bundle
 
 
-def write_atomically(path: Path, text: str, *, service: Account | None = None) -> None:
+def write_atomically(path: Path, text: str) -> None:
     """Replace `path` whole, so a failed write never leaves a half-written file.
 
-    Keeps the file's mode and never follows a link. `service` is passed to `atomic.replace_file`: on Windows that
-    account can read the new file before it is named.
+    Keeps the file's mode and never follows a link.
     """
-    replace_file(path.parent, path.name, io.BytesIO(text.encode("utf-8")), None, service=service)
+    replace_file(path.parent, path.name, io.BytesIO(text.encode("utf-8")), None)
 
 
 # Comparing to upstream ================================================================================================

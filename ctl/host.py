@@ -79,6 +79,11 @@ def _binaries_of(daemon_id: str, platform: str) -> tuple[str, ...]:
     return RUNS[daemon_id] + (("goetia-shim", ) if platform.startswith("windows") else ())
 
 
+def service_binaries(platform: str) -> tuple[str, ...]:
+    """The base names of the files the service manager starts on `platform`: the daemons, and on Windows goetia's shim."""
+    return tuple(dict.fromkeys(name for daemon_id in IDS for name in _binaries_of(daemon_id, platform)))
+
+
 def _host_pins(services: Services) -> tuple[tuple[Pin, ...], Pin | None, str]:
     lock = binaries.load_lock(services.lock_path)
     platform = services.platform or binaries.current_platform()
@@ -276,7 +281,7 @@ def _installer() -> Account | None:
 
     `bin/` is the installer's rather than the operator's, stricter than the ownership table (which leaves the directory
     to whoever cloned the repository): what root executes must not be replaceable by anyone else. Windows: `None`, the
-    directory inherits.
+    directory has an ACL, not an owner.
     """
     if sys.platform == "win32":
         return None
@@ -290,12 +295,12 @@ def _installer() -> Account | None:
     return Account(name, uid, os.getegid())
 
 
-def _converge_bin(root: Path, service: Account) -> None:
-    """Converge `bin/`, its DACL and each file's written once with the service's ACE in them: converging never leaves
-    what the service reads without access."""
-    perms.converge_dir(
-        root / "bin", _installer(), BIN_MODE, frozenset(), isolate=False, service_read=service, root=root
-    )
+def _converge_owned(root: Path, service: Account) -> None:
+    """Converge `bin/` and `host/`, which the service reads. On Windows both are the install's outright: protected, a
+    fixed DACL with the service's access in it and no deny, every file in them inheriting it. On POSIX `bin/` has the
+    installer's owner and `BIN_MODE`, and `host/`, which git writes, is left as it is."""
+    perms.converge_owned(root / "bin", service, owner=_installer(), mode=BIN_MODE, root=root)
+    perms.converge_owned(root / "host", service, root=root)
 
 
 def _clear_staging(root: Path) -> None:
@@ -308,22 +313,21 @@ def _clear_staging(root: Path) -> None:
 def stage(config: Config, plan: Plan, *, services: Services) -> None:
     """Make the tree ready without disturbing anything running. The order matters.
 
-    Whatever a failed run left in `bin/.staging` goes first: on Windows `grant_service_read` refuses a subdirectory of
-    `bin\\`. That grant comes next, before anything inherits from the repository root: an install that finds the
-    inheritable ACE an earlier one wrote there removes it, and a directory converged before that would keep recording
-    it as inherited until the next run. `bin/` is converged after it with the service's ACE in the same write, since
-    converging rewrites its whole ACL. `secrets/` and `logs/` come before the token, which is created inside the first,
-    and goetia must never be handed a `logs/` owned by root. `.env` is tightened last, after everything that could
-    fail.
+    Whatever a failed run left in `bin/.staging` goes first: on Windows converging `bin\\` refuses a subdirectory.
+    `bin/`, `host/`, `secrets/` and `logs/` come next, each written whole with the service's access in the same write,
+    so none leaves what the service reads without it. Only then does the repository root lose the service's ACE an
+    earlier install gave it, since until the four hold their own access the root's is what an earlier tree relies on.
+    `secrets/` and `logs/` come before the token, which is created inside the first, and goetia must never be handed a
+    `logs/` owned by root. `.env` is tightened last, after everything that could fail.
     """
     root = config.root
     service = perms.service_account(config)
     readers = _service_readers(root)
     _clear_staging(root)
-    perms.grant_service_read(root, service)
-    _converge_bin(root, service)
+    _converge_owned(root, service)
     perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
     perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
+    perms.revoke_root(root, service)
     perms.write_secret(root / "secrets" / "token", _token_bytes(config), service, readers, root=root)
     _download(root, plan, services)
     perms.harden_file(root / ".env", None, frozenset(), root=root)
@@ -363,12 +367,11 @@ def _step(description: str, action: Callable[..., None], *args, **kwargs) -> Non
         raise InstallError(f"{description}: {exc}") from exc
 
 
-def _promote(root: Path, plan: Plan, service: Account) -> None:
-    """Replace each binary in `bin/` with its staged, pinned bytes, the service's read already on the new file.
+def _promote(root: Path, plan: Plan) -> None:
+    """Replace each binary in `bin/` with its staged, pinned bytes.
 
-    A file created in `bin\\` has no ACE for the service: the one `grant_service_read` wrote to its parent is not
-    inheritable. So the grant is made on the temporary file, before the rename, and the final name never exists
-    without it.
+    On Windows the new file is created in `bin\\` and inherits the service's access from it, so the final name never
+    exists without it.
     """
     bin_dir, staging = root / "bin", root / "bin" / STAGING
     for pin in plan.pins:
@@ -383,7 +386,7 @@ def _promote(root: Path, plan: Plan, service: Account) -> None:
             raise BinariesError(
                 f"{staging / pin.install_name} is not the pinned {pin.install_name}; it was changed after staging"
             )
-        replace_file(bin_dir, pin.install_name, io.BytesIO(content), BIN_MODE, service=service)
+        replace_file(bin_dir, pin.install_name, io.BytesIO(content), BIN_MODE)
 
 
 def apply(config: Config, plan: Plan, *, services: Services) -> None:
@@ -395,7 +398,6 @@ def apply(config: Config, plan: Plan, *, services: Services) -> None:
     removed whatever happens.
     """
     root, bin_dir = config.root, config.root / "bin"
-    service = perms.service_account(config)
     try:
         if STOP_BEFORE_REPLACE:
             for daemon_id in plan.daemons_to_converge:
@@ -405,14 +407,14 @@ def apply(config: Config, plan: Plan, *, services: Services) -> None:
                 }
                 if daemon_id in plan.installed and runs & set(plan.binaries_to_replace):
                     _step(f"stopping {daemon_id}", goetia.daemon_stop, root, daemon_id)
-        _promote(root, plan, service)
+        _promote(root, plan)
         for daemon_id in plan.daemons_to_converge:
             _step(f"installing {daemon_id}", goetia.daemon_install, root, daemon_id, enable=True)
             _step(f"restarting {daemon_id}", goetia.daemon_restart, root, daemon_id)
             print(f"{daemon_id}: installed and restarted ({plan.reasons[daemon_id]})")
         expected = {pin.install_name: pin.member_sha256 for pin in plan.pins} | dict(plan.inputs)
         if read_digests(bin_dir) != expected:
-            record_digests(bin_dir, plan.pins, plan.inputs, service=service)
+            record_digests(bin_dir, plan.pins, plan.inputs)
             perms.assign_file(bin_dir / DIGESTS, perms.operator_account(root), RECORD_MODE, root=root)
     finally:
         _clear_staging_quietly(root)

@@ -389,7 +389,6 @@ def converge_dir(
     *,
     writers: frozenset[str] = frozenset(),
     isolate: bool = True,
-    service_read: Account | None = None,
     root: Path,
 ) -> None:
     """Create `path` if absent and reassert its owner and mode, whatever state it was left in.
@@ -399,18 +398,41 @@ def converge_dir(
     On Windows `isolate` breaks inheritance; only `.env`, `secrets/` and the token do, never the repository root.
     On Windows every entry of an existing directory is opened and vetted first (a subdirectory, reparse point or
     hard-linked file is refused), because NTFS rewrites the ACL of each child when a directory gains an inheritable ACE.
-    `service_read` makes the DACL write, and the write of each file in the directory, also hold that account's
-    read-and-execute ACE for the object itself, not inheritable (`bin/` and its files, which the service reads, must
-    not lose it, not even one that held it only by inheriting); POSIX ignores it. An entry whose inheritance is broken
-    is left so, with that ACE added.
+    An entry whose inheritance is broken is left so.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_dir(path, owner, readers, writers, isolate, root, service_read)
+        perms_windows.converge_dir(path, owner, readers, writers, isolate, root)
         return
     with _converged(path, owner, mode):
         pass
+
+
+def converge_owned(
+    path: Path,
+    service: Account,
+    *,
+    owner: Account | None = None,
+    mode: int | None = None,
+    write: bool = False,
+    root: Path,
+) -> None:
+    """Make `path` the install's own: `bin/` and `host/`, and `logs/` through `converge_tree`.
+
+    Windows: the DACL is written whole, whatever it held (see `perms_windows.converge_owned`): protected, the operator
+    and Administrators in full control, `service` with read-and-execute (modify when `write`), no deny; every entry is
+    rewritten to inherit it, and a flat directory is required (a subdirectory, a reparse point or a hard-linked file is
+    refused). POSIX: `owner` and `mode` through `converge_dir`; without a `mode` the directory is left alone, which is
+    how `host/`, git's directory, is kept.
+    """
+    if sys.platform == "win32":
+        from ctl import perms_windows
+
+        perms_windows.converge_owned(path, service, write=write, root=root)
+        return
+    if mode is not None:
+        converge_dir(path, owner, mode, frozenset(), root=root)
 
 
 def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -> None:
@@ -422,41 +444,33 @@ def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -
     or a hard link to a file it does not own and have root change it.
 
     systemd opens a log's append target after dropping to `User=`, so a stale owner is `EACCES` and the daemon never
-    starts. On Windows `owner` is the service account, which gets modify on the directory, and each entry is reset to
-    inherit from it.
+    starts. On Windows `owner` is the service account and the directory is the install's own (`converge_owned`), with
+    modify for the service.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_tree(path, owner, root)
+        service = owner or Account(LOCAL_SERVICE, None, None)  # Windows has one service account
+        perms_windows.converge_owned(path, service, write=True, root=root)
         return
     with _converged(path, owner, mode) as fd:
         _converge_entries(fd, path, owner)
 
 
-def grant_service_read(root: Path, account: Account) -> None:
-    """Give `account` read-and-execute on the repository `root`, `bin`, `host` and their direct files; POSIX: nothing.
+def revoke_root(root: Path, account: Account) -> None:
+    """Take the service's read-and-execute ACE off the repository `root`, where an earlier install put it; POSIX: nothing.
 
-    The root and `bin` get an ACE applying to it alone, and so does each file in `bin`; none is inheritable, so nothing
-    is propagated by the OS and NTFS has no reason to rewrite an entry that was not opened here. A file created or
-    replaced in `bin` has no ACE for the account until `atomic.replace_file` writes it with `service=`, or this is
-    run; that is enough because only `ctl` writes `bin`.
-
-    `host` also gets an ACE that only the files created in it inherit, and its files hold the account's access by
-    inheriting it. Git writes `host`: a `git pull` deletes and recreates `frpc.toml`, and a file with no ACE would leave
-    the tunnel down at the next restart. The NTFS rewrite of `host`'s children touches only entries opened and vetted
-    here. A subdirectory, reparse point or hard-linked file inside `bin` or `host` is refused, and so is an ACE that
-    denies the account read-and-execute on anything it needs, judged by Windows' own access check for the service's
-    token (nothing is written then). A file or directory there whose inheritance is broken (NTFS's doing, or an
-    interrupted run's) is kept so and gets the ACE of its own. Ancestors of `root` get
-    no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository under a
-    user profile is reachable without exposing the profile.
+    The service needs nothing on the root: its working directory is `logs/` and everything it reads is in a directory
+    that holds its own access. Only that ACE goes, and only the root is written; its other children are not `ctl`'s.
+    Run it after `bin/`, `host/` and `logs/` are converged. Ancestors of `root` never had an ACE: `LocalService` holds
+    `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository under a user profile is reachable
+    without exposing the profile.
     """
     if sys.platform != "win32":
         return
     from ctl import perms_windows
 
-    perms_windows.grant_service_read(root, account)
+    perms_windows.revoke_root(root, account)
 
 
 # Inspection ===========================================================================================================

@@ -41,6 +41,8 @@ READ_EXECUTE = 0x1200A9
 READ = 0x120089
 READ_WRITE = 0x12019F
 READ_WRITE_DELETE = READ_WRITE | DELETE
+# What creating a file in a directory takes: list it, add to it, and pass through it.
+LIST_AND_ADD = 0x1 | 0x2 | 0x20 | 0x100000
 
 # Generic rights and what they mean for a file.
 GENERIC_READ = 0x80000000
@@ -345,13 +347,17 @@ def grants(
     operator: str | None,
     readers: Collection[str],
     writers: Collection[str],
+    full: Collection[str] = (),
 ) -> dict[str, int]:
-    """The explicit grants: Administrators full, then `operator`, `writers` and `readers`, strongest first.
+    """The explicit grants: Administrators and each of `full` in full control, then `operator`, `writers` and
+    `readers`, strongest first.
 
     Files give `operator` read, write and delete (replacing a secret deletes the old file), and `readers` read.
     Directories give `operator` and `writers` modify and `readers` read and execute.
     """
     wanted = {SID_ADMINISTRATORS: FULL}
+    for sid in sorted(full):
+        wanted.setdefault(sid, FULL)
     if operator is not None:
         wanted.setdefault(operator, MODIFY if directory else READ_WRITE_DELETE)
     for sid in sorted(writers):
@@ -373,6 +379,7 @@ def plan(
     group: str | None = None,
     parent_label: str = "<parent>",
     extra: Iterable[Entry] = (),
+    full: Collection[str] = (),
 ) -> tuple[list[Entry], frozenset[str]]:
     """The DACL an object should end up with, and the SIDs it grants explicitly. Nothing is written.
 
@@ -381,7 +388,7 @@ def plan(
     `parent` (all of the parent's ACEs, as on disk) passes down to an object owned by `owner` with primary group
     `group` follow them, inherited.
     """
-    wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers)
+    wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers, full=full)
     inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
     entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()] + list(extra)
     if not isolate:

@@ -142,23 +142,3 @@ def test_converge_tree_accepts_a_flat_directory_of_regular_files(tmp_path):
     (logs / "frpc.log").write_bytes(b"")
     (logs / "websocat.log").write_bytes(b"")
     converge_tree(logs, None, 0o750, root=tmp_path)
-
-
-def test_listed_names_are_matched_case_insensitively_and_returned_as_listed():
-    from pathlib import Path
-
-    from ctl import perms_windows
-
-    assert perms_windows._listed(["Bin", "HOST", "ctl"], ("bin", "host", "logs"),
-                                 Path("repo")) == {"bin": "Bin", "host": "HOST"}
-
-
-def test_two_spellings_of_one_name_are_refused_as_ambiguous():
-    from pathlib import Path
-
-    from ctl import perms_windows
-
-    with pytest.raises(PermsError) as raised:
-        perms_windows._listed(["bin", "Bin", "host"], ("bin", "host"), Path("repo"))
-    assert "ambiguous" in str(raised.value)
-    assert "Bin" in str(raised.value)
