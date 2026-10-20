@@ -485,8 +485,9 @@ def grant_service_read(root: Path, account: Account) -> None:
     opened and vetted here, so the rewrite NTFS makes of a directory's children touches nothing else.
 
     A file or directory in `root` that is `bin` or `host`, or a file in them, whose inheritance is broken (NTFS does
-    that to the children of a directory that just gained an inheritable ACE, and an interruption can leave it so) is kept
-    protected, with its own explicit ACE for the service added to what it holds (for `host`, both); it is not refused.
+    that to the children of a directory that just gained an inheritable ACE, and an interruption can leave it so) is
+    kept protected, with its own explicit ACE for the service added to what it holds (for `host`, both); it is not
+    refused.
 
     Windows' own access check, for the service's token with its groups, judges every DACL before it is written and
     after: on the root, `bin` and `host` and their files, and on the DACL a file created in `host` would inherit. A
@@ -561,10 +562,12 @@ def grant_service_read(root: Path, account: Account) -> None:
 
 
 def grant_service_read_handle(handle: int, label: Path, account: Account) -> None:
-    """Give the service read-and-execute on the file open as `handle` (READ_CONTROL, WRITE_DAC), named `label` in errors.
+    """Give the service read-and-execute on the file open as `handle` (READ_CONTROL, WRITE_DAC); `label` names it in
+    errors.
 
     The file keeps every ACE it has; only an earlier explicit allow for the service is replaced. For a file that is not
-    in place yet: `atomic.replace_file` calls it on its temporary file, so the final name never exists without the grant.
+    in place yet: `atomic.replace_file` calls it on its temporary file, so the final name never exists without the
+    grant.
     """
     sid = _sid_of(account)
     with _errors(label), _service_token(sid) as token:
