@@ -119,6 +119,7 @@ MARKERS = {
     ("ctl/doctor/probes.py", "a local port accepting a connection and sshd sending its banner."),
     ("ctl/doctor/probes.py", "the public front answering the data-path probe."),
     ("ctl/doctor/tls.py", "the public front answering a TLS handshake; a human reads the failure."),
+    ("tests/platform/windows/test_service_token_windows.py", "the scheduled task writing its result"),
     (
         "ctl/github.py",
         "GitHub, or the host serving a release asset, answering a request. Per socket operation, not total."

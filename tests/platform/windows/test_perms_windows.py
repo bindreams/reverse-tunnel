@@ -673,19 +673,116 @@ def test_grant_service_read_refuses_a_deny_of_what_the_service_reads_naming_the_
     assert {p: whole_entries(p, directory=p.is_dir()) for p in [repo, *repo.rglob("*")]} == before
 
 
+# A deny for a group the service is in =================================================================================
+
+# What a LocalService service's token holds (see test_service_token_windows.py), and the service itself. A deny of
+# FILE_EXECUTE alone takes the service's read-and-execute and leaves the test process, which is in most of these groups,
+# able to list and change what it denied.
+SERVICE_GROUPS = {
+    "service": SID_LOCAL_SERVICE,
+    "everyone": SID_EVERYONE,
+    "users": SID_USERS,
+    "authenticated-users": SID_AUTHENTICATED_USERS,
+    "SERVICE": "S-1-5-6",
+    "this-organization": "S-1-5-15",
+    "LOCAL": winacl.SID_LOCAL,
+    "console-logon": winacl.SID_CONSOLE_LOGON,
+}
+
+
+def snapshot_of(repo: Path) -> dict[Path, tuple[list[winacl.Entry], bool]]:
+    return {p: whole_entries(p, directory=p.is_dir()) for p in [repo, *repo.rglob("*")]}
+
+
+@pytest.mark.parametrize("group", SERVICE_GROUPS.values(), ids=SERVICE_GROUPS)
+@pytest.mark.parametrize("where", [".", "bin", "bin/frpc.exe", "host", "host/frpc.toml"])
+def test_grant_service_read_refuses_a_deny_for_a_group_the_service_is_in_naming_the_path_and_changes_nothing(
+    tmp_path, where, group
+):
+    repo = repo_with(tmp_path)
+    path = repo / where
+    icacls(str(path), "/deny", f"*{group}:(X)")
+    before = snapshot_of(repo)
+    with pytest.raises(PermsError) as raised:
+        grant_service_read(repo, LOCAL_SERVICE)
+    assert str(path) in str(raised.value) and "denied" in str(raised.value)
+    assert snapshot_of(repo) == before
+
+
+@pytest.mark.parametrize("group", SERVICE_GROUPS.values(), ids=SERVICE_GROUPS)
+def test_grant_service_read_refuses_an_inherit_only_deny_on_host_that_a_new_file_would_inherit(tmp_path, group):
+    repo = repo_with(tmp_path)
+    (repo / "host" / "frpc.toml").unlink()  # no file in host: only the DACL a new one would inherit tells
+    icacls(str(repo / "host"), "/deny", f"*{group}:(OI)(IO)(X)")
+    before = snapshot_of(repo)
+    with pytest.raises(PermsError) as raised:
+        grant_service_read(repo, LOCAL_SERVICE)
+    assert str(repo / "host") in str(raised.value) and "denied" in str(raised.value)
+    assert snapshot_of(repo) == before
+
+
+def write_in_order(path: Path, aces: list[tuple[bool, str, int]]) -> None:
+    """Replace the DACL of `path` with exactly these (allow, sid, mask) ACEs, in this order, inheritance broken."""
+    import win32security
+
+    dacl = win32security.ACL()
+    for allow, sid, mask in aces:
+        add = dacl.AddAccessAllowedAce if allow else dacl.AddAccessDeniedAce
+        add(win32security.ACL_REVISION, mask, win32security.ConvertStringSidToSid(sid))
+    win32security.SetNamedSecurityInfo(
+        str(path), win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION, None, None, dacl,
+        None
+    )
+
+
+def allow_before_a_group_deny(repo: Path) -> Path:
+    """`bin/frpc.exe` holding the service's allow before a deny for Users, as an operator may have left it."""
+    binary = repo / "bin" / "frpc.exe"
+    write_in_order(
+        binary, [(True, SID_LOCAL_SERVICE, winacl.READ_EXECUTE), (False, SID_USERS, FILE_EXECUTE),
+                 (True, SID_ADMINISTRATORS, winacl.FULL)]
+    )
+    assert can_open(binary), "the setup must leave the service able to read, which is what the install must keep"
+    return binary
+
+
+def test_grant_service_read_does_not_turn_an_allow_before_a_group_deny_into_a_denial(tmp_path):
+    """Writing the DACL sorts denies before allows: that would deny the service what it read."""
+    repo = repo_with(tmp_path)
+    binary = allow_before_a_group_deny(repo)
+    before = snapshot_of(repo)
+    with pytest.raises(PermsError) as raised:
+        grant_service_read(repo, LOCAL_SERVICE)
+    assert str(binary) in str(raised.value)
+    assert snapshot_of(repo) == before
+    assert can_open(binary)
+
+
+def test_converging_bin_does_not_turn_an_allow_before_a_group_deny_into_a_denial(tmp_path):
+    repo = repo_with(tmp_path)
+    binary = allow_before_a_group_deny(repo)
+    before = snapshot_of(repo)
+    with pytest.raises(PermsError) as raised:
+        converge_bin(repo)
+    assert str(binary) in str(raised.value)
+    assert snapshot_of(repo) == before
+    assert can_open(binary)
+
+
 # A child NTFS made protected ==========================================================================================
 
 
-def make_protected(path: Path, *, service: bool) -> None:
+def make_protected(path: Path, *, service: bool, directory: bool = False) -> None:
     """What NTFS leaves a child when its directory gains an inheritable ACE: explicit, protected copies of its ACEs."""
-    entries, _ = whole_entries(path, directory=False)
+    entries, _ = whole_entries(path, directory=directory)
     copies = [e._replace(flags=e.flags & ~INHERITED_ACE) for e in entries if service or e.sid != SID_LOCAL_SERVICE]
-    with perms_windows._handle(path, directory=False, access=perms_windows.ACL_ACCESS) as handle:
+    with perms_windows._handle(path, directory=directory, access=perms_windows.ACL_ACCESS) as handle:
         winacl.set_dacl(handle, copies, protected=True)
 
 
-def others(path: Path) -> list[winacl.Entry]:
-    return [e for e in whole_entries(path, directory=False)[0] if e.sid != SID_LOCAL_SERVICE]
+def others(path: Path, *, directory: bool = False) -> list[winacl.Entry]:
+    return [e for e in whole_entries(path, directory=directory)[0] if e.sid != SID_LOCAL_SERVICE]
 
 
 @pytest.mark.parametrize("service", [True, False], ids=["holds-a-copy", "holds-none"])
@@ -704,6 +801,36 @@ def test_grant_service_read_keeps_a_protected_file_protected_and_gives_it_the_se
     again = whole_acl(path)
     grant_service_read(repo, LOCAL_SERVICE)
     assert whole_acl(path) == again
+
+
+@pytest.mark.parametrize("service", [True, False], ids=["holds-a-copy", "holds-none"])
+@pytest.mark.parametrize("where", ["bin", "host"])
+def test_grant_service_read_keeps_a_protected_directory_protected_and_gives_it_the_service_read(
+    tmp_path, where, service
+):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    path = repo / where
+    make_protected(path, service=service, directory=True)
+    before = others(path, directory=True)
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert whole_entries(path, directory=True)[1], "the directory must stay protected"
+    expected = HOST_SERVICE_ACES if where == "host" else [(winacl.READ_EXECUTE, 0)]
+    assert service_shape(path) == expected
+    assert others(path, directory=True) == before
+    assert can_open(path) and can_open(next(path.iterdir()))
+    again = whole_entries(path, directory=True)
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert whole_entries(path, directory=True) == again
+
+
+def test_converging_bin_keeps_the_service_read_of_a_directory_NTFS_protected(tmp_path):
+    repo = repo_with(tmp_path)
+    grant_service_read(repo, LOCAL_SERVICE)
+    make_protected(repo / "bin", service=False, directory=True)
+    converge_bin(repo)
+    assert service_shape(repo / "bin") == [(winacl.READ_EXECUTE, 0)]
+    assert can_open(repo / "bin") and can_open(repo / "bin" / "frpc.exe")
 
 
 @pytest.mark.parametrize("service", [True, False], ids=["holds-a-copy", "holds-none"])

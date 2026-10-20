@@ -57,7 +57,8 @@ def _library():
         ctypes.POINTER(_POINTER)
     ]
     authz.AuthzAddSidsToContext.argtypes = [
-        _POINTER, ctypes.POINTER(_SidAndAttributes), wintypes.DWORD, _POINTER, wintypes.DWORD,
+        _POINTER,
+        ctypes.POINTER(_SidAndAttributes), wintypes.DWORD, _POINTER, wintypes.DWORD,
         ctypes.POINTER(_POINTER)
     ]
     authz.AuthzAccessCheck.argtypes = [
@@ -149,7 +150,8 @@ def descriptor_for(entries: Iterable[winacl.Entry], *, protected: bool, owner: s
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
-        ctypes.c_wchar_p, wintypes.DWORD, ctypes.POINTER(_POINTER),
+        ctypes.c_wchar_p, wintypes.DWORD,
+        ctypes.POINTER(_POINTER),
         ctypes.POINTER(wintypes.DWORD)
     ]
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = ctypes.c_int

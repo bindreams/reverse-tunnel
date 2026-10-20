@@ -446,8 +446,9 @@ def grant_service_read(root: Path, account: Account) -> None:
     inheriting it. Git writes `host`: a `git pull` deletes and recreates `frpc.toml`, and a file with no ACE would leave
     the tunnel down at the next restart. The NTFS rewrite of `host`'s children touches only entries opened and vetted
     here. A subdirectory, reparse point or hard-linked file inside `bin` or `host` is refused, and so is an ACE that
-    denies the account read-and-execute on anything it needs (nothing is written then). A file there whose inheritance
-    is broken (NTFS's doing, or an interrupted run's) is kept so and gets the ACE of its own. Ancestors of `root` get
+    denies the account read-and-execute on anything it needs, judged by Windows' own access check for the service's
+    token (nothing is written then). A file or directory there whose inheritance is broken (NTFS's doing, or an
+    interrupted run's) is kept so and gets the ACE of its own. Ancestors of `root` get
     no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository under a
     user profile is reachable without exposing the profile.
     """

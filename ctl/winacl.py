@@ -20,6 +20,8 @@ from collections.abc import Collection, Iterable, Sequence
 from typing import Any, NamedTuple
 
 SID_EVERYONE = "S-1-1-0"
+SID_LOCAL = "S-1-2-0"
+SID_CONSOLE_LOGON = "S-1-2-1"
 SID_AUTHENTICATED_USERS = "S-1-5-11"
 SID_LOCAL_SERVICE = "S-1-5-19"
 SID_ADMINISTRATORS = "S-1-5-32-544"
