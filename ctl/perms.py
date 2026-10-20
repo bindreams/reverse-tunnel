@@ -430,14 +430,17 @@ def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -
 def grant_service_read(root: Path, account: Account) -> None:
     """Give `account` read-and-execute on the repository `root`, `bin`, `host` and their direct files; POSIX: nothing.
 
-    Each of them gets its own ACE, written to it directly and applying to it alone. None is inheritable: nothing is
-    propagated by the OS and NTFS has no reason to rewrite an entry that was not opened here, so nothing unvetted is
-    touched. A subdirectory, reparse point or hard-linked file inside `bin` or `host` is refused. Ancestors of `root` get
+    The root and `bin` get an ACE applying to it alone, and so does each file in `bin`; none is inheritable, so nothing
+    is propagated by the OS and NTFS has no reason to rewrite an entry that was not opened here. A file created or
+    replaced in `bin` has no ACE for the account until this runs again or `grant_service_read_file` is called on it, and
+    that is enough because only `ctl` writes `bin`.
+
+    `host` also gets an ACE that only the files created in it inherit, and its files hold the account's access by
+    inheriting it. Git writes `host`: a `git pull` deletes and recreates `frpc.toml`, and a file with no ACE would leave
+    the tunnel down at the next restart. The NTFS rewrite of `host`'s children touches only entries opened and vetted
+    here. A subdirectory, reparse point or hard-linked file inside `bin` or `host` is refused. Ancestors of `root` get
     no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository under a
     user profile is reachable without exposing the profile.
-
-    A file created or replaced in `bin` or `host` afterwards has no ACE for the account until this runs again or
-    `grant_service_read_file` is called on it.
     """
     if sys.platform != "win32":
         return

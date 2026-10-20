@@ -10,7 +10,9 @@ ACLs are written with `NtSetSecurityObject`, which propagates to no child; the i
 computed here (`winacl.inherited_for`) and written to that object through its own handle. The Win32 `SetSecurityInfo`
 would instead walk the whole subtree before any of it could be vetted. Windows Server 2025 does not stop there: a new
 inheritable ACE on a directory makes NTFS turn the inherited ACEs of its direct children into explicit, protected ones.
-The repository root holds files `ctl` never opens, so the service's ACEs are never inheritable.
+The repository root holds files `ctl` never opens, so the service's ACEs on it and on `bin` are never inheritable. The
+one on `host` is inherited by files only: `ctl` opens and vets every entry of `host`, and git recreates `frpc.toml`
+there.
 
 The owner field of an object is deliberately left as created (Administrators when the process is elevated). Ownership
 is expressed by the ACL alone, with explicit grants for the principals that matter; `operator_sid` names the one that
@@ -315,19 +317,42 @@ class _Target:
     directory: bool
     entries: list[winacl.Entry]
     parent: "_Target | None" = None
+    inherited_read: bool = False  # for a directory: its files hold the service's read by inheriting it
 
 
-def _service_read(entries: list[winacl.Entry], sid: str) -> list[winacl.Entry]:
+def _without_service_read(entries: list[winacl.Entry], sid: str) -> list[winacl.Entry]:
+    """`entries` less the explicit allows for the service."""
+    return [
+        e for e in entries
+        if e.flags & winacl.INHERITED_ACE or e.sid != sid or e.ace_type != winacl.ACCESS_ALLOWED_ACE_TYPE
+    ]
+
+
+def _service_read(entries: list[winacl.Entry], sid: str, *, files: bool = False) -> list[winacl.Entry]:
     """`entries` with the service's read-and-execute ACE, which applies to the object alone and is never inherited.
+
+    `files` adds a second ACE that only the files created in the directory inherit (and not the directory itself,
+    subdirectories or the files' own children): `OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE`.
 
     Only an earlier explicit allow for the service is replaced (including the inheritable one an older install wrote on
     the root); a deny for it, or an inherited ACE, stays.
     """
-    kept = [
-        e for e in entries
-        if e.flags & winacl.INHERITED_ACE or e.sid != sid or e.ace_type != winacl.ACCESS_ALLOWED_ACE_TYPE
-    ]
-    return winacl.canonical(kept + [winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, 0, winacl.READ_EXECUTE, sid)])
+    kept = _without_service_read(entries, sid)
+    granted = [winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, 0, winacl.READ_EXECUTE, sid)]
+    if files:
+        flags = winacl.OBJECT_INHERIT_ACE | winacl.INHERIT_ONLY_ACE
+        granted.append(winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, flags, winacl.READ_EXECUTE, sid))
+    return winacl.canonical(kept + granted)
+
+
+def _explicit_service_read(target: _Target, sid: str) -> list[winacl.Entry]:
+    """The explicit ACEs `target` is left with. A file whose directory is inherited from holds no ACE of its own for
+    the service: the one it inherits is what a file git creates there holds too."""
+    entries = winacl.explicit(target.entries)
+    if target.directory:
+        return _service_read(entries, sid, files=target.inherited_read)
+    assert target.parent is not None
+    return (_without_service_read if target.parent.inherited_read else _service_read)(entries, sid)
 
 
 def grant_service_read(root: Path, account: Account) -> None:
@@ -336,8 +361,15 @@ def grant_service_read(root: Path, account: Account) -> None:
     The set is known: `root`, `bin` and its direct files, `host` and its direct files. `root` and `bin` and `host` are
     held without `FILE_SHARE_DELETE`; their files are opened relative to them. Everything is vetted (a subdirectory, a
     reparse point, a hard-linked file, or an object whose inheritance is broken is refused) before the first ACL is
-    written. Each object gets its own explicit ACE and nothing is inherited from the service's ACE on its parent, so a
-    file created or replaced there later has no access until `grant_service_read_file` gives it.
+    written.
+
+    `root` and `bin` get an ACE for themselves and each file in `bin` one of its own; nothing is inherited, so a file
+    created or replaced in `bin` has no access until `grant_service_read_file` gives it. `bin` is written only by `ctl`,
+    which calls that. `host` is written by git as well: a `git pull` deletes and recreates `frpc.toml`, and a file with no
+    ACE for the service would leave the tunnel down after the next restart. So `host` also gets an ACE that its files
+    inherit (not its subdirectories, which `ctl` refuses), and its files hold the service's access only by inheriting
+    it. That is safe where an inheritable ACE on the root is not because every entry of `host` has been opened and
+    vetted here, so the rewrite NTFS makes of a directory's children touches nothing else.
     """
     sid = _sid_of(account)
     listing = ACL_ACCESS | winfile.FILE_LIST_DIRECTORY
@@ -348,7 +380,7 @@ def grant_service_read(root: Path, account: Account) -> None:
         top = _Target(root_handle, root, True, [])
         targets: list[_Target] = []
         # A directory missing from the listing is absent, not unopenable: whatever is created there inherits normally.
-        for name in _listed(winfile.list_names(root_handle), ("bin", "host"), root).values():
+        for key, name in _listed(winfile.list_names(root_handle), ("bin", "host"), root).items():
             label = root / name
             try:
                 handle = winfile.open_relative(
@@ -363,7 +395,7 @@ def grant_service_read(root: Path, account: Account) -> None:
             except OSError as exc:
                 raise _unopenable(label, exc) from exc
             stack.callback(winfile.close_handle, handle)
-            directory = _Target(handle, label, True, [], top)
+            directory = _Target(handle, label, True, [], top, inherited_read=key == "host")
             targets.append(directory)
             targets += [_Target(h, where, False, [], directory) for h, where in _open_entries(stack, handle, label)]
         top.entries, root_protected = winacl.read_entries(root_handle)
@@ -379,7 +411,7 @@ def grant_service_read(root: Path, account: Account) -> None:
             assert target.parent is not None
             owner_sid, group_sid = winacl.owner_and_group(target.handle)
             target.entries = winacl.canonical(
-                _service_read(winacl.explicit(target.entries), sid) + winacl.inherited_for(
+                _explicit_service_read(target, sid) + winacl.inherited_for(
                     target.parent.entries,
                     directory=target.directory,
                     owner=owner_sid,
