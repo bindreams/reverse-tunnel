@@ -432,24 +432,39 @@ def _service_token(sid: str) -> Generator[authz.Token]:
         yield token
 
 
-def _require_service_read(token: authz.Token, label: Path, descriptor: bytes) -> None:
+def _require_service_read(token: authz.Token, label: Path, descriptor: bytes, *, new_file: bool = False) -> None:
     """Fail unless Windows' own access check grants the service read-and-execute under `descriptor`.
 
     A deny for the service or for any group its token holds is the usual cause, whichever ACE order the DACL has.
+    `descriptor` is the one a file created in the directory `label` would get when `new_file`.
     """
-    if not token.grants(descriptor, winacl.READ_EXECUTE):
+    if token.grants(descriptor, winacl.READ_EXECUTE):
+        return
+    if new_file:
         raise PermsError(
-            f"{label}: the service is denied read-and-execute (an ACE denying it or a group it is in, explicit or "
-            "inherited, or a DACL that does not grant it); remove that ACE, then rerun"
+            f"{label}: a file created here would deny the service read-and-execute (an inheritable ACE on "
+            f"{label.name} or above); remove that ACE, then rerun"
         )
+    raise PermsError(
+        f"{label}: the service is denied read-and-execute (an ACE denying it or a group it is in, explicit or "
+        "inherited, or a DACL that does not grant it); remove that ACE, then rerun"
+    )
 
 
 def _require_planned(
-    token: authz.Token, label: Path, entries: list[winacl.Entry], protected: bool, owner: str, group: str
+    token: authz.Token,
+    label: Path,
+    entries: list[winacl.Entry],
+    protected: bool,
+    owner: str,
+    group: str,
+    *,
+    new_file: bool = False
 ) -> None:
     """`_require_service_read` for the DACL `entries` that is about to be written to an object of this owner and group,
     in the order that `winacl.set_dacl` writes them."""
-    _require_service_read(token, label, authz.descriptor_for(entries, protected=protected, owner=owner, group=group))
+    descriptor = authz.descriptor_for(entries, protected=protected, owner=owner, group=group)
+    _require_service_read(token, label, descriptor, new_file=new_file)
 
 
 def _require_on_disk(token: authz.Token, handle: int, label: Path) -> None:
@@ -550,7 +565,7 @@ def grant_service_read(root: Path, account: Account) -> None:
                 created = winacl.inherited_for(
                     target.entries, directory=False, owner=owner_sid, group=group_sid, parent_label=str(target.label)
                 )
-                _require_planned(token, target.label / "<a new file>", created, False, owner_sid, group_sid)
+                _require_planned(token, target.label, created, False, owner_sid, group_sid, new_file=True)
             writes.append((target.handle, target.entries, target.protected))
         # The root is last: by then everything the service reads holds its own access.
         writes.append((root_handle, top.entries, root_protected))
