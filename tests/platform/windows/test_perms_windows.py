@@ -668,6 +668,66 @@ def test_grant_service_read_keeps_an_explicit_deny_for_the_service(tmp_path):
     assert {e.ace_type for e in kept} == {winacl.ACCESS_ALLOWED_ACE_TYPE, winacl.ACCESS_DENIED_ACE_TYPE}
 
 
+# Writing in an order that never leaves the service without access =====================================================
+
+
+def old_shape(tmp_path: Path) -> Path:
+    """What an earlier install granted (an inheritable service ACE on the root), and two entries `ctl` never opens."""
+    repo = repo_with(tmp_path)
+    (repo / "ctl").mkdir()
+    (repo / "goetia.yaml").write_bytes(b"")
+    icacls(str(repo), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)(RX)")
+    return repo
+
+
+def reads(path: Path, *, directory: bool) -> bool:
+    """Whether an ACE that applies to `path` itself, explicit or inherited, allows the service."""
+    return any(
+        e.sid == SID_LOCAL_SERVICE and e.ace_type == winacl.ACCESS_ALLOWED_ACE_TYPE and not e.flags & INHERIT_ONLY_ACE
+        for e in entries_of(path, directory=directory)
+    )
+
+
+def after_each_write(monkeypatch, observe) -> list:
+    """Call `observe()` after every `winacl.set_dacl` and collect what it returns."""
+    real = winacl.set_dacl
+    seen = []
+
+    def recording(handle, entries, *, protected):
+        real(handle, entries, protected=protected)
+        seen.append(observe())
+
+    monkeypatch.setattr(winacl, "set_dacl", recording)
+    return seen
+
+
+def test_grant_service_read_writes_the_root_last_and_only_once(tmp_path, monkeypatch):
+    repo = old_shape(tmp_path)
+    before = entries_of(repo)
+    seen = after_each_write(monkeypatch, lambda: entries_of(repo) != before)
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert seen and seen == [False] * (len(seen) - 1) + [True]
+
+
+def test_no_write_of_grant_service_read_leaves_what_the_service_reads_without_access(tmp_path, monkeypatch):
+    repo = old_shape(tmp_path)
+    needed = [(repo / "bin", True), (repo / "bin" / "frpc.exe", False), (repo / "host", True),
+              (repo / "host" / "frpc.toml", False)]
+    assert all(reads(path, directory=directory) for path, directory in needed)
+    seen = after_each_write(
+        monkeypatch, lambda: [path for path, directory in needed if not reads(path, directory=directory)]
+    )
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert seen and seen == [[]] * len(seen)
+
+
+def test_grant_service_read_from_the_old_shape_leaves_the_unvetted_entries_of_the_root_as_they_were(tmp_path):
+    repo = old_shape(tmp_path)
+    before = (whole_entries(repo / "ctl", directory=True), whole_entries(repo / "goetia.yaml", directory=False))
+    grant_service_read(repo, LOCAL_SERVICE)
+    assert (whole_entries(repo / "ctl", directory=True), whole_entries(repo / "goetia.yaml", directory=False)) == before
+
+
 # Converging bin =======================================================================================================
 
 
@@ -695,18 +755,26 @@ def test_converging_bin_after_the_grant_keeps_the_service_read_and_is_idempotent
 
 def test_converging_bin_replaces_an_inheritable_service_ace_an_earlier_install_wrote(tmp_path):
     repo = repo_with(tmp_path)
+    binary = repo / "bin" / "frpc.exe"
     icacls(str(repo / "bin"), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)(RX)")
+    assert [e.flags for e in service_entries(binary, directory=False)] == [INHERITED_ACE]  # all it holds
     converge_bin(repo)
     assert service_shape(repo / "bin") == [(winacl.READ_EXECUTE, 0)]
+    assert service_shape(binary, directory=False) == [(winacl.READ_EXECUTE, 0)]
 
 
 # What NTFS rewrites when a directory gains inheritable ACEs ===========================================================
 
 
-def whole_acl(path: Path) -> tuple[list[winacl.Entry], bool]:
-    """Every ACE of the file `path` in stored order, and whether its inheritance is broken."""
-    with perms_windows._handle(path, directory=False, access=perms_windows.winfile.READ_CONTROL) as handle:
+def whole_entries(path: Path, *, directory: bool) -> tuple[list[winacl.Entry], bool]:
+    """Every ACE of `path` in stored order, and whether its inheritance is broken."""
+    with perms_windows._handle(path, directory=directory, access=perms_windows.winfile.READ_CONTROL) as handle:
         return winacl.read_entries(handle)
+
+
+def whole_acl(path: Path) -> tuple[list[winacl.Entry], bool]:
+    """`whole_entries` for a file."""
+    return whole_entries(path, directory=False)
 
 
 def converge_for(repo: Path, directory: str) -> None:
