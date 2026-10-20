@@ -412,9 +412,8 @@ def apply(config: Config, plan: Plan, *, services: Services) -> None:
             print(f"{daemon_id}: installed and restarted ({plan.reasons[daemon_id]})")
         expected = {pin.install_name: pin.member_sha256 for pin in plan.pins} | dict(plan.inputs)
         if read_digests(bin_dir) != expected:
-            record_digests(bin_dir, plan.pins, plan.inputs)
+            record_digests(bin_dir, plan.pins, plan.inputs, service=service)
             perms.assign_file(bin_dir / DIGESTS, perms.operator_account(root), RECORD_MODE, root=root)
-            perms.grant_service_read_file(bin_dir / DIGESTS, service)
     finally:
         _clear_staging_quietly(root)
     if not plan.daemons_to_converge:

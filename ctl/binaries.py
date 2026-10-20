@@ -26,6 +26,7 @@ from ctl.archive import ArchiveFormat, hash_binary, is_safe_member
 from ctl.atomic import replace_file
 from ctl.config import Role
 from ctl.errors import BinariesError, UpstreamUnavailable
+from ctl.perms import Account
 from ctl.github import (
     api_client,
     asset_named,
@@ -431,9 +432,13 @@ def _write_tool(document: tomlkit.TOMLDocument, tool: str, pinned: dict[str, lis
         table[BUNDLE] = bundle
 
 
-def write_atomically(path: Path, text: str) -> None:
-    """Replace `path` whole, so a failed write never leaves a half-written file; keeps the file's mode, never follows a link."""
-    replace_file(path.parent, path.name, io.BytesIO(text.encode("utf-8")), None)
+def write_atomically(path: Path, text: str, *, service: Account | None = None) -> None:
+    """Replace `path` whole, so a failed write never leaves a half-written file; keeps the file's mode, never follows a link.
+
+    `service` is passed to `atomic.replace_file`: on Windows that account holds read access to the new file before it has
+    its final name.
+    """
+    replace_file(path.parent, path.name, io.BytesIO(text.encode("utf-8")), None, service=service)
 
 
 # Comparing to upstream ================================================================================================
