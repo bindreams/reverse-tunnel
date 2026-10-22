@@ -15,12 +15,11 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.platform.windows.acl_support import icacls
 from tests.unit.dry_run_support import goetia_binary
 
 from ctl import goetia, perms_windows, winacl
 from ctl.goetia import GoetiaError
-from ctl.perms import SID_LOCAL_SERVICE
+from ctl.perms import SID_LOCAL_SERVICE, Account
 
 DAEMON = "rtcwd"
 # What the doctor required of `logs` before it asked for FILE_READ_ATTRIBUTES: list, add, traverse, synchronize.
@@ -36,23 +35,29 @@ def binaries(tmp_path_factory) -> Path:
 
 def deployment(root: Path, binaries: Path, logs_mask: int) -> None:
     """A deployment of one daemon whose working directory is `logs`, which grants the service `logs_mask` and nothing
-    inherited, as an owned directory does."""
+    inherited, as an owned directory does. The root grants the service nothing, as after an install: a right to list
+    the root would give it the read of attributes of `logs` whatever `logs` grants."""
     root.mkdir()
-    icacls(str(root), "/grant", f"*{SID_LOCAL_SERVICE}:(OI)(CI)M")  # so that it reaches `bin`
+    allow = winacl.ACCESS_ALLOWED_ACE_TYPE
+    operator = perms_windows.operator_sid(root)
+    admin_and_operator = [
+        winacl.Entry(allow, INHERIT, winacl.FULL, winacl.SID_ADMINISTRATORS),
+        winacl.Entry(allow, INHERIT, winacl.FULL, operator),
+    ]
+    with perms_windows._handle(root, directory=True, access=perms_windows.ACL_ACCESS) as handle:
+        winacl.set_dacl(handle, admin_and_operator, protected=True)
     (root / "bin").mkdir()
     for member in binaries.iterdir():
         if member.is_file():
             shutil.copy(member, root / "bin" / member.name)
+    perms_windows.converge_owned(root / "bin", Account("LocalService", None, None), write=False, root=root)
     logs = root / "logs"
     logs.mkdir()
-    allow = winacl.ACCESS_ALLOWED_ACE_TYPE
-    entries = [
-        winacl.Entry(allow, INHERIT, winacl.FULL, winacl.SID_ADMINISTRATORS),
-        winacl.Entry(allow, INHERIT, winacl.FULL, perms_windows.operator_sid(root)),
-        winacl.Entry(allow, INHERIT, logs_mask, SID_LOCAL_SERVICE),
-    ]
     with perms_windows._handle(logs, directory=True, access=perms_windows.ACL_ACCESS) as handle:
-        winacl.set_dacl(handle, entries, protected=True)
+        winacl.set_dacl(
+            handle,
+            [*admin_and_operator, winacl.Entry(allow, INHERIT, logs_mask, SID_LOCAL_SERVICE)], protected=True
+        )
     hold = [str(Path(os.environ["SystemRoot"]) / "System32" / "waitfor.exe"), "/t", "99999", "rtcwdhold"]
     manifest = {
         "daemons": {
