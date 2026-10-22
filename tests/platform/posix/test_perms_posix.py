@@ -159,6 +159,17 @@ def test_write_secret_removes_its_temporary_file_when_the_chown_fails(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_write_secret_keeps_the_original_failure_when_its_temporary_file_cannot_be_removed(tmp_path, monkeypatch):
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(os, "unlink", refuse)
+    with pytest.raises(ValueError) as raised:
+        write_secret(tmp_path / "token", b"secret", Account("windows-only", None, None), NO_READERS, root=tmp_path)
+    assert any("Permission denied" in note for note in getattr(raised.value, "__notes__", []))
+
+
 def test_write_secret_refuses_a_symlinked_directory(tmp_path):
     (tmp_path / "real").mkdir()
     (tmp_path / "secrets").symlink_to(tmp_path / "real")

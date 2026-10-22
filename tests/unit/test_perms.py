@@ -125,3 +125,32 @@ def test_write_secret_refuses_a_hard_linked_destination(tmp_path):
         write_secret(token, b"new", None, NO_READERS, root=tmp_path)
     assert "hard link" in str(raised.value)
     assert other.read_bytes() == b"the-old-secret"
+
+
+# Removing a temporary file while an error is in flight ================================================================
+
+
+def test_discarding_a_temporary_file_removes_it(tmp_path):
+    temporary = tmp_path / ".token.tmp"
+    temporary.write_bytes(b"partial")
+    perms.discard_temporary(str(temporary), RuntimeError("write failed"))
+    assert not temporary.exists()
+
+
+def test_discarding_a_temporary_file_that_is_gone_is_no_failure_and_adds_no_note(tmp_path):
+    error = RuntimeError("write failed")
+    perms.discard_temporary(str(tmp_path / "gone"), error)
+    assert not hasattr(error, "__notes__")
+
+
+def test_a_temporary_file_that_cannot_be_removed_is_noted_on_the_error_in_flight_and_raises_nothing(
+    tmp_path, monkeypatch
+):
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Access is denied")
+
+    monkeypatch.setattr(os, "unlink", refuse)
+    error = RuntimeError("write failed")
+    perms.discard_temporary(str(tmp_path / "held"), error)
+    assert len(error.__notes__) == 1 and "held" in error.__notes__[0] and "Access is denied" in error.__notes__[0]
