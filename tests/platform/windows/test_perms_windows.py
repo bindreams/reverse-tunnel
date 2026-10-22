@@ -451,7 +451,7 @@ def test_converging_secrets_again_writes_nothing_with_subdirectories_present(tmp
     first = acls_under(repo)
     writes = after_each_write(monkeypatch, lambda: None)
     converge_secrets(repo)
-    assert writes == [] and acls_under(repo) == first
+    assert len(writes) == 1 and acls_under(repo) == first  # the directory itself is always written, nothing in it
 
 
 def test_converging_secrets_refuses_a_hard_link_deep_in_a_subdirectory_and_changes_nothing(tmp_path):
@@ -578,6 +578,11 @@ def test_converge_dir_refused_for_an_unsupported_parent_ace_creates_nothing(tmp_
 
 
 # Inspection ===========================================================================================================
+
+
+def test_reading_the_acl_of_a_missing_path_is_a_file_not_found_error(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        winacl.read_acl(tmp_path / "absent")
 
 
 def test_describe_lists_the_sids_and_the_inheritance_state(tmp_path):

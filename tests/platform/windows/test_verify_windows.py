@@ -31,14 +31,6 @@ def uninheritable(entries, protected):
     ], protected
 
 
-def flip_protected(entries, protected):
-    return entries, not protected
-
-
-FILE_TAMPERING = [widen, deny, flip_protected]
-DIRECTORY_TAMPERING = [widen, deny, uninheritable, flip_protected]
-
-
 def tamper(monkeypatch, change) -> None:
     """Every DACL written afterwards is stored as `change` made it."""
     real = winacl.set_dacl
@@ -50,11 +42,30 @@ def tamper(monkeypatch, change) -> None:
     monkeypatch.setattr(winacl, "set_dacl", writing)
 
 
+def flip_protected(monkeypatch) -> None:
+    """Every ACL read afterwards says its inheritance is in the other state than it is."""
+    real = winacl.read_entries
+
+    def reading(handle):
+        entries, protected = real(handle)
+        return entries, not protected
+
+    monkeypatch.setattr(winacl, "read_entries", reading)
+
+
+def writes_as(change):
+    return lambda monkeypatch: tamper(monkeypatch, change)
+
+
+FILE_TAMPERING = [writes_as(widen), writes_as(deny), flip_protected]
+DIRECTORY_TAMPERING = [writes_as(widen), writes_as(deny), writes_as(uninheritable), flip_protected]
+
+
 @pytest.mark.parametrize("change", FILE_TAMPERING)
 def test_hardening_a_file_fails_unless_the_acl_reads_back_as_written(tmp_path, monkeypatch, change):
     path = tmp_path / ".env"
     path.write_bytes(b"")
-    tamper(monkeypatch, change)
+    change(monkeypatch)
     with pytest.raises(PermsError) as raised:
         harden_file(path, None, READERS, root=tmp_path)
     assert str(path) in str(raised.value)
@@ -64,7 +75,7 @@ def test_hardening_a_file_fails_unless_the_acl_reads_back_as_written(tmp_path, m
 def test_writing_a_secret_fails_unless_the_acl_of_its_temporary_file_reads_back_as_written(
     tmp_path, monkeypatch, change
 ):
-    tamper(monkeypatch, change)
+    change(monkeypatch)
     with pytest.raises(PermsError):
         write_secret(tmp_path / "token", b"secret", LOCAL_SERVICE, READERS, root=tmp_path)
     assert list(tmp_path.iterdir()) == []
@@ -72,7 +83,7 @@ def test_writing_a_secret_fails_unless_the_acl_of_its_temporary_file_reads_back_
 
 @pytest.mark.parametrize("change", DIRECTORY_TAMPERING)
 def test_converging_an_isolated_directory_fails_unless_the_acl_reads_back_as_written(tmp_path, monkeypatch, change):
-    tamper(monkeypatch, change)
+    change(monkeypatch)
     with pytest.raises(PermsError) as raised:
         converge_dir(tmp_path / "secrets", LOCAL_SERVICE, 0o711, READERS, root=tmp_path)
     assert str(tmp_path / "secrets") in str(raised.value)
@@ -80,7 +91,7 @@ def test_converging_an_isolated_directory_fails_unless_the_acl_reads_back_as_wri
 
 @pytest.mark.parametrize("change", DIRECTORY_TAMPERING)
 def test_converging_a_directory_that_inherits_fails_unless_the_acl_reads_back_as_written(tmp_path, monkeypatch, change):
-    tamper(monkeypatch, change)
+    change(monkeypatch)
     with pytest.raises(PermsError) as raised:
         converge_dir(tmp_path / "staging", LOCAL_SERVICE, 0o700, READERS, isolate=False, root=tmp_path)
     assert str(tmp_path / "staging") in str(raised.value)
