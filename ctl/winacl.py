@@ -44,7 +44,7 @@ READ_WRITE_DELETE = READ_WRITE | DELETE
 # What goetia-shim needs of `logs` itself: list it, add a file to it, pass through it, and read its attributes. The last
 # is what `create_dir_all` (it ends in `is_dir()`, an open that adds FILE_READ_ATTRIBUTES) and the daemon's working
 # directory (process creation checks it with GetFileAttributesW) ask, and the repository root grants the service nothing.
-LIST_AND_ADD = 0x1 | 0x2 | 0x20 | 0x80 | 0x100000
+LIST_AND_ADD = 0x1 | 0x2 | 0x20 | 0x100000
 # What goetia-shim asks for when it opens `logs\<daemon>.log`: Rust's `OpenOptions::append(true)` requests
 # `FILE_GENERIC_WRITE & !FILE_WRITE_DATA`, which is read-control, write-attributes, write-EA, append-data, synchronize.
 APPEND = 0x20000 | 0x100 | 0x10 | 0x4 | 0x100000
