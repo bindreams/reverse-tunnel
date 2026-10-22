@@ -161,7 +161,10 @@ def _raise_status(ntdll, status: int):
 
 
 def close_handle(handle: int) -> None:
-    _kernel32().CloseHandle(handle)
+    """Close `handle`. Every caller closes a handle it opened and still owns, so a failure here is a double close or a
+    handle that was never ours: a bug, which is not allowed to pass."""
+    closed = _kernel32().CloseHandle(handle)
+    assert closed, f"CloseHandle({handle}) failed: {ctypes.WinError(ctypes.get_last_error())}"
 
 
 def _inspect(kernel32, handle: int, path, *, directory: bool | None, single_link: bool, error: type[Exception]) -> None:
