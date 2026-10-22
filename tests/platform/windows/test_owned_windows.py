@@ -17,6 +17,7 @@ from tests.platform.windows.acl_support import (
     after_each_write,
     entries_of,
     icacls,
+    Shape,
     owned_shape,
     shape_of,
     snapshot,
@@ -48,6 +49,22 @@ def repo_with(tmp_path: Path) -> Path:
     (repo / "ctl" / "module.py").write_bytes(b"")
     (repo / "goetia.yaml").write_bytes(b"")
     return repo
+
+
+def add_nested(repo: Path, name: str) -> list[Path]:
+    """Two levels of subdirectory in an owned directory, each holding a file; the paths below `name`, parents first."""
+    top, deeper = repo / name / "old", repo / name / "old" / "deeper"
+    deeper.mkdir(parents=True)
+    files = [top / "leftover", deeper / "leftover"]
+    for file in files:
+        file.write_bytes(b"")
+    return [top, files[0], deeper, files[1]]
+
+
+def inherited_shape(repo: Path, name: str, path: Path) -> tuple[Shape, bool]:
+    """What an entry of an owned directory holds: what it inherits, not protected; a directory passes it on."""
+    flags = (INHERITING | INHERITED_ACE) if path.is_dir() else INHERITED_ACE
+    return owned_shape(repo, KINDS[name], flags), False
 
 
 def converge(repo: Path, name: str) -> None:
@@ -179,6 +196,80 @@ def test_a_file_moved_in_from_elsewhere_keeps_its_old_acl_until_the_directory_is
     assert can_open(repo / name / "moved.toml", READ)
 
 
+# Subdirectories =======================================================================================================
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_every_entry_at_every_depth_holds_exactly_what_it_inherits_and_is_not_protected(tmp_path, name):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo, name)
+    converge(repo, name)
+    for path in nested:
+        assert shape_of(path) == inherited_shape(repo, name, path), path
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_the_service_may_open_what_lies_deep_in_a_subdirectory(tmp_path, name):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo, name)
+    converge(repo, name)
+    assert all(can_open(path, LIST if path.is_dir() else READ) for path in nested)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_converging_again_writes_nothing_with_subdirectories_present(tmp_path, monkeypatch, name):
+    repo = repo_with(tmp_path)
+    add_nested(repo, name)
+    converge(repo, name)
+    first = snapshot(repo / name)
+    writes = count_writes(monkeypatch)
+    converge(repo, name)
+    assert writes == [] and snapshot(repo / name) == first
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_an_ace_or_a_deny_added_to_a_subdirectory_or_a_file_in_it_is_dropped(tmp_path, name):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo, name)
+    for path in nested:
+        icacls(str(path), "/deny", f"*{winacl.SID_USERS}:(X)")
+        icacls(str(path), "/grant", f"*{winacl.SID_EVERYONE}:(R)")
+    converge(repo, name)
+    for path in nested:
+        assert shape_of(path) == inherited_shape(repo, name, path), path
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_protected_subdirectory_or_file_deep_in_the_tree_is_made_to_inherit_again(tmp_path, name):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo, name)
+    for path in nested:
+        make_protected(path)
+    converge(repo, name)
+    for path in nested:
+        assert shape_of(path) == inherited_shape(repo, name, path), path
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_file_created_in_a_subdirectory_afterwards_holds_the_service_access(tmp_path, name):
+    repo = repo_with(tmp_path)
+    add_nested(repo, name)
+    converge(repo, name)
+    created = repo / name / "old" / "deeper" / "created"
+    created.write_bytes(b"")
+    assert can_open(created, READ)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_nothing_outside_the_owned_directory_is_written_when_it_holds_subdirectories(tmp_path, name):
+    repo = repo_with(tmp_path)
+    add_nested(repo, name)
+    others = [p for p in repo.iterdir() if p.name != name]
+    before = snapshot(*others)
+    converge(repo, name)
+    assert snapshot(*others) == before
+
+
 # Files created afterwards =============================================================================================
 
 
@@ -247,15 +338,6 @@ def refuses(repo: Path, name: str, *foreign: Path) -> PermsError:
 
 
 @pytest.mark.parametrize("name", KINDS)
-def test_a_subdirectory_is_refused_and_nothing_is_changed(tmp_path, name):
-    repo = repo_with(tmp_path)
-    (repo / name / "old").mkdir()
-    (repo / name / "old" / "x").write_bytes(b"")
-    error = refuses(repo, name)
-    assert str(repo / name / "old") in str(error) and "remove it" in str(error)
-
-
-@pytest.mark.parametrize("name", KINDS)
 def test_a_hard_linked_file_is_refused_and_the_other_name_is_left_alone(tmp_path, name):
     repo = repo_with(tmp_path)
     foreign = tmp_path / "foreign"
@@ -319,6 +401,116 @@ def test_a_junction_whose_name_is_outside_the_bmp_is_refused_by_name_not_skipped
     assert NON_BMP in str(error) and "reparse point" in str(error)
 
 
+@pytest.mark.parametrize("name", KINDS)
+def test_a_hard_linked_file_deep_in_a_subdirectory_is_refused_and_nothing_is_changed(tmp_path, name):
+    repo = repo_with(tmp_path)
+    add_nested(repo, name)
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"")
+    os.link(foreign, repo / name / "old" / "deeper" / "linked")
+    error = refuses(repo, name, foreign)
+    assert "hard link" in str(error) and str(repo / name / "old" / "deeper" / "linked") in str(error)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_symlink_deep_in_a_subdirectory_is_refused_and_its_target_is_left_alone(tmp_path, name):
+    repo = repo_with(tmp_path)
+    add_nested(repo, name)
+    target = tmp_path / "target"
+    target.write_bytes(b"")
+    (repo / name / "old" / "deeper" / "link").symlink_to(target)
+    error = refuses(repo, name, target)
+    assert str(repo / name / "old" / "deeper" / "link") in str(error) and "reparse point" in str(error)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_junction_to_a_directory_in_a_subdirectory_is_refused_and_its_target_is_left_alone(tmp_path, name):
+    import _winapi
+
+    repo = repo_with(tmp_path)
+    add_nested(repo, name)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "inside").write_bytes(b"")
+    _winapi.CreateJunction(str(target), str(repo / name / "old" / "junction"))
+    assert "reparse point" in str(refuses(repo, name, target))
+
+
+# Entries that vanish ==================================================================================================
+
+
+def vanish_after_listing(monkeypatch, victim: Path) -> None:
+    """The listing of the directory holding `victim` is followed by `victim` being deleted, as a daemon rotating a log
+    or git cleaning up would."""
+    real = perms_windows.winfile.list_names
+
+    def listing(directory):
+        names = real(directory)
+        if victim.name in names and victim.exists():
+            if victim.is_dir():
+                victim.rmdir()
+            else:
+                victim.unlink()
+        return names
+
+    monkeypatch.setattr(perms_windows.winfile, "list_names", listing)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_file_deleted_between_listing_and_opening_is_skipped(tmp_path, monkeypatch, name):
+    repo = repo_with(tmp_path)
+    (repo / name / "rotated").write_bytes(b"")
+    kept = [p for p in (repo / name).iterdir() if p.name != "rotated"]
+    vanish_after_listing(monkeypatch, repo / name / "rotated")
+    converge(repo, name)
+    assert not (repo / name / "rotated").exists()
+    assert shape_of(repo / name) == (owned_shape(repo, KINDS[name], INHERITING), True)
+    for path in kept:
+        assert shape_of(path) == inherited_shape(repo, name, path)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_file_deleted_from_a_subdirectory_between_listing_and_opening_is_skipped(tmp_path, monkeypatch, name):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo, name)
+    victim = repo / name / "old" / "deeper" / "rotated"
+    victim.write_bytes(b"")
+    vanish_after_listing(monkeypatch, victim)
+    converge(repo, name)
+    assert not victim.exists()
+    for path in nested[:3]:
+        assert shape_of(path) == inherited_shape(repo, name, path), path
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_subdirectory_deleted_between_listing_and_opening_is_skipped(tmp_path, monkeypatch, name):
+    repo = repo_with(tmp_path)
+    (repo / name / "gone").mkdir()
+    vanish_after_listing(monkeypatch, repo / name / "gone")
+    converge(repo, name)
+    assert not (repo / name / "gone").exists()
+    assert shape_of(repo / name) == (owned_shape(repo, KINDS[name], INHERITING), True)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_an_entry_that_cannot_be_opened_for_another_reason_still_refuses(tmp_path, monkeypatch, name):
+    repo = repo_with(tmp_path)
+    real = perms_windows.winfile.open_relative
+    (victim, ) = [p.name for p in (repo / name).iterdir()]
+
+    def opening(parent, entry, **kwargs):
+        if entry == victim:
+            raise PermissionError(5, "Access is denied")
+        return real(parent, entry, **kwargs)
+
+    monkeypatch.setattr(perms_windows.winfile, "open_relative", opening)
+    before = snapshot(repo)
+    with pytest.raises(PermsError) as raised:
+        converge(repo, name)
+    assert "cannot be opened" in str(raised.value) and "Access is denied" in str(raised.value)
+    assert snapshot(repo) == before
+
+
 # Order and interruption ===============================================================================================
 
 
@@ -346,6 +538,22 @@ def test_no_write_of_converging_a_directory_leaves_what_the_service_reads_withou
     assert len(seen) > 1 and seen == [[]] * len(seen)
 
 
+@pytest.mark.parametrize("name", ["bin", "host"])
+def test_no_write_of_converging_a_directory_with_subdirectories_leaves_what_the_service_reads_without_access(
+    tmp_path, monkeypatch, name
+):
+    repo = old_shape(tmp_path)
+    nested = add_nested(repo, name)
+
+    def unreadable() -> list[Path]:
+        return [path for path in nested if not can_open(path, LIST if path.is_dir() else READ)]
+
+    assert unreadable() == []
+    seen = after_each_write(monkeypatch, unreadable)
+    converge(repo, name)
+    assert len(seen) > 1 and seen == [[]] * len(seen)
+
+
 @pytest.mark.parametrize("name", KINDS)
 def test_the_directory_is_written_before_its_files(tmp_path, monkeypatch, name):
     repo = repo_with(tmp_path)
@@ -361,6 +569,7 @@ def test_ctrl_c_does_not_land_between_the_writes_of_converging_a_directory(tmp_p
     whole, interrupted = (repo_with(tmp_path / case) for case in ("whole", "interrupted"))
     for repo in (whole, interrupted):
         (repo / name / "extra").write_bytes(b"")
+        add_nested(repo, name)
     real = winacl.set_dacl
     calls = []
     interrupt = False

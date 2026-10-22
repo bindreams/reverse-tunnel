@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.platform.windows.acl_support import entries_of, icacls, owned_shape, shape_of, snapshot, whole_entries
+from tests.platform.windows.acl_support import (
+    after_each_write,
+    entries_of,
+    icacls,
+    owned_shape,
+    shape_of,
+    snapshot,
+    whole_entries,
+)
 
 from ctl import perms_windows, winacl
 from ctl.perms import (
@@ -411,14 +419,84 @@ def test_a_file_in_a_converged_directory_ends_up_inheriting_from_it(converged_di
     assert whole_acl(extra) == (expected, False)
 
 
-def test_converging_secrets_refuses_a_subdirectory_and_changes_nothing(tmp_path):
+def inherited_by(path: Path, parent: Path) -> tuple[list[winacl.Entry], bool]:
+    """What `path`, a new entry of `parent`, inherits: its ACL when nothing explicit is on it, and not protected."""
+    with perms_windows._handle(path, directory=path.is_dir(), access=perms_windows.winfile.READ_CONTROL) as handle:
+        owner, group = winacl.owner_and_group(handle)
+    return winacl.inherited_for(entries_of(parent), directory=path.is_dir(), owner=owner, group=group), False
+
+
+def add_nested(repo: Path) -> list[Path]:
+    """Two levels of subdirectory in `secrets`, each holding a file; parents first."""
+    top, deeper = repo / "secrets" / "old", repo / "secrets" / "old" / "deeper"
+    deeper.mkdir(parents=True)
+    (top / "x").write_bytes(b"")
+    (deeper / "y").write_bytes(b"")
+    return [top, top / "x", deeper, deeper / "y"]
+
+
+def test_converging_secrets_rewrites_a_subdirectory_and_what_is_in_it_to_inherit(tmp_path):
     repo = repo_with(tmp_path)
-    (repo / "secrets" / "old").mkdir()
-    before = acls_under(repo)
+    nested = add_nested(repo)
+    converge_secrets(repo)
+    parents = {nested[0]: repo / "secrets", nested[1]: nested[0], nested[2]: nested[0], nested[3]: nested[2]}
+    for path in nested:
+        assert whole_acl(path) == inherited_by(path, parents[path]), path
+
+
+def test_converging_secrets_again_writes_nothing_with_subdirectories_present(tmp_path, monkeypatch):
+    repo = repo_with(tmp_path)
+    add_nested(repo)
+    converge_secrets(repo)
+    first = acls_under(repo)
+    writes = after_each_write(monkeypatch, lambda: None)
+    converge_secrets(repo)
+    assert writes == [] and acls_under(repo) == first
+
+
+def test_converging_secrets_refuses_a_hard_link_deep_in_a_subdirectory_and_changes_nothing(tmp_path):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo)
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"")
+    os.link(foreign, nested[2] / "linked")
+    before = acls_under(repo) | acls_under(foreign)
     with pytest.raises(PermsError) as raised:
         converge_secrets(repo)
-    assert str(repo / "secrets" / "old") in str(raised.value)
-    assert acls_under(repo) == before
+    assert "hard link" in str(raised.value) and str(nested[2] / "linked") in str(raised.value)
+    assert acls_under(repo) | acls_under(foreign) == before
+
+
+def test_converging_secrets_refuses_a_reparse_point_deep_in_a_subdirectory_and_leaves_its_target_alone(tmp_path):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo)
+    target = tmp_path / "target"
+    target.mkdir()
+    (nested[2] / "link").symlink_to(target, target_is_directory=True)
+    before = acls_under(repo) | acls_under(target)
+    with pytest.raises(PermsError) as raised:
+        converge_secrets(repo)
+    assert "reparse point" in str(raised.value) and str(nested[2] / "link") in str(raised.value)
+    assert acls_under(repo) | acls_under(target) == before
+
+
+def test_converging_secrets_skips_an_entry_deleted_between_listing_and_opening(tmp_path, monkeypatch):
+    repo = repo_with(tmp_path)
+    victim = repo / "secrets" / "rotated"
+    victim.write_bytes(b"")
+    kept = repo / "secrets" / "kept"
+    kept.write_bytes(b"")
+    real = perms_windows.winfile.list_names
+
+    def listing(directory):
+        names = real(directory)
+        if victim.exists():
+            victim.unlink()
+        return names
+
+    monkeypatch.setattr(perms_windows.winfile, "list_names", listing)
+    converge_secrets(repo)
+    assert not victim.exists() and whole_acl(kept) == inherited_by(kept, repo / "secrets")
 
 
 def test_converging_secrets_leaves_a_file_with_broken_inheritance_as_it_was(tmp_path):

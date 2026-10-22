@@ -1,7 +1,8 @@
 """`stage` and `apply` on a repository an earlier install left: no interruption strands the service, a rerun converges.
 
-The service's access is judged by Windows' own access check (see `service_access`). It reads: `bin` and every file in
-it, `host` and `host/frpc.toml`, `secrets/token`, and it writes into `logs`. The repository root is not on the list.
+The service's access is judged by Windows' own access check (see `service_access`). It reads: `bin`, `host` and everything
+in them, down any subdirectory, `secrets/token`, and it writes into `logs` and what is in it. The repository root is
+not on the list.
 """
 
 import os
@@ -84,6 +85,16 @@ def write_previous_shape(root: Path) -> None:
             winacl.set_dacl(handle, winacl.canonical(winacl.explicit(entries) + inherited), protected=protected)
 
 
+def add_nested(root: Path) -> None:
+    """Two levels of subdirectory, each with a file, in each owned directory that exists, as an operator may leave."""
+    for name in ("bin", "host", "logs"):
+        deeper = root / name / "old" / "deeper"
+        if (root / name).is_dir():
+            deeper.mkdir(parents=True)
+            (root / name / "old" / "leftover").write_bytes(b"")
+            (deeper / "leftover").write_bytes(b"")
+
+
 def build(variant: str, base: Path, monkeypatch) -> HostTree:
     """A repository in one of four states: never installed, installed, and installed by either earlier version.
 
@@ -107,6 +118,7 @@ def build(variant: str, base: Path, monkeypatch) -> HostTree:
                            capture_output=True)
         else:
             write_previous_shape(tree.root)
+    add_nested(tree.root)
     return tree
 
 
@@ -141,18 +153,19 @@ def install(tree: HostTree) -> None:
 
 
 def needed(root: Path) -> dict[Path, int]:
-    """The objects of the install that exist now that the service opens, each with the rights it is asked for."""
+    """The objects of the install that exist now that the service opens, each with the rights it is asked for.
+
+    Everything in `bin`, `host` and `logs` at any depth, except `bin/.staging` (the operator's, not the service's).
+    """
     wanted: dict[Path, int] = {}
-    for directory, access in (("bin", LIST), ("host", LIST), ("secrets", LIST), ("logs", ADD_TO)):
-        if (root / directory).is_dir():
-            wanted[Path(directory)] = access
-    for directory, access in (("bin", EXECUTE), ("logs", APPEND)):
-        if (root / directory).is_dir():
-            for entry in sorted((root / directory).iterdir()):
-                if entry.is_file():
-                    wanted[entry.relative_to(root)] = access
-    for name, access in (("host/frpc.toml", READ), ("secrets/token", READ)):
-        if (root / name).is_file():
+    for directory, listing, opening in (("bin", LIST, EXECUTE), ("host", LIST, READ), ("logs", ADD_TO, APPEND)):
+        top = root / directory
+        if top.is_dir():
+            for path in [top, *top.rglob("*")]:
+                if host.STAGING not in path.relative_to(top).parts:
+                    wanted[path.relative_to(root)] = listing if path.is_dir() else opening
+    for name, access in (("secrets", LIST), ("secrets/token", READ)):
+        if (root / name).exists():
             wanted[Path(name)] = access
     return wanted
 
@@ -185,6 +198,28 @@ def test_one_install_gives_the_owned_directories_their_fixed_acls_and_a_second_c
         assert shape(first, directory) == (owned_shape(tree.root, mask, INHERITING), True), directory
         for name in files:
             assert shape(first, f"{directory}/{name}") == (owned_shape(tree.root, mask, INHERITED_ACE), False), name
+    install(tree)
+    assert acls(tree.root) == first
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_one_install_rewrites_subdirectories_and_what_is_in_them_to_inherit_and_a_second_changes_nothing(
+    tmp_path, monkeypatch, variant
+):
+    tree = build(variant, tmp_path / variant, monkeypatch)
+    nested = {"bin": winacl.READ_EXECUTE, "host": winacl.READ_EXECUTE, "logs": winacl.MODIFY}
+    nested = {name: mask for name, mask in nested.items() if (tree.root / name / "old").is_dir()}
+    assert nested  # `host` exists even before the first install
+    install(tree)
+    first = acls(tree.root)
+    for directory, mask in nested.items():
+        for name in ("old", "old/deeper"):
+            assert shape(first,
+                         f"{directory}/{name}") == (owned_shape(tree.root, mask,
+                                                                INHERITING | INHERITED_ACE), False), (directory, name)
+        for name in ("old/leftover", "old/deeper/leftover"):
+            assert shape(first, f"{directory}/{name}") == (owned_shape(tree.root, mask,
+                                                                       INHERITED_ACE), False), (directory, name)
     install(tree)
     assert acls(tree.root) == first
 
