@@ -240,11 +240,15 @@ def owner_and_group(handle: int) -> tuple[str, str]:
 
 def read_entries(handle: int) -> tuple[list[Entry], bool]:
     """Every ACE of the object behind `handle` (READ_CONTROL) and whether its inheritance is broken."""
+    import pywintypes
     import win32security
 
-    descriptor = win32security.GetSecurityInfo(
-        handle, win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-    )
+    try:
+        descriptor = win32security.GetSecurityInfo(
+            handle, win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+        )
+    except pywintypes.error as exc:
+        raise _os_error(exc, None) from exc
     return _parse(descriptor, "<handle>")
 
 
@@ -268,16 +272,26 @@ def _acl(entries: Sequence[Entry], protected: bool) -> Acl:
     return Acl(tuple(ace for ace in aces if not ace.flags & INHERIT_ONLY_ACE), protected)
 
 
+def _os_error(exc: Any, filename: str | None) -> OSError:
+    """pywin32's error as the `OSError` it means, so that a missing path is a `FileNotFoundError`."""
+    return OSError(0, exc.strerror, filename, exc.winerror)
+
+
 def read_dacl(path) -> tuple[list[Entry], bool]:
     """Every ACE of `path` in stored order, inherit-only ones included, and whether its inheritance is broken.
 
-    A missing DACL grants everyone everything.
+    A missing DACL grants everyone everything. A path that cannot be read is an `OSError` (`FileNotFoundError` if it is
+    not there).
     """
+    import pywintypes
     import win32security
 
-    descriptor = win32security.GetNamedSecurityInfo(
-        str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-    )
+    try:
+        descriptor = win32security.GetNamedSecurityInfo(
+            str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+        )
+    except pywintypes.error as exc:
+        raise _os_error(exc, str(path)) from exc
     return _parse(descriptor, path)
 
 
