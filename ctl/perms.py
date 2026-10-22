@@ -7,8 +7,9 @@ at any file on the machine.
 
 On POSIX the owner and mode express who may read what. On Windows `os.chmod` sets no ACL, so the same intent is an ACL
 of well-known SIDs (see `ctl.winacl`), set through a handle that `ctl._winfile` has already vetted: `owner=None` means
-the path stays the operator's and the operator's SID is granted explicitly; `readers` and `writers` are the SIDs of the
-other accounts, and POSIX ignores them.
+the path stays the operator's and the operator's SID is granted explicitly; `readers` are the SIDs of the other
+accounts, and POSIX ignores them. The directories `ctl install` owns outright on Windows (`bin`, `host`, `logs`) are not
+here: see `ctl.perms_windows.converge_owned`.
 """
 
 import dataclasses
@@ -387,7 +388,6 @@ def converge_dir(
     mode: int,
     readers: frozenset[str],
     *,
-    writers: frozenset[str] = frozenset(),
     isolate: bool = True,
     root: Path,
 ) -> None:
@@ -395,83 +395,31 @@ def converge_dir(
 
     Leaving an existing directory alone is wrong here: another account that owns, or can write to, `secrets/` can
     replace the token inside it regardless of the token's own mode. A symlink at `path` is refused, never repaired.
-    On Windows `isolate` breaks inheritance; only `.env`, `secrets/` and the token do, never the repository root.
-    On Windows every entry below an existing directory, at every depth, is opened and vetted first (a reparse point or
-    hard-linked file is refused; an entry that vanishes meanwhile is skipped), because NTFS rewrites the ACL of each
-    child when a directory gains an inheritable ACE. An entry whose inheritance is broken is left so.
+    On Windows `isolate` breaks inheritance (`secrets/`; never the repository root) and `readers` are granted read; see
+    `perms_windows.converge_dir` for what happens to the entries below an existing directory.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_dir(path, owner, readers, writers, isolate, root)
+        perms_windows.converge_dir(path, owner, readers, isolate, root)
         return
     with _converged(path, owner, mode):
         pass
 
 
-def converge_owned(
-    path: Path,
-    service: Account,
-    *,
-    owner: Account | None = None,
-    mode: int | None = None,
-    write: bool = False,
-    root: Path,
-) -> None:
-    """Make `path` the install's own: `bin/` and `host/`, and `logs/` through `converge_tree`.
-
-    Windows: the DACL is written whole, whatever it held (see `perms_windows.converge_owned`): protected, the operator
-    and Administrators in full control, `service` with read-and-execute (modify when `write`), no deny; every entry
-    below it, at every depth, is rewritten to inherit from its directory (a reparse point or a hard-linked file anywhere
-    is refused; an entry that vanishes meanwhile is skipped). POSIX: `owner` and `mode` through `converge_dir`; without
-    a `mode` the directory is left alone, which is how `host/`, git's directory, is kept.
-    """
-    if sys.platform == "win32":
-        from ctl import perms_windows
-
-        perms_windows.converge_owned(path, service, write=write, root=root)
-        return
-    if mode is not None:
-        converge_dir(path, owner, mode, frozenset(), root=root)
-
-
 def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -> None:
-    """`converge_dir` for `path`, then the same for each of its direct entries, keeping each entry's own mode.
+    """POSIX only (Windows: `perms_windows.converge_owned`): `converge_dir` for `path`, then the same for each entry.
 
-    POSIX: the directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a
-    symlink, a FIFO, a socket, a hard-linked file, a file on another filesystem) is refused with a message telling the
-    operator to remove it, and is never entered. A service that can write `logs/` could otherwise plant a link or a hard
-    link to a file it does not own and have root change it. Windows: see `converge_owned`; subdirectories are entered,
-    and a reparse point or a hard-linked file at any depth is refused.
+    The directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a symlink, a
+    FIFO, a socket, a hard-linked file, a file on another filesystem) is refused with a message telling the operator to
+    remove it, and is never entered. A service that can write `logs/` could otherwise plant a link or a hard link to a
+    file it does not own and have root change it. Each entry keeps its own mode.
 
     systemd opens a log's append target after dropping to `User=`, so a stale owner is `EACCES` and the daemon never
-    starts. On Windows `owner` is the service account and the directory is the install's own (`converge_owned`), with
-    modify for the service.
+    starts.
     """
-    if sys.platform == "win32":
-        from ctl import perms_windows
-
-        service = owner or Account(LOCAL_SERVICE, None, None)  # Windows has one service account
-        perms_windows.converge_owned(path, service, write=True, root=root)
-        return
     with _converged(path, owner, mode) as fd:
         _converge_entries(fd, path, owner)
-
-
-def revoke_root(root: Path, account: Account) -> None:
-    """Take the service's read-and-execute ACE off the repository `root`, where an earlier install put it; POSIX: nothing.
-
-    The service needs nothing on the root: its working directory is `logs/` and everything it reads is in a directory
-    that holds its own access. Only that ACE goes, and only the root is written; its other children are not `ctl`'s.
-    Run it after `bin/`, `host/` and `logs/` are converged. Ancestors of `root` never had an ACE: `LocalService` holds
-    `SeChangeNotifyPrivilege`, which bypasses traverse checking, so a repository under a user profile is reachable
-    without exposing the profile.
-    """
-    if sys.platform != "win32":
-        return
-    from ctl import perms_windows
-
-    perms_windows.revoke_root(root, account)
 
 
 # Inspection ===========================================================================================================

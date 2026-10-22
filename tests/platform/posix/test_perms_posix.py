@@ -15,13 +15,11 @@ from ctl.perms import (
     PermsError,
     account_mode,
     converge_dir,
-    converge_owned,
     converge_tree,
     describe,
     harden_file,
     principals,
     resolve_service_account,
-    revoke_root,
     service_account,
     write_secret,
 )
@@ -417,26 +415,6 @@ def test_describe_names_the_owner_and_mode(tmp_path):
     path.write_bytes(b"")
     path.chmod(0o600)
     assert describe(path) == f"owner {me().name}, mode 0600"
-
-
-def test_converge_owned_without_a_mode_leaves_a_directory_as_it_is(tmp_path):
-    before = os.stat(tmp_path)
-    converge_owned(tmp_path, me(), root=tmp_path)
-    assert os.stat(tmp_path).st_mode == before.st_mode
-
-
-def test_converge_owned_with_a_mode_gives_the_directory_that_mode(tmp_path):
-    path = tmp_path / "bin"
-    path.mkdir()
-    path.chmod(0o777)
-    converge_owned(path, me(), owner=me(), mode=0o755, root=tmp_path)
-    assert mode_of(path) == 0o755
-
-
-def test_revoke_root_is_a_no_op(tmp_path):
-    before = os.stat(tmp_path)
-    revoke_root(tmp_path, me())
-    assert os.stat(tmp_path).st_mode == before.st_mode
 
 
 # Root =================================================================================================================

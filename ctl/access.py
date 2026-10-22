@@ -21,7 +21,7 @@ def verify_traversable(root: Path, service: Account) -> None:
     """Raise unless `service` can reach the binary and config under `root` at exec time.
 
     Windows always passes: traversal is guaranteed by construction. LocalService needs nothing on the repository root
-    (its working directory is `logs`), `perms.converge_owned` gives it its access to `bin`, `host` and `logs` and the
+    (its working directory is `logs`), `perms_windows.converge_owned` gives it its access to `bin`, `host` and `logs` and the
     files in them, and it holds SeChangeNotifyPrivilege, which bypasses traverse checking, so the ancestors of those
     need no ACE.
 

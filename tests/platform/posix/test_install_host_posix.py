@@ -665,20 +665,23 @@ def test_the_flag_does_not_detach_an_uninstall_that_cannot_disconnect_anyone(run
 # Staging directory ====================================================================================================
 
 
-def test_stage_empties_the_staging_directory_before_converging_the_owned_directories(running, monkeypatch):
-    """On Windows `converge_owned` would rewrite what a failed run left in the staging directory to be readable by the
-    service, so it is emptied first."""
+def test_stage_empties_the_staging_directory_before_converging_bin(running, monkeypatch):
+    """On Windows converging `bin` would rewrite what a failed run left in the staging directory to be readable by the
+    service, so it is emptied first on both platforms."""
     staging = running.root / "bin" / ".staging"
     (staging / "leftover-directory").mkdir(parents=True)
     (staging / "leftover").write_bytes(b"x")
     seen = []
-    original = perms.converge_owned
-    monkeypatch.setattr(
-        perms, "converge_owned", lambda path, *args, **kwargs: seen.append((running.root / "bin" / ".staging").exists())
-        or original(path, *args, **kwargs)
-    )
+    original = perms.converge_dir
+
+    def converging(path, *args, **kwargs):
+        if path == running.root / "bin":
+            seen.append(staging.exists())
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(perms, "converge_dir", converging)
     run_install(running)
-    assert seen and set(seen) == {False}
+    assert seen == [False]
 
 
 def test_the_staging_directory_is_gone_after_a_failed_apply(running, monkeypatch):
@@ -708,52 +711,43 @@ def test_the_staging_directory_is_gone_after_a_failed_download(running, monkeypa
     assert not (running.root / "bin" / ".staging").exists()
 
 
-# The owned directories ================================================================================================
+# The directories the install gives the service ========================================================================
 #
-# On Windows `bin/`, `host/` and `logs/` are the install's outright: each is written whole, with the service's access in
-# the same write, and the service's ACE is taken from the repository root only when all of them are done. These
-# operations are no-ops on POSIX, where `bin/` and `logs/` have an owner and a mode; these tests record when and with
-# what they are called.
+# On POSIX these have an owner and a mode and `host/`, git's, is left alone; Windows owns them outright.
 
 
 @pytest.fixture
 def events(monkeypatch):
-    """Every permission operation of the install that the Windows install shapes, in order, with its path."""
+    """Every permission operation of the install that gives a directory its owner and mode, in order, with its path."""
     events = []
-    for name in ("converge_owned", "converge_dir", "converge_tree", "revoke_root"):
+    for name in ("converge_dir", "converge_tree"):
         real = getattr(perms, name)
 
         def spy(path, *args, _name=name, _real=real, **kwargs):
-            events.append((_name, path, kwargs))
+            events.append((_name, path, args, kwargs))
             return _real(path, *args, **kwargs)
 
         monkeypatch.setattr(perms, name, spy)
     return events
 
 
-def test_bin_and_host_are_converged_as_owned_directories(host_tree, events):
+def test_bin_gets_the_installer_as_owner_and_its_mode(host_tree, events):
     run_install(host_tree)
-    owned = [path for name, path, _ in events if name == "converge_owned"]
-    assert owned == [host_tree.root / "bin", host_tree.root / "host"]
+    (event, ) = [event for event in events if event[1] == host_tree.root / "bin"]
+    assert event[0] == "converge_dir" and event[2][1] == host.BIN_MODE
 
 
-def test_the_service_is_taken_off_the_root_after_every_owned_directory_is_converged(host_tree, events):
-    run_install(host_tree)
-    root = host_tree.root
-    names = [(name, path) for name, path, _ in events]
-    revoked = [index for index, event in enumerate(names) if event[0] == "revoke_root"]
-    assert len(revoked) == 1 and names[revoked[0]] == ("revoke_root", root)
-    for done in (("converge_owned", root / "bin"), ("converge_owned", root / "host"),
-                 ("converge_dir", root / "secrets"), ("converge_tree", root / "logs")):
-        assert names.index(done) < revoked[0], done
-
-
-def test_host_is_converged_with_no_mode_so_git_s_directory_keeps_its_own_on_posix(host_tree, events):
+def test_host_is_not_touched_so_git_s_directory_keeps_its_own_mode(host_tree, events):
     (host_tree.root / "host").chmod(0o775)
     run_install(host_tree)
     assert mode_of(host_tree.root / "host") == 0o775
-    (kwargs, ) = [kwargs for name, path, kwargs in events if name == "converge_owned" and path.name == "host"]
-    assert kwargs.get("mode") is None
+    assert [event for event in events if event[1] == host_tree.root / "host"] == []
+
+
+def test_secrets_and_logs_are_converged(host_tree, events):
+    run_install(host_tree)
+    seen = {(name, path) for name, path, *_ in events}
+    assert {("converge_dir", host_tree.root / "secrets"), ("converge_tree", host_tree.root / "logs")} <= seen
 
 
 @pytest.fixture

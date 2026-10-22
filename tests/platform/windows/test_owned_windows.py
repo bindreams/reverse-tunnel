@@ -28,7 +28,7 @@ from tests.platform.windows.acl_support import (
 from tests.platform.windows.service_access import can_open
 
 from ctl import perms_windows, winacl
-from ctl.perms import SID_LOCAL_SERVICE, Account, PermsError, converge_owned, converge_tree, revoke_root
+from ctl.perms import SID_LOCAL_SERVICE, Account, PermsError
 
 LOCAL_SERVICE = Account("LocalService", None, None)
 LIST = 0x1 | 0x20 | 0x100000
@@ -70,10 +70,7 @@ def inherited_shape(repo: Path, name: str, path: Path) -> tuple[Shape, bool]:
 
 
 def converge(repo: Path, name: str) -> None:
-    if name == "logs":
-        converge_tree(repo / "logs", LOCAL_SERVICE, 0o750, root=repo)
-    else:
-        converge_owned(repo / name, LOCAL_SERVICE, root=repo)
+    perms_windows.converge_owned(repo / name, LOCAL_SERVICE, write=name == "logs", root=repo)
 
 
 def converge_all(repo: Path) -> None:
@@ -658,7 +655,7 @@ def test_revoking_removes_the_read_and_execute_ace_an_earlier_install_wrote_on_t
     repo = repo_with(tmp_path)
     icacls(str(repo), "/grant", f"*{SID_LOCAL_SERVICE}:" + ("(OI)(CI)(RX)" if flags else "(RX)"))
     assert [e.flags & INHERITING for e in service_aces(repo)] == [flags]
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     assert service_aces(repo) == []
 
 
@@ -667,7 +664,7 @@ def test_revoking_keeps_every_other_ace_of_the_root_and_its_inheritance_state(tm
     icacls(str(repo), "/grant", f"*{SID_LOCAL_SERVICE}:(RX)", f"*{winacl.SID_USERS}:(OI)(CI)(R)")
     icacls(str(repo), "/deny", f"*{winacl.SID_EVERYONE}:(WD)")
     before = whole_entries(repo)
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     entries, protected = whole_entries(repo)
     assert protected == before[1]
     assert entries == [e for e in before[0] if e.sid != SID_LOCAL_SERVICE]
@@ -678,21 +675,21 @@ def test_revoking_keeps_an_ace_for_the_service_that_is_not_the_one_install_wrote
     icacls(str(repo), "/grant", f"*{SID_LOCAL_SERVICE}:(M)")
     icacls(str(repo), "/deny", f"*{SID_LOCAL_SERVICE}:(WD)")
     before = whole_entries(repo)
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     assert whole_entries(repo) == before
 
 
 def test_revoking_writes_nothing_when_the_root_holds_no_such_ace(tmp_path, monkeypatch):
     repo = repo_with(tmp_path)
     writes = count_writes(monkeypatch)
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     assert writes == []
 
 
 def test_revoking_writes_the_root_once(tmp_path, monkeypatch):
     repo = old_shape(tmp_path)
     writes = count_writes(monkeypatch)
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     assert len(writes) == 1
 
 
@@ -700,7 +697,7 @@ def test_revoking_from_the_oldest_shape_leaves_the_other_children_of_the_root_as
     """The oldest install's inheritable ACE is on `ctl` and `goetia.yaml` as an inherited one; they were not opened."""
     repo = old_shape(tmp_path)
     before = snapshot(repo / "ctl", repo / "goetia.yaml")
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     assert snapshot(repo / "ctl", repo / "goetia.yaml") == before
 
 
@@ -709,7 +706,7 @@ def test_no_write_of_revoking_leaves_what_the_service_reads_without_access(tmp_p
     converge_all(repo)
     assert openable(repo) == []
     seen = after_each_write(monkeypatch, lambda: openable(repo))
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     assert seen == [[]]
     assert service_aces(repo) == []
 
@@ -717,5 +714,5 @@ def test_no_write_of_revoking_leaves_what_the_service_reads_without_access(tmp_p
 def test_the_service_needs_nothing_on_the_root_once_the_directories_are_converged(tmp_path):
     repo = old_shape(tmp_path)
     converge_all(repo)
-    revoke_root(repo, LOCAL_SERVICE)
+    perms_windows.revoke_root(repo, LOCAL_SERVICE)
     assert openable(repo) == [] and service_aces(repo) == []

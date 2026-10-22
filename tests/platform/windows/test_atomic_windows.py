@@ -10,7 +10,7 @@ from ctl import perms_windows, winacl
 from ctl.atomic import replace_file
 from ctl.binaries import write_atomically
 from ctl.errors import BinariesError
-from ctl.perms import SID_LOCAL_SERVICE, Account, converge_owned
+from ctl.perms import SID_LOCAL_SERVICE, Account
 
 LOCAL_SERVICE = Account("LocalService", None, None)
 
@@ -244,7 +244,7 @@ def test_a_file_replaced_in_an_owned_directory_holds_the_service_read_before_it_
 ):
     """The final name must never exist without the service's access: a crash between a rename and a later grant is a
     lockout. The temporary file is created in the directory, so it inherits the access from it."""
-    converge_owned(tmp_path, LOCAL_SERVICE, root=tmp_path)
+    perms_windows.converge_owned(tmp_path, LOCAL_SERVICE, write=False, root=tmp_path)
     put(tmp_path, "tool", b"old")
     seen = []
     real = winfile.rename_over

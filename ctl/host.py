@@ -298,12 +298,28 @@ def _installer() -> Account | None:
     return Account(name, uid, os.getegid())
 
 
-def _converge_owned(root: Path, service: Account) -> None:
-    """Converge `bin/` and `host/`, which the service reads. On Windows both are the install's outright: protected, a
-    fixed DACL with the service's access in it and no deny, every file in them inheriting it. On POSIX `bin/` has the
-    installer's owner and `BIN_MODE`, and `host/`, which git writes, is left as it is."""
-    perms.converge_owned(root / "bin", service, owner=_installer(), mode=BIN_MODE, root=root)
-    perms.converge_owned(root / "host", service, root=root)
+def _own_directories(root: Path, service: Account, readers: frozenset[str]) -> None:
+    """Give the service its access to `bin/`, `host/`, `secrets/` and `logs/`, and take its ACE off the root.
+
+    Windows: `bin`, `host` and `logs` are the install's outright (`perms_windows.converge_owned`): protected, a fixed
+    DACL with the service's access in it and no deny, every entry below inheriting it. `secrets` is isolated the same
+    way. The root loses the service's ACE an earlier install gave it only after all four hold their own.
+
+    POSIX: `bin/` has the installer's owner and `BIN_MODE`; `host/` is git's directory and is left as it is; `logs/` is
+    flat and owned by the service; `secrets/` has the service as owner.
+    """
+    if sys.platform == "win32":
+        from ctl import perms_windows
+
+        perms_windows.converge_owned(root / "bin", service, write=False, root=root)
+        perms_windows.converge_owned(root / "host", service, write=False, root=root)
+        perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
+        perms_windows.converge_owned(root / "logs", service, write=True, root=root)
+        perms_windows.revoke_root(root, service)
+        return
+    perms.converge_dir(root / "bin", _installer(), BIN_MODE, frozenset(), root=root)
+    perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
+    perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
 
 
 def _clear_staging(root: Path) -> None:
@@ -316,22 +332,16 @@ def _clear_staging(root: Path) -> None:
 def stage(config: Config, plan: Plan, *, services: Services) -> None:
     """Make the tree ready without disturbing anything running. The order matters.
 
-    Whatever a failed run left in `bin/.staging` goes first: on Windows converging `bin\\` would otherwise
-    rewrite half-downloaded files to be readable by the service.
-    `bin/`, `host/`, `secrets/` and `logs/` come next, each written whole with the service's access in the same write,
-    so none leaves what the service reads without it. Only then does the repository root lose the service's ACE an
-    earlier install gave it, since until the four hold their own access the root's is what an earlier tree relies on.
-    `secrets/` and `logs/` come before the token, which is created inside the first, and goetia must never be handed a
-    `logs/` owned by root. `.env` is tightened last, after everything that could fail.
+    `bin/.staging` is cleared first, so converging `bin\\` never touches half-downloaded files. The directories come
+    next (`_own_directories`), each written whole with the service's access in the same write, so none leaves what the
+    service reads without it. `secrets/` and `logs/` come before the token, which is created inside the first, and
+    goetia must never be handed a `logs/` owned by root. `.env` is tightened last, after everything that could fail.
     """
     root = config.root
     service = perms.service_account(config)
     readers = _service_readers(root)
     _clear_staging(root)
-    _converge_owned(root, service)
-    perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
-    perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
-    perms.revoke_root(root, service)
+    _own_directories(root, service, readers)
     perms.write_secret(root / "secrets" / "token", _token_bytes(config), service, readers, root=root)
     _download(root, plan, services)
     perms.harden_file(root / ".env", None, frozenset(), root=root)

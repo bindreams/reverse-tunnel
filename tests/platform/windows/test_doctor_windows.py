@@ -12,7 +12,7 @@ from ctl.config import Config, Role
 from ctl.doctor import Outcome
 from ctl.doctor.permissions import Permissions
 from ctl.doctor.probes import Probes
-from ctl.perms import SID_LOCAL_SERVICE, Account, converge_dir, converge_owned, converge_tree, write_secret
+from ctl.perms import SID_LOCAL_SERVICE, Account, converge_dir, write_secret
 
 LOCAL_SERVICE = Account("LocalService", None, None)
 BINARIES = ("frpc.exe", "websocat.exe", "goetia-shim.exe")
@@ -31,9 +31,9 @@ def installed_repo(tmp_path: Path, *, logs: tuple[str, ...] = LOG_FILES) -> tupl
     (repo / "bin" / ".digests.json").write_bytes(b"{}")
     (repo / "host" / "frpc.toml").write_bytes(b"")
     config = write_env(repo, Role.HOST)
-    converge_owned(repo / "bin", LOCAL_SERVICE, root=repo)
-    converge_owned(repo / "host", LOCAL_SERVICE, root=repo)
-    converge_tree(repo / "logs", LOCAL_SERVICE, 0o750, root=repo)
+    perms_windows.converge_owned(repo / "bin", LOCAL_SERVICE, write=False, root=repo)
+    perms_windows.converge_owned(repo / "host", LOCAL_SERVICE, write=False, root=repo)
+    perms_windows.converge_owned(repo / "logs", LOCAL_SERVICE, write=True, root=repo)
     readers = frozenset({SID_LOCAL_SERVICE, perms_windows.operator_sid(repo)})
     converge_dir(repo / "secrets", LOCAL_SERVICE, 0o711, readers, root=repo)
     write_secret(repo / "secrets" / "token", b"secret", LOCAL_SERVICE, readers, root=repo)

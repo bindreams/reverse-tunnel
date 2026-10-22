@@ -5,7 +5,7 @@ import pytest
 
 from ctl import perms
 from ctl.config import ConfigError
-from ctl.perms import Account, PermsError, converge_tree, harden_file, resolve_service_account, write_secret
+from ctl.perms import Account, PermsError, harden_file, resolve_service_account, write_secret
 
 NO_READERS: frozenset[str] = frozenset()
 
@@ -125,11 +125,3 @@ def test_write_secret_refuses_a_hard_linked_destination(tmp_path):
         write_secret(token, b"new", None, NO_READERS, root=tmp_path)
     assert "hard link" in str(raised.value)
     assert other.read_bytes() == b"the-old-secret"
-
-
-def test_converge_tree_accepts_a_flat_directory_of_regular_files(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "frpc.log").write_bytes(b"")
-    (logs / "websocat.log").write_bytes(b"")
-    converge_tree(logs, None, 0o750, root=tmp_path)

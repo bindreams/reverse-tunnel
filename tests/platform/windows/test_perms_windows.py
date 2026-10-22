@@ -27,7 +27,6 @@ from ctl.perms import (
     Account,
     PermsError,
     converge_dir,
-    converge_owned,
     describe,
     harden_file,
     principals,
@@ -339,17 +338,6 @@ def test_secrets_directory_grants_localservice_read_and_execute_but_not_write(tm
     assert principals(folder) == {SID_LOCAL_SERVICE, owner_of(tmp_path), SID_ADMINISTRATORS}
 
 
-def test_logs_directory_grants_localservice_modify(tmp_path):
-    logs = tmp_path / "logs"
-    converge_dir(
-        logs, LOCAL_SERVICE, 0o750, NO_READERS, writers=frozenset({SID_LOCAL_SERVICE}), isolate=False, root=tmp_path
-    )
-    ace = ace_for(logs, SID_LOCAL_SERVICE)
-    assert ace.mask & FILE_WRITE_DATA
-    assert ace.flags & OBJECT_INHERIT_ACE and ace.flags & CONTAINER_INHERIT_ACE
-    assert not winacl.read_acl(logs).protected
-
-
 def test_converge_dir_removes_a_stale_explicit_grant(tmp_path):
     folder = tmp_path / "secrets"
     folder.mkdir()
@@ -519,7 +507,7 @@ def test_an_operator_who_is_not_an_administrator_holds_full_control_of_an_owned_
     repo = tmp_path / "repo"
     repo.mkdir()
     make_owner(repo, standard_user)
-    converge_owned(repo / name, LOCAL_SERVICE, root=repo)
+    perms_windows.converge_owned(repo / name, LOCAL_SERVICE, write=False, root=repo)
     expected = owned_shape(repo, mask, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
     assert (standard_user.sid, winacl.FULL, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) in expected
     assert shape_of(repo / name) == (expected, True)
@@ -610,9 +598,9 @@ def test_the_doctor_check_of_the_services_access_runs_for_an_operator_who_is_not
     for name in ("frpc.exe", "websocat.exe", "goetia-shim.exe"):
         (repo / "bin" / name).write_bytes(b"")
     (repo / "host" / "frpc.toml").write_bytes(b"")
-    converge_owned(repo / "bin", LOCAL_SERVICE, root=repo)
-    converge_owned(repo / "host", LOCAL_SERVICE, root=repo)
-    converge_owned(repo / "logs", LOCAL_SERVICE, write=True, root=repo)
+    perms_windows.converge_owned(repo / "bin", LOCAL_SERVICE, write=False, root=repo)
+    perms_windows.converge_owned(repo / "host", LOCAL_SERVICE, write=False, root=repo)
+    perms_windows.converge_owned(repo / "logs", LOCAL_SERVICE, write=True, root=repo)
     readers = frozenset({SID_LOCAL_SERVICE, standard_user.sid})
     converge_dir(repo / "secrets", LOCAL_SERVICE, 0o711, readers, root=repo)
     write_secret(repo / "secrets" / "token", b"x", LOCAL_SERVICE, readers, root=repo)

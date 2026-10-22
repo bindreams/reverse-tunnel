@@ -283,7 +283,6 @@ def converge_dir(
     path: Path,
     owner: Account | None,
     readers: frozenset[str],
-    writers: frozenset[str],
     isolate: bool,
     root: Path,
 ) -> None:
@@ -314,7 +313,7 @@ def converge_dir(
             directory=True,
             operator=operator,
             readers=readers,
-            writers=writers,
+            writers=frozenset(),
             isolate=isolate,
             parent=parent,
             owner=owner_sid,
