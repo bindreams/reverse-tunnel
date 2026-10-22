@@ -148,14 +148,11 @@ def _ntdll():
     return ntdll
 
 
-class DeletePending(OSError):
-    """The entry is marked for deletion and goes when the last handle to it closes; it can no longer be opened."""
-
-
 def _status_error(ntdll, status: int) -> OSError:
-    """The `OSError` (a `FileNotFoundError` for a missing name, `DeletePending` for a pending deletion) an NTSTATUS means."""
+    """The `OSError` an NTSTATUS means: `EBUSY` for an entry pending deletion, which cannot be opened but may still be
+    kept, a `FileNotFoundError` for a missing name, and so on."""
     if status & 0xFFFFFFFF == STATUS_DELETE_PENDING:
-        return DeletePending(errno.EBUSY, "is being deleted")
+        return OSError(errno.EBUSY, "is being deleted")
     return ctypes.WinError(ntdll.RtlNtStatusToDosError(status))
 
 
