@@ -309,7 +309,11 @@ def test_no_interruption_of_an_install_takes_the_service_read_from_what_it_needs
                 install(tree)
         held = readable(tree.root)
         assert before <= held, f"event {number}: the service lost {sorted(before - held)}"
-        in_bin = {path for path in needed(tree.root) if path.parts[0] == "bin" and len(path.parts) == 2}
+        in_bin = {
+            path
+            for path in needed(tree.root)
+            if path.parts[0] == "bin" and len(path.parts) == 2 and (tree.root / path).is_file()
+        }
         assert in_bin <= held, f"event {number}: a file in bin exists without the service's access: {sorted(in_bin - held)}"
         install(tree)  # the rerun converges in one run
         missing = set(needed(tree.root)) - readable(tree.root)
