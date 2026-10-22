@@ -45,6 +45,9 @@ RUNS = {FRPC_ID: ("frpc", ), WEBSOCAT_ID: ("websocat", )}
 # Read once at startup, so changing one means nothing until the daemon restarts. Keys of `bin/.digests.json`.
 READS = {FRPC_ID: ("token", "frpc.toml")}
 
+# What each daemon appends to, relative to the repository root: the `logs:` of its entry in `goetia.yaml`.
+WRITES = {FRPC_ID: ("logs/frpc.log", ), WEBSOCAT_ID: ("logs/websocat.log", )}
+
 # Windows refuses to replace a running executable; POSIX replaces the file and the process keeps its inode.
 STOP_BEFORE_REPLACE = sys.platform == "win32"
 SECRETS_MODE, LOGS_MODE, BIN_MODE, STAGING_MODE = 0o711, 0o750, 0o755, 0o700

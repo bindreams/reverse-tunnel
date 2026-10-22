@@ -42,6 +42,7 @@ RIGHTS = {
     winacl.READ_WRITE: "R,W",
     winacl.READ_WRITE_DELETE: "R,W,D",
     winacl.LIST_AND_ADD: "list,add",
+    winacl.APPEND: "append",
 }
 
 Ace = tuple[str, int, int]  # sid, rights mask, inheritance flags
@@ -130,27 +131,36 @@ class Permissions:
             (root / "logs", winacl.LIST_AND_ADD),
         ]
 
+    def _log_files(self) -> list[Path]:
+        """The files the daemons append to. They appear when a daemon first runs, so a missing one is no failure."""
+        return [self.root / path for paths in host.WRITES.values() for path in paths]
+
     def service_read(self) -> Verdict:
         """Whether the service can open what it needs: an allow for it and no deny of any kind.
 
         Judged from each object's DACL alone, with no imitation of the service's token: the allows for the service
         itself (explicit or inherited, inherit-only ones left out) must together cover the rights it needs, and no ACE
         of the DACL may be a deny, for anyone, wherever it came from. `ctl install` writes these directories whole, so
-        a deny is never its doing. A file moved in from elsewhere keeps the DACL it had and fails here.
+        a deny is never its doing. A file moved in from elsewhere keeps the DACL it had and fails here. The log files
+        the daemons append to are judged the same way, for the right to append, when they exist.
         """
         if not self.probes.windows:
             return not_applicable("only Windows gives the service its access by ACE; POSIX uses the owner and mode")
         problems = [problem for path, needs in self._service_needs() for problem in self._service_problems(path, needs)]
+        problems += [
+            problem for path in self._log_files()
+            for problem in self._service_problems(path, winacl.APPEND, optional=True)
+        ]
         if problems:
             summary = f"the service's access is wrong on {len(problems)} path(s); {INSTALL}"
             return fail("\n".join([summary, *problems]))
         return ok(f"LocalService is allowed what it needs in {self.root} and no ACE denies anyone anything there")
 
-    def _service_problems(self, path: Path, needs: int) -> list[str]:
+    def _service_problems(self, path: Path, needs: int, *, optional: bool = False) -> list[str]:
         try:
             entries, _ = self.probes.entries(path)
         except FileNotFoundError:
-            return [f"{path}: missing"]
+            return [] if optional else [f"{path}: missing"]
         except OSError as exc:
             return [f"{path}: {exc.strerror or exc}"]
         problems = [
