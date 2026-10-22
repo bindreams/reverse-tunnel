@@ -439,7 +439,7 @@ def test_converging_secrets_again_writes_nothing_with_subdirectories_present(tmp
     first = acls_under(repo)
     writes = after_each_write(monkeypatch, lambda: None)
     converge_secrets(repo)
-    assert len(writes) == 1 and acls_under(repo) == first  # the directory itself is always written, nothing in it
+    assert writes == [] and acls_under(repo) == first
 
 
 def test_converging_secrets_refuses_a_hard_link_deep_in_a_subdirectory_and_changes_nothing(tmp_path):
