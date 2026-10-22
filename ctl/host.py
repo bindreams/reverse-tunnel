@@ -44,6 +44,8 @@ HOST_BINARIES = ("goetia", "goetia-shim", "frpc", "websocat")
 RUNS = {FRPC_ID: ("frpc", ), WEBSOCAT_ID: ("websocat", )}
 # Read once at startup, so changing one means nothing until the daemon restarts. Keys of `bin/.digests.json`.
 READS = {FRPC_ID: ("token", "frpc.toml")}
+# Where each of those lives relative to the repository root; the doctor checks the service can read them.
+READ_PATHS = {"token": "secrets/token", "frpc.toml": "host/frpc.toml"}
 
 # What each daemon appends to, relative to the repository root: the `logs:` of its entry in `goetia.yaml`.
 WRITES = {FRPC_ID: ("logs/frpc.log", ), WEBSOCAT_ID: ("logs/websocat.log", )}

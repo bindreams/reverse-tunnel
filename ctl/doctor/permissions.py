@@ -118,16 +118,17 @@ class Permissions:
         """Each object the service opens on a Windows host, with the rights it is asked for.
 
         `bin` and the files in it that the daemons and the service shim run (`ctl` runs goetia itself, and doctor reads
-        the record, both as the operator), `host` and its `frpc.toml`, the token, and `logs`, where the daemons write.
+        the record, both as the operator), `host`, every file the daemons read once at startup (`host.READS`), and
+        `logs`, where the daemons write.
         """
         root = self.root
         started = [root / "bin" / f"{base}.exe" for base in host.service_binaries("windows")]
+        inputs = [root / host.READ_PATHS[name] for names in host.READS.values() for name in names]
         return [
             (root / "bin", winacl.READ_EXECUTE),
             *((path, winacl.READ_EXECUTE) for path in started),
             (root / "host", winacl.READ_EXECUTE),
-            (root / "host" / "frpc.toml", winacl.READ),
-            (root / "secrets" / "token", winacl.READ),
+            *((path, winacl.READ) for path in dict.fromkeys(inputs)),
             (root / "logs", winacl.LIST_AND_ADD),
         ]
 
