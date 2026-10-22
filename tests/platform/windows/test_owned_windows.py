@@ -5,6 +5,8 @@ deny) and rewrites every entry in it to inherit from it. Nothing outside them is
 the service's ACE an earlier install gave it.
 """
 
+import contextlib
+import ctypes
 import os
 import shutil
 import signal
@@ -489,6 +491,60 @@ def test_a_subdirectory_deleted_between_listing_and_opening_is_skipped(tmp_path,
     vanish_after_listing(monkeypatch, repo / name / "gone")
     converge(repo, name)
     assert not (repo / name / "gone").exists()
+    assert shape_of(repo / name) == (owned_shape(repo, KINDS[name], INHERITING), True)
+
+
+@contextlib.contextmanager
+def deleted_while_held(path: Path):
+    """`path` marked for deletion while a handle to it stays open: it keeps its name and is listed until the handle
+    closes, and opening it answers STATUS_DELETE_PENDING. (`os.unlink` would use POSIX semantics and remove the name.)"""
+    import _winapi
+
+    DELETE, SHARE_ALL, BACKUP_SEMANTICS, FILE_DISPOSITION_INFO = 0x10000, 0x7, 0x02000000, 4
+    handle = _winapi.CreateFile(str(path), DELETE, SHARE_ALL, 0, 3, BACKUP_SEMANTICS, 0)
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetFileInformationByHandle.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        mark = ctypes.c_ubyte(1)
+        if not kernel32.SetFileInformationByHandle(handle, FILE_DISPOSITION_INFO, ctypes.byref(mark), 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+        assert path.name in os.listdir(
+            path.parent
+        ), "a name pending deletion must still be listed for this test to mean it"
+        yield
+    finally:
+        _winapi.CloseHandle(handle)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_file_pending_deletion_between_listing_and_opening_is_skipped(tmp_path, name):
+    repo = repo_with(tmp_path)
+    (repo / name / "rotated").write_bytes(b"")
+    kept = [p for p in (repo / name).iterdir() if p.name != "rotated"]
+    with deleted_while_held(repo / name / "rotated"):
+        converge(repo, name)
+    assert not (repo / name / "rotated").exists()
+    assert shape_of(repo / name) == (owned_shape(repo, KINDS[name], INHERITING), True)
+    for path in kept:
+        assert shape_of(path) == inherited_shape(repo, name, path)
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_file_pending_deletion_in_a_subdirectory_is_skipped(tmp_path, name):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo, name)
+    with deleted_while_held(nested[3]):
+        converge(repo, name)
+    for path in nested[:3]:
+        assert shape_of(path) == inherited_shape(repo, name, path), path
+
+
+@pytest.mark.parametrize("name", KINDS)
+def test_a_subdirectory_pending_deletion_is_skipped(tmp_path, name):
+    repo = repo_with(tmp_path)
+    (repo / name / "gone").mkdir()
+    with deleted_while_held(repo / name / "gone"):
+        converge(repo, name)
     assert shape_of(repo / name) == (owned_shape(repo, KINDS[name], INHERITING), True)
 
 

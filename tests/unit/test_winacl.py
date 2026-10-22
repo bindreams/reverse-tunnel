@@ -285,6 +285,19 @@ def test_a_delete_pending_status_says_so():
 
     error = _winfile._status_error(None, 0xC0000056 - (1 << 32))
     assert "being deleted" in str(error)
+    assert isinstance(error, _winfile.DeletePending)
+
+
+def test_no_other_status_is_a_delete_pending_error():
+    from ctl import _winfile
+
+    class Ntdll:
+
+        @staticmethod
+        def RtlNtStatusToDosError(status):
+            return 2
+
+    assert not isinstance(_winfile._status_error(Ntdll, 0xC000000F - (1 << 32)), _winfile.DeletePending)
 
 
 def test_refuse_unsupported_can_be_asked_before_anything_exists():
