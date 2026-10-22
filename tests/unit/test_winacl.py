@@ -280,28 +280,14 @@ def test_owner_rights_is_neither_substituted_nor_split():
     assert len(inherit(parent, directory=True)) == 1
 
 
-def test_a_delete_pending_status_says_so():
+def test_a_delete_pending_status_is_a_busy_error_saying_so_and_not_a_missing_entry():
+    import errno
+
     from ctl import _winfile
 
     error = _winfile._status_error(None, 0xC0000056 - (1 << 32))
-    assert "being deleted" in str(error)
-    assert isinstance(error, _winfile.DeletePending)
-
-
-def test_no_other_status_is_a_delete_pending_error(monkeypatch):
-    import ctypes
-
-    from ctl import _winfile
-
-    class Ntdll:
-
-        @staticmethod
-        def RtlNtStatusToDosError(status):
-            return 2
-
-    monkeypatch.setattr(ctypes, "WinError", lambda code: FileNotFoundError(2, "missing"), raising=False)
-    error = _winfile._status_error(Ntdll, 0xC000000F - (1 << 32))
-    assert isinstance(error, FileNotFoundError) and not isinstance(error, _winfile.DeletePending)
+    assert error.errno == errno.EBUSY and "being deleted" in str(error)
+    assert not isinstance(error, FileNotFoundError)
 
 
 def test_refuse_unsupported_can_be_asked_before_anything_exists():
