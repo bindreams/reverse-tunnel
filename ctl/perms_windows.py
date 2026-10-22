@@ -26,7 +26,7 @@ stands for the repository's owner.
 """
 
 import os
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import NamedTuple
@@ -281,6 +281,44 @@ def _open_listing(stack: ExitStack, directory: int, name: str, node: _Node) -> i
     return listing
 
 
+def _write_exactly(handle: int, label: Path, entries: list[winacl.Entry], *, protected: bool) -> None:
+    """Make the object behind `handle` hold exactly `entries`, writing nothing if it already does; fail loudly if not."""
+    if winacl.read_entries(handle) == (entries, protected):
+        return
+    winacl.set_dacl(handle, entries, protected=protected)
+    _verify(handle, label, entries, protected=protected)
+
+
+Wanted = tuple[_Node, list[winacl.Entry], bool]  # a node, the entries it is to hold, whether its inheritance is broken
+
+
+def _wanted_below(
+    nodes: list[_Node], path: Path, planned: list[winacl.Entry], wanted: Callable[[_Node, list[winacl.Entry]],
+                                                                                  tuple[list[winacl.Entry], bool]]
+) -> list[Wanted]:
+    """What each of `nodes` is to hold, parents first. `wanted(node, above)` says what one node should hold, given what
+    the directory above it will (`planned` for `path` itself); every refusal happens here, before the first write."""
+    holds = {path: planned}
+    found = []
+    for node in nodes:
+        entries, protected = wanted(node, holds[node.parent])
+        if node.directory:
+            holds[node.label] = entries
+        found.append((node, entries, protected))
+    return found
+
+
+def _write_tree(held: int, path: Path, planned: list[winacl.Entry], *, protected: bool, below: list[Wanted]) -> None:
+    """Write `path`, then each node below it, parents first, each through `_write_exactly`.
+
+    Ctrl-C is held back until the last write, so an interruption never leaves the tree half converged.
+    """
+    with deferred_interrupts():
+        _write_exactly(held, path, planned, protected=protected)
+        for node, entries, node_protected in below:
+            _write_exactly(node.handle, node.label, entries, protected=node_protected)
+
+
 def converge_dir(
     path: Path,
     owner: Account | None,
@@ -288,13 +326,11 @@ def converge_dir(
     isolate: bool,
     root: Path,
 ) -> None:
-    """Converge the ACL of `path`, having opened and vetted everything below it first.
+    """Converge the ACL of `path` (`secrets`, or a directory that inherits), as `converge_owned` does for its own.
 
-    Windows Server 2025 makes NTFS rewrite the ACL of each direct child of a directory that gains an inheritable ACE,
-    so `path` is held without `FILE_SHARE_DELETE`, each entry at every depth is opened relative to its directory (a
-    reparse point or a hard-linked file is refused before anything is written), and each is then written back through
-    its own handle, parents first: an entry that inherits keeps its own ACEs and holds what it inherits from its
-    directory's new ACL, one whose inheritance is broken is left exactly as it was.
+    The DACL of `path` is planned from `readers` and, unless `isolate`, from its parent. Every entry below it is opened
+    and vetted first, then written back through its own handle: one that inherits keeps its own explicit ACEs and
+    holds what it inherits from its directory's new ACL, one whose inheritance is broken is left exactly as it was.
     """
     operator = _operator(owner, root)
     with _errors(path), ExitStack() as stack:
@@ -322,43 +358,19 @@ def converge_dir(
             group=group_sid,
             parent_label=str(path.parent),
         )
-        # Everything that can be refused is computed before the first write.
-        holds = {path: planned}  # what each directory will hold, which its entries inherit from
-        writes = []
-        for node in nodes:
+
+        def keeping_own(node: _Node, above: list[winacl.Entry]) -> tuple[list[winacl.Entry], bool]:
             entries, protected = winacl.read_entries(node.handle)
-            if not protected:
-                child_owner, child_group = winacl.owner_and_group(node.handle)
-                entries = winacl.canonical(
-                    winacl.explicit(entries) + winacl.inherited_for(
-                        holds[node.parent],
-                        directory=node.directory,
-                        owner=child_owner,
-                        group=child_group,
-                        parent_label=str(node.parent)
-                    )
-                )
-            if node.directory:
-                holds[node.label] = entries
-            writes.append((node, entries, protected))
-        with deferred_interrupts():  # Ctrl-C waits for the last write
-            winacl.set_dacl(held, planned, protected=isolate)
-            _verify(held, path, planned, protected=isolate)
-            for node, entries, protected in writes:
-                if winacl.read_entries(node.handle) != (entries, protected):  # NTFS may already have written it so
-                    winacl.set_dacl(node.handle, entries, protected=protected)
-                if winacl.read_acl_handle(node.handle).protected != protected:
-                    raise PermsError(
-                        f"{node.label}: inheritance is {'enabled' if protected else 'broken'} after the write"
-                    )
+            if protected:
+                return entries, True
+            child_owner, child_group = winacl.owner_and_group(node.handle)
+            inherited = winacl.inherited_for(
+                above, directory=node.directory, owner=child_owner, group=child_group, parent_label=str(node.parent)
+            )
+            return winacl.canonical(winacl.explicit(entries) + inherited), False
 
-
-def _write_exactly(handle: int, label: Path, entries: list[winacl.Entry], *, protected: bool) -> None:
-    """Make the object behind `handle` hold exactly `entries`, writing nothing if it already does; fail loudly if not."""
-    if winacl.read_entries(handle) == (entries, protected):
-        return
-    winacl.set_dacl(handle, entries, protected=protected)
-    _verify(handle, label, entries, protected=protected)
+        below = _wanted_below(nodes, path, planned, keeping_own)
+        _write_tree(held, path, planned, protected=isolate, below=below)
 
 
 def converge_owned(path: Path, service: Account, *, write: bool, root: Path) -> None:
@@ -371,12 +383,14 @@ def converge_owned(path: Path, service: Account, *, write: bool, root: Path) -> 
     NTFS protected, ends up readable by the service; and a file created in `path` afterwards (git replaces
     `host/frpc.toml`) inherits the same.
 
-    `path` is held without `FILE_SHARE_DELETE`, its entries are listed through that handle and opened relative to it,
+    Windows Server 2025 makes NTFS rewrite the ACL of each direct child of a directory that gains an inheritable ACE.
+    So `path` is held without `FILE_SHARE_DELETE`, its entries are listed through that handle and opened relative to it,
     and so are the entries of each subdirectory; all of them are vetted (a reparse point or a hard-linked file anywhere
     is refused: rewriting a hard-linked file would change a file outside `path`) before the first ACL is written. An
-    entry that has gone by the time it is opened is skipped. `path` is written first, then each directory before the
-    entries it holds, each once and only if it differs; the DACL of `path` holds the service's access, so no write
-    leaves anything the service needs without it. Inheritance from the parent plays no part, so nothing on it is read.
+    entry that has gone by the time it is opened is skipped; one pending deletion is refused. `path` is written first,
+    then each directory before the entries it holds, each once and only if it differs; the DACL of `path` holds the
+    service's access, so no write leaves anything the service needs without it. Inheritance from the parent plays no
+    part, so nothing on it is read.
     """
     sid = _sid_of(service)
     operator = operator_sid(root)
@@ -399,17 +413,12 @@ def converge_owned(path: Path, service: Account, *, write: bool, root: Path) -> 
             full=frozenset({operator}),
             isolate=True,
         )
-        holds = {path: planned}  # what each directory will hold, which its entries inherit from
-        inherited = []
-        for node in nodes:
-            entries = winacl.inherited_for(holds[node.parent], directory=node.directory)
-            if node.directory:
-                holds[node.label] = entries
-            inherited.append((node, entries))
-        with deferred_interrupts():  # Ctrl-C waits for the last write
-            _write_exactly(held, path, planned, protected=True)
-            for node, entries in inherited:
-                _write_exactly(node.handle, node.label, entries, protected=False)
+
+        def inheriting(node: _Node, above: list[winacl.Entry]) -> tuple[list[winacl.Entry], bool]:
+            return winacl.inherited_for(above, directory=node.directory), False
+
+        below = _wanted_below(nodes, path, planned, inheriting)
+        _write_tree(held, path, planned, protected=True, below=below)
 
 
 def _installed_grant(entry: winacl.Entry, sid: str) -> bool:
@@ -435,7 +444,4 @@ def revoke_root(root: Path, service: Account) -> None:
         if len(kept) == len(entries):
             return
         with deferred_interrupts():
-            winacl.set_dacl(handle, kept, protected=protected)
-        found, found_protected = winacl.read_entries(handle)
-        if found_protected != protected or any(_installed_grant(entry, sid) for entry in found):
-            raise PermsError(f"{root}: the service's ACE is still there, or inheritance changed, after the write")
+            _write_exactly(handle, root, kept, protected=protected)

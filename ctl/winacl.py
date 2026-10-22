@@ -303,11 +303,6 @@ def read_acl(path) -> Acl:
     return _acl(*read_dacl(path))
 
 
-def read_acl_handle(handle: int) -> Acl:
-    """`read_acl` for the object behind `handle` (READ_CONTROL), so what is read is what was changed."""
-    return _acl(*read_entries(handle))
-
-
 def _entries(dacl, source) -> list[tuple[int, int, int, Any]]:
     """Every ACE of `dacl` as (type, flags, mask, sid). An unknown type is an error: it may grant something unseen."""
     entries = []
