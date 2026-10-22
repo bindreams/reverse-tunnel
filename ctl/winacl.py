@@ -215,13 +215,22 @@ def to_sddl(entries: Iterable[Entry], *, protected: bool) -> str:
 # Reading ==============================================================================================================
 
 
+def _security_info(handle: int, information: int):
+    """The security descriptor of the object behind `handle` with only `information`; a failure is an `OSError`."""
+    import pywintypes
+    import win32security
+
+    try:
+        return win32security.GetSecurityInfo(handle, win32security.SE_FILE_OBJECT, information)
+    except pywintypes.error as exc:
+        raise _os_error(exc, None) from exc
+
+
 def owner_sid(handle: int) -> str:
     """The SID that owns the object behind `handle`, which needs READ_CONTROL."""
     import win32security
 
-    descriptor = win32security.GetSecurityInfo(
-        handle, win32security.SE_FILE_OBJECT, win32security.OWNER_SECURITY_INFORMATION
-    )
+    descriptor = _security_info(handle, win32security.OWNER_SECURITY_INFORMATION)
     return win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())
 
 
@@ -229,9 +238,8 @@ def owner_and_group(handle: int) -> tuple[str, str]:
     """The owner and primary group SIDs of the object behind `handle` (READ_CONTROL)."""
     import win32security
 
-    descriptor = win32security.GetSecurityInfo(
-        handle, win32security.SE_FILE_OBJECT,
-        win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
+    descriptor = _security_info(
+        handle, win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
     )
     # pywin32 has GetSecurityDescriptorGroup; its stubs omit it.
     group = descriptor.GetSecurityDescriptorGroup()  # ty: ignore[unresolved-attribute]
@@ -243,16 +251,9 @@ def owner_and_group(handle: int) -> tuple[str, str]:
 
 def read_entries(handle: int) -> tuple[list[Entry], bool]:
     """Every ACE of the object behind `handle` (READ_CONTROL) and whether its inheritance is broken."""
-    import pywintypes
     import win32security
 
-    try:
-        descriptor = win32security.GetSecurityInfo(
-            handle, win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-        )
-    except pywintypes.error as exc:
-        raise _os_error(exc, None) from exc
-    return _parse(descriptor, "<handle>")
+    return _parse(_security_info(handle, win32security.DACL_SECURITY_INFORMATION), "<handle>")
 
 
 def _parse(descriptor, source) -> tuple[list[Entry], bool]:
