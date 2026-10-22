@@ -130,3 +130,9 @@ def test_a_hard_linked_file_is_refused_when_the_kind_is_not_given(tmp_path):
     finally:
         winfile.close_handle(parent)
     assert "hard links" in str(raised.value)
+
+
+def test_closing_an_invalid_handle_fails_loudly_instead_of_being_ignored():
+    """A handle that cannot be closed is a double close or a handle that was never ours: a bug in the caller."""
+    with pytest.raises(AssertionError):
+        winfile.close_handle(0)
