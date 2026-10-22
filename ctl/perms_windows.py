@@ -3,9 +3,9 @@
 
 Each path is opened once with `FILE_FLAG_OPEN_REPARSE_POINT`, which refuses a reparse point before anything is
 changed, and its ACL is then set and read back through that handle, so the object that was checked is the object that
-is changed. A directory whose entries are changed too, or that gains an inheritable ACE, is held open without
-`FILE_SHARE_DELETE`; its entries are listed through that handle and opened relative to it, and every entry is vetted
-before the first ACL is written.
+is changed; what is read back must be the whole ACL that was written. A directory whose entries are changed too, or
+that gains an inheritable ACE, is held open without `FILE_SHARE_DELETE`; its entries are listed through that handle and
+opened relative to it, and every entry is vetted before the first ACL is written.
 
 ACLs are written with `NtSetSecurityObject`, which propagates to no child; the inherited ACEs of each object are
 computed here (`winacl.inherited_for`) and written to that object through its own handle. The Win32 `SetSecurityInfo`
@@ -95,16 +95,14 @@ def _handle(
         winfile.close_handle(handle)
 
 
-def _verify(handle: int, path: Path, wanted: frozenset[str], *, isolate: bool) -> None:
-    """Fail loudly if the ACL is not what was meant: the whole ACL when isolated, at least the grants otherwise."""
-    acl = winacl.read_acl_handle(handle)
-    if acl.protected != isolate:
-        found, expected = ("broken", "enabled") if acl.protected else ("enabled", "broken")
-        raise PermsError(f"{path}: inheritance is {found}, expected {expected}")
-    if isolate and acl.sids != wanted:
-        raise PermsError(f"{path}: the ACL grants {sorted(acl.sids)}, expected {sorted(wanted)}")
-    if not wanted <= acl.sids:
-        raise PermsError(f"{path}: the ACL lacks {sorted(wanted - acl.sids)}")
+def _verify(handle: int, path: Path, entries: list[winacl.Entry], *, protected: bool) -> None:
+    """Fail loudly unless the ACL reads back as exactly what was written: every ACE and the inheritance state."""
+    found, found_protected = winacl.read_entries(handle)
+    if found_protected != protected:
+        was, expected = ("broken", "enabled") if found_protected else ("enabled", "broken")
+        raise PermsError(f"{path}: inheritance is {was}, expected {expected}")
+    if found != entries:
+        raise PermsError(f"{path}: the ACL reads back as {found}, not what was written ({entries})")
 
 
 def _parent_entries(directory: Path) -> list[winacl.Entry]:
@@ -142,10 +140,10 @@ def _sid_of(account: Account) -> str:
 def harden_file(path: Path, owner: Account | None, readers: frozenset[str], root: Path) -> None:
     operator = _operator(owner, root)
     with _errors(path), _handle(path, directory=False, single_link=True) as handle:
-        wanted = winacl.apply(
+        entries = winacl.apply(
             handle, directory=False, operator=operator, readers=readers, writers=frozenset(), isolate=True
         )
-        _verify(handle, path, wanted, isolate=True)
+        _verify(handle, path, entries, protected=True)
 
 
 def _create_temporary(path: Path, owner: Account | None, readers: frozenset[str], root: Path) -> tuple[Path, int]:
@@ -167,10 +165,10 @@ def _create_temporary(path: Path, owner: Account | None, readers: frozenset[str]
             continue
         break
     try:
-        wanted = winacl.apply(
+        entries = winacl.apply(
             handle, directory=False, operator=operator, readers=readers, writers=frozenset(), isolate=True
         )
-        _verify(handle, temporary, wanted, isolate=True)
+        _verify(handle, temporary, entries, protected=True)
         return temporary, msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
     except BaseException:
         winfile.close_handle(handle)
@@ -235,7 +233,7 @@ def converge_dir(
         )
         children = _open_entries(stack, held, path)
         owner_sid, group_sid = winacl.owner_and_group(held)
-        planned, wanted = winacl.plan(
+        planned, _ = winacl.plan(
             directory=True,
             operator=operator,
             readers=readers,
@@ -260,7 +258,7 @@ def converge_dir(
             writes.append((handle, label, entries, protected))
         with deferred_interrupts():  # Ctrl-C waits for the last write
             winacl.set_dacl(held, planned, protected=isolate)
-            _verify(held, path, wanted, isolate=isolate)
+            _verify(held, path, planned, protected=isolate)
             for handle, label, entries, protected in writes:
                 if winacl.read_entries(handle) != (entries, protected):  # NTFS may already have written it so
                     winacl.set_dacl(handle, entries, protected=protected)
@@ -294,9 +292,7 @@ def _write_exactly(handle: int, label: Path, entries: list[winacl.Entry], *, pro
     if winacl.read_entries(handle) == (entries, protected):
         return
     winacl.set_dacl(handle, entries, protected=protected)
-    found, found_protected = winacl.read_entries(handle)
-    if (found, found_protected) != (entries, protected):
-        raise PermsError(f"{label}: the ACL reads back as {found}, not what was written ({entries})")
+    _verify(handle, label, entries, protected=protected)
 
 
 def converge_owned(path: Path, service: Account, *, write: bool, root: Path) -> None:
