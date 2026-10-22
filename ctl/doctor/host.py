@@ -44,7 +44,6 @@ class Host:
         self.permissions = Permissions(config, probes)
 
     def checks(self) -> list[Check]:
-        # Only Windows gives the service its access by ACE; POSIX has no such check to show.
         service_read = [("service_read_permissions", self.permissions.service_read)] if self.probes.windows else []
         return execute([
             ("bin_digests_match_record", self.binaries),

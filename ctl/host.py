@@ -384,11 +384,7 @@ def _step(description: str, action: Callable[..., None], *args, **kwargs) -> Non
 
 
 def _promote(root: Path, plan: Plan) -> None:
-    """Replace each binary in `bin/` with its staged, pinned bytes.
-
-    On Windows the new file is created in `bin\\` and inherits the service's access from it, so the final name never
-    exists without it.
-    """
+    """Replace each binary in `bin/` with its staged, pinned bytes."""
     bin_dir, staging = root / "bin", root / "bin" / STAGING
     for pin in plan.pins:
         if pin.install_name not in plan.binaries_to_replace:

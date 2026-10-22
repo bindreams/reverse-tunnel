@@ -139,11 +139,10 @@ class Permissions:
     def service_read(self) -> Verdict:
         """Whether the service can open what it needs: an allow for it and no deny of any kind.
 
-        Judged from each object's DACL alone, with no imitation of the service's token: the allows for the service
-        itself (explicit or inherited, inherit-only ones left out) must together cover the rights it needs, and no ACE
-        of the DACL may be a deny, for anyone, wherever it came from. `ctl install` writes these directories whole, so
-        a deny is never its doing. A file moved in from elsewhere keeps the DACL it had and fails here. The log files
-        the daemons append to are judged the same way, for the right to append, when they exist.
+        Judged from each object's DACL alone: the allows for the service itself (explicit or inherited, inherit-only
+        ones left out) must together cover the rights it needs. Any deny ACE fails, for anyone: install writes none, so
+        one came from elsewhere. The log files the daemons append to are judged the same way, for the right to append,
+        when they exist.
         """
         if not self.probes.windows:
             return not_applicable("only Windows gives the service its access by ACE; POSIX uses the owner and mode")

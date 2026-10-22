@@ -202,8 +202,6 @@ LOG_FILES = ("frpc.log", "websocat.log")
 # `append(true)` into `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` (library/std/src/sys/fs/windows.rs, `get_access_mode`).
 FILE_GENERIC_WRITE = 0x120116  # windows_sys.rs: FILE_GENERIC_WRITE = 1179926
 RUST_APPEND_OPEN = FILE_GENERIC_WRITE & ~FILE_WRITE_DATA
-# The old doctor mask: write and append data, read attributes, synchronize. The open above asks for none of the first
-# and the last-but-one, and for more besides.
 NARROWER_APPEND = 0x2 | 0x4 | 0x80 | 0x100000
 
 

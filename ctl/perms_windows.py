@@ -432,10 +432,10 @@ def _installed_grant(entry: winacl.Entry, sid: str) -> bool:
 def revoke_root(root: Path, service: Account) -> None:
     """Take from the repository root the service's read-and-execute ACE that an earlier install gave it.
 
-    The service needs nothing on the root: its working directory is `logs`. Only that ACE is removed, wherever its
-    inheritance flags stood; every other ACE and the inheritance state stay as they were, and nothing is written when
-    the root holds none. The root is written through its own handle and no entry in it is opened: the other children of
-    the root are not `ctl`'s. Call it after `bin`, `host` and `logs` are converged, which hold their own access.
+    Only that ACE is removed, wherever its inheritance flags stood; every other ACE and the inheritance state stay as
+    they were, and nothing is written when the root holds none. The root is written through its own handle and no entry
+    in it is opened: the other children of the root are not `ctl`'s. The service needs nothing on the root (see
+    `access.verify_traversable`).
     """
     sid = _sid_of(service)
     with _errors(root), _handle(root, directory=True) as handle:

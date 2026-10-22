@@ -168,9 +168,7 @@ def close_handle(handle: int) -> None:
 
 
 def _inspect(kernel32, handle: int, path, *, directory: bool | None, single_link: bool, error: type[Exception]) -> None:
-    """Refuse a reparse point, the wrong kind, or (for a file) a second hard link, through the handle.
-
-    `directory=None` accepts either kind."""
+    """Refuse a reparse point, the wrong kind, or (for a file) a second hard link, through the handle."""
     information = _FileInformation()
     if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -190,7 +188,6 @@ def _inspect(kernel32, handle: int, path, *, directory: bool | None, single_link
 
 
 def is_directory(handle: int) -> bool:
-    """Whether the object behind `handle` is a directory."""
     information = _FileInformation()
     if not _kernel32().GetFileInformationByHandle(handle, ctypes.byref(information)):
         raise ctypes.WinError(ctypes.get_last_error())
