@@ -666,7 +666,8 @@ def test_the_flag_does_not_detach_an_uninstall_that_cannot_disconnect_anyone(run
 
 
 def test_stage_empties_the_staging_directory_before_converging_the_owned_directories(running, monkeypatch):
-    """On Windows `converge_owned` refuses a subdirectory of `bin`, and a failed run leaves exactly that."""
+    """On Windows `converge_owned` would rewrite what a failed run left in the staging directory to be readable by the
+    service, so it is emptied first."""
     staging = running.root / "bin" / ".staging"
     (staging / "leftover-directory").mkdir(parents=True)
     (staging / "leftover").write_bytes(b"x")

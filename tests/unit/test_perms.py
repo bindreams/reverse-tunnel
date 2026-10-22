@@ -127,15 +127,6 @@ def test_write_secret_refuses_a_hard_linked_destination(tmp_path):
     assert other.read_bytes() == b"the-old-secret"
 
 
-def test_converge_tree_refuses_a_subdirectory(tmp_path):
-    logs = tmp_path / "logs"
-    (logs / "old").mkdir(parents=True)
-    with pytest.raises(PermsError) as raised:
-        converge_tree(logs, None, 0o750, root=tmp_path)
-    assert str(logs / "old") in str(raised.value)
-    assert "remove it" in str(raised.value)
-
-
 def test_converge_tree_accepts_a_flat_directory_of_regular_files(tmp_path):
     logs = tmp_path / "logs"
     logs.mkdir()

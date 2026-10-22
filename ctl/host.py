@@ -316,7 +316,8 @@ def _clear_staging(root: Path) -> None:
 def stage(config: Config, plan: Plan, *, services: Services) -> None:
     """Make the tree ready without disturbing anything running. The order matters.
 
-    Whatever a failed run left in `bin/.staging` goes first: on Windows converging `bin\\` refuses a subdirectory.
+    Whatever a failed run left in `bin/.staging` goes first: on Windows converging `bin\\` would otherwise
+    rewrite half-downloaded files to be readable by the service.
     `bin/`, `host/`, `secrets/` and `logs/` come next, each written whole with the service's access in the same write,
     so none leaves what the service reads without it. Only then does the repository root lose the service's ACE an
     earlier install gave it, since until the four hold their own access the root's is what an earlier tree relies on.

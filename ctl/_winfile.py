@@ -163,8 +163,10 @@ def close_handle(handle: int) -> None:
     _kernel32().CloseHandle(handle)
 
 
-def _inspect(kernel32, handle: int, path, *, directory: bool, single_link: bool, error: type[Exception]) -> None:
-    """Refuse a reparse point, the wrong kind, or (for a file) a second hard link, through the handle."""
+def _inspect(kernel32, handle: int, path, *, directory: bool | None, single_link: bool, error: type[Exception]) -> None:
+    """Refuse a reparse point, the wrong kind, or (for a file) a second hard link, through the handle.
+
+    `directory=None` accepts either kind."""
     information = _FileInformation()
     if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -174,13 +176,21 @@ def _inspect(kernel32, handle: int, path, *, directory: bool, single_link: bool,
     is_directory = bool(attributes & FILE_ATTRIBUTE_DIRECTORY)
     if directory and not is_directory:
         raise error(f"{path}: not a directory")
-    if not directory and (is_directory or kernel32.GetFileType(handle) != FILE_TYPE_DISK):
+    if directory is False and is_directory or not is_directory and kernel32.GetFileType(handle) != FILE_TYPE_DISK:
         raise error(f"{path}: not a regular file")
-    if single_link and not directory and information.nNumberOfLinks > 1:
+    if single_link and not is_directory and information.nNumberOfLinks > 1:
         raise error(
             f"{path}: has {information.nNumberOfLinks} hard links; "
             "refusing to change a file that is also reachable under another name"
         )
+
+
+def is_directory(handle: int) -> bool:
+    """Whether the object behind `handle` is a directory."""
+    information = _FileInformation()
+    if not _kernel32().GetFileInformationByHandle(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return bool(information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
 
 
 def file_identity(handle: int) -> tuple[int, int]:
@@ -226,16 +236,17 @@ def open_relative(
     *,
     label,
     access: int,
-    directory: bool,
+    directory: bool | None,
     error: type[Exception],
     single_link: bool = False,
     share: int = FILE_SHARE_READ_WRITE,
 ) -> int:
     """A handle to the entry `name` of the directory held by `parent`, opened relative to it and vetted like `open_handle`.
 
-    `label` is the path to name in messages. A `name` containing a separator is refused: it must be one entry. The name
-    is matched exactly (no `OBJ_CASE_INSENSITIVE`), so it must be a name as `list_names` returned it; in a
-    case-sensitive directory a different spelling is a different entry.
+    `directory=None` accepts a file or a directory (`is_directory` says which). `label` is the path to name in
+    messages. A `name` containing a separator is refused: it must be one entry. The name is matched exactly (no
+    `OBJ_CASE_INSENSITIVE`), so it must be a name as `list_names` returned it; in a case-sensitive directory a different
+    spelling is a different entry.
     `NtCreateFile` adds no rights of its own, unlike `CreateFileW`, so SYNCHRONIZE and FILE_READ_ATTRIBUTES (which the
     vetting needs) are requested here.
     """
@@ -300,7 +311,7 @@ def _relative(
     access: int,
     disposition: int,
     options: int,
-    directory: bool,
+    directory: bool | None,
     error: type[Exception],
     single_link: bool,
     share: int,

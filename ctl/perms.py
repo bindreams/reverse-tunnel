@@ -396,9 +396,9 @@ def converge_dir(
     Leaving an existing directory alone is wrong here: another account that owns, or can write to, `secrets/` can
     replace the token inside it regardless of the token's own mode. A symlink at `path` is refused, never repaired.
     On Windows `isolate` breaks inheritance; only `.env`, `secrets/` and the token do, never the repository root.
-    On Windows every entry of an existing directory is opened and vetted first (a subdirectory, reparse point or
-    hard-linked file is refused), because NTFS rewrites the ACL of each child when a directory gains an inheritable ACE.
-    An entry whose inheritance is broken is left so.
+    On Windows every entry below an existing directory, at every depth, is opened and vetted first (a reparse point or
+    hard-linked file is refused; an entry that vanishes meanwhile is skipped), because NTFS rewrites the ACL of each
+    child when a directory gains an inheritable ACE. An entry whose inheritance is broken is left so.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
@@ -421,10 +421,10 @@ def converge_owned(
     """Make `path` the install's own: `bin/` and `host/`, and `logs/` through `converge_tree`.
 
     Windows: the DACL is written whole, whatever it held (see `perms_windows.converge_owned`): protected, the operator
-    and Administrators in full control, `service` with read-and-execute (modify when `write`), no deny; every entry is
-    rewritten to inherit it, and a flat directory is required (a subdirectory, a reparse point or a hard-linked file is
-    refused). POSIX: `owner` and `mode` through `converge_dir`; without a `mode` the directory is left alone, which is
-    how `host/`, git's directory, is kept.
+    and Administrators in full control, `service` with read-and-execute (modify when `write`), no deny; every entry
+    below it, at every depth, is rewritten to inherit from its directory (a reparse point or a hard-linked file anywhere
+    is refused; an entry that vanishes meanwhile is skipped). POSIX: `owner` and `mode` through `converge_dir`; without
+    a `mode` the directory is left alone, which is how `host/`, git's directory, is kept.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
@@ -438,10 +438,11 @@ def converge_owned(
 def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -> None:
     """`converge_dir` for `path`, then the same for each of its direct entries, keeping each entry's own mode.
 
-    The directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a symlink or
-    reparse point, a FIFO, a socket, a hard-linked file, on POSIX a file on another filesystem) is refused with a message
-    telling the operator to remove it, and is never entered. A service that can write `logs/` could otherwise plant a link
-    or a hard link to a file it does not own and have root change it.
+    POSIX: the directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a
+    symlink, a FIFO, a socket, a hard-linked file, a file on another filesystem) is refused with a message telling the
+    operator to remove it, and is never entered. A service that can write `logs/` could otherwise plant a link or a hard
+    link to a file it does not own and have root change it. Windows: see `converge_owned`; subdirectories are entered,
+    and a reparse point or a hard-linked file at any depth is refused.
 
     systemd opens a log's append target after dropping to `User=`, so a stale owner is `EACCES` and the daemon never
     starts. On Windows `owner` is the service account and the directory is the install's own (`converge_owned`), with
