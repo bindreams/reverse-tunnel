@@ -424,6 +424,25 @@ def test_logs_without_the_right_to_add_a_file_fails(host):
     assert outcome is Outcome.FAIL and f"{place(host, 'logs')}: LocalService is not allowed" in detail
 
 
+# What goetia-shim does with `logs` itself. `create_dir_all(logs)` gets ERROR_ALREADY_EXISTS from `mkdir` and then asks
+# `is_dir()`, which opens with CreateFileW and so asks for FILE_READ_ATTRIBUTES; the shim spawns the daemon with `logs`
+# as its working directory, which CreateProcess checks with GetFileAttributesW, the same right. With the repository root
+# granting the service nothing there is no other way in, so a missing right keeps the daemon from ever starting.
+FILE_LIST_DIRECTORY, FILE_ADD_FILE, FILE_TRAVERSE, FILE_READ_ATTRIBUTES, SYNCHRONIZE = 0x1, 0x2, 0x20, 0x80, 0x100000
+LOGS_OPENED = FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+
+
+def test_logs_granting_exactly_what_the_shim_asks_of_it_passes(host):
+    outcome, detail = service_read(host, service_acls(logs=owned(LOGS_OPENED)))
+    assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("bit", [bit for bit in range(32) if LOGS_OPENED >> bit & 1])
+def test_logs_missing_any_one_right_the_shim_asks_of_it_fails(host, bit):
+    outcome, detail = service_read(host, service_acls(logs=owned(LOGS_OPENED & ~(1 << bit))))
+    assert outcome is Outcome.FAIL and f"{place(host, 'logs')}: LocalService is not allowed" in detail
+
+
 @pytest.mark.parametrize("name", LOG_FILES)
 def test_a_log_file_moved_into_logs_that_keeps_the_acl_it_had_fails(host, name):
     moved = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0), protected=False)
@@ -446,3 +465,23 @@ def test_the_log_files_checked_are_the_ones_goetia_yaml_has_the_daemons_write():
     written = {daemon["logs"] for daemon in manifest["daemons"].values()}
     assert {path for paths in WRITES.values() for path in paths} == written
     assert {Path(path).name for path in written} == set(LOG_FILES)
+
+
+# The files the daemons read ===========================================================================================
+
+
+def test_every_input_the_daemons_read_once_has_a_place_in_the_tree():
+    from ctl import host as installer
+
+    names = {name for names in installer.READS.values() for name in names}
+    assert names <= set(installer.READ_PATHS)
+
+
+def test_a_file_a_daemon_reads_is_checked_for_the_service_access(host, monkeypatch):
+    """A new input in `host.READS` is judged without anyone remembering to add it to the doctor."""
+    from ctl import host as installer
+
+    monkeypatch.setattr(installer, "READS", {**installer.READS, installer.WEBSOCAT_ID: ("extra", )})
+    monkeypatch.setattr(installer, "READ_PATHS", {**installer.READ_PATHS, "extra": "host/extra.conf"})
+    outcome, detail = service_read(host, service_acls())
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'host' / 'extra.conf'}: missing" in detail

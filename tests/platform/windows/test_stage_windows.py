@@ -33,7 +33,8 @@ FILE_TRAVERSE, FILE_READ_ATTRIBUTES, SYNCHRONIZE = 0x20, 0x80, 0x100000
 LIST = FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE
 EXECUTE = 0x1 | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE  # FILE_READ_DATA | FILE_EXECUTE
 READ = winacl.READ
-ADD_TO = LIST | FILE_ADD_FILE
+# `logs` is also the service's working directory, which the process creation checks with FILE_READ_ATTRIBUTES.
+ADD_TO = LIST | FILE_ADD_FILE | FILE_READ_ATTRIBUTES
 # goetia-shim v0.1.0 opens the log with `OpenOptions::new().create(true).append(true)` (src/bin/shim/logging.rs:39).
 # Rust's std on Windows requests `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` for `append(true)`
 # (library/std/src/sys/fs/windows.rs, `get_access_mode`).
@@ -174,6 +175,15 @@ def needed(root: Path) -> dict[Path, int]:
     return wanted
 
 
+# What a finished install must leave for the service to open, named here and not read off the disk: an install that
+# never wrote one of these would otherwise be judged by a list that lacks it.
+INSTALLED = {
+    Path("secrets/token"),
+    Path("host/frpc.toml"),
+    *(Path("bin") / f"{name}.exe" for name in host.HOST_BINARIES),
+}
+
+
 def readable(root: Path) -> set[Path]:
     """The relative paths among `needed` that the service is granted, as the kernel decides it."""
     with service_token() as token:
@@ -246,6 +256,27 @@ def test_the_other_children_of_the_root_keep_their_whole_acls_through_an_install
     assert {name: acls(tree.root)[name] for name in names} == before
 
 
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_the_service_is_taken_off_the_root_after_every_owned_directory_is_converged(tmp_path, monkeypatch, variant):
+    tree = build(variant, tmp_path / variant, monkeypatch)
+    calls: list[tuple[str, Path]] = []
+    for name in ("converge_owned", "converge_dir", "revoke_root"):
+        real = getattr(perms_windows, name)
+
+        def spy(path, *args, _name=name, _real=real, **kwargs):
+            calls.append((_name, path))
+            return _real(path, *args, **kwargs)
+
+        monkeypatch.setattr(perms_windows, name, spy)
+    install(tree)
+    root = tree.root
+    revoked = [index for index, call in enumerate(calls) if call[0] == "revoke_root"]
+    assert len(revoked) == 1 and calls[revoked[0]] == ("revoke_root", root)
+    for done in (("converge_owned", root / "bin"), ("converge_owned", root / "host"), ("converge_owned", root / "logs"),
+                 ("converge_dir", root / "secrets")):
+        assert calls.index(done) < revoked[0], done
+
+
 # Events ===============================================================================================================
 
 
@@ -303,6 +334,7 @@ def test_no_interruption_of_an_install_takes_the_service_read_from_what_it_needs
     total = events.count
     assert total > 1
     expected = acls(reference.root)
+    assert INSTALLED <= set(needed(reference.root)), "the finished install lacks a file the service opens"
     assert readable(reference.root) == set(needed(reference.root)), "the finished install leaves the service short"
     for number in range(1, total + 1):
         tree = build(variant, tmp_path / f"after-{number}", monkeypatch)
@@ -320,6 +352,7 @@ def test_no_interruption_of_an_install_takes_the_service_read_from_what_it_needs
         }
         assert in_bin <= held, f"event {number}: a file in bin exists without the service's access: {sorted(in_bin - held)}"
         install(tree)  # the rerun converges in one run
+        assert INSTALLED <= set(needed(tree.root)), f"after the rerun of event {number} a file is missing"
         missing = set(needed(tree.root)) - readable(tree.root)
         assert not missing, f"after the rerun of event {number} the service cannot open {sorted(missing)}"
         assert differences(acls(tree.root), expected) == [], f"rerun after event {number}"
