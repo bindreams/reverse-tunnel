@@ -23,10 +23,9 @@ BRIDGE_CHECKS = {
 HOST_CHECKS = {
     "bin_digests_match_record", "token_matches_record", "frpc_config_matches_record", "frpc_service",
     "websocat_service", "frpc_spec_current", "websocat_spec_current", "websocat_listening", "local_target_answers",
-    "env_permissions", "secrets_dir_permissions", "secrets_token_permissions", "service_read_permissions",
-    "tunnel_end_to_end"
+    "env_permissions", "secrets_dir_permissions", "secrets_token_permissions", "tunnel_end_to_end"
 }
-NOT_APPLICABLE_ON_POSIX = {"service_read_permissions"}
+WINDOWS_ONLY = {"service_read_permissions"}
 CLIENT_CHECKS = {"bin_digests_match_record", "env_permissions"}
 
 
@@ -59,9 +58,13 @@ def diagnose(world: World) -> list[Check]:
 def test_all_checks_pass_reports_exit_zero(fixture, expected, request):
     checks = diagnose(request.getfixturevalue(fixture))
     assert {check.name for check in checks} == expected
-    assert [(c.name, c.detail) for c in checks if c.outcome is not Outcome.PASS
-            ] == [(c.name, c.detail) for c in checks if c.name in NOT_APPLICABLE_ON_POSIX]
+    assert [(c.name, c.detail) for c in checks if c.outcome is not Outcome.PASS] == []
     assert doctor.exit_code(checks) == 0
+
+
+def test_a_windows_host_also_checks_what_the_service_may_open(host):
+    names = {check.name for check in doctor.run(host.config, host.probes(windows=True))}
+    assert names == HOST_CHECKS | WINDOWS_ONLY
 
 
 def test_diagnose_loads_the_env_and_runs_the_checks_of_its_role(bridge):
