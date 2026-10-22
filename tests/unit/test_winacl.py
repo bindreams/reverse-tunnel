@@ -288,7 +288,9 @@ def test_a_delete_pending_status_says_so():
     assert isinstance(error, _winfile.DeletePending)
 
 
-def test_no_other_status_is_a_delete_pending_error():
+def test_no_other_status_is_a_delete_pending_error(monkeypatch):
+    import ctypes
+
     from ctl import _winfile
 
     class Ntdll:
@@ -297,7 +299,9 @@ def test_no_other_status_is_a_delete_pending_error():
         def RtlNtStatusToDosError(status):
             return 2
 
-    assert not isinstance(_winfile._status_error(Ntdll, 0xC000000F - (1 << 32)), _winfile.DeletePending)
+    monkeypatch.setattr(ctypes, "WinError", lambda code: FileNotFoundError(2, "missing"), raising=False)
+    error = _winfile._status_error(Ntdll, 0xC000000F - (1 << 32))
+    assert isinstance(error, FileNotFoundError) and not isinstance(error, _winfile.DeletePending)
 
 
 def test_refuse_unsupported_can_be_asked_before_anything_exists():
