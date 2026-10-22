@@ -32,7 +32,9 @@ from ctl.perms import SID_LOCAL_SERVICE, Account, PermsError
 
 LOCAL_SERVICE = Account("LocalService", None, None)
 LIST = 0x1 | 0x20 | 0x100000
-ADD_TO = LIST | 0x2
+# Creating a file in `logs` and starting a process with it as the working directory: FILE_ADD_FILE and
+# FILE_READ_ATTRIBUTES on the directory.
+ADD_TO = LIST | 0x2 | 0x80
 READ = winacl.READ
 EXECUTE = 0x1 | 0x20 | 0x80 | 0x100000
 KINDS = {"bin": winacl.READ_EXECUTE, "host": winacl.READ_EXECUTE, "logs": winacl.MODIFY}
@@ -513,36 +515,40 @@ def deleted_while_held(path: Path):
         _winapi.CloseHandle(handle)
 
 
+def refuses_pending(repo: Path, name: str, victim: Path) -> PermsError:
+    """Converge while `victim`, an entry pending deletion, is held open: it is refused, and nothing was written."""
+    others = [p for p in repo.iterdir() if p.name != name]
+    before = (entries_of(repo / name), snapshot(*others))
+    with deleted_while_held(victim):
+        with pytest.raises(PermsError) as raised:
+            converge(repo, name)
+    assert (entries_of(repo / name), snapshot(*others)) == before
+    return raised.value
+
+
 @pytest.mark.parametrize("name", KINDS)
-def test_a_file_pending_deletion_between_listing_and_opening_is_skipped(tmp_path, name):
+def test_a_file_pending_deletion_is_refused_because_its_deletion_can_be_cancelled(tmp_path, name):
+    """Setting the disposition back through any handle with DELETE access keeps the file, with whatever DACL it had."""
     repo = repo_with(tmp_path)
     (repo / name / "rotated").write_bytes(b"")
-    kept = [p for p in (repo / name).iterdir() if p.name != "rotated"]
-    with deleted_while_held(repo / name / "rotated"):
-        converge(repo, name)
-    assert not (repo / name / "rotated").exists()
-    assert shape_of(repo / name) == (owned_shape(repo, KINDS[name], INHERITING), True)
-    for path in kept:
-        assert shape_of(path) == inherited_shape(repo, name, path)
+    error = refuses_pending(repo, name, repo / name / "rotated")
+    assert str(repo / name / "rotated") in str(error) and "close the process holding it" in str(error)
 
 
 @pytest.mark.parametrize("name", KINDS)
-def test_a_file_pending_deletion_in_a_subdirectory_is_skipped(tmp_path, name):
+def test_a_file_pending_deletion_in_a_subdirectory_is_refused(tmp_path, name):
     repo = repo_with(tmp_path)
     nested = add_nested(repo, name)
-    with deleted_while_held(nested[3]):
-        converge(repo, name)
-    for path in nested[:3]:
-        assert shape_of(path) == inherited_shape(repo, name, path), path
+    error = refuses_pending(repo, name, nested[3])
+    assert str(nested[3]) in str(error) and "close the process holding it" in str(error)
 
 
 @pytest.mark.parametrize("name", KINDS)
-def test_a_subdirectory_pending_deletion_is_skipped(tmp_path, name):
+def test_a_subdirectory_pending_deletion_is_refused(tmp_path, name):
     repo = repo_with(tmp_path)
     (repo / name / "gone").mkdir()
-    with deleted_while_held(repo / name / "gone"):
-        converge(repo, name)
-    assert shape_of(repo / name) == (owned_shape(repo, KINDS[name], INHERITING), True)
+    error = refuses_pending(repo, name, repo / name / "gone")
+    assert str(repo / name / "gone") in str(error) and "close the process holding it" in str(error)
 
 
 @pytest.mark.parametrize("name", KINDS)
