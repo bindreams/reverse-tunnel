@@ -30,6 +30,8 @@ def windows(acls: dict[str, Acl], operator: str = OPERATOR, denies: dict[str, tu
     """
 
     def entries(path) -> tuple[list[winacl.Entry], bool]:
+        if path.name not in acls:
+            raise FileNotFoundError(2, "The system cannot find the file specified", str(path))
         found = acls[path.name]
         denied = [
             winacl.Entry(winacl.ACCESS_DENIED_ACE_TYPE, a.flags, a.mask, a.sid)
@@ -193,6 +195,9 @@ SERVICE_NEEDS = {
     "token": winacl.READ,
     "logs": winacl.MODIFY,
 }
+# The files in `logs` the daemons append to, as `goetia.yaml` names them; one that does not exist yet is no failure.
+LOG_FILES = ("frpc.log", "websocat.log")
+APPEND = 0x2 | 0x4 | 0x80 | 0x100000  # FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE
 
 
 def owned(mask: int) -> Acl:
@@ -217,6 +222,7 @@ def service_acls(**changes: Acl) -> dict[str, Acl]:
         "frpc.toml": owned_file(winacl.READ_EXECUTE),
     }
     acls |= {name: owned_file(winacl.READ_EXECUTE) for name in ("frpc.exe", "websocat.exe", "goetia-shim.exe")}
+    acls |= {name: owned_file(winacl.MODIFY) for name in LOG_FILES}
     return acls | changes
 
 
@@ -227,7 +233,13 @@ def service_read(world: World, acls: dict[str, Acl], denies: dict[str, tuple[Ace
 def place(world: World, name: str) -> Path:
     root = world.config.root
     where = {
-        "frpc.exe": "bin", "websocat.exe": "bin", "goetia-shim.exe": "bin", "frpc.toml": "host", "token": "secrets"
+        "frpc.exe": "bin",
+        "websocat.exe": "bin",
+        "goetia-shim.exe": "bin",
+        "frpc.toml": "host",
+        "token": "secrets",
+        "frpc.log": "logs",
+        "websocat.log": "logs",
     }
     return root / where[name] / name if name in where else root / name
 
@@ -242,7 +254,7 @@ def test_the_service_read_is_not_applicable_on_posix(host):
     assert outcome is Outcome.NOT_APPLICABLE
 
 
-@pytest.mark.parametrize("name", SERVICE_NEEDS)
+@pytest.mark.parametrize("name", [*SERVICE_NEEDS, *LOG_FILES])
 @pytest.mark.parametrize("flags", [0, ID, FILES_ONLY], ids=["explicit", "inherited", "inherit-only"])
 @pytest.mark.parametrize("sid", [SERVICE, winacl.SID_EVERYONE, OTHER], ids=["service", "everyone", "another"])
 def test_a_deny_ace_of_any_kind_on_anything_the_service_needs_fails_naming_the_path_and_whom_it_denies(
@@ -253,7 +265,7 @@ def test_a_deny_ace_of_any_kind_on_anything_the_service_needs_fails_naming_the_p
     assert f"{place(host, name)}: has a deny ACE for {sid}" in detail and "ctl install" in detail
 
 
-@pytest.mark.parametrize("name", SERVICE_NEEDS)
+@pytest.mark.parametrize("name", [*SERVICE_NEEDS, *LOG_FILES])
 def test_an_object_with_no_allow_for_the_service_fails_naming_the_path(host, name):
     bare = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0))
     outcome, detail = service_read(host, service_acls(**{name: bare}))
@@ -353,3 +365,54 @@ def test_an_object_that_is_missing_fails_saying_to_install(host, name):
 def test_an_object_doctor_cannot_read_fails_instead_of_crashing(host):
     outcome, detail = reading(host, "frpc.toml", PermissionError(5, "Access is denied"))
     assert outcome is Outcome.FAIL and "Access is denied" in detail
+
+
+# The log files the daemons append to ==================================================================================
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_that_does_not_exist_yet_is_no_failure(host, name):
+    acls = service_acls()
+    del acls[name]
+    outcome, detail = service_read(host, acls)
+    assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+@pytest.mark.parametrize("narrow", [winacl.READ, winacl.READ_EXECUTE])
+def test_a_log_file_the_service_cannot_append_to_fails_saying_what_it_holds(host, name, narrow):
+    narrowed = acl((ADMINS, winacl.FULL, ID), (SERVICE, narrow, ID), protected=False)
+    outcome, detail = service_read(host, service_acls(**{name: narrowed}))
+    assert outcome is Outcome.FAIL
+    assert f"{place(host, name)}: LocalService is not allowed" in detail and f"it holds ({RIGHTS[narrow]})" in detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_the_rights_to_append_are_enough_for_a_log_file(host, name):
+    appending = acl((ADMINS, winacl.FULL, 0), (SERVICE, APPEND, 0))
+    outcome, detail = service_read(host, service_acls(**{name: appending}))
+    assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_moved_into_logs_that_keeps_the_acl_it_had_fails(host, name):
+    moved = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0), protected=False)
+    outcome, detail = service_read(host, service_acls(**{name: moved}))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_doctor_cannot_read_fails_instead_of_crashing(host, name):
+    outcome, detail = reading(host, name, PermissionError(5, "Access is denied"))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: Access is denied" in detail
+
+
+def test_the_log_files_checked_are_the_ones_goetia_yaml_has_the_daemons_write():
+    import yaml
+
+    from ctl.host import WRITES
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parents[2] / "goetia.yaml").read_text(encoding="utf-8"))
+    written = {daemon["logs"] for daemon in manifest["daemons"].values()}
+    assert {path for paths in WRITES.values() for path in paths} == written
+    assert {Path(path).name for path in written} == set(LOG_FILES)

@@ -16,12 +16,16 @@ from ctl.perms import SID_LOCAL_SERVICE, Account, converge_dir, converge_owned, 
 
 LOCAL_SERVICE = Account("LocalService", None, None)
 BINARIES = ("frpc.exe", "websocat.exe", "goetia-shim.exe")
+LOG_FILES = ("frpc.log", "websocat.log")
 
 
-def installed_repo(tmp_path: Path) -> tuple[Path, Config]:
+def installed_repo(tmp_path: Path, *, logs: tuple[str, ...] = LOG_FILES) -> tuple[Path, Config]:
     repo = tmp_path / "repo"
     (repo / "bin").mkdir(parents=True)
     (repo / "host").mkdir()
+    (repo / "logs").mkdir()
+    for name in logs:
+        (repo / "logs" / name).write_bytes(b"")
     for name in BINARIES:
         (repo / "bin" / name).write_bytes(b"")
     (repo / "bin" / ".digests.json").write_bytes(b"{}")
@@ -46,7 +50,10 @@ def test_doctor_passes_what_install_writes(tmp_path):
     assert outcome is Outcome.PASS, detail
 
 
-@pytest.mark.parametrize("where", ["bin", "bin/frpc.exe", "host", "host/frpc.toml", "secrets/token", "logs"])
+@pytest.mark.parametrize(
+    "where",
+    ["bin", "bin/frpc.exe", "host", "host/frpc.toml", "secrets/token", "logs", "logs/frpc.log", "logs/websocat.log"]
+)
 def test_doctor_fails_a_deny_ace_added_after_the_install_naming_the_path(tmp_path, where):
     repo, config = installed_repo(tmp_path)
     icacls(str(repo / where), "/deny", f"*{winacl.SID_USERS}:(WD)")
@@ -88,3 +95,22 @@ def test_doctor_does_not_read_the_repository_root(tmp_path):
     icacls(str(repo), "/deny", f"*{SID_LOCAL_SERVICE}:(X)")
     outcome, detail = service_read(config)
     assert outcome is Outcome.PASS, detail
+
+
+def test_doctor_passes_when_no_log_file_exists_yet(tmp_path):
+    _, config = installed_repo(tmp_path, logs=())
+    outcome, detail = service_read(config)
+    assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_doctor_fails_a_log_file_moved_into_logs_that_keeps_the_acl_it_had(tmp_path, name):
+    repo, config = installed_repo(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    icacls(str(elsewhere), "/inheritance:r", "/grant:r", f"*{winacl.SID_ADMINISTRATORS}:(OI)(CI)(F)")
+    (elsewhere / name).write_bytes(b"")
+    os.replace(elsewhere / name, repo / "logs" / name)
+    outcome, detail = service_read(config)
+    assert outcome is Outcome.FAIL
+    assert f"{repo / 'logs' / name}: LocalService is not allowed" in detail and "ctl install" in detail
