@@ -6,7 +6,7 @@ changed, and its ACL is then set and read back through that handle, so the objec
 is changed; what is read back must be the whole ACL that was written. A directory whose entries are changed too, or
 that gains an inheritable ACE, is held open without `FILE_SHARE_DELETE`; its entries are listed through that handle and
 opened relative to it, then the entries of each subdirectory the same way, at every depth, and every entry is vetted
-before the first ACL is written. An entry that is gone by the time it is opened has nothing to change and is skipped.
+before the first ACL is written. An entry that is gone, or pending deletion, by the time it is opened has nothing to change and is skipped.
 
 ACLs are written with `NtSetSecurityObject`, which propagates to no child; the inherited ACEs of each object are
 computed here (`winacl.inherited_for`) and written to that object through its own handle. The Win32 `SetSecurityInfo`
@@ -217,8 +217,8 @@ def _open_tree(stack: ExitStack, directory: int, where: Path) -> list[_Node]:
     """Open every entry below the held `directory`, at every depth, parents before the entries they hold.
 
     Each entry is opened relative to the directory that holds it and kept open on `stack`, so a refusal part-way closes
-    the ones already opened. A reparse point or a hard-linked file anywhere is refused. An entry listed and gone by the
-    time it is opened is skipped: there is nothing left to change. Every other failure refuses.
+    the ones already opened. A reparse point or a hard-linked file anywhere is refused. An entry listed and gone (or pending
+    deletion) by the time it is opened is skipped: there is nothing left to change. Every other failure refuses.
     """
     nodes: list[_Node] = []
     pending = [(directory, where)]
@@ -242,7 +242,7 @@ def _open_entry(stack: ExitStack, directory: int, name: str, where: Path) -> _No
         handle = winfile.open_relative(
             directory, name, label=label, access=ACL_ACCESS, directory=None, single_link=True, error=PermsError
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, winfile.DeletePending):
         return None
     except PermsError as exc:
         raise PermsError(f"{exc}{REMOVE}") from exc
@@ -253,7 +253,7 @@ def _open_entry(stack: ExitStack, directory: int, name: str, where: Path) -> _No
 
 
 def _open_listing(stack: ExitStack, directory: int, name: str, node: _Node) -> int | None:
-    """A handle to the subdirectory `node`, opened to list it; `None` if it is gone.
+    """A handle to the subdirectory `node`, opened to list it; `None` if it is gone or pending deletion.
 
     It is the very directory `node.handle` holds, which is open without `FILE_SHARE_DELETE`: nothing can have replaced
     the name since. Identities are compared all the same.
@@ -267,7 +267,7 @@ def _open_listing(stack: ExitStack, directory: int, name: str, node: _Node) -> i
             directory=True,
             error=PermsError,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, winfile.DeletePending):
         return None
     except PermsError as exc:
         raise PermsError(f"{exc}{REMOVE}") from exc
