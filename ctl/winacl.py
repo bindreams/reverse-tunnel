@@ -241,8 +241,7 @@ def owner_and_group(handle: int) -> tuple[str, str]:
     descriptor = _security_info(
         handle, win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
     )
-    # pywin32 has GetSecurityDescriptorGroup; its stubs omit it.
-    group = descriptor.GetSecurityDescriptorGroup()  # ty: ignore[unresolved-attribute]
+    group = descriptor.GetSecurityDescriptorGroup()
     return (
         win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()),
         win32security.ConvertSidToStringSid(group),

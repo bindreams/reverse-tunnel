@@ -39,8 +39,8 @@ from ctl.perms import (
     Account,
     PermsError,
     check_destination,
+    discard_temporary,
     temporary_name,
-    unlink_quietly,
     write_all,
 )
 
@@ -174,9 +174,9 @@ def _create_temporary(path: Path, owner: Account | None, readers: frozenset[str]
         )
         _verify(handle, temporary, entries, protected=True)
         return temporary, msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
-    except BaseException:
+    except BaseException as error:
         winfile.close_handle(handle)
-        unlink_quietly(str(temporary))
+        discard_temporary(str(temporary), error)
         raise
 
 
@@ -198,8 +198,8 @@ def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozen
             os.close(fd)
         with _errors(path):
             os.replace(temporary, path)
-    except BaseException:
-        unlink_quietly(str(temporary))
+    except BaseException as error:
+        discard_temporary(str(temporary), error)
         raise
 
 

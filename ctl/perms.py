@@ -253,11 +253,15 @@ def check_destination(path: Path, status: os.stat_result | None) -> None:
         raise PermsError(_hard_link_message(path, status.st_nlink) + "; the other name would keep the old secret")
 
 
-def unlink_quietly(name: str, *, dir_fd: int | None = None) -> None:
+def discard_temporary(name: str, error: BaseException, *, dir_fd: int | None = None) -> None:
+    """Remove the temporary file `name` while `error` propagates. A file that is already gone is fine; a removal that
+    fails is attached to `error` as a note and raises nothing, so it cannot replace the failure that matters."""
     try:
         os.unlink(name, dir_fd=dir_fd)
     except FileNotFoundError:
         pass
+    except OSError as exc:
+        error.add_note(f"the temporary file {name} could not be removed: {exc.strerror or exc}")
 
 
 def temporary_name(path: Path) -> str:
@@ -306,8 +310,8 @@ def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozen
                 os.replace(name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
             except OSError as exc:
                 raise PermsError(f"{path}: {exc.strerror or exc}") from exc
-        except BaseException:
-            unlink_quietly(name, dir_fd=directory_fd)
+        except BaseException as error:
+            discard_temporary(name, error, dir_fd=directory_fd)
             raise
         os.fsync(directory_fd)
     finally:
