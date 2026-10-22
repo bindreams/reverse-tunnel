@@ -43,8 +43,9 @@ READ_WRITE = 0x12019F
 READ_WRITE_DELETE = READ_WRITE | DELETE
 # What creating a file in a directory takes: list it, add to it, and pass through it.
 LIST_AND_ADD = 0x1 | 0x2 | 0x20 | 0x100000
-# What appending to an existing file takes: write and append data, read its attributes, synchronize.
-APPEND = 0x2 | 0x4 | 0x80 | 0x100000
+# What goetia-shim asks for when it opens `logs\<daemon>.log`: Rust's `OpenOptions::append(true)` requests
+# `FILE_GENERIC_WRITE & !FILE_WRITE_DATA`, which is read-control, write-attributes, write-EA, append-data, synchronize.
+APPEND = 0x20000 | 0x100 | 0x10 | 0x4 | 0x100000
 
 # Generic rights and what they mean for a file.
 GENERIC_READ = 0x80000000

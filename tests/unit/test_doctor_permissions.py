@@ -197,7 +197,14 @@ SERVICE_NEEDS = {
 }
 # The files in `logs` the daemons append to, as `goetia.yaml` names them; one that does not exist yet is no failure.
 LOG_FILES = ("frpc.log", "websocat.log")
-APPEND = 0x2 | 0x4 | 0x80 | 0x100000  # FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+# What the writer of `logs/<daemon>.log` asks the kernel for. goetia-shim v0.1.0 opens it with
+# `OpenOptions::new().create(true).append(true).open(path)` (src/bin/shim/logging.rs:39), and Rust's std on Windows turns
+# `append(true)` into `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` (library/std/src/sys/fs/windows.rs, `get_access_mode`).
+FILE_GENERIC_WRITE = 0x120116  # windows_sys.rs: FILE_GENERIC_WRITE = 1179926
+RUST_APPEND_OPEN = FILE_GENERIC_WRITE & ~FILE_WRITE_DATA
+# The old doctor mask: write and append data, read attributes, synchronize. The open above asks for none of the first
+# and the last-but-one, and for more besides.
+NARROWER_APPEND = 0x2 | 0x4 | 0x80 | 0x100000
 
 
 def owned(mask: int) -> Acl:
@@ -388,10 +395,33 @@ def test_a_log_file_the_service_cannot_append_to_fails_saying_what_it_holds(host
 
 
 @pytest.mark.parametrize("name", LOG_FILES)
-def test_the_rights_to_append_are_enough_for_a_log_file(host, name):
-    appending = acl((ADMINS, winacl.FULL, 0), (SERVICE, APPEND, 0))
+def test_the_access_the_writer_opens_a_log_file_with_is_enough(host, name):
+    appending = acl((ADMINS, winacl.FULL, 0), (SERVICE, RUST_APPEND_OPEN, 0))
     outcome, detail = service_read(host, service_acls(**{name: appending}))
     assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_granting_less_than_the_writer_opens_it_with_fails(host, name):
+    narrow = acl((ADMINS, winacl.FULL, 0), (SERVICE, NARROWER_APPEND, 0))
+    outcome, detail = service_read(host, service_acls(**{name: narrow}))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+@pytest.mark.parametrize("bit", [bit for bit in range(32) if RUST_APPEND_OPEN >> bit & 1])
+def test_a_log_file_missing_any_one_right_the_writer_asks_for_fails(host, name, bit):
+    short = acl((ADMINS, winacl.FULL, 0), (SERVICE, RUST_APPEND_OPEN & ~(1 << bit), 0))
+    outcome, detail = service_read(host, service_acls(**{name: short}))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: LocalService is not allowed" in detail
+
+
+# Creating the log file adds an entry to `logs`: CreateFile with OPEN_ALWAYS needs FILE_ADD_FILE on the directory.
+def test_logs_without_the_right_to_add_a_file_fails(host):
+    FILE_ADD_FILE = 0x2
+    short = acl((ADMINS, winacl.FULL, INHERIT), (SERVICE, winacl.MODIFY & ~FILE_ADD_FILE, INHERIT))
+    outcome, detail = service_read(host, service_acls(logs=short))
+    assert outcome is Outcome.FAIL and f"{place(host, 'logs')}: LocalService is not allowed" in detail
 
 
 @pytest.mark.parametrize("name", LOG_FILES)

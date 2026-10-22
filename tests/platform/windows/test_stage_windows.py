@@ -28,13 +28,17 @@ INHERITING = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
 PLATFORM = "windows-x86_64"
 # The rights each kind of object is asked for. The service starts `bin/*.exe`, reads its configuration and the token,
 # lists the directories on the way, and appends to its logs.
-FILE_LIST_DIRECTORY, FILE_ADD_FILE, FILE_WRITE_DATA, FILE_APPEND_DATA = 0x1, 0x2, 0x2, 0x4
+FILE_LIST_DIRECTORY, FILE_ADD_FILE, FILE_WRITE_DATA = 0x1, 0x2, 0x2
 FILE_TRAVERSE, FILE_READ_ATTRIBUTES, SYNCHRONIZE = 0x20, 0x80, 0x100000
 LIST = FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE
 EXECUTE = 0x1 | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE  # FILE_READ_DATA | FILE_EXECUTE
 READ = winacl.READ
 ADD_TO = LIST | FILE_ADD_FILE
-APPEND = FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+# goetia-shim v0.1.0 opens the log with `OpenOptions::new().create(true).append(true)` (src/bin/shim/logging.rs:39).
+# Rust's std on Windows requests `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` for `append(true)`
+# (library/std/src/sys/fs/windows.rs, `get_access_mode`).
+FILE_GENERIC_WRITE = 0x120116
+APPEND = FILE_GENERIC_WRITE & ~FILE_WRITE_DATA
 VARIANTS = ["fresh", "installed", "earlier", "previous"]
 
 
