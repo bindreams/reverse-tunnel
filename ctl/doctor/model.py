@@ -34,6 +34,10 @@ class Skip(Exception):
     """The check cannot be evaluated; `str(self)` says why, naming the check that holds the cause."""
 
 
+class DockerProblem(Exception):
+    """Docker could not be run or asked; the message says why."""
+
+
 def ok(detail: str) -> Verdict:
     return Verdict(Outcome.PASS, detail)
 

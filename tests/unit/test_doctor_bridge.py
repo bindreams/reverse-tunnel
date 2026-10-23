@@ -4,11 +4,14 @@ import hashlib
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
 from tests.unit.deployment_support import write_env
 from tests.unit.doctor_support import (
+    IMAGE_ENV,
+    IMAGE_ID,
     PORT_BINDINGS,
     PS_ENTRY,
     World,
@@ -19,6 +22,7 @@ from tests.unit.doctor_support import (
 
 from ctl import doctor
 from ctl.config import Role
+from ctl.doctor.hardening import MASKED_PATHS, READONLY_PATHS
 from ctl.host import token_digest
 from ctl.install import install
 from ctl.doctor import Outcome
@@ -38,20 +42,29 @@ def checks_of(world: World, **overrides):
 
 @pytest.mark.parametrize(
     "arrange", [
-        pytest.param(lambda docker: docker.raises("version", error=FileNotFoundError("docker")), id="not-installed"),
         pytest.param(
-            lambda docker: docker.on("version", returncode=1, stderr="Cannot connect to the Docker daemon"),
+            lambda docker, command: docker.raises(command, error=FileNotFoundError("docker")), id="not-installed"
+        ),
+        pytest.param(
+            lambda docker, command: docker.on(command, returncode=1, stderr="Cannot connect to the Docker daemon"),
             id="daemon-down",
         ),
-        pytest.param(lambda docker: docker.raises("version", error=subprocess.TimeoutExpired("docker", 60)), id="hung"),
+        pytest.param(
+            lambda docker, command: docker.raises(command, error=subprocess.TimeoutExpired("docker", 60)), id="hung"
+        ),
     ]
 )
 def test_docker_unavailable_is_one_named_failure_not_ten(world, arrange):
-    arrange(world.docker)
+    # `docker info` is as unusable as `docker version`, so a check that asks the daemon first cannot hide behind it.
+    for command in ("version", "info"):
+        arrange(world.docker, command)
     checks = checks_of(world)
     assert failures(list(checks.values())) == ["docker_reachable"]
     assert "Docker" in checks["docker_reachable"].detail
-    for name in ("container_healthy", "restart_policy", "control_port_published", "config_skew", "token_skew"):
+    for name in (
+        "container_healthy", "restart_policy", "container_hardening", "control_port_published", "config_skew",
+        "token_skew"
+    ):
         assert checks[name].outcome is Outcome.NOT_APPLICABLE
         assert "docker_reachable" in checks[name].detail
 
@@ -152,10 +165,17 @@ def test_a_project_without_an_frps_service_has_no_container(world):
 
 
 def test_an_inspect_that_fails_fails_the_checks_that_need_it_with_dockers_words(world):
-    world.docker.on("inspect", returncode=1, stderr="No such object")
+    world.docker.on("inspect", returncode=1, stderr="permission denied while trying to connect")
     checks = checks_of(world)
     for name in ("restart_policy", "control_port_published", "vhost_answers_404"):
-        assert checks[name].outcome is Outcome.FAIL and "No such object" in checks[name].detail
+        assert checks[name].outcome is Outcome.FAIL and "permission denied" in checks[name].detail
+
+
+def test_an_inspect_of_a_container_that_is_gone_skips_the_checks_that_need_it(world):
+    world.docker.on("inspect", returncode=1, stderr="Error: No such object: 0123456789ab")
+    checks = checks_of(world)
+    for name in ("restart_policy", "control_port_published", "vhost_answers_404", "container_hardening"):
+        assert checks[name].outcome is Outcome.NOT_APPLICABLE and "container_healthy" in checks[name].detail
 
 
 @pytest.mark.parametrize("policy", ["no", "", "on-failure"])
@@ -173,9 +193,7 @@ def test_only_always_and_unless_stopped_pass(world, policy):
 
 
 def test_a_null_restart_policy_is_its_own_named_failure(world):
-    world.docker.on(
-        "inspect", stdout=json.dumps([{"HostConfig": {"RestartPolicy": None, "PortBindings": PORT_BINDINGS}}])
-    )
+    world.docker.altered(lambda document: document["HostConfig"].update(RestartPolicy=None))
     check = checks_of(world)["restart_policy"]
     assert check.outcome is Outcome.FAIL and "RestartPolicy" in check.detail and "null" in check.detail
 
@@ -193,6 +211,667 @@ def test_the_control_port_published_somewhere_else_fails(world):
     world.docker.healthy(bindings=bindings)
     check = checks_of(world)["control_port_published"]
     assert check.outcome is Outcome.FAIL and "9999" in check.detail
+
+
+# The container's security settings ====================================================================================
+
+
+def host_config(**fields):
+    return lambda document: document["HostConfig"].update(fields)
+
+
+def config(**fields):
+    return lambda document: document["Config"].update(fields)
+
+
+def network_ports(**ports):
+    return lambda document: document["NetworkSettings"]["Ports"].update(ports)
+
+
+def mounts(change):
+    return lambda document: change(document["Mounts"])
+
+
+def hardening(world: World):
+    return checks_of(world)["container_hardening"]
+
+
+def test_container_hardening_passes_for_the_shipped_compose_shape(world):
+    check = hardening(world)
+    assert check.outcome is Outcome.PASS
+    assert check.detail == "the container matches compose.yaml's security settings"
+
+
+DOCKER_SOCKET = {"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True}
+# Each case: the edit, the field the message names, and the value text it reports on that same line.
+HARDENING_VIOLATIONS = [
+    pytest.param(host_config(CapDrop=[]), "HostConfig.CapDrop", "[]", id="no-cap-drop"),
+    pytest.param(host_config(CapDrop=["NET_RAW"]), "HostConfig.CapDrop", '["NET_RAW"]', id="cap-drop-without-all"),
+    pytest.param(
+        host_config(CapAdd=["DAC_READ_SEARCH", "SYS_ADMIN"]),
+        "HostConfig.CapAdd",
+        '["DAC_READ_SEARCH", "SYS_ADMIN"]',
+        id="extra-capability",
+    ),
+    pytest.param(host_config(CapAdd=[]), "HostConfig.CapAdd", "[]", id="capability-missing"),
+    pytest.param(host_config(Privileged=True), "HostConfig.Privileged", "true", id="privileged"),
+    pytest.param(
+        host_config(SecurityOpt=["seccomp=unconfined"]),
+        "HostConfig.SecurityOpt",
+        '["seccomp=unconfined"]',
+        id="seccomp-unconfined-alone",
+    ),
+    pytest.param(
+        host_config(SecurityOpt=["no-new-privileges:true", "seccomp=unconfined"]),
+        "HostConfig.SecurityOpt",
+        '["no-new-privileges:true", "seccomp=unconfined"]',
+        id="seccomp-unconfined-beside-no-new-privileges",
+    ),
+    pytest.param(host_config(SecurityOpt=[]), "HostConfig.SecurityOpt", "[]", id="no-new-privileges-missing"),
+    pytest.param(
+        host_config(SecurityOpt=["no-new-privileges:false"]),
+        "HostConfig.SecurityOpt",
+        '["no-new-privileges:false"]',
+        id="npp-false",
+    ),
+    pytest.param(host_config(NetworkMode="host"), "HostConfig.NetworkMode", '"host"', id="host-network"),
+    pytest.param(host_config(NetworkMode="none"), "HostConfig.NetworkMode", '"none"', id="no-network"),
+    pytest.param(
+        host_config(NetworkMode="container:abc123"),
+        "HostConfig.NetworkMode",
+        '"container:abc123"',
+        id="shared-network"
+    ),
+    pytest.param(host_config(PidMode="host"), "HostConfig.PidMode", '"host"', id="host-pid"),
+    pytest.param(host_config(UsernsMode="host"), "HostConfig.UsernsMode", '"host"', id="host-userns"),
+    pytest.param(host_config(IpcMode="host"), "HostConfig.IpcMode", '"host"', id="host-ipc"),
+    pytest.param(host_config(IpcMode="container:abc123"), "HostConfig.IpcMode", '"container:abc123"', id="shared-ipc"),
+    pytest.param(host_config(IpcMode="shareable"), "HostConfig.IpcMode", '"shareable"', id="shareable-ipc"),
+    pytest.param(host_config(IpcMode=""), "HostConfig.IpcMode", '""', id="empty-ipc"),
+    pytest.param(lambda document: document["HostConfig"].pop("IpcMode"), "HostConfig.IpcMode", "null", id="absent-ipc"),
+    pytest.param(host_config(MaskedPaths=[]), "HostConfig.MaskedPaths", "[]", id="no-masked-paths"),
+    pytest.param(
+        host_config(MaskedPaths=sorted(MASKED_PATHS - {"/proc/kcore"})),
+        "HostConfig.MaskedPaths",
+        json.dumps(sorted(MASKED_PATHS - {"/proc/kcore"})),
+        id="masked-paths-without-kcore",
+    ),
+    pytest.param(host_config(ReadonlyPaths=[]), "HostConfig.ReadonlyPaths", "[]", id="no-readonly-paths"),
+    pytest.param(
+        host_config(ReadonlyPaths=sorted(READONLY_PATHS - {"/proc/sys"})),
+        "HostConfig.ReadonlyPaths",
+        json.dumps(sorted(READONLY_PATHS - {"/proc/sys"})),
+        id="readonly-paths-without-proc-sys",
+    ),
+    pytest.param(host_config(UTSMode="host"), "HostConfig.UTSMode", '"host"', id="host-uts"),
+    pytest.param(host_config(CgroupnsMode="host"), "HostConfig.CgroupnsMode", '"host"', id="host-cgroupns"),
+    pytest.param(
+        host_config(Devices=[{"PathOnHost": "/dev/mem"}]),
+        "HostConfig.Devices",
+        '[{"PathOnHost": "/dev/mem"}]',
+        id="device",
+    ),
+    pytest.param(
+        host_config(Sysctls={"net.ipv4.ip_forward": "1"}),
+        "HostConfig.Sysctls",
+        '{"net.ipv4.ip_forward": "1"}',
+        id="sysctl",
+    ),
+    pytest.param(
+        host_config(DeviceCgroupRules=["c *:* rwm"]),
+        "HostConfig.DeviceCgroupRules",
+        '["c *:* rwm"]',
+        id="device-cgroup-rule",
+    ),
+    pytest.param(
+        host_config(DeviceRequests=[{"Driver": "nvidia"}]),
+        "HostConfig.DeviceRequests",
+        '[{"Driver": "nvidia"}]',
+        id="device-request",
+    ),
+    pytest.param(host_config(GroupAdd=["0"]), "HostConfig.GroupAdd", '["0"]', id="group-add-root"),
+    pytest.param(host_config(GroupAdd=["disk", "42"]), "HostConfig.GroupAdd", '["disk", "42"]', id="group-add-several"),
+    pytest.param(host_config(Runtime="nvidia"), "HostConfig.Runtime", '"nvidia"', id="another-runtime"),
+    pytest.param(host_config(Runtime=""), "HostConfig.Runtime", '""', id="no-runtime"),
+    pytest.param(config(User="root"), "Config.User", '"root"', id="user"),
+    pytest.param(
+        mounts(lambda found: found.append(DOCKER_SOCKET)),
+        "Mounts",
+        "a bind of /var/run/docker.sock at /var/run/docker.sock, which reaches the host",
+        id="docker-socket",
+    ),
+    pytest.param(
+        mounts(lambda found: found[0].update(RW=True)),
+        "Mounts",
+        "/rt/secrets/token not read-only (RW is true)",
+        id="writable-token-mount"
+    ),
+    pytest.param(
+        mounts(lambda found: found[1].update(RW=True)),
+        "Mounts",
+        "/rt/bridge/frps.toml not read-only (RW is true)",
+        id="writable-config-mount",
+    ),
+    pytest.param(mounts(lambda found: found.pop()), "Mounts", "no /rt/bridge/frps.toml", id="config-mount-missing"),
+    pytest.param(
+        mounts(lambda found: found[0].update(RW=None)),
+        "Mounts",
+        "/rt/secrets/token not read-only (RW is null)",
+        id="null-rw-token-mount",
+    ),
+    pytest.param(
+        mounts(lambda found: found[1].pop("RW")),
+        "Mounts",
+        "/rt/bridge/frps.toml not read-only (RW is null)",
+        id="absent-rw-config-mount",
+    ),
+    pytest.param(
+        mounts(lambda found: found[0].update(Source="/etc/shadow")),
+        "Mounts",
+        "/rt/secrets/token coming from /etc/shadow",
+        id="token-mount-from-elsewhere",
+    ),
+    pytest.param(
+        host_config(PortBindings=PORT_BINDINGS | {"7500/tcp": [{"HostIp": "", "HostPort": "7500"}]}),
+        "HostConfig.PortBindings[7500/tcp]",
+        '[""]',
+        id="admin-port-on-every-interface",
+    ),
+    pytest.param(
+        host_config(PortBindings=PORT_BINDINGS | {"7500/tcp": [{"HostIp": "0.0.0.0", "HostPort": "7500"}]}),
+        "HostConfig.PortBindings[7500/tcp]",
+        '["0.0.0.0"]',
+        id="admin-port-on-the-wildcard",
+    ),
+    pytest.param(host_config(PublishAllPorts=True), "HostConfig.PublishAllPorts", "true", id="publish-all-ports"),
+    pytest.param(
+        network_ports(**{"7500/tcp": [{"HostIp": "0.0.0.0", "HostPort": "49153"}]}),
+        "NetworkSettings.Ports[7500/tcp]",
+        '["0.0.0.0"]',
+        id="admin-port-published-on-the-wildcard",
+    ),
+    pytest.param(
+        network_ports(
+            **{"7500/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7500"}, {"HostIp": "::", "HostPort": "7500"}]}
+        ),
+        "NetworkSettings.Ports[7500/tcp]",
+        '["127.0.0.1", "::"]',
+        id="admin-port-published-on-every-ipv6-interface",
+    ),
+]
+
+
+def violation_line(field: str, value: str) -> str:
+    """The start of the line `container_hardening` writes for `field` with the found `value`."""
+    if field == "Mounts":
+        return f"Mounts has {value};"
+    if field.endswith("]"):
+        return f"{field} publishes on {value};"
+    return f"{field} is {value};"
+
+
+@pytest.mark.parametrize(("change", "field", "value"), HARDENING_VIOLATIONS)
+def test_container_hardening_names_each_violation(world, change, field, value):
+    world.docker.altered(change)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- " + violation_line(field, value) in check.detail, check.detail
+
+
+@pytest.mark.parametrize(
+    "change", [
+        pytest.param(host_config(ReadonlyRootfs=False), id="writable-rootfs"),
+        pytest.param(host_config(ReadonlyRootfs=None), id="null-readonly-rootfs"),
+        pytest.param(host_config(Tmpfs={"/run/rt": "mode=0777,exec", "/tmp": ""}), id="different-tmpfs"),
+        pytest.param(host_config(Tmpfs={}), id="no-tmpfs"),
+        pytest.param(host_config(Tmpfs=None), id="null-tmpfs"),
+    ]
+)
+def test_the_containers_interior_is_not_held_to_compose_yamls_defaults(world, change):
+    # A writable root and other tmpfs mounts keep the container inside itself: compose.yaml ships them, doctor does not
+    # require them.
+    world.docker.altered(change)
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_the_hardening_failure_says_recreating_from_compose_yaml_fixes_a_container_with_no_override(world):
+    world.docker.altered(host_config(Privileged=True))
+    detail = hardening(world).detail
+    assert "created before an upgrade that tightened these rules" in detail
+    assert "recreate" in detail.lower() and "docker compose up -d --force-recreate" in detail
+
+
+def test_an_env_file_that_adds_variables_is_named_by_variable_and_never_by_value(world):
+    world.docker.altered(
+        lambda document: document["Config"]["Env"].extend(["RT_TOKEN=sekrit-token-value", "RT_LABEL=alpha"])
+    )
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "RT_TOKEN" in check.detail and "RT_LABEL" in check.detail
+    assert "sekrit-token-value" not in check.detail and "alpha" not in check.detail
+
+
+def test_a_variable_the_image_declares_is_not_a_violation(world):
+    # Present in the shipped document already; a second copy is no new name.
+    world.docker.altered(lambda document: document["Config"]["Env"].append(IMAGE_ENV[0]))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_the_image_is_asked_by_the_containers_image_id_not_by_its_tag(world):
+    hardening(world)
+    assert ["image", "inspect", IMAGE_ID] in [call[:3] for call in world.docker.calls]
+
+
+def test_an_image_inspect_that_fails_fails_the_check_closed_with_dockers_words(world):
+    world.docker.on("image", "inspect", returncode=1, stderr="No such image")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "No such image" in check.detail
+
+
+def test_a_daemon_that_cannot_say_its_defaults_fails_the_check_closed_with_dockers_words(world):
+    world.docker.on("info", returncode=1, stderr="permission denied while trying to connect")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
+
+
+@pytest.mark.parametrize("mode", ["host", ""])
+def test_a_cgroupns_mode_other_than_private_fails(world, mode):
+    world.docker.altered(host_config(CgroupnsMode=mode))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "HostConfig.CgroupnsMode" in check.detail
+
+
+def test_the_runtime_the_daemon_defaults_to_is_the_one_the_container_must_use(world):
+    world.docker.on("info", stdout=json.dumps({"DefaultRuntime": "crun"}))
+    world.docker.altered(host_config(Runtime="crun"))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_a_container_running_another_entrypoint_and_command_than_the_images_passes(world):
+    world.docker.altered(config(Entrypoint=["/bin/sh", "-c"], Cmd=["echo", "hello"]))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_a_mount_source_is_compared_resolved_on_both_sides(world):
+    world.docker.altered(
+        mounts(lambda found: found[0].update(Source=str(world.root / "elsewhere" / ".." / "secrets" / "token")))
+    )
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_a_volume_at_a_wanted_target_is_a_violation(world):
+    volume = {"Type": "volume", "Name": "data", "Destination": "/rt/secrets/token", "RW": False}
+    world.docker.altered(mounts(lambda found: found.__setitem__(0, volume)))
+    detail = hardening(world).detail
+    assert "\n- Mounts has a volume of data at /rt/secrets/token;" in detail
+    assert "\n- Mounts has no /rt/secrets/token;" in detail
+
+
+# Mounts beyond the two binds ------------------------------------------------------------------------------------------
+
+
+def volume_mount(name: str = "data", target: str = "/data") -> dict:
+    return {
+        "Type": "volume", "Name": name, "Driver": "local", "Source": f"/var/lib/docker/volumes/{name}/_data",
+        "Destination": target, "RW": True
+    }
+
+
+def mounted(*extra: dict):
+    return mounts(lambda found: found.extend(extra))
+
+
+def privileged_with(world, *extra: dict) -> None:
+    """A privileged container that also mounts the volumes `extra` describes."""
+    world.docker.altered(lambda document: (host_config(Privileged=True)(document), mounted(*extra)(document)))
+
+
+@pytest.mark.parametrize("options", [None, {}])
+def test_an_anonymous_local_volume_with_no_options_passes(world, options):
+    world.docker.altered(mounted(volume_mount("a1b2c3")))
+    world.docker.volume("a1b2c3", options=options)
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_the_volume_is_asked_for_its_options_by_name(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.volume("data")
+    hardening(world)
+    assert ["volume", "inspect", "data"] in world.docker.calls
+
+
+@pytest.mark.parametrize(
+    "options", [
+        pytest.param({"type": "none", "o": "bind", "device": "/etc"}, id="bind-to-a-host-path"),
+        pytest.param({"type": "nfs", "o": "addr=nas.example.com,rw", "device": ":/export"}, id="nfs"),
+    ]
+)
+def test_a_local_volume_with_driver_options_fails_naming_the_volume_and_the_options(world, options):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.volume("data", options=options)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- Mounts has a volume of data at /data, " in check.detail
+    assert "driver options" in check.detail and options["type"] in check.detail
+
+
+def test_a_volume_of_another_driver_fails_naming_the_volume_and_the_driver(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.volume("data", driver="rexray/ebs")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- Mounts has a volume of data at /data, " in check.detail and "rexray/ebs" in check.detail
+
+
+def test_a_volume_that_vanished_before_volume_inspect_is_not_applicable_not_a_docker_problem(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.on(
+        "volume", "inspect", "data", returncode=1, stderr="Error response from daemon: No such volume: data"
+    )
+    check = hardening(world)
+    assert check.outcome is Outcome.NOT_APPLICABLE and "container_healthy" in check.detail
+
+
+def test_a_volume_inspect_that_fails_fails_the_check_closed_with_dockers_words(world):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.on("volume", "inspect", "data", returncode=1, stderr="permission denied while trying to connect")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert check.detail.startswith("the container's security settings could not be checked: ")
+    assert "permission denied" in check.detail
+
+
+@pytest.mark.parametrize(("stderr", "reason"), [
+    pytest.param("Error response from daemon: No such volume: data", "is gone", id="vanished"),
+    pytest.param("permission denied while trying to connect", "permission denied", id="inspect-fails"),
+])
+def test_a_volume_that_cannot_be_inspected_does_not_hide_the_other_violations(world, stderr, reason):
+    privileged_with(world, volume_mount())
+    world.docker.on("volume", "inspect", "data", returncode=1, stderr=stderr)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- HostConfig.Privileged is true" in check.detail
+    assert "\n- Mounts has a volume of data at /data, which could not be inspected" in check.detail
+    assert reason in check.detail
+
+
+def test_every_volume_that_cannot_be_inspected_is_named(world):
+    privileged_with(world, volume_mount("a"), volume_mount("b", "/b"))
+    world.docker.on("volume", "inspect", "a", returncode=1, stderr="No such volume: a")
+    world.docker.on("volume", "inspect", "b", returncode=1, stderr="permission denied")
+    detail = hardening(world).detail
+    assert "volume of a at /data, which could not be inspected" in detail
+    assert "volume of b at /b, which could not be inspected" in detail
+
+
+def test_with_nothing_else_wrong_a_failed_volume_lookup_outranks_a_vanished_volume(world):
+    world.docker.altered(mounted(volume_mount("a"), volume_mount("b", "/b")))
+    world.docker.on("volume", "inspect", "a", returncode=1, stderr="No such volume: a")
+    world.docker.on("volume", "inspect", "b", returncode=1, stderr="permission denied")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert check.detail.startswith("the container's security settings could not be checked: ")
+    assert "permission denied" in check.detail
+
+
+@pytest.mark.parametrize("document", ["[null]", "[[]]", '["x"]', "[]", "{}", "not json"])
+def test_a_volume_inspect_that_is_not_an_object_fails_the_check_with_a_message(world, document):
+    world.docker.altered(mounted(volume_mount()))
+    world.docker.on("volume", "inspect", "data", stdout=document)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "`docker volume inspect` printed something that is not a volume's configuration" in check.detail
+
+
+def test_a_volume_mount_with_no_name_fails_since_its_options_cannot_be_read(world):
+    world.docker.altered(mounted(volume_mount() | {"Name": ""}))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "\n- Mounts has a volume of nothing at /data, " in check.detail
+
+
+def test_a_read_only_bind_of_the_docker_socket_fails(world):
+    world.docker.altered(mounted(DOCKER_SOCKET | {"RW": False, "Mode": "ro"}))
+    detail = hardening(world).detail
+    assert "\n- Mounts has a bind of /var/run/docker.sock at /var/run/docker.sock" in detail
+
+
+@pytest.mark.parametrize("kind", ["image", "npipe", "cluster", "devpts", ""])
+def test_a_mount_of_any_other_type_fails_closed(world, kind):
+    world.docker.altered(mounted({"Type": kind, "Source": "x", "Destination": "/x", "RW": False}))
+    detail = hardening(world).detail
+    assert f"\n- Mounts has a {kind or 'mount'} of x at /x" in detail
+
+
+def test_a_tmpfs_mount_passes(world):
+    world.docker.altered(mounted({"Type": "tmpfs", "Destination": "/scratch", "RW": True}))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_a_second_mount_at_a_wanted_target_is_a_violation(world):
+    world.docker.altered(mounts(lambda found: found.append(dict(found[0]))))
+    source = str(world.root / "secrets" / "token")
+    assert f"\n- Mounts has a bind of {source} at /rt/secrets/token;" in hardening(world).detail
+
+
+def test_a_mount_source_that_cannot_be_resolved_is_a_violation_with_the_error(world, monkeypatch):
+    resolve = Path.resolve
+
+    def failing(self, *args, **kwargs):
+        if self == Path("/etc/loop"):
+            raise OSError("Too many levels of symbolic links")
+        return resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", failing)
+    world.docker.altered(mounts(lambda found: found[0].update(Source="/etc/loop")))
+    detail = hardening(world).detail
+    assert "\n- Mounts has /rt/secrets/token coming from /etc/loop, which cannot be resolved" in detail
+    assert "Too many levels of symbolic links" in detail
+
+
+NULLED = [
+    pytest.param(host_config(CapDrop=None), "HostConfig.CapDrop is null;", id="CapDrop"),
+    pytest.param(host_config(SecurityOpt=None), "HostConfig.SecurityOpt is null;", id="SecurityOpt"),
+    pytest.param(lambda document: document.update(Mounts=None), "Mounts has no /rt/secrets/token;", id="Mounts"),
+    pytest.param(host_config(CapAdd=None), "HostConfig.CapAdd is [];", id="CapAdd"),
+    pytest.param(
+        lambda document: document.update(Config=None),
+        "`docker inspect` has no Config for the container, so its settings cannot be confirmed",
+        id="null-Config",
+    ),
+    pytest.param(
+        lambda document: document.pop("HostConfig"),
+        "`docker inspect` has no HostConfig for the container, so its settings cannot be confirmed",
+        id="missing-HostConfig",
+    ),
+    pytest.param(
+        lambda document: document.update(HostConfig=None),
+        "`docker inspect` has no HostConfig for the container, so its settings cannot be confirmed",
+        id="null-HostConfig",
+    ),
+    pytest.param(
+        lambda document: document.pop("Image"),
+        "`docker inspect` has no Image (the ID of the container's image), so the variables the image declares are "
+        "unknown",
+        id="missing-Image",
+    ),
+    pytest.param(host_config(MaskedPaths=None), "HostConfig.MaskedPaths is null;", id="MaskedPaths"),
+    pytest.param(host_config(ReadonlyPaths=None), "HostConfig.ReadonlyPaths is null;", id="ReadonlyPaths"),
+    pytest.param(host_config(IpcMode=None), "HostConfig.IpcMode is null;", id="IpcMode"),
+]
+
+
+@pytest.mark.parametrize(("change", "cause"), NULLED)
+def test_container_hardening_fails_closed_on_null_fields(world, change, cause):
+    world.docker.altered(change)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and cause in check.detail
+
+
+def test_container_hardening_lists_every_violation_at_once(world):
+
+    def weaken(document):
+        document["HostConfig"].update(Privileged=True, NetworkMode="host", SecurityOpt=["seccomp=unconfined"])
+        document["Config"]["Env"].append("RT_TOKEN=x")
+        document["Mounts"].append(DOCKER_SOCKET)
+
+    world.docker.altered(weaken)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    for cause in ("Privileged", "NetworkMode", "seccomp=unconfined", "RT_TOKEN", "/var/run/docker.sock"):
+        assert cause in check.detail
+
+
+# Go's strconv.ParseBool reads these as true, and Docker parses the value with it.
+GO_TRUE = ["1", "t", "T", "TRUE", "true", "True"]
+GO_FALSE = ["0", "f", "F", "FALSE", "false", "False"]
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["no-new-privileges"] + [f"no-new-privileges{separator}{value}" for separator in ":=" for value in GO_TRUE]
+)
+def test_container_hardening_accepts_every_no_new_privileges_spelling(world, spelling):
+    world.docker.altered(host_config(SecurityOpt=[spelling]))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [f"no-new-privileges{separator}{value}" for separator in ":=" for value in GO_FALSE + ["", "yes", "TrUe"]]
+)
+def test_container_hardening_rejects_a_no_new_privileges_that_is_not_true(world, spelling):
+    world.docker.altered(host_config(SecurityOpt=[spelling]))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and spelling in check.detail
+
+
+@pytest.mark.parametrize("capability", ["dac_read_search", "CAP_DAC_READ_SEARCH", "cap_dac_read_search"])
+def test_container_hardening_reads_a_capability_however_it_is_spelled(world, capability):
+    world.docker.altered(host_config(CapAdd=[capability]))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("bindings", [{}, {"7500/tcp": None}, {"7500/tcp": []}], ids=["absent", "null", "empty"])
+def test_container_hardening_fails_when_the_admin_port_is_not_published_on_loopback(world, bindings):
+    world.docker.altered(host_config(PortBindings=bindings))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- HostConfig.PortBindings[7500/tcp] is not published;" in check.detail
+
+
+def test_container_hardening_fails_when_port_bindings_are_null(world):
+    world.docker.altered(host_config(PortBindings=None))
+    assert "\n- HostConfig.PortBindings[7500/tcp] is not published;" in hardening(world).detail
+
+
+@pytest.mark.parametrize("groups", [None, []], ids=["null", "empty"])
+def test_container_hardening_reads_a_null_and_an_empty_group_add_as_none(world, groups):
+    world.docker.altered(host_config(GroupAdd=groups))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+@pytest.mark.parametrize("published", [None, False], ids=["null", "false"])
+def test_container_hardening_reads_a_null_publish_all_ports_as_false(world, published):
+    world.docker.altered(host_config(PublishAllPorts=published))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_container_hardening_reads_an_absent_publish_all_ports_as_false(world):
+    world.docker.altered(lambda document: document["HostConfig"].pop("PublishAllPorts"))
+    assert hardening(world).outcome is Outcome.PASS
+
+
+PORTS_NOT_REPORTED = [None, {}, {"7500/tcp": None}, {"7500/tcp": []}]
+PORTS_IDS = ["null", "empty", "admin-port-null", "admin-port-empty"]
+
+
+@pytest.mark.parametrize("ports", PORTS_NOT_REPORTED, ids=PORTS_IDS)
+def test_container_hardening_fails_when_a_running_container_reports_no_admin_port(world, ports):
+    world.docker.altered(lambda document: document["NetworkSettings"].update(Ports=ports))
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "\n- NetworkSettings.Ports[7500/tcp] is not published;" in check.detail
+
+
+def test_container_hardening_fails_without_network_settings_on_a_running_container(world):
+    world.docker.altered(lambda document: document.pop("NetworkSettings"))
+    assert "\n- NetworkSettings.Ports[7500/tcp] is not published;" in hardening(world).detail
+
+
+def test_container_hardening_fails_without_a_state_since_the_container_may_be_running(world):
+
+    def change(document):
+        document.pop("State")
+        document["NetworkSettings"]["Ports"] = {}
+
+    world.docker.altered(change)
+    assert "\n- NetworkSettings.Ports[7500/tcp] is not published;" in hardening(world).detail
+
+
+@pytest.mark.parametrize("ports", PORTS_NOT_REPORTED, ids=PORTS_IDS)
+def test_an_exited_container_that_reports_no_ports_is_not_a_violation(world, ports):
+
+    def change(document):
+        document["State"]["Running"] = False
+        document["NetworkSettings"]["Ports"] = ports
+
+    world.docker.altered(change)
+    assert hardening(world).outcome is Outcome.PASS
+
+
+def test_an_exited_container_is_still_held_to_its_admin_port_binding(world):
+
+    def change(document):
+        document["State"]["Running"] = False
+        document["NetworkSettings"]["Ports"] = {}
+        document["HostConfig"]["PortBindings"] = {}
+
+    world.docker.altered(change)
+    assert "\n- HostConfig.PortBindings[7500/tcp] is not published;" in hardening(world).detail
+
+
+def test_an_exited_container_that_reports_a_wildcard_port_is_still_a_violation(world):
+
+    def change(document):
+        document["State"]["Running"] = False
+        document["NetworkSettings"]["Ports"] = {"7500/tcp": [{"HostIp": "0.0.0.0", "HostPort": "7500"}]}
+
+    world.docker.altered(change)
+    assert "\n- NetworkSettings.Ports[7500/tcp] publishes on" in hardening(world).detail
+
+
+def test_container_hardening_skips_when_there_is_no_container(world):
+    world.docker.on("ps", stdout="")
+    assert hardening(world).outcome is Outcome.NOT_APPLICABLE
+
+
+def test_container_hardening_skips_when_there_is_no_container_and_the_daemon_cannot_say_its_defaults(world):
+    world.docker.on("ps", stdout="")
+    world.docker.on("info", returncode=1, stderr="permission denied while trying to connect")
+    assert hardening(world).outcome is Outcome.NOT_APPLICABLE
+
+
+def test_container_hardening_fails_with_dockers_words_when_the_container_cannot_be_inspected(world):
+    world.docker.on("inspect", returncode=1, stderr="permission denied while trying to connect")
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL and "permission denied" in check.detail
+
+
+@pytest.mark.parametrize(
+    "stderr", ["Error: No such object: 0123456789ab", "Error response from daemon: No such container: 0123456789ab"]
+)
+def test_a_container_removed_between_ps_and_inspect_is_not_applicable_not_a_docker_problem(world, stderr):
+    world.docker.on("inspect", returncode=1, stderr=stderr)
+    check = hardening(world)
+    assert check.outcome is Outcome.NOT_APPLICABLE and "container_healthy" in check.detail
+
+
+@pytest.mark.parametrize("document", ["[null]", "[[]]", '["x"]', "[]", "{}"])
+def test_an_image_inspect_that_is_not_an_object_fails_the_check_with_a_message(world, document):
+    world.docker.on("image", "inspect", stdout=document)
+    check = hardening(world)
+    assert check.outcome is Outcome.FAIL
+    assert "`docker image inspect` printed something that is not an image's configuration" in check.detail
 
 
 # frps answers =========================================================================================================

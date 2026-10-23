@@ -16,9 +16,10 @@ from ctl.doctor import Check, Outcome
 from ctl.env import EnvError
 
 BRIDGE_CHECKS = {
-    "docker_reachable", "container_healthy", "restart_policy", "control_port_published", "admin_healthz",
-    "vhost_answers_404", "registered_labels", "label_collisions", "config_skew", "token_skew", "tls_chain_validates",
-    "tls_issuer_is_not_staging", "env_permissions", "secrets_dir_permissions", "secrets_token_permissions"
+    "docker_reachable", "container_healthy", "restart_policy", "container_hardening", "control_port_published",
+    "admin_healthz", "vhost_answers_404", "registered_labels", "label_collisions", "config_skew", "token_skew",
+    "tls_chain_validates", "tls_issuer_is_not_staging", "env_permissions", "secrets_dir_permissions",
+    "secrets_token_permissions"
 }
 HOST_CHECKS = {
     "bin_digests_match_record", "token_matches_record", "frpc_config_matches_record", "frpc_service",

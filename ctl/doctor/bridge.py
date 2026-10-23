@@ -19,8 +19,8 @@ import httpx
 
 from ctl.atomic import read_file
 from ctl.config import Config
-from ctl.doctor import frps_api
-from ctl.doctor.model import Check, Skip, Verdict, execute, fail, not_applicable, ok
+from ctl.doctor import frps_api, hardening
+from ctl.doctor.model import Check, DockerProblem, Skip, Verdict, execute, fail, not_applicable, ok
 from ctl.doctor.permissions import Permissions
 from ctl.doctor.probes import DOCKER_TIMEOUT, Probes
 from ctl.doctor.tls import TlsProbeError, is_staging
@@ -31,6 +31,9 @@ SERVICE = "frps"
 RECREATE = "docker compose up -d --force-recreate"
 LOOPBACK = "127.0.0.1"
 CONTROL, VHOST = "8001", "8080/tcp"
+# What `docker inspect` says of an object that no longer exists ("No such object", or "No such container" from older
+# daemons), and `docker volume inspect` of a volume ("No such volume").
+GONE = re.compile(r"no such (?:object|container|volume)", re.IGNORECASE)
 DIGEST = re.compile(r"[0-9a-f]{64}", re.ASCII)
 WILDCARDS = {"0.0.0.0": LOOPBACK, "::": "::1", "0:0:0:0:0:0:0:0": "::1"}
 # Not a label any host would use; frps answers 404 for a name no proxy has registered.
@@ -43,10 +46,6 @@ TOKEN_REMEDY = (
     "only the recreate is needed."
 )
 DURABLE_POLICIES = ("always", "unless-stopped")
-
-
-class DockerProblem(Exception):
-    """Docker could not be run or asked; the message says why."""
 
 
 class Found:
@@ -80,6 +79,7 @@ class Bridge:
             ("docker_reachable", self.docker_reachable),
             ("container_healthy", self.container_healthy),
             ("restart_policy", self.restart_policy),
+            ("container_hardening", self.container_hardening),
             ("control_port_published", self.control_port_published),
             ("admin_healthz", self.admin_healthz),
             ("vhost_answers_404", self.vhost_answers_404),
@@ -139,15 +139,79 @@ class Bridge:
         return Found(next((entry for entry in listing if entry.get("Service") == SERVICE), None))
 
     @functools.cached_property
-    def host_config(self) -> dict[str, Any]:
+    def inspected(self) -> dict[str, Any]:
+        """The whole `docker inspect` document of the container."""
         container = self.require_container()
         result = self.docker("inspect", str(container.get("ID", SERVICE)))
         if result.returncode != 0:
+            if GONE.search(result.stderr):  # removed or recreated since `docker compose ps` listed it
+                raise Skip(f"the {SERVICE} container is gone (see container_healthy)")
             raise DockerProblem(f"`docker inspect` failed (exit {result.returncode}): {self.said(result)}")
+        return self.first_document(result, "inspect", "a container's configuration")
+
+    @staticmethod
+    def first_document(result: subprocess.CompletedProcess[str], shown: str, what: str) -> dict[str, Any]:
+        """The first object of the JSON array an `inspect` command prints."""
         try:
-            return json.loads(result.stdout)[0]["HostConfig"]
+            document = json.loads(result.stdout)[0]
         except (ValueError, LookupError, TypeError):
-            raise DockerProblem("`docker inspect` printed something that is not a container's configuration") from None
+            document = None
+        if not isinstance(document, dict):
+            raise DockerProblem(f"`docker {shown}` printed something that is not {what}")
+        return document
+
+    def volume_inspected(self, name: str) -> dict[str, Any]:
+        """The `docker volume inspect` document of a volume the container mounts, which holds its driver options."""
+        result = self.docker("volume", "inspect", name)
+        if result.returncode != 0:
+            if GONE.search(result.stderr):  # removed since the container was inspected
+                raise Skip(f"the volume {name} is gone (see container_healthy)")
+            raise DockerProblem(f"`docker volume inspect` failed (exit {result.returncode}): {self.said(result)}")
+        return self.first_document(result, "volume inspect", "a volume's configuration")
+
+    @functools.cached_property
+    def host_config(self) -> dict[str, Any]:
+        host_config = self.inspected.get("HostConfig")
+        if not isinstance(host_config, dict):
+            raise DockerProblem("`docker inspect` printed something that is not a container's configuration")
+        return host_config
+
+    @functools.cached_property
+    def image_config(self) -> dict[str, Any]:
+        """The `Config` of the image the container was made from: what the container gets when nothing overrides it.
+
+        That is the container's image ID: `Config.Image` is a tag, which may have moved to a rebuilt image since.
+        """
+        image = self.inspected.get("Image")
+        if not isinstance(image, str) or not image:
+            raise DockerProblem(
+                "`docker inspect` has no Image (the ID of the container's image), so the variables the image "
+                "declares are unknown"
+            )
+        document = self.docker_json("image inspect", "image", "inspect", image)
+        first = document[0] if isinstance(document, list) and document else None
+        config = first.get("Config") if isinstance(first, dict) else None
+        if not isinstance(config, dict):
+            raise DockerProblem("`docker image inspect` printed something that is not an image's configuration")
+        return config
+
+    @functools.cached_property
+    def default_runtime(self) -> str:
+        """The daemon's default runtime, which a container made without asking for one gets."""
+        document = self.docker_json("info", "info", "--format", "{{json .}}")
+        runtime = document.get("DefaultRuntime") if isinstance(document, dict) else None
+        if not isinstance(runtime, str) or not runtime:
+            raise DockerProblem("`docker info` does not name the daemon's default runtime")
+        return runtime
+
+    def docker_json(self, shown: str, *args: str) -> Any:
+        result = self.docker(*args)
+        if result.returncode != 0:
+            raise DockerProblem(f"`docker {shown}` failed (exit {result.returncode}): {self.said(result)}")
+        try:
+            return json.loads(result.stdout)
+        except ValueError:
+            raise DockerProblem(f"`docker {shown}` printed something that is not JSON") from None
 
     def require_container(self) -> dict[str, Any]:
         if self.docker_problem:
@@ -224,6 +288,33 @@ class Bridge:
                 "recreate the container with `docker compose up -d`"
             )
         return ok(f"the container's restart policy is {name}")
+
+    def container_hardening(self) -> Verdict:
+        """The live container against compose.yaml's security settings, however the container came to be started."""
+        try:
+            container = self.inspected  # first, so no container or no Docker is n/a whatever `docker info` says
+            runtime = self.default_runtime
+            found = hardening.violations(
+                container, image=self.image_config, runtime=runtime, root=self.root, volume=self.volume_inspected
+            )
+        except DockerProblem as exc:
+            return fail(f"the container's security settings could not be checked: {exc}")
+        if found.unread and not found.problems:
+            # Nothing else is wrong, so the lookup is all there is to report; a failed one outranks a vanished volume.
+            causes = [unread.cause for unread in found.unread]
+            failed = next((cause for cause in causes if isinstance(cause, DockerProblem)), None)
+            if failed is not None:
+                return fail(f"the container's security settings could not be checked: {failed}")
+            raise causes[0]
+        if found.problems:
+            lines = "".join(f"\n- {line}" for line in found.problems + [unread.line for unread in found.unread])
+            return fail(
+                f"the container departs from compose.yaml's security settings. Remove the cause (a compose override, or a "
+                f"container started some other way), then recreate the container from compose.yaml with `{RECREATE}`. "
+                f"A container created before an upgrade that tightened these rules has no override to remove; "
+                f"recreating it is the fix:{lines}"
+            )
+        return ok("the container matches compose.yaml's security settings")
 
     def control_port_published(self) -> Verdict:
         try:

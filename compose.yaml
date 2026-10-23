@@ -37,6 +37,12 @@ services:
     security_opt:
       - no-new-privileges:true
     read_only: true
+    # A daemon may default to the host's cgroup namespace (`default-cgroupns-mode: host`), which `docker info` does not
+    # show; `container_hardening` requires `private`, so this pins it.
+    cgroup: private
+    # Likewise a daemon may default to `shareable`, which lets another container join the IPC namespace; the check
+    # requires `private`.
+    ipc: private
     # The entrypoint's private copy of the token and config; it refuses to start without this mount.
     tmpfs:
       - /run/rt:mode=0700

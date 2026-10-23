@@ -2,8 +2,10 @@ import re
 import tomllib
 
 import pytest
+import yaml
 
 from ctl import config
+from ctl.doctor import hardening
 from ctl.env import GO_TEMPLATE_REFERENCE
 from ctl.config import EXAMPLE_ADMIN_PASSWORD, EXAMPLE_TOKEN
 from scanner_support import REPO_ROOT
@@ -155,9 +157,82 @@ def test_every_compose_variable_is_required_with_a_message(path):
         assert re.fullmatch(r"\$\{[A-Z][A-Z0-9_]*:\?[^}$]+\}", reference), reference
 
 
+def untagged(loader: yaml.SafeLoader, tag: str, node: yaml.Node) -> object:
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    return loader.construct_scalar(node)
+
+
+class ComposeLoader(yaml.SafeLoader):
+    """Reads Compose's merge tags (`!override`, `!reset`) as the plain value they wrap."""
+
+
+ComposeLoader.add_multi_constructor("!", untagged)
+
+
+def compose_services(path) -> dict:
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=ComposeLoader).get("services") or {}
+
+
 @pytest.mark.parametrize("path", COMPOSE_FILES, ids=lambda path: path.name)
 def test_compose_files_do_not_load_env_file(path):
-    assert "env_file" not in path.read_text(encoding="utf-8")
+    services = compose_services(path)
+    assert services
+    # A service written as an empty mapping parses to None.
+    assert [name for name, service in services.items() if "env_file" in (service or {})] == []
+
+
+def frps_service() -> dict:
+    return yaml.safe_load((REPO_ROOT / "compose.yaml").read_text(encoding="utf-8"))["services"]["frps"]
+
+
+# `ctl doctor`'s container_hardening holds the live container to these constants, so compose.yaml must agree with them.
+def test_compose_pins_a_private_cgroup_namespace():
+    # The daemon's default may be `host`, which `docker info` does not show; container_hardening requires `private`.
+    assert frps_service()["cgroup"] == hardening.CGROUPNS_MODE == "private"
+
+
+def test_compose_pins_a_private_ipc_namespace():
+    # The daemon's default may be `shareable`; container_hardening requires `private`.
+    assert frps_service()["ipc"] == hardening.IPC_MODE == "private"
+
+
+# The `${...}` in a port entry holds colons, so the host side is matched as a prefix and the container side as a suffix.
+@pytest.mark.parametrize(
+    "path",
+    [path for path in COMPOSE_FILES if "ports" in (compose_services(path).get("frps") or {})],
+    ids=lambda path: path.name,
+)
+def test_compose_publishes_the_admin_port_on_the_loopback_address_the_check_expects(path):
+    ports = compose_services(path)["frps"]["ports"]
+    published = [entry for entry in ports if entry.endswith(f":{hardening.ADMIN_PORT}")]
+    assert len(published) == 1
+    assert published[0].startswith(f"{hardening.LOOPBACK}:")
+
+
+def test_compose_capabilities_are_the_ones_the_allow_list_holds_the_container_to():
+    service = frps_service()
+    assert service["cap_add"] == [hardening.CAPABILITY]
+    assert service["cap_drop"] == ["ALL"]
+
+
+def test_compose_security_settings_are_the_ones_the_allow_list_holds_the_container_to():
+    service = frps_service()
+    assert service["security_opt"] == [f"{hardening.NO_NEW_PRIVILEGES}:true"]
+
+
+def test_compose_mounts_are_the_ones_the_allow_list_holds_the_container_to():
+    volumes = frps_service()["volumes"]
+    assert [(volume["type"], volume["source"], volume["target"], volume["read_only"]) for volume in volumes] == [
+        ("bind", f"./{hardening.TOKEN_SOURCE}", hardening.TOKEN_TARGET, True),
+        ("bind", f"./{hardening.CONFIG_SOURCE}", hardening.CONFIG_TARGET, True),
+    ]
+
+
+def test_compose_environment_names_are_the_ones_the_allow_list_permits():
+    assert set(frps_service()["environment"]) == hardening.ENVIRONMENT
 
 
 # front proxy examples =================================================================================================
