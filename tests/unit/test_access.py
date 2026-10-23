@@ -135,6 +135,7 @@ def test_account_can_reports_undecodable_wrapper_output_as_an_install_error(monk
         return subprocess.CompletedProcess(argv, 1, "", stderr.decode("utf-8", errors=errors))
 
     monkeypatch.setattr(access.subprocess, "run", run)
+    monkeypatch.setattr(sys, "platform", "linux")
     with pytest.raises(InstallError) as raised:
         access.account_can(SERVICE, "-x", PurePosixPath("/srv/rt"))
     message = str(raised.value)
