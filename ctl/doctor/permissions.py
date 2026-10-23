@@ -1,5 +1,6 @@
 # This file is part of reverse-tunnel, licensed under AGPL-3.0-or-later; see LICENSE.md.
-"""Who may read `.env`, `secrets/` and `secrets/token`: each against the exact set `ctl install` gives it.
+"""Who may read `.env`, `secrets/` and `secrets/token`: each against the exact set `ctl install` gives it. On a Windows
+host it also checks that the service holds an allow for what it needs and that no deny stands in the way.
 
 Stat only, and never an open: `secrets/` is `0711` so that an unelevated operator can `stat` the token in
 separate-account mode, and that grants nothing but the name's existence, mode and owner. On POSIX the expectation is an
@@ -10,9 +11,9 @@ the installer builds the ACL with, so a token ACE widened from `(R)` to `(F)` is
 from collections.abc import Mapping
 from pathlib import Path
 
-from ctl import perms, winacl
+from ctl import host, perms, winacl
 from ctl.config import Config, ConfigError, Role
-from ctl.doctor.model import Verdict, fail, ok
+from ctl.doctor.model import Verdict, fail, not_applicable, ok
 from ctl.doctor.probes import Probes
 from ctl.perms import PermsError
 
@@ -20,6 +21,12 @@ ENV_MODE, SECRETS_MODE, TOKEN_MODE = 0o600, 0o711, 0o600
 INSTALL = "run `ctl install` to restore it"
 INHERITANCE = winacl.OBJECT_INHERIT_ACE | winacl.CONTAINER_INHERIT_ACE
 INHERITANCE_FLAGS = INHERITANCE | winacl.NO_PROPAGATE_INHERIT_ACE
+INHERIT_TOKENS = (
+    (winacl.OBJECT_INHERIT_ACE, "(OI)"),
+    (winacl.CONTAINER_INHERIT_ACE, "(CI)"),
+    (winacl.NO_PROPAGATE_INHERIT_ACE, "(NP)"),
+    (winacl.INHERIT_ONLY_ACE, "(IO)"),
+)
 SID_NAMES = {
     winacl.SID_ADMINISTRATORS: "Administrators",
     winacl.SID_LOCAL_SERVICE: "LocalService",
@@ -34,6 +41,8 @@ RIGHTS = {
     winacl.READ: "R",
     winacl.READ_WRITE: "R,W",
     winacl.READ_WRITE_DELETE: "R,W,D",
+    winacl.LIST_AND_ADD: "list,add",
+    winacl.APPEND: "append",
 }
 
 Ace = tuple[str, int, int]  # sid, rights mask, inheritance flags
@@ -42,7 +51,7 @@ Ace = tuple[str, int, int]  # sid, rights mask, inheritance flags
 def _describe(ace: Ace) -> str:
     sid, mask, flags = ace
     name = f" ({SID_NAMES[sid]})" if sid in SID_NAMES else ""
-    inherit = "(OI)(CI)" if flags & INHERITANCE == INHERITANCE else ""
+    inherit = "".join(token for bit, token in INHERIT_TOKENS if flags & bit)
     return f"{sid}{name}:{inherit}({RIGHTS.get(mask, hex(mask))})"
 
 
@@ -104,6 +113,71 @@ class Permissions:
             owner=self._secrets_owner,
             grants=lambda: self._secrets_grants(directory=False)
         )
+
+    def _service_needs(self) -> list[tuple[Path, int]]:
+        """Each object the service opens on a Windows host, with the rights it is asked for.
+
+        `bin` and the files in it that the daemons and the service shim run (`ctl` runs goetia itself, and doctor reads
+        the record, both as the operator), `host`, every file the daemons read once at startup (`host.READS`), and
+        `logs`, where the daemons write.
+        """
+        root = self.root
+        started = [root / "bin" / f"{base}.exe" for base in host.service_binaries("windows")]
+        inputs = [root / host.READ_PATHS[name] for names in host.READS.values() for name in names]
+        return [
+            (root / "bin", winacl.READ_EXECUTE),
+            *((path, winacl.READ_EXECUTE) for path in started),
+            (root / "host", winacl.READ_EXECUTE),
+            *((path, winacl.READ) for path in dict.fromkeys(inputs)),
+            (root / "logs", winacl.LIST_AND_ADD),
+        ]
+
+    def _log_files(self) -> list[Path]:
+        """The files the daemons append to. They appear when a daemon first runs, so a missing one is no failure."""
+        return [self.root / path for paths in host.WRITES.values() for path in paths]
+
+    def service_read(self) -> Verdict:
+        """Whether the service can open what it needs: an allow for it and no deny of any kind.
+
+        Judged from each object's DACL alone: the allows for the service itself (explicit or inherited, inherit-only
+        ones left out) must together cover the rights it needs. Any deny ACE fails, for anyone: install writes none, so
+        one came from elsewhere. The log files the daemons append to are judged the same way, for the right to append,
+        when they exist.
+        """
+        if not self.probes.windows:
+            return not_applicable("only Windows gives the service its access by ACE; POSIX uses the owner and mode")
+        problems = [problem for path, needs in self._service_needs() for problem in self._service_problems(path, needs)]
+        problems += [
+            problem for path in self._log_files()
+            for problem in self._service_problems(path, winacl.APPEND, optional=True)
+        ]
+        if problems:
+            summary = f"the service's access is wrong on {len(problems)} path(s); {INSTALL}"
+            return fail("\n".join([summary, *problems]))
+        return ok(f"LocalService is allowed what it needs in {self.root} and no ACE denies anyone anything there")
+
+    def _service_problems(self, path: Path, needs: int, *, optional: bool = False) -> list[str]:
+        try:
+            entries, _ = self.probes.entries(path)
+        except FileNotFoundError:
+            return [] if optional else [f"{path}: missing"]
+        except OSError as exc:
+            return [f"{path}: {exc.strerror or exc}"]
+        problems = [
+            f"{path}: has a deny ACE for {_describe((e.sid, e.mask, e.flags))}" for e in entries
+            if e.ace_type == winacl.ACCESS_DENIED_ACE_TYPE
+        ]
+        held = 0
+        for e in entries:
+            if (
+                e.ace_type == winacl.ACCESS_ALLOWED_ACE_TYPE and e.sid == winacl.SID_LOCAL_SERVICE
+                and not e.flags & winacl.INHERIT_ONLY_ACE
+            ):
+                held |= e.mask
+        if held & needs != needs:
+            holds = f"({RIGHTS.get(held, hex(held))})" if held else "no allow"
+            problems.append(f"{path}: LocalService is not allowed ({RIGHTS.get(needs, hex(needs))}); it holds {holds}")
+        return problems
 
     def _check(self, path: Path, mode: int, *, directory: bool, owner, grants) -> Verdict:
         try:

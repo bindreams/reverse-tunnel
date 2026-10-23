@@ -17,7 +17,14 @@ TOKEN_ELEVATION = 20
 def token_says_elevated() -> bool:
     """`TokenElevation` of the current process token, which is what UAC means by an elevated process."""
     advapi32, kernel32 = ctypes.WinDLL("advapi32", use_last_error=True), ctypes.WinDLL("kernel32", use_last_error=True)
+    # Without prototypes ctypes passes a 64-bit handle (GetCurrentProcess is -1, so 0xFFFF_FFFF_FFFF_FFFF) as a C int.
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD)
+    ]
     token = wintypes.HANDLE()
     assert advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token))
     try:

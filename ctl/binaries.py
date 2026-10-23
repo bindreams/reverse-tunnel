@@ -432,7 +432,10 @@ def _write_tool(document: tomlkit.TOMLDocument, tool: str, pinned: dict[str, lis
 
 
 def write_atomically(path: Path, text: str) -> None:
-    """Replace `path` whole, so a failed write never leaves a half-written file; keeps the file's mode, never follows a link."""
+    """Replace `path` whole, so a failed write never leaves a half-written file.
+
+    Keeps the file's mode and never follows a link.
+    """
     replace_file(path.parent, path.name, io.BytesIO(text.encode("utf-8")), None)
 
 

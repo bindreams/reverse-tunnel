@@ -78,6 +78,8 @@ class Probes:
     transport: httpx.BaseTransport | None = None  # None: the real network
     principals: Callable[[Path], frozenset[str]] = perms.principals
     acl: Callable[[Path], winacl.Acl] = winacl.read_acl
+    # Every ACE, denies and inherit-only ones included; `acl` leaves those out.
+    entries: Callable[[Path], tuple[list[winacl.Entry], bool]] = winacl.read_dacl
     operator_sid: Callable[[Path], str] = perms_windows.operator_sid
     windows: bool = sys.platform == "win32"
 

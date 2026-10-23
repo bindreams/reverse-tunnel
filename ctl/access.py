@@ -20,9 +20,9 @@ GUARDED_TREES = ("ctl", ".venv")
 def verify_traversable(root: Path, service: Account) -> None:
     """Raise unless `service` can reach the binary and config under `root` at exec time.
 
-    Windows always passes: traversal is guaranteed by construction. `perms.grant_service_read` gives LocalService an
-    inheritable read-and-execute ACE on the repository root, and LocalService holds SeChangeNotifyPrivilege, which
-    bypasses traverse checking, so the ancestors of the root need no ACE.
+    Windows always passes: LocalService needs nothing on the repository root (its working directory is `logs`), holds
+    SeChangeNotifyPrivilege, so the ancestors of `bin`, `host` and `logs` need no ACE, and `perms_windows.converge_owned`
+    gives it those three.
 
     On POSIX the kernel checks execute permission, as the service account, on every component of the path, so a checkout under
     a `0700` home is unreachable to any account but its owner. Whether to document that as a requirement, to relocate the

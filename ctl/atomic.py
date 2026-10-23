@@ -86,7 +86,10 @@ def replace_file(directory: Path, name: str, source: IO[bytes], mode: int | None
 
     A symlink, a directory or anything else that is not a regular file at `name` is refused, never followed. Nothing but
     the old file or the complete new one is ever visible, and a failure leaves no temporary behind. On POSIX the mode is
-    set on the open descriptor before the first byte, so the umask never matters; Windows has no mode to set.
+    set on the open descriptor before the first byte, so the umask never matters. Windows has no mode to set: the
+    temporary file is created in `directory` and holds what it inherits from it, which for `bin/` includes the service's
+    access, so `name` never exists without it (a binary the service cannot read would lock a host reachable only through
+    its tunnel out at the next boot).
     """
     if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
         raise BinariesError(f"{directory / name}: not a single directory entry name")

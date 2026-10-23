@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from ctl import access, detach, handshake, host, lock, perms
+from ctl import access, binaries, detach, handshake, host, lock, perms
 from ctl.config import ConfigError
 from ctl.download import DIGESTS, read_digests
 from ctl.errors import BinariesError, InstallError
@@ -665,17 +665,21 @@ def test_the_flag_does_not_detach_an_uninstall_that_cannot_disconnect_anyone(run
 # Staging directory ====================================================================================================
 
 
-def test_stage_empties_the_staging_directory_before_granting_the_service_read(running, monkeypatch):
-    """On Windows `grant_service_read` refuses a subdirectory of `bin\\`, and a failed run leaves exactly that."""
+def test_stage_empties_the_staging_directory_before_converging_bin(running, monkeypatch):
+    """On Windows converging `bin` would rewrite what a failed run left in the staging directory to be readable by the
+    service, so it is emptied first on both platforms."""
     staging = running.root / "bin" / ".staging"
     (staging / "leftover-directory").mkdir(parents=True)
     (staging / "leftover").write_bytes(b"x")
     seen = []
-    original = perms.grant_service_read
-    monkeypatch.setattr(
-        perms, "grant_service_read",
-        lambda root, account: seen.append((root / "bin" / ".staging").exists()) or original(root, account)
-    )
+    original = perms.converge_dir
+
+    def converging(path, *args, **kwargs):
+        if path == running.root / "bin":
+            seen.append(staging.exists())
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(perms, "converge_dir", converging)
     run_install(running)
     assert seen == [False]
 
@@ -705,6 +709,92 @@ def test_the_staging_directory_is_gone_after_a_failed_download(running, monkeypa
     with pytest.raises(BinariesError):
         install(running.config, services=broken)
     assert not (running.root / "bin" / ".staging").exists()
+
+
+# The directories the install gives the service ========================================================================
+#
+# On POSIX these have an owner and a mode and `host/`, git's, is left alone; Windows owns them outright.
+
+
+@pytest.fixture
+def events(monkeypatch):
+    """Every permission operation of the install that gives a directory its owner and mode, in order, with its path."""
+    events = []
+    for name in ("converge_dir", "converge_tree"):
+        real = getattr(perms, name)
+
+        def spy(path, *args, _name=name, _real=real, **kwargs):
+            events.append((_name, path, args, kwargs))
+            return _real(path, *args, **kwargs)
+
+        monkeypatch.setattr(perms, name, spy)
+    return events
+
+
+def test_bin_gets_the_installer_as_owner_and_its_mode(host_tree, events):
+    run_install(host_tree)
+    (event, ) = [event for event in events if event[1] == host_tree.root / "bin"]
+    assert event[0] == "converge_dir" and event[2][1] == host.BIN_MODE
+
+
+def test_host_is_not_touched_so_git_s_directory_keeps_its_own_mode(host_tree, events):
+    (host_tree.root / "host").chmod(0o775)
+    run_install(host_tree)
+    assert mode_of(host_tree.root / "host") == 0o775
+    assert [event for event in events if event[1] == host_tree.root / "host"] == []
+
+
+def test_secrets_and_logs_are_converged(host_tree, events):
+    run_install(host_tree)
+    seen = {(name, path) for name, path, *_ in events}
+    assert {("converge_dir", host_tree.root / "secrets"), ("converge_tree", host_tree.root / "logs")} <= seen
+
+
+@pytest.fixture
+def replacements(monkeypatch):
+    """Every file the install writes into `bin/` through `replace_file`, with the bytes it was given."""
+    events = []
+    replace_file = host.replace_file
+    replace_record = binaries.replace_file
+
+    def spy_replace(directory, name, source, mode, **kwargs):
+        events.append((directory / name, source.getvalue()))
+        source.seek(0)
+        return replace_file(directory, name, source, mode, **kwargs)
+
+    def spy_record(directory, name, source, mode, **kwargs):
+        events.append((directory / name, None))
+        return replace_record(directory, name, source, mode, **kwargs)
+
+    monkeypatch.setattr(host, "replace_file", spy_replace)
+    monkeypatch.setattr(binaries, "replace_file", spy_record)
+    return events
+
+
+def test_every_binary_and_the_record_are_written_into_bin(host_tree, replacements):
+    run_install(host_tree)
+    bin_dir = host_tree.root / "bin"
+    written = {path: content for path, content in replacements}
+    assert written == {bin_dir / name: host_tree.pinned_bytes(name)
+                       for name in host_tree.pins} | {bin_dir / DIGESTS: None}
+
+
+def test_an_install_that_replaces_and_records_nothing_writes_no_file(host_tree, replacements):
+    run_install(host_tree)
+    settle(host_tree)
+    replacements.clear()
+    run_install(host_tree)
+    assert replacements == []
+
+
+def test_only_the_binary_that_was_replaced_is_written(host_tree, replacements, monkeypatch):
+    monkeypatch.setenv("SSH_CONNECTION", OFF_TUNNEL)
+    run_install(host_tree)
+    settle(host_tree)
+    (host_tree.root / "bin" / "frpc").write_bytes(b"tampered")
+    replacements.clear()
+    run_install(host_tree)
+    assert [path for path, _ in replacements if path.name != DIGESTS] == [host_tree.root / "bin" / "frpc"]
 
 
 # bin/ is the installer's ==============================================================================================

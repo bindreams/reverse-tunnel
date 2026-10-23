@@ -71,3 +71,68 @@ def test_create_new_refuses_an_existing_name(tmp_path):
     (tmp_path / "file").write_bytes(b"")
     with pytest.raises(FileExistsError):
         open_checked(tmp_path / "file", disposition=winfile.CREATE_NEW)
+
+
+# An entry whose kind is not known yet =================================================================================
+
+
+def open_entry(parent: int, name: str, label):
+    return winfile.open_relative(
+        parent, name, label=label, access=winfile.READ_CONTROL, directory=None, single_link=True, error=Refused
+    )
+
+
+def test_an_entry_of_either_kind_opens_when_the_kind_is_not_given_and_says_which_it_is(tmp_path):
+    (tmp_path / "file").write_bytes(b"")
+    (tmp_path / "folder").mkdir()
+    parent = open_checked(tmp_path, directory=True)
+    try:
+        kinds = {}
+        for name in ("file", "folder"):
+            handle = open_entry(parent, name, tmp_path / name)
+            kinds[name] = winfile.is_directory(handle)
+            winfile.close_handle(handle)
+    finally:
+        winfile.close_handle(parent)
+    assert kinds == {"file": False, "folder": True}
+
+
+@pytest.mark.parametrize("kind", ["file symlink", "directory symlink", "junction"])
+def test_a_reparse_point_is_refused_when_the_kind_is_not_given(tmp_path, kind):
+    import _winapi
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (tmp_path / "file-target").write_bytes(b"")
+    link = tmp_path / "link"
+    if kind == "junction":
+        _winapi.CreateJunction(str(target), str(link))
+    elif kind == "directory symlink":
+        os.symlink(target, link, target_is_directory=True)
+    else:
+        os.symlink(tmp_path / "file-target", link)
+    parent = open_checked(tmp_path, directory=True)
+    try:
+        with pytest.raises(Refused) as raised:
+            open_entry(parent, "link", link)
+    finally:
+        winfile.close_handle(parent)
+    assert "reparse point" in str(raised.value)
+
+
+def test_a_hard_linked_file_is_refused_when_the_kind_is_not_given(tmp_path):
+    (tmp_path / "file").write_bytes(b"")
+    os.link(tmp_path / "file", tmp_path / "other")
+    parent = open_checked(tmp_path, directory=True)
+    try:
+        with pytest.raises(Refused) as raised:
+            open_entry(parent, "file", tmp_path / "file")
+    finally:
+        winfile.close_handle(parent)
+    assert "hard links" in str(raised.value)
+
+
+def test_closing_an_invalid_handle_fails_loudly_instead_of_being_ignored():
+    """A handle that cannot be closed is a double close or a handle that was never ours: a bug in the caller."""
+    with pytest.raises(AssertionError):
+        winfile.close_handle(0)

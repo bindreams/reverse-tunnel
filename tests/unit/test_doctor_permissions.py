@@ -1,11 +1,14 @@
 """Who may read what: the POSIX owner and mode, and on Windows the SIDs and the rights each was given."""
 
+import dataclasses
+from pathlib import Path
+
 import pytest
 from tests.unit.doctor_support import World, build_bridge, build_host_world
 
 from ctl import winacl
 from ctl.doctor import Outcome
-from ctl.doctor.permissions import Permissions
+from ctl.doctor.permissions import RIGHTS, Permissions
 from ctl.doctor.probes import Probes
 from ctl.winacl import Ace, Acl
 
@@ -20,8 +23,27 @@ def acl(*aces: tuple[str, int, int], protected: bool = True) -> Acl:
     return Acl(tuple(Ace(sid, mask, flags) for sid, mask, flags in aces), protected)
 
 
-def windows(acls: dict[str, Acl], operator: str = OPERATOR) -> Probes:
-    return Probes(windows=True, acl=lambda path: acls[path.name], operator_sid=lambda root: operator)
+def windows(acls: dict[str, Acl], operator: str = OPERATOR, denies: dict[str, tuple[Ace, ...]] | None = None) -> Probes:
+    """Probes that read `acls` (and the deny ACEs in `denies`) as the real ones do.
+
+    `acl` leaves the inherit-only ACEs out and `entries` does not.
+    """
+
+    def entries(path) -> tuple[list[winacl.Entry], bool]:
+        if path.name not in acls:
+            raise FileNotFoundError(2, "The system cannot find the file specified", str(path))
+        found = acls[path.name]
+        denied = [
+            winacl.Entry(winacl.ACCESS_DENIED_ACE_TYPE, a.flags, a.mask, a.sid)
+            for a in (denies or {}).get(path.name, ())
+        ]
+        return denied + [
+            winacl.Entry(winacl.ACCESS_ALLOWED_ACE_TYPE, a.flags, a.mask, a.sid) for a in found.aces
+        ], found.protected
+
+    return Probes(
+        windows=True, acl=lambda path: winacl._acl(*entries(path)), entries=entries, operator_sid=lambda root: operator
+    )
 
 
 # What install writes, spelled out independently of `winacl.grants` so a wrong expectation fails here ==================
@@ -156,3 +178,308 @@ def test_a_legacy_env_whose_operator_ace_lacks_delete_fails_asking_to_reinstall(
         f"{path}: unexpected: {OPERATOR}:(R,W); missing: {OPERATOR}:(R,W,D); "
         f"expected exactly {OPERATOR}:(R,W,D), {ADMINS} (Administrators):(F); run `ctl install` to restore it"
     )
+
+
+# The service's access to what it needs ================================================================================
+
+ID = winacl.INHERITED_ACE
+FILES_ONLY = winacl.OBJECT_INHERIT_ACE | winacl.INHERIT_ONLY_ACE
+FILE_WRITE_DATA = 0x2
+SERVICE_NEEDS = {
+    "bin": winacl.READ_EXECUTE,
+    "frpc.exe": winacl.READ_EXECUTE,
+    "websocat.exe": winacl.READ_EXECUTE,
+    "goetia-shim.exe": winacl.READ_EXECUTE,
+    "host": winacl.READ_EXECUTE,
+    "frpc.toml": winacl.READ,
+    "token": winacl.READ,
+    "logs": winacl.MODIFY,
+}
+# The files in `logs` the daemons append to, as `goetia.yaml` names them; one that does not exist yet is no failure.
+LOG_FILES = ("frpc.log", "websocat.log")
+# What the writer of `logs/<daemon>.log` asks the kernel for. goetia-shim v0.1.0 opens it with
+# `OpenOptions::new().create(true).append(true).open(path)` (src/bin/shim/logging.rs:39), and Rust's std on Windows turns
+# `append(true)` into `FILE_GENERIC_WRITE & !FILE_WRITE_DATA` (library/std/src/sys/fs/windows.rs, `get_access_mode`).
+FILE_GENERIC_WRITE = 0x120116  # windows_sys.rs: FILE_GENERIC_WRITE = 1179926
+RUST_APPEND_OPEN = FILE_GENERIC_WRITE & ~FILE_WRITE_DATA
+NARROWER_APPEND = 0x2 | 0x4 | 0x80 | 0x100000
+
+
+def owned(mask: int) -> Acl:
+    """A directory `ctl install` owns: protected, the operator and Administrators in full, the service with `mask`."""
+    return acl((ADMINS, winacl.FULL, INHERIT), (OPERATOR, winacl.FULL, INHERIT), (SERVICE, mask, INHERIT))
+
+
+def owned_file(mask: int) -> Acl:
+    """A file in one: it holds what it inherits, so it is not protected."""
+    return acl((ADMINS, winacl.FULL, ID), (OPERATOR, winacl.FULL, ID), (SERVICE, mask, ID), protected=False)
+
+
+def service_acls(**changes: Acl) -> dict[str, Acl]:
+    """What `ctl install` leaves, keyed by the last component of each path the fake reads (the root is never read)."""
+    acls = {
+        "bin": owned(winacl.READ_EXECUTE),
+        "host": owned(winacl.READ_EXECUTE),
+        "logs": owned(winacl.MODIFY),
+        "token": HOST_TOKEN,
+        ".digests.json": owned_file(winacl.READ_EXECUTE),
+        "goetia.exe": owned_file(winacl.READ_EXECUTE),
+        "frpc.toml": owned_file(winacl.READ_EXECUTE),
+    }
+    acls |= {name: owned_file(winacl.READ_EXECUTE) for name in ("frpc.exe", "websocat.exe", "goetia-shim.exe")}
+    acls |= {name: owned_file(winacl.MODIFY) for name in LOG_FILES}
+    return acls | changes
+
+
+def service_read(world: World, acls: dict[str, Acl], denies: dict[str, tuple[Ace, ...]] | None = None):
+    return Permissions(world.config, windows(acls, denies=denies)).service_read()
+
+
+def place(world: World, name: str) -> Path:
+    root = world.config.root
+    where = {
+        "frpc.exe": "bin",
+        "websocat.exe": "bin",
+        "goetia-shim.exe": "bin",
+        "frpc.toml": "host",
+        "token": "secrets",
+        "frpc.log": "logs",
+        "websocat.log": "logs",
+    }
+    return root / where[name] / name if name in where else root / name
+
+
+def test_the_acls_install_writes_give_the_service_what_it_needs(host):
+    outcome, detail = service_read(host, service_acls())
+    assert outcome is Outcome.PASS, detail
+
+
+def test_the_service_read_is_not_applicable_on_posix(host):
+    outcome, _ = Permissions(host.config, Probes(windows=False)).service_read()
+    assert outcome is Outcome.NOT_APPLICABLE
+
+
+@pytest.mark.parametrize("name", [*SERVICE_NEEDS, *LOG_FILES])
+@pytest.mark.parametrize("flags", [0, ID, FILES_ONLY], ids=["explicit", "inherited", "inherit-only"])
+@pytest.mark.parametrize("sid", [SERVICE, winacl.SID_EVERYONE, OTHER], ids=["service", "everyone", "another"])
+def test_a_deny_ace_of_any_kind_on_anything_the_service_needs_fails_naming_the_path_and_whom_it_denies(
+    host, name, flags, sid
+):
+    outcome, detail = service_read(host, service_acls(), {name: (Ace(sid, FILE_WRITE_DATA, flags), )})
+    assert outcome is Outcome.FAIL
+    assert f"{place(host, name)}: has a deny ACE for {sid}" in detail and "ctl install" in detail
+
+
+@pytest.mark.parametrize("name", [*SERVICE_NEEDS, *LOG_FILES])
+def test_an_object_with_no_allow_for_the_service_fails_naming_the_path(host, name):
+    bare = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0))
+    outcome, detail = service_read(host, service_acls(**{name: bare}))
+    assert outcome is Outcome.FAIL
+    assert f"{place(host, name)}: LocalService is not allowed" in detail and "it holds no allow" in detail
+    assert "ctl install" in detail
+
+
+def test_a_frpc_toml_moved_into_host_keeps_its_old_acl_and_fails(host):
+    """A file moved in from elsewhere keeps the DACL it had, which is the operator's and not the service's."""
+    moved = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0), protected=False)
+    outcome, detail = service_read(host, service_acls(**{"frpc.toml": moved}))
+    toml = host.config.root / "host" / "frpc.toml"
+    assert outcome is Outcome.FAIL and f"{toml}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize(
+    "name,narrow", [
+        ("bin", winacl.READ),
+        ("frpc.exe", winacl.READ),
+        ("host", winacl.READ),
+        ("logs", winacl.READ_EXECUTE),
+    ]
+)
+def test_an_allow_that_does_not_cover_what_the_service_needs_fails_saying_what_it_holds(host, name, narrow):
+    narrowed = acl((ADMINS, winacl.FULL, INHERIT), (SERVICE, narrow, INHERIT))
+    outcome, detail = service_read(host, service_acls(**{name: narrowed}))
+    assert outcome is Outcome.FAIL
+    assert f"{place(host, name)}: LocalService is not allowed" in detail
+    assert f"it holds ({RIGHTS[narrow]})" in detail
+
+
+def test_allows_for_the_service_that_together_cover_what_it_needs_pass(host):
+    split = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ, 0), (SERVICE, 0x20, 0))  # read, then execute
+    outcome, detail = service_read(host, service_acls(**{"frpc.exe": split}))
+    assert outcome is Outcome.PASS, detail
+
+
+def test_an_allow_the_service_holds_only_by_inheriting_it_counts(host):
+    inherited = acl((ADMINS, winacl.FULL, ID), (SERVICE, winacl.READ_EXECUTE, ID), protected=False)
+    outcome, detail = service_read(host, service_acls(**{"frpc.toml": inherited}))
+    assert outcome is Outcome.PASS, detail
+
+
+def test_an_allow_that_applies_only_to_new_files_does_not_count_for_the_directory(host):
+    files_only = acl((ADMINS, winacl.FULL, 0), (SERVICE, winacl.READ_EXECUTE, FILES_ONLY))
+    outcome, detail = service_read(host, service_acls(host=files_only))
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'host'}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize("group", [winacl.SID_EVERYONE, winacl.SID_USERS, winacl.SID_AUTHENTICATED_USERS])
+def test_an_allow_for_a_group_the_service_is_in_is_not_an_allow_for_the_service(host, group):
+    via_group = acl((ADMINS, winacl.FULL, 0), (group, winacl.READ_EXECUTE, 0))
+    outcome, detail = service_read(host, service_acls(bin=via_group))
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'bin'}: LocalService is not allowed" in detail
+
+
+def test_files_the_service_never_reads_are_not_judged(host):
+    """`goetia.exe` is run by `ctl`, and `.digests.json` is read by doctor, as the operator."""
+    bare = acl((ADMINS, winacl.FULL, 0))
+    denied = (Ace(SERVICE, FILE_WRITE_DATA, 0), )
+    outcome, detail = service_read(
+        host, service_acls(**{"goetia.exe": bare, ".digests.json": bare}),
+        {"goetia.exe": denied, ".digests.json": denied}
+    )
+    assert outcome is Outcome.PASS, detail
+
+
+def test_every_failing_object_is_reported_with_a_count(host):
+    bare = acl((ADMINS, winacl.FULL, 0))
+    outcome, detail = service_read(host, service_acls(bin=bare, logs=bare))
+    assert outcome is Outcome.FAIL
+    assert "wrong on 2 path(s)" in detail and f"{host.config.root / 'bin'}:" in detail
+    assert f"{host.config.root / 'logs'}:" in detail
+
+
+def reading(world: World, fail_on: str, error: OSError):
+    """The service check with every object readable but the one called `fail_on`, which raises `error`."""
+    probes = windows(service_acls())
+    read = probes.entries
+
+    def entries(path):
+        if path.name == fail_on:
+            raise error
+        return read(path)
+
+    return Permissions(world.config, dataclasses.replace(probes, entries=entries)).service_read()
+
+
+@pytest.mark.parametrize("name", SERVICE_NEEDS)
+def test_an_object_that_is_missing_fails_saying_to_install(host, name):
+    outcome, detail = reading(host, name, FileNotFoundError(2, "The system cannot find the file specified"))
+    assert outcome is Outcome.FAIL
+    assert f"{place(host, name)}: missing" in detail and "ctl install" in detail
+
+
+def test_an_object_doctor_cannot_read_fails_instead_of_crashing(host):
+    outcome, detail = reading(host, "frpc.toml", PermissionError(5, "Access is denied"))
+    assert outcome is Outcome.FAIL and "Access is denied" in detail
+
+
+# The log files the daemons append to ==================================================================================
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_that_does_not_exist_yet_is_no_failure(host, name):
+    acls = service_acls()
+    del acls[name]
+    outcome, detail = service_read(host, acls)
+    assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+@pytest.mark.parametrize("narrow", [winacl.READ, winacl.READ_EXECUTE])
+def test_a_log_file_the_service_cannot_append_to_fails_saying_what_it_holds(host, name, narrow):
+    narrowed = acl((ADMINS, winacl.FULL, ID), (SERVICE, narrow, ID), protected=False)
+    outcome, detail = service_read(host, service_acls(**{name: narrowed}))
+    assert outcome is Outcome.FAIL
+    assert f"{place(host, name)}: LocalService is not allowed" in detail and f"it holds ({RIGHTS[narrow]})" in detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_the_access_the_writer_opens_a_log_file_with_is_enough(host, name):
+    appending = acl((ADMINS, winacl.FULL, 0), (SERVICE, RUST_APPEND_OPEN, 0))
+    outcome, detail = service_read(host, service_acls(**{name: appending}))
+    assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_granting_less_than_the_writer_opens_it_with_fails(host, name):
+    narrow = acl((ADMINS, winacl.FULL, 0), (SERVICE, NARROWER_APPEND, 0))
+    outcome, detail = service_read(host, service_acls(**{name: narrow}))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+@pytest.mark.parametrize("bit", [bit for bit in range(32) if RUST_APPEND_OPEN >> bit & 1])
+def test_a_log_file_missing_any_one_right_the_writer_asks_for_fails(host, name, bit):
+    short = acl((ADMINS, winacl.FULL, 0), (SERVICE, RUST_APPEND_OPEN & ~(1 << bit), 0))
+    outcome, detail = service_read(host, service_acls(**{name: short}))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: LocalService is not allowed" in detail
+
+
+# Creating the log file adds an entry to `logs`: CreateFile with OPEN_ALWAYS needs FILE_ADD_FILE on the directory.
+def test_logs_without_the_right_to_add_a_file_fails(host):
+    FILE_ADD_FILE = 0x2
+    short = acl((ADMINS, winacl.FULL, INHERIT), (SERVICE, winacl.MODIFY & ~FILE_ADD_FILE, INHERIT))
+    outcome, detail = service_read(host, service_acls(logs=short))
+    assert outcome is Outcome.FAIL and f"{place(host, 'logs')}: LocalService is not allowed" in detail
+
+
+# What goetia-shim does with `logs` itself. `create_dir_all(logs)` gets ERROR_ALREADY_EXISTS from `mkdir` and then asks
+# `is_dir()`, which opens with CreateFileW and so asks for FILE_READ_ATTRIBUTES; the shim spawns the daemon with `logs`
+# as its working directory, which CreateProcess checks with GetFileAttributesW, the same right. With the repository root
+# granting the service nothing there is no other way in, so a missing right keeps the daemon from ever starting.
+FILE_LIST_DIRECTORY, FILE_ADD_FILE, FILE_TRAVERSE, FILE_READ_ATTRIBUTES, SYNCHRONIZE = 0x1, 0x2, 0x20, 0x80, 0x100000
+LOGS_OPENED = FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+
+
+def test_logs_granting_exactly_what_the_shim_asks_of_it_passes(host):
+    outcome, detail = service_read(host, service_acls(logs=owned(LOGS_OPENED)))
+    assert outcome is Outcome.PASS, detail
+
+
+@pytest.mark.parametrize("bit", [bit for bit in range(32) if LOGS_OPENED >> bit & 1])
+def test_logs_missing_any_one_right_the_shim_asks_of_it_fails(host, bit):
+    outcome, detail = service_read(host, service_acls(logs=owned(LOGS_OPENED & ~(1 << bit))))
+    assert outcome is Outcome.FAIL and f"{place(host, 'logs')}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_moved_into_logs_that_keeps_the_acl_it_had_fails(host, name):
+    moved = acl((ADMINS, winacl.FULL, 0), (OPERATOR, winacl.FULL, 0), protected=False)
+    outcome, detail = service_read(host, service_acls(**{name: moved}))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: LocalService is not allowed" in detail
+
+
+@pytest.mark.parametrize("name", LOG_FILES)
+def test_a_log_file_doctor_cannot_read_fails_instead_of_crashing(host, name):
+    outcome, detail = reading(host, name, PermissionError(5, "Access is denied"))
+    assert outcome is Outcome.FAIL and f"{place(host, name)}: Access is denied" in detail
+
+
+def test_the_log_files_checked_are_the_ones_goetia_yaml_has_the_daemons_write():
+    import yaml
+
+    from ctl.host import WRITES
+
+    manifest = yaml.safe_load((Path(__file__).resolve().parents[2] / "goetia.yaml").read_text(encoding="utf-8"))
+    written = {daemon["logs"] for daemon in manifest["daemons"].values()}
+    assert {path for paths in WRITES.values() for path in paths} == written
+    assert {Path(path).name for path in written} == set(LOG_FILES)
+
+
+# The files the daemons read ===========================================================================================
+
+
+def test_every_input_the_daemons_read_once_has_a_place_in_the_tree():
+    from ctl import host as installer
+
+    names = {name for names in installer.READS.values() for name in names}
+    assert names <= set(installer.READ_PATHS)
+
+
+def test_a_file_a_daemon_reads_is_checked_for_the_service_access(host, monkeypatch):
+    """A new input in `host.READS` is judged without anyone remembering to add it to the doctor."""
+    from ctl import host as installer
+
+    monkeypatch.setattr(installer, "READS", {**installer.READS, installer.WEBSOCAT_ID: ("extra", )})
+    monkeypatch.setattr(installer, "READ_PATHS", {**installer.READ_PATHS, "extra": "host/extra.conf"})
+    outcome, detail = service_read(host, service_acls())
+    assert outcome is Outcome.FAIL and f"{host.config.root / 'host' / 'extra.conf'}: missing" in detail

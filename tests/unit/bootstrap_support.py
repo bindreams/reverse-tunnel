@@ -46,7 +46,10 @@ def check_same_shape_as_the_venv() -> None:
     report = isolated_report()
     path = report["path"]
     assert os.path.normcase(os.path.realpath(path[0])) == os.path.normcase(os.path.realpath(REPO_ROOT))
-    assert normalise(path) == normalise(venv_dash_m_path())
+    # CPython 3.14 on Windows puts the venv's own directory on its `sys.path`; nothing importable lives there.
+    in_the_venv = normalise(venv_dash_m_path()) - normalise([sys.prefix])
+    assert normalise(path
+                     ) == in_the_venv, (sorted(normalise(path) - in_the_venv), sorted(in_the_venv - normalise(path)))
     if os.path.normcase(os.path.realpath(base_site_packages())
                         ) != os.path.normcase(os.path.realpath(venv_site_packages())):
         assert os.path.normcase(os.path.realpath(base_site_packages())) not in normalise(path)

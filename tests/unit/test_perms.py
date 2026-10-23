@@ -5,7 +5,7 @@ import pytest
 
 from ctl import perms
 from ctl.config import ConfigError
-from ctl.perms import Account, PermsError, converge_tree, harden_file, resolve_service_account, write_secret
+from ctl.perms import Account, PermsError, harden_file, resolve_service_account, write_secret
 
 NO_READERS: frozenset[str] = frozenset()
 
@@ -127,38 +127,30 @@ def test_write_secret_refuses_a_hard_linked_destination(tmp_path):
     assert other.read_bytes() == b"the-old-secret"
 
 
-def test_converge_tree_refuses_a_subdirectory(tmp_path):
-    logs = tmp_path / "logs"
-    (logs / "old").mkdir(parents=True)
-    with pytest.raises(PermsError) as raised:
-        converge_tree(logs, None, 0o750, root=tmp_path)
-    assert str(logs / "old") in str(raised.value)
-    assert "remove it" in str(raised.value)
+# Removing a temporary file while an error is in flight ================================================================
 
 
-def test_converge_tree_accepts_a_flat_directory_of_regular_files(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    (logs / "frpc.log").write_bytes(b"")
-    (logs / "websocat.log").write_bytes(b"")
-    converge_tree(logs, None, 0o750, root=tmp_path)
+def test_discarding_a_temporary_file_removes_it(tmp_path):
+    temporary = tmp_path / ".token.tmp"
+    temporary.write_bytes(b"partial")
+    perms.discard_temporary(str(temporary), RuntimeError("write failed"))
+    assert not temporary.exists()
 
 
-def test_listed_names_are_matched_case_insensitively_and_returned_as_listed():
-    from pathlib import Path
-
-    from ctl import perms_windows
-
-    assert perms_windows._listed(["Bin", "HOST", "ctl"], ("bin", "host", "logs"),
-                                 Path("repo")) == {"bin": "Bin", "host": "HOST"}
+def test_discarding_a_temporary_file_that_is_gone_is_no_failure_and_adds_no_note(tmp_path):
+    error = RuntimeError("write failed")
+    perms.discard_temporary(str(tmp_path / "gone"), error)
+    assert not hasattr(error, "__notes__")
 
 
-def test_two_spellings_of_one_name_are_refused_as_ambiguous():
-    from pathlib import Path
+def test_a_temporary_file_that_cannot_be_removed_is_noted_on_the_error_in_flight_and_raises_nothing(
+    tmp_path, monkeypatch
+):
 
-    from ctl import perms_windows
+    def refuse(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Access is denied")
 
-    with pytest.raises(PermsError) as raised:
-        perms_windows._listed(["bin", "Bin", "host"], ("bin", "host"), Path("repo"))
-    assert "ambiguous" in str(raised.value)
-    assert "Bin" in str(raised.value)
+    monkeypatch.setattr(os, "unlink", refuse)
+    error = RuntimeError("write failed")
+    perms.discard_temporary(str(tmp_path / "held"), error)
+    assert len(error.__notes__) == 1 and "held" in error.__notes__[0] and "Access is denied" in error.__notes__[0]

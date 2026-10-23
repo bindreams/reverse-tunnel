@@ -6,9 +6,13 @@ import os
 import pytest
 
 from ctl import _winfile as winfile
+from ctl import perms_windows, winacl
 from ctl.atomic import replace_file
 from ctl.binaries import write_atomically
 from ctl.errors import BinariesError
+from ctl.perms import SID_LOCAL_SERVICE, Account
+
+LOCAL_SERVICE = Account("LocalService", None, None)
 
 
 def put(directory, name, data=b"data"):
@@ -229,3 +233,29 @@ def test_a_name_longer_than_the_first_buffer_is_still_read_in_full(tmp_path):
         winfile.close_handle(holder.value)
     finally:
         winfile.close_handle(directory)
+
+
+def service_aces(entries):
+    return [(e.mask, e.flags) for e in entries if e.sid == SID_LOCAL_SERVICE]
+
+
+def test_a_file_replaced_in_an_owned_directory_holds_the_service_read_before_it_is_renamed_into_place(
+    tmp_path, monkeypatch
+):
+    """The final name must never exist without the service's access: a crash between a rename and a later grant is a
+    lockout. The temporary file is created in the directory, so it inherits the access from it."""
+    perms_windows.converge_owned(tmp_path, LOCAL_SERVICE, write=False, root=tmp_path)
+    put(tmp_path, "tool", b"old")
+    seen = []
+    real = winfile.rename_over
+
+    def spy(handle, *args, **kwargs):
+        seen.append(winacl.read_entries(handle)[0])
+        return real(handle, *args, **kwargs)
+
+    monkeypatch.setattr(winfile, "rename_over", spy)
+    replace_file(tmp_path, "tool", io.BytesIO(b"new"), None)
+    assert [service_aces(entries) for entries in seen] == [[(winacl.READ_EXECUTE, winacl.INHERITED_ACE)]]
+    assert (tmp_path / "tool").read_bytes() == b"new"
+    with perms_windows._handle(tmp_path / "tool", directory=False, access=winfile.READ_CONTROL) as handle:
+        assert service_aces(winacl.read_entries(handle)[0]) == [(winacl.READ_EXECUTE, winacl.INHERITED_ACE)]

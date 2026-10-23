@@ -85,13 +85,32 @@ def test_the_child_command_uses_the_real_interpreter_isolated_and_with_each_path
     assert site_packages.lower().endswith("site-packages") and ";" not in site_packages + root
 
 
-def test_a_child_started_from_the_venv_is_in_no_job_and_says_so(tmp_path):
+# The child asks Windows itself, with its own prototypes, whether it is in a job, and holds `survival_problem` to that.
+CHILD_BODY = """
+import ctypes
+from ctypes import wintypes
+from ctl import detach, handshake
+
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+kernel32.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+in_job = wintypes.BOOL()
+assert kernel32.IsProcessInJob(kernel32.GetCurrentProcess(), None, ctypes.byref(in_job))
+problem = detach.survival_problem()
+if bool(in_job.value) != (problem is not None):
+    problem = f"survival_problem() said {problem!r} but IsProcessInJob said {bool(in_job.value)}"
+handshake.signal(int(sys.argv[3]), refusal=problem)
+"""
+
+
+def test_a_child_started_from_the_venv_starts_in_no_job_or_says_exactly_why_not(tmp_path):
+    """On a console the child is in no job and starts. Under a CI runner or an ssh session it can be in an outer job
+    that breakaway from the venv launcher's own job does not leave, and then it must decline, saying so."""
     from ctl import handshake
 
-    body = "from ctl import detach, handshake\nhandshake.signal(int(sys.argv[3]), refusal=detach.survival_problem())\n"
     pipe = handshake.Pipe()
     prefix = detach.python_command([])
-    argv = [prefix[0], "-I", "-S", "-c", detach.ISOLATED_SETUP + body, prefix[5], prefix[6], str(pipe.token)]
+    argv = [prefix[0], "-I", "-S", "-c", detach.ISOLATED_SETUP + CHILD_BODY, prefix[5], prefix[6], str(pipe.token)]
     with open(tmp_path / "install.log", "ab") as log:
         detach.spawn_detached(argv, cwd=tmp_path, log=log, inherit=[pipe.token])
-    assert pipe.wait() is True, pipe.refusal
+    assert pipe.wait() or pipe.refusal == detach.STILL_IN_A_JOB, pipe.refusal

@@ -7,8 +7,9 @@ at any file on the machine.
 
 On POSIX the owner and mode express who may read what. On Windows `os.chmod` sets no ACL, so the same intent is an ACL
 of well-known SIDs (see `ctl.winacl`), set through a handle that `ctl._winfile` has already vetted: `owner=None` means
-the path stays the operator's and the operator's SID is granted explicitly; `readers` and `writers` are the SIDs of the
-other accounts, and POSIX ignores them.
+the path stays the operator's and the operator's SID is granted explicitly; `readers` are the SIDs of the other
+accounts, and POSIX ignores them. The directories `ctl install` owns outright on Windows (`bin`, `host`, `logs`) are not
+here: see `ctl.perms_windows.converge_owned`.
 """
 
 import dataclasses
@@ -252,11 +253,15 @@ def check_destination(path: Path, status: os.stat_result | None) -> None:
         raise PermsError(_hard_link_message(path, status.st_nlink) + "; the other name would keep the old secret")
 
 
-def unlink_quietly(name: str, *, dir_fd: int | None = None) -> None:
+def discard_temporary(name: str, error: BaseException, *, dir_fd: int | None = None) -> None:
+    """Remove the temporary file `name` while `error` propagates. A file that is already gone is fine; a removal that
+    fails is attached to `error` as a note and raises nothing, so it cannot replace the failure that matters."""
     try:
         os.unlink(name, dir_fd=dir_fd)
     except FileNotFoundError:
         pass
+    except OSError as exc:
+        error.add_note(f"the temporary file {name} could not be removed: {exc.strerror or exc}")
 
 
 def temporary_name(path: Path) -> str:
@@ -305,8 +310,8 @@ def write_secret(path: Path, data: bytes, owner: Account | None, readers: frozen
                 os.replace(name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
             except OSError as exc:
                 raise PermsError(f"{path}: {exc.strerror or exc}") from exc
-        except BaseException:
-            unlink_quietly(name, dir_fd=directory_fd)
+        except BaseException as error:
+            discard_temporary(name, error, dir_fd=directory_fd)
             raise
         os.fsync(directory_fd)
     finally:
@@ -387,7 +392,6 @@ def converge_dir(
     mode: int,
     readers: frozenset[str],
     *,
-    writers: frozenset[str] = frozenset(),
     isolate: bool = True,
     root: Path,
 ) -> None:
@@ -395,51 +399,31 @@ def converge_dir(
 
     Leaving an existing directory alone is wrong here: another account that owns, or can write to, `secrets/` can
     replace the token inside it regardless of the token's own mode. A symlink at `path` is refused, never repaired.
-    On Windows `isolate` breaks inheritance; only `.env`, `secrets/` and the token do, never the repository root.
+    On Windows `isolate` breaks inheritance (`secrets/`; never the repository root) and `readers` are granted read; see
+    `perms_windows.converge_dir` for what happens to the entries below an existing directory.
     """
     if sys.platform == "win32":
         from ctl import perms_windows
 
-        perms_windows.converge_dir(path, owner, readers, writers, isolate, root)
+        perms_windows.converge_dir(path, owner, readers, isolate, root)
         return
     with _converged(path, owner, mode):
         pass
 
 
 def converge_tree(path: Path, owner: Account | None, mode: int, *, root: Path) -> None:
-    """`converge_dir` for `path`, then the same for each of its direct entries, keeping each entry's own mode.
+    """POSIX only (Windows: `perms_windows.converge_owned`): `converge_dir` for `path`, then the same for each entry.
 
-    The directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a symlink or
-    reparse point, a FIFO, a socket, a hard-linked file, on POSIX a file on another filesystem) is refused with a message
-    telling the operator to remove it, and is never entered. A service that can write `logs/` could otherwise plant a link
-    or a hard link to a file it does not own and have root change it.
+    The directory is flat. Every entry must be a regular file with one name; anything else (a subdirectory, a symlink, a
+    FIFO, a socket, a hard-linked file, a file on another filesystem) is refused with a message telling the operator to
+    remove it, and is never entered. A service that can write `logs/` could otherwise plant a link or a hard link to a
+    file it does not own and have root change it. Each entry keeps its own mode.
 
     systemd opens a log's append target after dropping to `User=`, so a stale owner is `EACCES` and the daemon never
-    starts. On Windows `owner` is the service account, which gets modify on the directory, and each entry is reset to
-    inherit from it.
+    starts.
     """
-    if sys.platform == "win32":
-        from ctl import perms_windows
-
-        perms_windows.converge_tree(path, owner, root)
-        return
     with _converged(path, owner, mode) as fd:
         _converge_entries(fd, path, owner)
-
-
-def grant_service_read(root: Path, account: Account) -> None:
-    """Give `account` read-and-execute on the repository `root`, `bin`, `host` and their direct files; POSIX: nothing.
-
-    `root` gets an inheritable ACE and each of the others the ACE it would inherit, written to it directly: nothing is
-    propagated by the OS, so nothing unvetted is touched. A subdirectory, reparse point or hard-linked file inside `bin`
-    or `host` is refused. Ancestors of `root` get no ACE: `LocalService` holds `SeChangeNotifyPrivilege`, which bypasses
-    traverse checking, so a repository under a user profile is reachable without exposing the profile.
-    """
-    if sys.platform != "win32":
-        return
-    from ctl import perms_windows
-
-    perms_windows.grant_service_read(root, account)
 
 
 # Inspection ===========================================================================================================

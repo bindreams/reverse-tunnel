@@ -17,7 +17,6 @@ from ctl.perms import (
     converge_dir,
     converge_tree,
     describe,
-    grant_service_read,
     harden_file,
     principals,
     resolve_service_account,
@@ -158,6 +157,17 @@ def test_write_secret_removes_its_temporary_file_when_the_chown_fails(tmp_path):
     with pytest.raises(ValueError):
         write_secret(tmp_path / "token", b"secret", Account("windows-only", None, None), NO_READERS, root=tmp_path)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_write_secret_keeps_the_original_failure_when_its_temporary_file_cannot_be_removed(tmp_path, monkeypatch):
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(os, "unlink", refuse)
+    with pytest.raises(ValueError) as raised:
+        write_secret(tmp_path / "token", b"secret", Account("windows-only", None, None), NO_READERS, root=tmp_path)
+    assert any("Permission denied" in note for note in getattr(raised.value, "__notes__", []))
 
 
 def test_write_secret_refuses_a_symlinked_directory(tmp_path):
@@ -416,12 +426,6 @@ def test_describe_names_the_owner_and_mode(tmp_path):
     path.write_bytes(b"")
     path.chmod(0o600)
     assert describe(path) == f"owner {me().name}, mode 0600"
-
-
-def test_grant_service_read_is_a_no_op(tmp_path):
-    before = os.stat(tmp_path)
-    grant_service_read(tmp_path, me())
-    assert os.stat(tmp_path).st_mode == before.st_mode
 
 
 # Root =================================================================================================================

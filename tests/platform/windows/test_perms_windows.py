@@ -3,10 +3,19 @@ import secrets
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import pytest
+from tests.platform.windows.acl_support import (
+    after_each_write,
+    entries_of,
+    icacls,
+    owned_shape,
+    shape_of,
+    snapshot,
+    whole_entries,
+)
 
 from ctl import perms_windows, winacl
 from ctl.perms import (
@@ -18,9 +27,7 @@ from ctl.perms import (
     Account,
     PermsError,
     converge_dir,
-    converge_tree,
     describe,
-    grant_service_read,
     harden_file,
     principals,
     write_secret,
@@ -243,8 +250,8 @@ def test_a_secret_is_never_written_under_the_permissive_inherited_acl(tmp_path):
     path = folder / "token"
     write_secret(path, b"secret", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}), root=tmp_path)
     assert winacl.read_acl(path).protected
-    assert SID_LOCAL_SERVICE in principals(path)
-    assert owner_of(tmp_path) not in principals(path)
+    # Administrators are always granted, and are the operator on an elevated run; nothing else is, not the operator.
+    assert principals(path) == {SID_LOCAL_SERVICE, SID_ADMINISTRATORS}
 
 
 def test_harden_file_refuses_a_directory_junction(tmp_path):
@@ -331,17 +338,6 @@ def test_secrets_directory_grants_localservice_read_and_execute_but_not_write(tm
     assert principals(folder) == {SID_LOCAL_SERVICE, owner_of(tmp_path), SID_ADMINISTRATORS}
 
 
-def test_logs_directory_grants_localservice_modify(tmp_path):
-    logs = tmp_path / "logs"
-    converge_dir(
-        logs, LOCAL_SERVICE, 0o750, NO_READERS, writers=frozenset({SID_LOCAL_SERVICE}), isolate=False, root=tmp_path
-    )
-    ace = ace_for(logs, SID_LOCAL_SERVICE)
-    assert ace.mask & FILE_WRITE_DATA
-    assert ace.flags & OBJECT_INHERIT_ACE and ace.flags & CONTAINER_INHERIT_ACE
-    assert not winacl.read_acl(logs).protected
-
-
 def test_converge_dir_removes_a_stale_explicit_grant(tmp_path):
     folder = tmp_path / "secrets"
     folder.mkdir()
@@ -362,236 +358,162 @@ def test_converge_dir_refuses_a_reparse_point_and_leaves_its_target_untouched(tm
     assert winacl.read_acl(target) == before
 
 
-def test_converge_tree_refuses_a_reparse_point_entry(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    target = tmp_path / "sentinel"
-    target.write_bytes(b"")
-    before = winacl.read_acl(target)
-    (logs / "frpc.log").symlink_to(target)
-    with pytest.raises(PermsError) as raised:
-        converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    assert str(logs / "frpc.log") in str(raised.value)
-    assert "remove it" in str(raised.value)
-    assert winacl.read_acl(target) == before
-
-
-def test_converge_tree_refuses_a_subdirectory_and_does_not_enter_it(tmp_path):
-    logs = tmp_path / "logs"
-    (logs / "old").mkdir(parents=True)
-    inner = logs / "old" / "frpc.log.1"
-    inner.write_bytes(b"")
-    harden_file(inner, None, NO_READERS, root=tmp_path)
-    before = {path: winacl.read_acl(path) for path in (logs, logs / "old", inner)}
-    with pytest.raises(PermsError) as raised:
-        converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    assert str(logs / "old") in str(raised.value)
-    assert "remove it" in str(raised.value)
-    for path, acl in before.items():
-        assert winacl.read_acl(path) == acl, path
-
-
-def test_converge_tree_refuses_a_junction_entry(tmp_path):
-    import _winapi
-
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    target = tmp_path / "target"
-    target.mkdir()
-    _winapi.CreateJunction(str(target), str(logs / "junction"))
-    (target / "inside").write_bytes(b"")
-    before = {path: winacl.read_acl(path) for path in (logs, target, target / "inside")}
-    with pytest.raises(PermsError) as raised:
-        converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    assert "reparse point" in str(raised.value)
-    for path, acl in before.items():
-        assert winacl.read_acl(path) == acl, path
-
-
-def test_converge_tree_refuses_a_hard_linked_entry(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    other = tmp_path / "other"
-    other.write_bytes(b"")
-    os.link(other, logs / "frpc.log")
-    before = {path: winacl.read_acl(path) for path in (logs, other)}
-    with pytest.raises(PermsError) as raised:
-        converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    assert "hard link" in str(raised.value)
-    for path, acl in before.items():
-        assert winacl.read_acl(path) == acl, path
-
-
-def test_converge_tree_converges_the_directory_itself(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    ace = ace_for(logs, SID_LOCAL_SERVICE)
-    assert ace.mask & FILE_WRITE_DATA
-    assert ace.flags & OBJECT_INHERIT_ACE and ace.flags & CONTAINER_INHERIT_ACE
-    assert SID_ADMINISTRATORS in principals(logs)
-    assert not winacl.read_acl(logs).protected
-
-
-def test_converge_tree_restores_inheritance_on_an_existing_entry(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    entry = logs / "frpc.log"
-    entry.write_bytes(b"")
-    harden_file(entry, None, NO_READERS, root=tmp_path)
-    assert SID_LOCAL_SERVICE not in principals(entry)
-    converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    assert SID_LOCAL_SERVICE in principals(entry)
-    assert not winacl.read_acl(entry).protected
-
-
-# Service access =======================================================================================================
-
-
-def test_grant_service_read_reaches_the_repository_and_leaves_its_ancestors_alone(tmp_path):
-    profile = tmp_path / "profile"
-    repo = profile / "repo"
-    (repo / "bin").mkdir(parents=True)
-    (repo / "host").mkdir()
-    (repo / "host" / "frpc.toml").write_bytes(b"")
-    env = env_file(repo)
-    harden_file(env, None, NO_READERS, root=repo)
-    secrets_dir = repo / "secrets"
-    converge_dir(secrets_dir, LOCAL_SERVICE, 0o711, NO_READERS, root=repo)
-    before = {path: winacl.read_acl(path) for path in (profile, tmp_path, env, secrets_dir)}
-    grant_service_read(repo, LOCAL_SERVICE)
-    for path, acl in before.items():
-        assert winacl.read_acl(path) == acl, path
-    ace = ace_for(repo, SID_LOCAL_SERVICE)
-    assert ace.mask & FILE_EXECUTE and ace.mask & FILE_READ_DATA
-    assert not ace.mask & WRITING
-    assert ace.flags & OBJECT_INHERIT_ACE and ace.flags & CONTAINER_INHERIT_ACE
-    for path in (repo / "bin", repo / "host", repo / "host" / "frpc.toml"):
-        assert SID_LOCAL_SERVICE in principals(path), path
-        assert not winacl.read_acl(path).protected, path
-    assert SID_LOCAL_SERVICE not in principals(env)
+# What NTFS rewrites when a directory gains inheritable ACEs ===========================================================
 
 
 def repo_with(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
-    (repo / "bin").mkdir(parents=True)
-    (repo / "host").mkdir()
-    (repo / "bin" / "frpc.exe").write_bytes(b"")
-    (repo / "host" / "frpc.toml").write_bytes(b"")
+    (repo / "secrets").mkdir(parents=True)
     return repo
 
 
-def acls_under(repo: Path) -> dict[Path, winacl.Acl]:
-    return {path: winacl.read_acl(path) for path in [repo, *repo.rglob("*")]}
+def acls_under(repo: Path) -> dict[Path, tuple[list[winacl.Entry], bool]]:
+    return snapshot(repo)
 
 
-def test_grant_service_read_refuses_a_subdirectory_in_bin_and_changes_nothing(tmp_path):
+def whole_acl(path: Path) -> tuple[list[winacl.Entry], bool]:
+    return whole_entries(path)
+
+
+def converge_secrets(repo: Path) -> None:
+    converge_dir(repo / "secrets", LOCAL_SERVICE, 0o711, frozenset({SID_LOCAL_SERVICE}), root=repo)
+
+
+@pytest.fixture
+def converged_directory(tmp_path):
+    """A repository whose `secrets` is about to be converged, and a file in it whose ACL `ctl` did not set."""
     repo = repo_with(tmp_path)
-    (repo / "bin" / "old").mkdir()
-    (repo / "bin" / "old" / "x").write_bytes(b"")
-    before = acls_under(repo)
-    with pytest.raises(PermsError) as raised:
-        grant_service_read(repo, LOCAL_SERVICE)
-    assert str(repo / "bin" / "old") in str(raised.value)
-    assert acls_under(repo) == before
+    extra = repo / "secrets" / "extra.txt"
+    extra.write_bytes(b"")
+    return repo, "secrets", extra
 
 
-def test_grant_service_read_refuses_a_hard_linked_file_and_leaves_the_foreign_file_alone(tmp_path):
+def test_converging_a_directory_again_changes_neither_it_nor_a_file_in_it(converged_directory):
+    """The first converge writes the file (it was opened and vetted); one where the ACEs exist rewrites nothing."""
+    repo, directory, extra = converged_directory
+    converge_secrets(repo)
+    first = (whole_acl(extra), entries_of(repo / directory))
+    converge_secrets(repo)
+    assert (whole_acl(extra), entries_of(repo / directory)) == first
+
+
+def test_a_file_in_a_converged_directory_ends_up_inheriting_from_it(converged_directory):
+    """Vetted and written through its own handle, the file holds what NTFS inheritance from the new ACL gives it."""
+    repo, directory, extra = converged_directory
+    converge_secrets(repo)
+    with perms_windows._handle(extra, directory=False, access=perms_windows.winfile.READ_CONTROL) as handle:
+        owner, group = winacl.owner_and_group(handle)
+    expected = winacl.inherited_for(entries_of(repo / directory), directory=False, owner=owner, group=group)
+    assert whole_acl(extra) == (expected, False)
+
+
+def inherited_by(path: Path, parent: Path) -> tuple[list[winacl.Entry], bool]:
+    """What `path`, a new entry of `parent`, inherits: its ACL when nothing explicit is on it, and not protected."""
+    with perms_windows._handle(path, directory=path.is_dir(), access=perms_windows.winfile.READ_CONTROL) as handle:
+        owner, group = winacl.owner_and_group(handle)
+    return winacl.inherited_for(entries_of(parent), directory=path.is_dir(), owner=owner, group=group), False
+
+
+def add_nested(repo: Path) -> list[Path]:
+    """Two levels of subdirectory in `secrets`, each holding a file; parents first."""
+    top, deeper = repo / "secrets" / "old", repo / "secrets" / "old" / "deeper"
+    deeper.mkdir(parents=True)
+    (top / "x").write_bytes(b"")
+    (deeper / "y").write_bytes(b"")
+    return [top, top / "x", deeper, deeper / "y"]
+
+
+def test_converging_secrets_rewrites_a_subdirectory_and_what_is_in_it_to_inherit(tmp_path):
     repo = repo_with(tmp_path)
+    nested = add_nested(repo)
+    converge_secrets(repo)
+    parents = {nested[0]: repo / "secrets", nested[1]: nested[0], nested[2]: nested[0], nested[3]: nested[2]}
+    for path in nested:
+        assert whole_acl(path) == inherited_by(path, parents[path]), path
+
+
+def test_converging_secrets_again_writes_nothing_with_subdirectories_present(tmp_path, monkeypatch):
+    repo = repo_with(tmp_path)
+    add_nested(repo)
+    converge_secrets(repo)
+    first = acls_under(repo)
+    writes = after_each_write(monkeypatch, lambda: None)
+    converge_secrets(repo)
+    assert writes == [] and acls_under(repo) == first
+
+
+def test_converging_secrets_refuses_a_hard_link_deep_in_a_subdirectory_and_changes_nothing(tmp_path):
+    repo = repo_with(tmp_path)
+    nested = add_nested(repo)
     foreign = tmp_path / "foreign"
     foreign.write_bytes(b"")
-    os.link(foreign, repo / "host" / "extra.toml")
-    before = {**acls_under(repo), foreign: winacl.read_acl(foreign)}
+    os.link(foreign, nested[2] / "linked")
+    before = acls_under(repo) | acls_under(foreign)
     with pytest.raises(PermsError) as raised:
-        grant_service_read(repo, LOCAL_SERVICE)
-    assert "hard link" in str(raised.value)
-    assert {**acls_under(repo), foreign: winacl.read_acl(foreign)} == before
+        converge_secrets(repo)
+    assert "hard link" in str(raised.value) and str(nested[2] / "linked") in str(raised.value)
+    assert acls_under(repo) | acls_under(foreign) == before
 
 
-def test_grant_service_read_refuses_a_reparse_point_in_host_and_leaves_its_target_alone(tmp_path):
+def test_converging_secrets_refuses_a_reparse_point_deep_in_a_subdirectory_and_leaves_its_target_alone(tmp_path):
     repo = repo_with(tmp_path)
+    nested = add_nested(repo)
     target = tmp_path / "target"
     target.mkdir()
-    (repo / "host" / "link").symlink_to(target, target_is_directory=True)
-    before = {**acls_under(repo), target: winacl.read_acl(target)}
+    (nested[2] / "link").symlink_to(target, target_is_directory=True)
+    before = acls_under(repo) | acls_under(target)
     with pytest.raises(PermsError) as raised:
-        grant_service_read(repo, LOCAL_SERVICE)
-    assert "reparse point" in str(raised.value)
-    assert {**acls_under(repo), target: winacl.read_acl(target)} == before
+        converge_secrets(repo)
+    assert "reparse point" in str(raised.value) and str(nested[2] / "link") in str(raised.value)
+    assert acls_under(repo) | acls_under(target) == before
 
 
-def test_grant_service_read_does_not_reach_other_directories(tmp_path):
+def test_converging_secrets_skips_an_entry_deleted_between_listing_and_opening(tmp_path, monkeypatch):
     repo = repo_with(tmp_path)
-    (repo / "ctl").mkdir()
-    before = winacl.read_acl(repo / "ctl")
-    grant_service_read(repo, LOCAL_SERVICE)
-    assert winacl.read_acl(repo / "ctl") == before
+    victim = repo / "secrets" / "rotated"
+    victim.write_bytes(b"")
+    kept = repo / "secrets" / "kept"
+    kept.write_bytes(b"")
+    real = perms_windows.winfile.list_names
+
+    def listing(directory):
+        names = real(directory)
+        if victim.exists():
+            victim.unlink()
+        return names
+
+    monkeypatch.setattr(perms_windows.winfile, "list_names", listing)
+    converge_secrets(repo)
+    assert not victim.exists() and whole_acl(kept) == inherited_by(kept, repo / "secrets")
 
 
-def test_grant_service_read_is_idempotent(tmp_path):
+def test_converging_secrets_leaves_a_file_with_broken_inheritance_as_it_was(tmp_path):
     repo = repo_with(tmp_path)
-    grant_service_read(repo, LOCAL_SERVICE)
-    first = acls_under(repo)
-    grant_service_read(repo, LOCAL_SERVICE)
-    assert acls_under(repo) == first
+    token = repo / "secrets" / "token"
+    converge_secrets(repo)
+    write_secret(token, b"secret", LOCAL_SERVICE, frozenset({SID_LOCAL_SERVICE}), root=repo)
+    before = whole_acl(token)
+    converge_secrets(repo)
+    assert whole_acl(token) == before and before[1]
 
 
-def entries_of(path: Path, *, directory: bool = True) -> list[winacl.Entry]:
-    with perms_windows._handle(path, directory=directory, access=perms_windows.winfile.READ_CONTROL) as handle:
-        return winacl.read_entries(handle)[0]
+# The operator =========================================================================================================
 
 
-def test_grant_service_read_keeps_an_explicit_deny_for_the_service(tmp_path):
-    repo = repo_with(tmp_path)
-    subprocess.run(["icacls", str(repo), "/deny", f"*{SID_LOCAL_SERVICE}:(W)"], check=True, capture_output=True)
-    grant_service_read(repo, LOCAL_SERVICE)
-    kept = [e for e in entries_of(repo) if e.sid == SID_LOCAL_SERVICE]
-    assert {e.ace_type for e in kept} == {winacl.ACCESS_ALLOWED_ACE_TYPE, winacl.ACCESS_DENIED_ACE_TYPE}
-
-
-# Names outside the BMP ================================================================================================
-
-NON_BMP = "\U0001d4b3"
-
-
-def test_converge_tree_opens_an_entry_whose_name_is_outside_the_bmp(tmp_path):
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    entry = logs / f"frpc-{NON_BMP}.log"
-    entry.write_bytes(b"")
-    harden_file(entry, None, NO_READERS, root=tmp_path)
-    converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    assert SID_LOCAL_SERVICE in principals(entry)
-
-
-def test_converge_tree_refuses_a_non_bmp_junction_by_name_instead_of_skipping_it(tmp_path):
-    import _winapi
-
-    logs = tmp_path / "logs"
-    logs.mkdir()
-    target = tmp_path / "target"
-    target.mkdir()
-    before = {path: winacl.read_acl(path) for path in (logs, target)}
-    _winapi.CreateJunction(str(target), str(logs / NON_BMP))
-    with pytest.raises(PermsError) as raised:
-        converge_tree(logs, LOCAL_SERVICE, 0o750, root=tmp_path)
-    assert NON_BMP in str(raised.value)
-    assert "reparse point" in str(raised.value)
-    assert {path: winacl.read_acl(path) for path in before} == before
-
-
-def test_grant_service_read_opens_a_non_bmp_file_name_in_bin(tmp_path):
-    repo = repo_with(tmp_path)
-    (repo / "bin" / f"tool-{NON_BMP}.exe").write_bytes(b"")
-    grant_service_read(repo, LOCAL_SERVICE)
-    assert SID_LOCAL_SERVICE in principals(repo / "bin" / f"tool-{NON_BMP}.exe")
+@pytest.mark.parametrize("name,mask", [("bin", winacl.READ_EXECUTE), ("host", winacl.READ_EXECUTE)])
+def test_an_operator_who_is_not_an_administrator_holds_full_control_of_an_owned_directory(
+    tmp_path, standard_user, name, mask
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    make_owner(repo, standard_user)
+    perms_windows.converge_owned(repo / name, LOCAL_SERVICE, write=False, root=repo)
+    expected = owned_shape(repo, mask, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+    assert (standard_user.sid, winacl.FULL, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) in expected
+    assert shape_of(repo / name) == (expected, True)
 
 
 # Differential against NTFS ============================================================================================
-
-
-def icacls(*arguments: str) -> None:
-    subprocess.run(["icacls", *arguments], check=True, capture_output=True)
 
 
 def differential_parent(tmp_path: Path) -> Path:
@@ -633,28 +555,6 @@ def test_inherited_for_reproduces_the_ordered_acl_ntfs_computes(tmp_path):
             assert ordered(winacl.read_entries(handle)[0]) == by_ntfs, path
 
 
-def snapshot(root: Path) -> dict[Path, tuple[list[winacl.Entry], bool]]:
-    """Every ACE, in stored order, and the inheritance state of `root` and everything under it."""
-    result = {}
-    for path in [root, *root.rglob("*")]:
-        with perms_windows._handle(path, directory=path.is_dir(), access=perms_windows.winfile.READ_CONTROL) as handle:
-            result[path] = winacl.read_entries(handle)
-    return result
-
-
-def test_a_creator_owner_server_ace_on_the_parent_is_refused_and_nothing_is_created_or_changed(tmp_path):
-    parent = tmp_path / "parent"
-    parent.mkdir()
-    icacls(str(parent), "/grant:r", "*S-1-3-2:(OI)(CI)(F)")
-    before = snapshot(parent)
-    with pytest.raises(PermsError) as raised:
-        converge_tree(parent / "logs", LOCAL_SERVICE, 0o750, root=parent)
-    assert "S-1-3-2" in str(raised.value)
-    assert str(parent) in str(raised.value)
-    assert not (parent / "logs").exists()
-    assert snapshot(parent) == before
-
-
 def test_converge_dir_refused_for_an_unsupported_parent_ace_creates_nothing(tmp_path):
     parent = tmp_path / "parent"
     parent.mkdir()
@@ -665,54 +565,12 @@ def test_converge_dir_refused_for_an_unsupported_parent_ace_creates_nothing(tmp_
     assert not (parent / "logs").exists()
 
 
-def test_grant_service_read_refuses_an_unsupported_ace_on_the_root_and_writes_nothing(tmp_path):
-    repo = repo_with(tmp_path)
-    icacls(str(repo), "/grant:r", "*S-1-3-2:(OI)(CI)(F)")
-    before = snapshot(repo)
-    with pytest.raises(PermsError) as raised:
-        grant_service_read(repo, LOCAL_SERVICE)
-    assert "S-1-3-2" in str(raised.value)
-    assert snapshot(repo) == before
-
-
-def test_grant_service_read_refuses_an_unsupported_ace_on_bin_and_writes_nothing(tmp_path):
-    repo = repo_with(tmp_path)
-    icacls(str(repo / "bin"), "/grant:r", "*S-1-3-2:(OI)(R)")
-    before = snapshot(repo)
-    with pytest.raises(PermsError) as raised:
-        grant_service_read(repo, LOCAL_SERVICE)
-    assert "S-1-3-2" in str(raised.value)
-    assert snapshot(repo) == before
-
-
-def case_sensitive_repo(tmp_path: Path) -> Path:
-    """An empty directory whose names are matched case-sensitively, so `bin` and `Bin` are different entries."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["fsutil", "file", "setCaseSensitiveInfo", str(repo), "enable"], check=True, capture_output=True)
-    return repo
-
-
-def test_grant_service_read_opens_a_directory_by_the_name_the_listing_gives(tmp_path):
-    repo = case_sensitive_repo(tmp_path)
-    (repo / "Bin").mkdir()
-    (repo / "Bin" / "frpc.exe").write_bytes(b"")
-    grant_service_read(repo, LOCAL_SERVICE)
-    assert SID_LOCAL_SERVICE in principals(repo / "Bin" / "frpc.exe")
-
-
-def test_grant_service_read_refuses_bin_and_Bin_together_as_ambiguous(tmp_path):
-    repo = case_sensitive_repo(tmp_path)
-    (repo / "bin").mkdir()
-    (repo / "Bin").mkdir()
-    before = snapshot(repo)
-    with pytest.raises(PermsError) as raised:
-        grant_service_read(repo, LOCAL_SERVICE)
-    assert "ambiguous" in str(raised.value)
-    assert snapshot(repo) == before
-
-
 # Inspection ===========================================================================================================
+
+
+def test_reading_the_acl_of_a_missing_path_is_a_file_not_found_error(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        winacl.read_acl(tmp_path / "absent")
 
 
 def test_describe_lists_the_sids_and_the_inheritance_state(tmp_path):
@@ -721,3 +579,34 @@ def test_describe_lists_the_sids_and_the_inheritance_state(tmp_path):
     text = describe(path)
     assert SID_ADMINISTRATORS in text
     assert "inheritance broken" in text
+
+
+def test_the_doctor_check_of_the_services_access_runs_for_an_operator_who_is_not_elevated(tmp_path, standard_user):
+    import win32security
+    from tests.unit.deployment_support import write_env
+
+    from ctl.config import Role
+    from ctl.doctor import Outcome
+    from ctl.doctor.permissions import Permissions
+    from ctl.doctor.probes import Probes
+
+    repo = tmp_path / "repo"
+    (repo / "bin").mkdir(parents=True)
+    (repo / "host").mkdir()
+    make_owner(repo, standard_user)
+    config = write_env(repo, Role.HOST)
+    for name in ("frpc.exe", "websocat.exe", "goetia-shim.exe"):
+        (repo / "bin" / name).write_bytes(b"")
+    (repo / "host" / "frpc.toml").write_bytes(b"")
+    perms_windows.converge_owned(repo / "bin", LOCAL_SERVICE, write=False, root=repo)
+    perms_windows.converge_owned(repo / "host", LOCAL_SERVICE, write=False, root=repo)
+    perms_windows.converge_owned(repo / "logs", LOCAL_SERVICE, write=True, root=repo)
+    readers = frozenset({SID_LOCAL_SERVICE, standard_user.sid})
+    converge_dir(repo / "secrets", LOCAL_SERVICE, 0o711, readers, root=repo)
+    write_secret(repo / "secrets" / "token", b"x", LOCAL_SERVICE, readers, root=repo)
+    win32security.ImpersonateLoggedOnUser(standard_user.token)
+    try:
+        outcome, detail = Permissions(config, Probes()).service_read()
+    finally:
+        win32security.RevertToSelf()
+    assert outcome is Outcome.PASS, detail

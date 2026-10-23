@@ -25,6 +25,7 @@ HOST_CHECKS = {
     "websocat_service", "frpc_spec_current", "websocat_spec_current", "websocat_listening", "local_target_answers",
     "env_permissions", "secrets_dir_permissions", "secrets_token_permissions", "tunnel_end_to_end"
 }
+WINDOWS_ONLY = {"service_read_permissions"}
 CLIENT_CHECKS = {"bin_digests_match_record", "env_permissions"}
 
 
@@ -59,6 +60,11 @@ def test_all_checks_pass_reports_exit_zero(fixture, expected, request):
     assert {check.name for check in checks} == expected
     assert [(c.name, c.detail) for c in checks if c.outcome is not Outcome.PASS] == []
     assert doctor.exit_code(checks) == 0
+
+
+def test_a_windows_host_also_checks_what_the_service_may_open(host):
+    names = {check.name for check in doctor.run(host.config, host.probes(windows=True))}
+    assert names == HOST_CHECKS | WINDOWS_ONLY
 
 
 def test_diagnose_loads_the_env_and_runs_the_checks_of_its_role(bridge):

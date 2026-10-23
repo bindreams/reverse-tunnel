@@ -49,7 +49,7 @@ def archive_digests(lock) -> dict[str, str]:
 
 
 def edited_bundle(edit) -> bytes:
-    document = json.loads(BUNDLE.read_text())
+    document = json.loads(BUNDLE.read_text(encoding="utf-8"))
     edit(document)
     return json.dumps(document).encode()
 
@@ -149,11 +149,11 @@ def test_a_bundle_with_a_corrupted_signature_is_rejected(verifier, archive_diges
 
 def test_a_bundle_whose_certificate_chains_to_no_trusted_authority_is_rejected(tmp_path, archive_digests):
     """The same trusted root with each Fulcio chain replaced by an unrelated self-signed CA."""
-    root = json.loads(TRUSTED_ROOT.read_text())
+    root = json.loads(TRUSTED_ROOT.read_text(encoding="utf-8"))
     for authority in root["certificateAuthorities"]:
         authority["certChain"] = {"certificates": [{"rawBytes": unrelated_ca()}]}
     other_root = tmp_path / "other-root.json"
-    other_root.write_text(json.dumps(root))
+    other_root.write_text(json.dumps(root), encoding="utf-8")
     other = Verifier(trusted_root=TrustedRoot.from_file(str(other_root)))
     with pytest.raises(AttestationError, match="certificate chain"):
         verify_attestation_digest(archive_digests["linux-x86_64"], BUNDLE.read_bytes(), GOETIA_IDENTITY, verifier=other)

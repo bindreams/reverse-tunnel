@@ -44,6 +44,11 @@ HOST_BINARIES = ("goetia", "goetia-shim", "frpc", "websocat")
 RUNS = {FRPC_ID: ("frpc", ), WEBSOCAT_ID: ("websocat", )}
 # Read once at startup, so changing one means nothing until the daemon restarts. Keys of `bin/.digests.json`.
 READS = {FRPC_ID: ("token", "frpc.toml")}
+# Where each of those lives relative to the repository root; the doctor checks the service can read them.
+READ_PATHS = {"token": "secrets/token", "frpc.toml": "host/frpc.toml"}
+
+# What each daemon appends to, relative to the repository root: the `logs:` of its entry in `goetia.yaml`.
+WRITES = {FRPC_ID: ("logs/frpc.log", ), WEBSOCAT_ID: ("logs/websocat.log", )}
 
 # Windows refuses to replace a running executable; POSIX replaces the file and the process keeps its inode.
 STOP_BEFORE_REPLACE = sys.platform == "win32"
@@ -77,6 +82,11 @@ def _base(install_name: str) -> str:
 def _binaries_of(daemon_id: str, platform: str) -> tuple[str, ...]:
     """The base names of the files a daemon is started from. On Windows that includes goetia's service shim."""
     return RUNS[daemon_id] + (("goetia-shim", ) if platform.startswith("windows") else ())
+
+
+def service_binaries(platform: str) -> tuple[str, ...]:
+    """The base names of the files the service manager starts on `platform`: the daemons, and on Windows goetia's shim."""
+    return tuple(dict.fromkeys(name for daemon_id in IDS for name in _binaries_of(daemon_id, platform)))
 
 
 def _host_pins(services: Services) -> tuple[tuple[Pin, ...], Pin | None, str]:
@@ -276,7 +286,7 @@ def _installer() -> Account | None:
 
     `bin/` is the installer's rather than the operator's, stricter than the ownership table (which leaves the directory
     to whoever cloned the repository): what root executes must not be replaceable by anyone else. Windows: `None`, the
-    directory inherits.
+    directory has an ACL, not an owner.
     """
     if sys.platform == "win32":
         return None
@@ -290,8 +300,28 @@ def _installer() -> Account | None:
     return Account(name, uid, os.getegid())
 
 
-def _converge_bin(root: Path) -> None:
-    perms.converge_dir(root / "bin", _installer(), BIN_MODE, frozenset(), isolate=False, root=root)
+def _own_directories(root: Path, service: Account, readers: frozenset[str]) -> None:
+    """Give the service its access to `bin/`, `host/`, `secrets/` and `logs/`, and take its ACE off the root.
+
+    Windows: `bin`, `host` and `logs` are the install's outright (`perms_windows.converge_owned`): protected, a fixed
+    DACL with the service's access in it and no deny, every entry below inheriting it. `secrets` is isolated the same
+    way. The root loses the service's ACE an earlier install gave it only after all four hold their own.
+
+    POSIX: `bin/` has the installer's owner and `BIN_MODE`; `host/` is git's directory and is left as it is; `logs/` is
+    flat and owned by the service; `secrets/` has the service as owner.
+    """
+    if sys.platform == "win32":
+        from ctl import perms_windows
+
+        perms_windows.converge_owned(root / "bin", service, write=False, root=root)
+        perms_windows.converge_owned(root / "host", service, write=False, root=root)
+        perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
+        perms_windows.converge_owned(root / "logs", service, write=True, root=root)
+        perms_windows.revoke_root(root, service)
+        return
+    perms.converge_dir(root / "bin", _installer(), BIN_MODE, frozenset(), root=root)
+    perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
+    perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
 
 
 def _clear_staging(root: Path) -> None:
@@ -304,20 +334,17 @@ def _clear_staging(root: Path) -> None:
 def stage(config: Config, plan: Plan, *, services: Services) -> None:
     """Make the tree ready without disturbing anything running. The order matters.
 
-    Whatever a failed run left in `bin/.staging` goes first: on Windows `grant_service_read` refuses a subdirectory of
-    `bin\\`. `secrets/` and `logs/` come before the token, which is created inside the first, and goetia must never be
-    handed a `logs/` owned by root. `.env` is tightened last, after everything that could fail.
+    `bin/.staging` is cleared first, so converging `bin\\` never touches half-downloaded files. The directories come
+    next (`_own_directories`), each written whole with the service's access in the same write, so none leaves what the
+    service reads without it. `secrets/` and `logs/` come before the token, which is created inside the first, and
+    goetia must never be handed a `logs/` owned by root. `.env` is tightened last, after everything that could fail.
     """
     root = config.root
     service = perms.service_account(config)
     readers = _service_readers(root)
     _clear_staging(root)
-    if os.path.lexists(root / "bin"):
-        _converge_bin(root)
-    perms.converge_dir(root / "secrets", service, SECRETS_MODE, readers, root=root)
-    perms.converge_tree(root / "logs", service, LOGS_MODE, root=root)
+    _own_directories(root, service, readers)
     perms.write_secret(root / "secrets" / "token", _token_bytes(config), service, readers, root=root)
-    perms.grant_service_read(root, service)
     _download(root, plan, services)
     perms.harden_file(root / ".env", None, frozenset(), root=root)
 
@@ -327,7 +354,6 @@ def _download(root: Path, plan: Plan, services: Services) -> None:
         return
     staging = root / "bin" / STAGING
     try:
-        _converge_bin(root)
         perms.converge_dir(staging, _installer(), STAGING_MODE, frozenset(), isolate=False, root=root)
         with services.fetcher() as fetch:
             for pin in plan.pins:
@@ -358,6 +384,7 @@ def _step(description: str, action: Callable[..., None], *args, **kwargs) -> Non
 
 
 def _promote(root: Path, plan: Plan) -> None:
+    """Replace each binary in `bin/` with its staged, pinned bytes."""
     bin_dir, staging = root / "bin", root / "bin" / STAGING
     for pin in plan.pins:
         if pin.install_name not in plan.binaries_to_replace:

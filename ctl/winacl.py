@@ -20,7 +20,11 @@ from collections.abc import Collection, Iterable, Sequence
 from typing import Any, NamedTuple
 
 SID_EVERYONE = "S-1-1-0"
+SID_LOCAL = "S-1-2-0"
+SID_CONSOLE_LOGON = "S-1-2-1"
+SID_SERVICE = "S-1-5-6"
 SID_AUTHENTICATED_USERS = "S-1-5-11"
+SID_THIS_ORGANIZATION = "S-1-5-15"
 SID_LOCAL_SERVICE = "S-1-5-19"
 SID_ADMINISTRATORS = "S-1-5-32-544"
 SID_USERS = "S-1-5-32-545"
@@ -37,6 +41,13 @@ READ_EXECUTE = 0x1200A9
 READ = 0x120089
 READ_WRITE = 0x12019F
 READ_WRITE_DELETE = READ_WRITE | DELETE
+# What goetia-shim needs of `logs` itself: list it, add a file to it, pass through it, and read its attributes. The last
+# is what `create_dir_all` (it ends in `is_dir()`, an open that adds FILE_READ_ATTRIBUTES) and the daemon's working
+# directory (process creation checks it with GetFileAttributesW) ask, and the repository root grants the service nothing.
+LIST_AND_ADD = 0x1 | 0x2 | 0x20 | 0x80 | 0x100000
+# What goetia-shim asks for when it opens `logs\<daemon>.log`: Rust's `OpenOptions::append(true)` requests
+# `FILE_GENERIC_WRITE & !FILE_WRITE_DATA`, which is read-control, write-attributes, write-EA, append-data, synchronize.
+APPEND = 0x20000 | 0x100 | 0x10 | 0x4 | 0x100000
 
 # Generic rights and what they mean for a file.
 GENERIC_READ = 0x80000000
@@ -137,27 +148,40 @@ def inherited_for(
     A file takes every object-inheritable ACE. A directory takes a container-inheritable one, and an object-only one
     as an inherit-only ACE for its own files. Every result carries INHERITED_ACE. The effective ACE for the child maps
     CREATOR OWNER and CREATOR GROUP to `owner` and `group` and generic rights to file rights. A directory that passes
-    such an ACE on keeps the original, unmapped, as a second inherit-only ACE. OWNER RIGHTS is passed on as any other
-    SID. The result follows the order of `parent`, which holds all of the parent's ACEs, its own inherited ones
-    included, as they are on disk. An inheritable CREATOR OWNER SERVER or CREATOR GROUP SERVER ACE raises
-    `UnsupportedInheritance` naming `parent_label`.
+    such an ACE on keeps the original, unmapped, as a second inherit-only ACE. An effective ACE the child already has
+    (the same type, SID and mask, as when `owner` is a SID the parent also names) is not listed twice: a file drops it
+    and a directory keeps only its inheritable half, inherit-only. OWNER RIGHTS is passed on as any other SID. The
+    result follows the order of `parent`, which holds all of the parent's ACEs, its own inherited ones included, as they
+    are on disk. An inheritable CREATOR OWNER SERVER or CREATOR GROUP SERVER ACE raises `UnsupportedInheritance` naming
+    `parent_label`.
     """
     parent = list(parent)
     refuse_unsupported(parent, parent_label)
-    result = []
+    result: list[Entry] = []
+    granted: set[tuple[int, str, int]] = set()  # (type, sid, mask) of the effective ACEs so far
+
+    def add_effective(ace: Entry, propagate: int = 0) -> None:
+        """A child never lists the same effective ACE twice. The inheritable half of a repeat is kept, inherit-only."""
+        key = (ace.ace_type, ace.sid, ace.mask)
+        if key not in granted:
+            granted.add(key)
+            result.append(ace._replace(flags=INHERITED_ACE | propagate))
+        elif propagate:
+            result.append(ace._replace(flags=INHERITED_ACE | INHERIT_ONLY_ACE | propagate))
+
     for ace in parent:
         flags = ace.flags
         if not directory:
             if flags & OBJECT_INHERIT_ACE:
-                result.append(_effective(ace, owner, group))
+                add_effective(_effective(ace, owner, group))
         elif flags & CONTAINER_INHERIT_ACE:
             propagate = 0 if flags & NO_PROPAGATE_INHERIT_ACE else flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
             effective = _effective(ace, owner, group)
             if propagate and (ace.sid in (SID_CREATOR_OWNER, SID_CREATOR_GROUP) or ace.mask & GENERIC_MASK):
-                result.append(effective)
+                add_effective(effective)
                 result.append(ace._replace(flags=INHERITED_ACE | INHERIT_ONLY_ACE | propagate))
             else:
-                result.append(effective._replace(flags=INHERITED_ACE | propagate))
+                add_effective(effective, propagate)
         elif flags & OBJECT_INHERIT_ACE and not flags & NO_PROPAGATE_INHERIT_ACE:
             result.append(ace._replace(flags=INHERITED_ACE | OBJECT_INHERIT_ACE | INHERIT_ONLY_ACE))
     return result
@@ -191,13 +215,22 @@ def to_sddl(entries: Iterable[Entry], *, protected: bool) -> str:
 # Reading ==============================================================================================================
 
 
+def _security_info(handle: int, information: int):
+    """The security descriptor of the object behind `handle` with only `information`; a failure is an `OSError`."""
+    import pywintypes
+    import win32security
+
+    try:
+        return win32security.GetSecurityInfo(handle, win32security.SE_FILE_OBJECT, information)
+    except pywintypes.error as exc:
+        raise _os_error(exc, None) from exc
+
+
 def owner_sid(handle: int) -> str:
     """The SID that owns the object behind `handle`, which needs READ_CONTROL."""
     import win32security
 
-    descriptor = win32security.GetSecurityInfo(
-        handle, win32security.SE_FILE_OBJECT, win32security.OWNER_SECURITY_INFORMATION
-    )
+    descriptor = _security_info(handle, win32security.OWNER_SECURITY_INFORMATION)
     return win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner())
 
 
@@ -205,12 +238,10 @@ def owner_and_group(handle: int) -> tuple[str, str]:
     """The owner and primary group SIDs of the object behind `handle` (READ_CONTROL)."""
     import win32security
 
-    descriptor = win32security.GetSecurityInfo(
-        handle, win32security.SE_FILE_OBJECT,
-        win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
+    descriptor = _security_info(
+        handle, win32security.OWNER_SECURITY_INFORMATION | win32security.GROUP_SECURITY_INFORMATION
     )
-    # pywin32 has GetSecurityDescriptorGroup; its stubs omit it.
-    group = descriptor.GetSecurityDescriptorGroup()  # ty: ignore[unresolved-attribute]
+    group = descriptor.GetSecurityDescriptorGroup()
     return (
         win32security.ConvertSidToStringSid(descriptor.GetSecurityDescriptorOwner()),
         win32security.ConvertSidToStringSid(group),
@@ -221,10 +252,7 @@ def read_entries(handle: int) -> tuple[list[Entry], bool]:
     """Every ACE of the object behind `handle` (READ_CONTROL) and whether its inheritance is broken."""
     import win32security
 
-    descriptor = win32security.GetSecurityInfo(
-        handle, win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-    )
-    return _parse(descriptor, "<handle>")
+    return _parse(_security_info(handle, win32security.DACL_SECURITY_INFORMATION), "<handle>")
 
 
 def _parse(descriptor, source) -> tuple[list[Entry], bool]:
@@ -247,19 +275,32 @@ def _acl(entries: Sequence[Entry], protected: bool) -> Acl:
     return Acl(tuple(ace for ace in aces if not ace.flags & INHERIT_ONLY_ACE), protected)
 
 
-def read_acl(path) -> Acl:
-    """The allow entries that apply to `path` itself, inherited ones included. A missing DACL grants everyone."""
+def _os_error(exc: Any, filename: str | None) -> OSError:
+    """pywin32's error as the `OSError` it means, so that a missing path is a `FileNotFoundError`."""
+    return OSError(0, exc.strerror, filename, exc.winerror)
+
+
+def read_dacl(path) -> tuple[list[Entry], bool]:
+    """Every ACE of `path` in stored order, inherit-only ones included, and whether its inheritance is broken.
+
+    A missing DACL grants everyone everything. A path that cannot be read is an `OSError` (`FileNotFoundError` if it is
+    not there).
+    """
+    import pywintypes
     import win32security
 
-    descriptor = win32security.GetNamedSecurityInfo(
-        str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
-    )
-    return _acl(*_parse(descriptor, path))
+    try:
+        descriptor = win32security.GetNamedSecurityInfo(
+            str(path), win32security.SE_FILE_OBJECT, win32security.DACL_SECURITY_INFORMATION
+        )
+    except pywintypes.error as exc:
+        raise _os_error(exc, str(path)) from exc
+    return _parse(descriptor, path)
 
 
-def read_acl_handle(handle: int) -> Acl:
-    """`read_acl` for the object behind `handle` (READ_CONTROL), so what is read is what was changed."""
-    return _acl(*read_entries(handle))
+def read_acl(path) -> Acl:
+    """The allow entries that apply to `path` itself, inherited ones included. A missing DACL grants everyone."""
+    return _acl(*read_dacl(path))
 
 
 def _entries(dacl, source) -> list[tuple[int, int, int, Any]]:
@@ -320,13 +361,17 @@ def grants(
     operator: str | None,
     readers: Collection[str],
     writers: Collection[str],
+    full: Collection[str] = (),
 ) -> dict[str, int]:
-    """The explicit grants: Administrators full, then `operator`, `writers` and `readers`, strongest first.
+    """The explicit grants: Administrators and each of `full` in full control, then `operator`, `writers` and
+    `readers`, strongest first.
 
     Files give `operator` read, write and delete (replacing a secret deletes the old file), and `readers` read.
     Directories give `operator` and `writers` modify and `readers` read and execute.
     """
     wanted = {SID_ADMINISTRATORS: FULL}
+    for sid in sorted(full):
+        wanted.setdefault(sid, FULL)
     if operator is not None:
         wanted.setdefault(operator, MODIFY if directory else READ_WRITE_DELETE)
     for sid in sorted(writers):
@@ -347,14 +392,15 @@ def plan(
     owner: str | None = None,
     group: str | None = None,
     parent_label: str = "<parent>",
+    full: Collection[str] = (),
 ) -> tuple[list[Entry], frozenset[str]]:
     """The DACL an object should end up with, and the SIDs it grants explicitly. Nothing is written.
 
-    The explicit ACEs are the `grants`, inheritable by children if it is a directory. With `isolate`, inheritance
-    from the parent is broken, so they are the whole ACL. Without it, the ACEs `parent` (all of the parent's ACEs, as
-    on disk) passes down to an object owned by `owner` with primary group `group` follow them, inherited.
+    The explicit ACEs are the `grants`, inheritable by children if it is a directory. With `isolate`, inheritance from
+    the parent is broken, so they are the whole ACL. Without it, the ACEs `parent` (all of the parent's ACEs, as on disk)
+    passes down to an object owned by `owner` with primary group `group` follow them, inherited.
     """
-    wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers)
+    wanted = grants(directory=directory, operator=operator, readers=readers, writers=writers, full=full)
     inherit = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE if directory else 0
     entries = [Entry(ACCESS_ALLOWED_ACE_TYPE, inherit, mask, sid) for sid, mask in wanted.items()]
     if not isolate:
@@ -372,10 +418,10 @@ def apply(
     isolate: bool,
     parent: Iterable[Entry] = (),
     parent_label: str = "<parent>",
-) -> frozenset[str]:
-    """`plan` the DACL of the object behind `handle` (WRITE_DAC, READ_CONTROL) and write it. Returns the grants."""
+) -> list[Entry]:
+    """`plan` the DACL of the object behind `handle` (WRITE_DAC, READ_CONTROL) and write it. Returns the DACL written."""
     owner, group = owner_and_group(handle) if not isolate else (None, None)
-    entries, wanted = plan(
+    entries, _ = plan(
         directory=directory,
         operator=operator,
         readers=readers,
@@ -387,4 +433,4 @@ def apply(
         parent_label=parent_label
     )
     set_dacl(handle, entries, protected=isolate)
-    return wanted
+    return entries
