@@ -82,6 +82,15 @@ def test_bridge_install_writes_only_the_token_and_hardens_env(config, root, serv
     assert docker.calls == []
 
 
+def test_bridge_install_with_a_valid_compose_file_list_proceeds(root, services, docker):
+    for name in ("compose.yaml", "compose.override.yaml"):
+        (root / name).write_text("services: {}\n", newline="\n")
+    config = write_env(root, Role.BRIDGE, COMPOSE_FILE="compose.yaml:compose.override.yaml", COMPOSE_PATH_SEPARATOR=":")
+    assert install(config, services=services) == 0
+    assert (root / "secrets" / "token").read_text() == GOOD_TOKEN + "\n"
+    assert docker.calls == []
+
+
 def test_bridge_install_creates_the_secrets_dir_before_writing_the_token(config, root, services, monkeypatch):
     events: list[str] = []
     real_converge, real_write, real_harden = perms.converge_dir, perms.write_secret, perms.harden_file

@@ -33,9 +33,16 @@ def get(url: str, **kwargs) -> httpx.Response:
         return client.get(url, **kwargs)
 
 
+COMPOSE_VARIABLES = ("COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "COMPOSE_ENV_FILES")
+
+
 def clean_environment() -> dict[str, str]:
-    """The process environment minus every `RT_*`, which compose would let override the project's `.env`."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("RT_")}
+    """The process environment minus every `RT_*` and the `COMPOSE_*` variables that choose files; compose would let
+    them override the project's `.env`."""
+    return {
+        key: value
+        for key, value in os.environ.items() if not key.startswith("RT_") and key not in COMPOSE_VARIABLES
+    }
 
 
 def run(*args: str, cwd: Path | None = None, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -162,6 +169,11 @@ class Project:
         self.write_env()
         return run("docker", "compose", *self.arguments(overlay=overlay, extra_files=extra_files), *args, cwd=self.root)
 
+    def bare_compose(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """`docker compose` as an operator types it: no `-f`, so the files are the ones `COMPOSE_FILE` in `.env` names."""
+        self.write_env()
+        return run("docker", "compose", "--project-name", self.name, *args, cwd=self.root)
+
     def tail(
         self,
         service: str,
@@ -232,8 +244,17 @@ class Project:
         return self.root / "secrets" / "token"
 
 
-def make_project(directory: Path, root_name: str | None = None, **overrides: str | None) -> Project:
-    """A scratch deployment. With `root_name`, the compose project is named after the directory, as `ctl` runs it."""
+def make_project(
+    directory: Path,
+    root_name: str | None = None,
+    *,
+    copy_in: Mapping[str, Path] | None = None,
+    **overrides: str | None,
+) -> Project:
+    """A scratch deployment. With `root_name`, the compose project is named after the directory, as `ctl` runs it.
+
+    `copy_in` adds files to the project, keyed by their name in it (for example `compose.override.yaml`).
+    """
     root = directory / (root_name or "deployment")
     root.mkdir()
     for name in BRIDGE_FILES:
@@ -242,6 +263,8 @@ def make_project(directory: Path, root_name: str | None = None, **overrides: str
             shutil.copytree(source, root / name)
         else:
             shutil.copy2(source, root / name)
+    for name, source in (copy_in or {}).items():
+        shutil.copy2(source, root / name)
     (root / "secrets").mkdir(mode=0o711)
     write_operator_token(root / "secrets" / "token", (GOOD_TOKEN + "\n").encode())
     values = {

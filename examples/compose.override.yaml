@@ -1,0 +1,22 @@
+# Copy to `compose.override.yaml` next to `compose.yaml` and name it in `.env`, after the overlay it extends:
+#   COMPOSE_FILE=compose.yaml:compose.traefik.yaml:compose.override.yaml   (`;` instead of `:` on Windows)
+# For a Traefik v3 that sets TLS per router rather than per entrypoint. The names `websecure` and `letsencrypt`, and
+# the `expose` label, are this example's: use your Traefik's entrypoint, certificate resolver and constraint label.
+# Leave what `ctl doctor`'s `container_hardening` checks alone (service name, mounts, hardening settings), and never
+# load `.env` into the container: doctor fails on either.
+services:
+  frps:
+    labels:
+      # Opt in to a Traefik whose provider only exposes containers that carry this label.
+      expose: "true"
+      # Tunnels: one wildcard certificate for every <label>.RT_DOMAIN.
+      traefik.http.routers.rt-vhost.entrypoints: websecure
+      traefik.http.routers.rt-vhost.tls: "true"
+      traefik.http.routers.rt-vhost.tls.certresolver: letsencrypt
+      traefik.http.routers.rt-vhost.tls.domains[0].main: ${RT_DOMAIN:?set RT_DOMAIN in .env}
+      traefik.http.routers.rt-vhost.tls.domains[0].sans: "*.${RT_DOMAIN:?set RT_DOMAIN in .env}"
+      # The control connection of RT_PROTOCOL=wss, at RT_CONTROL_HOST (for example `bridge.example.com`).
+      traefik.http.routers.rt-control.entrypoints: websecure
+      traefik.http.routers.rt-control.tls: "true"
+      traefik.http.routers.rt-control.tls.certresolver: letsencrypt
+      traefik.http.routers.rt-control.tls.domains[0].main: ${RT_CONTROL_HOST:?set RT_CONTROL_HOST in .env}

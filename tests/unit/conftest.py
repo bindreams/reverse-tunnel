@@ -31,6 +31,14 @@ def not_root(monkeypatch):
     monkeypatch.setattr(cli, "is_elevated", lambda: False)
 
 
+@pytest.fixture(autouse=True)
+def compose_file_unexported(monkeypatch):
+    """Compose, and so `ctl`, prefers an exported `COMPOSE_FILE` to `.env`; the runner's own must not leak in."""
+    monkeypatch.delenv("COMPOSE_FILE", raising=False)
+    monkeypatch.delenv("COMPOSE_PATH_SEPARATOR", raising=False)
+    monkeypatch.delenv("COMPOSE_ENV_FILES", raising=False)
+
+
 # No network ===========================================================================================================
 
 

@@ -1,6 +1,7 @@
 # Operator state and derived artifacts
 .env
 secrets/
+/compose.override.yaml
 bin/
 logs/
 install.log

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ctl import binaries, client, host, perms
 from ctl.atomic import read_file
+from ctl.compose_files import REMEDY, compose_file_problems
 from ctl.config import Config, Role
 from ctl.errors import BinariesError, InstallError
 from ctl.removal import remove_directory
@@ -163,6 +164,9 @@ def _install_bridge(config: Config) -> int:
     root = config.root
     secrets_dir, token_path = root / "secrets", root / "secrets" / "token"
     token = config.require("RT_TOKEN").encode("ascii")
+    check = compose_file_problems(root, config.values)
+    if check.problems:
+        raise InstallError("; ".join(check.problems) + f". Nothing was changed; {REMEDY[check.source]} and rerun")
     _refuse_compose_leftovers(root)
     perms.converge_dir(secrets_dir, None, SECRETS_MODE, NO_READERS, root=root)
     previous = read_file(secrets_dir, "token")
@@ -205,7 +209,10 @@ def _uninstall_bridge(config: Config, run: Runner, force: bool) -> int:
             )
             return 1
         if status != 0:
-            print(f"docker compose down failed (exit {status}); secrets/ is kept", file=sys.stderr)
+            check = compose_file_problems(config.root, config.values)
+            reasons = "; ".join(check.problems)
+            hint = f" COMPOSE_FILE has problems ({reasons}); {REMEDY[check.source]}, or pass --force." if reasons else ""
+            print(f"docker compose down failed (exit {status}); secrets/ is kept.{hint}", file=sys.stderr)
             return 1
     removed = remove_directory(config.root, "secrets")
     print("removed secrets/" if removed else "secrets/ is already absent")
