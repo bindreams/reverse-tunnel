@@ -90,13 +90,16 @@ jobs:
       # The tests that need no privilege, as the unprivileged runner user.
       - run: uv run pytest -p no:cacheprovider -m "not root" tests/unit tests/platform/posix
       # The ownership tests chown to this account and fail without it. The uid avoids the one the tests leave unnamed.
+      # Like `useradd` on Linux, give it a primary group of its own with the same name.
       - name: Create the second account
         run: |
           account=rt-test-svc
+          sudo dscl . -create "/Groups/$account"
+          sudo dscl . -create "/Groups/$account" PrimaryGroupID 4300
           sudo dscl . -create "/Users/$account"
           sudo dscl . -create "/Users/$account" UserShell /usr/bin/false
           sudo dscl . -create "/Users/$account" UniqueID 4300
-          sudo dscl . -create "/Users/$account" PrimaryGroupID 20
+          sudo dscl . -create "/Users/$account" PrimaryGroupID 4300
           sudo dscl . -create "/Users/$account" NFSHomeDirectory /var/empty
       - run: sudo -E env "PATH=$PATH" .venv/bin/python -m pytest -p no:cacheprovider -m "not mount" tests/platform/posix
 

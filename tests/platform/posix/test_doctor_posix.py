@@ -8,6 +8,7 @@ import builtins
 import io
 import os
 import pwd
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -153,11 +154,20 @@ OPERATOR = 4242
 
 
 @pytest.mark.root
-def test_the_operator_can_stat_the_services_secrets_without_elevation(tmp_path, tmp_path_factory, monkeypatch):
+def test_the_operator_can_stat_the_services_secrets_without_elevation(monkeypatch):
     """The repository is the operator's and `secrets/` the service's: doctor, run as the operator, still gets a verdict."""
-    base = tmp_path_factory.getbasetemp()
-    for directory in (base.parent, base, tmp_path):  # pytest makes these 0700, which no other account can enter
-        os.chmod(directory, 0o755)
+    # Under `/tmp`, which every account can enter: macOS's per-user temp directory is 0700, and no other account can
+    # reach anything beneath it.
+    with tempfile.TemporaryDirectory(dir="/tmp") as scratch:
+        os.chmod(scratch, 0o755)
+        verdicts = operator_verdicts(Path(scratch), monkeypatch)
+    assert {name: (verdict.outcome, verdict.detail)
+            for name, verdict in verdicts.items()
+            } == {name: (Outcome.PASS, verdict.detail)
+                  for name, verdict in verdicts.items()}
+
+
+def operator_verdicts(tmp_path: Path, monkeypatch) -> dict:
     world, _ = build_host_world(tmp_path, monkeypatch, RT_SERVICE_USER=SERVICE_ACCOUNT)
     root, service = world.root, pwd.getpwnam(SERVICE_ACCOUNT)
     hand_to(root, pwd.getpwnam(SERVICE_ACCOUNT))
@@ -172,11 +182,7 @@ def test_the_operator_can_stat_the_services_secrets_without_elevation(tmp_path, 
     os.setegid(OPERATOR)
     os.seteuid(OPERATOR)
     try:
-        verdicts = {"env": permissions.env(), "dir": permissions.secrets_dir(), "token": permissions.secrets_token()}
+        return {"env": permissions.env(), "dir": permissions.secrets_dir(), "token": permissions.secrets_token()}
     finally:
         os.seteuid(0)
         os.setegid(0)
-    assert {name: (verdict.outcome, verdict.detail)
-            for name, verdict in verdicts.items()
-            } == {name: (Outcome.PASS, verdict.detail)
-                  for name, verdict in verdicts.items()}
