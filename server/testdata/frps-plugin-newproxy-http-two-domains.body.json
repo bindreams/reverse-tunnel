@@ -1,0 +1,1 @@
+{"version":"0.1.0","op":"NewProxy","content":{"user":{"user":"alice","metas":{"token":"host-secret"},"run_id":"589a57c069972276"},"proxy_name":"alice.p-m2","proxy_type":"http","custom_domains":["m2.alice.t.test","alice.t.test"]}}

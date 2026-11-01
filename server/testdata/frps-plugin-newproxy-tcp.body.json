@@ -1,0 +1,1 @@
+{"version":"0.1.0","op":"NewProxy","content":{"user":{"user":"alice","metas":{"token":"host-secret"},"run_id":"93c07e8890b1f40f"},"proxy_name":"alice.p-tcp","proxy_type":"tcp","remote_port":7100}}
