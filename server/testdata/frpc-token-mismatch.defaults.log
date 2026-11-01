@@ -1,0 +1,5 @@
+[1;34m2026-11-01 17:02:11.191 [I] [sub/root.go:194] start frpc service for config file [r.toml] with aggregated configuration
+[0m[1;34m2026-11-01 17:02:11.191 [I] [client/service.go:335] try to connect to server...
+[0m[1;33m2026-11-01 17:02:11.195 [W] [client/service.go:346] connect to server error: token mismatch
+[0m[1;34m2026-11-01 17:02:11.195 [I] [sub/root.go:211] frpc service for config file [r.toml] stopped
+[0mlogin to the server failed: token mismatch. With loginFailExit enabled, no additional retries will be attempted

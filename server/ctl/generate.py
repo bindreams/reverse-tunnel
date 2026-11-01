@@ -1,0 +1,45 @@
+import hashlib
+
+import yaml
+
+PLUGIN_SERVICE = "reverse-tunnel-plugin"
+_CERTS = "traefik.http.routers.certs"
+
+
+def alias_key(public: str) -> str:
+    """The Traefik router and middleware name for an alias: dot-free, so it is safe inside a label key."""
+    return "alias-" + hashlib.sha256(public.encode()).hexdigest()
+
+
+def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) -> str:
+    """Compose override that adds the registries' Traefik labels to the plugin service."""
+    labels = {
+        "traefik.enable": "true",
+        "traefik.expose": "true",
+        # Without a service port label Traefik drops the container's whole configuration.
+        "traefik.http.services.plugin.loadbalancer.server.port": "9000",
+    }
+    if hosts:
+        # Only a stand-in router to carry the certificate domains; nothing routes to it.
+        labels |= {
+            f"{_CERTS}.rule": "Host(`certs.invalid`)",
+            f"{_CERTS}.service": "noop@internal",
+            f"{_CERTS}.entrypoints": "websecure",
+            f"{_CERTS}.tls.certresolver": "letsencrypt",
+        }
+    for i, host in enumerate(sorted(hosts)):
+        labels[f"{_CERTS}.tls.domains[{i}].main"] = f"*.{host}.{domain}"
+        labels[f"{_CERTS}.tls.domains[{i}].sans"] = f"{host}.{domain}"
+    for public, backend in sorted(aliases.items()):
+        key = alias_key(public)
+        router = f"traefik.http.routers.{key}"
+        labels |= {
+            f"{router}.rule": f"Host(`{public}`)",
+            f"{router}.entrypoints": "websecure",
+            f"{router}.tls": "true",
+            f"{router}.tls.certresolver": "letsencrypt",
+            f"{router}.middlewares": key,
+            f"{router}.service": "frps-vhost@docker",
+            f"traefik.http.middlewares.{key}.headers.customrequestheaders.Host": backend,
+        }
+    return yaml.safe_dump({"services": {PLUGIN_SERVICE: {"labels": labels}}}, sort_keys=False)
