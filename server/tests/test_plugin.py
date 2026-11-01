@@ -22,7 +22,7 @@ def reject(reason):
 
 
 def captured(name):
-    """The query and body of a request frps 0.71.1 really sent."""
+    """The query and body of a request frps 0.71.1 sent."""
     query = (SERVER / "testdata" / f"frps-plugin-{name}.query.txt").read_text().strip()
     return query, json.loads((SERVER / "testdata" / f"frps-plugin-{name}.body.json").read_text())
 

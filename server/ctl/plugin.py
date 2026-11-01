@@ -13,7 +13,7 @@ from ctl.names import allowed_names, valid_domain
 from ctl.registry import RegistryError, read_hosts
 
 ACCEPT = {"reject": False, "unchange": True}
-MAX_BODY = 2**20  # frps's requests are a few hundred bytes
+MAX_BODY = 2**20  # input bound; frps requests are a few hundred bytes
 
 
 def _reject(reason: str, host: str | None = None) -> dict:
@@ -57,16 +57,17 @@ def decide(op: str, content: dict, hosts: dict[str, str], domain: str) -> dict:
 
 
 def make_server(state_dir: Path, domain: str, port: int) -> ThreadingHTTPServer:
-    """A plugin server bound to `port` (0 picks a free one; see `server_address`); the registry is read per request."""
+    """A plugin server bound to `port` (0 picks a free one); the registry is read per request."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             if urlsplit(self.path).path != "/handler":
                 return self.send_error(404)
             try:
-                length = int(self.headers.get("Content-Length") or 0)
-                request = json.loads(self.rfile.read(length)) if 0 <= length <= MAX_BODY else None
-            except (ValueError, RecursionError):  # a bad Content-Length, or a body that is not JSON
+                length = self.headers.get("Content-Length", "0")
+                digits = length.isascii() and length.isdigit()
+                request = json.loads(self.rfile.read(int(length))) if digits and int(length) <= MAX_BODY else None
+            except (ValueError, RecursionError):  # a body that is not JSON, or too deeply nested
                 request = None
             try:
                 hosts = read_hosts(state_dir / "hosts")
