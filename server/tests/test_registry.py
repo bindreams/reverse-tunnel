@@ -65,8 +65,8 @@ def test_hosts_undecodable_bytes_name_their_line(tmp_path):
 @pytest.mark.parametrize(
     "line",
     [
-        "Movies.binarydreams.me jellyfin.mothership.t.test",  # public-name rule
-        f"{MOVIES} jellyfin.other.example",  # backend rule
+        "Movies.binarydreams.me jellyfin.mothership.t.test",
+        f"{MOVIES} jellyfin.other.example",
         f"{DUP} jellyfin.mothership.t.test",
         MOVIES,
     ],
@@ -233,7 +233,7 @@ def test_locked_acquires_after_losing_the_creation_race(tmp_path, monkeypatch):
 
     def link_after_another_operator_created_it(src, dst):
         (tmp_path / "lock").touch(mode=0o600)
-        real_link(src, dst)  # raises FileExistsError
+        real_link(src, dst)
 
     monkeypatch.setattr(os, "link", link_after_another_operator_created_it)
     with locked(tmp_path):

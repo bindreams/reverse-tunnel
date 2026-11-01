@@ -15,7 +15,10 @@ def alias_key(public: str) -> str:
 
 
 def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) -> str:
-    """Compose override YAML labelling the plugin service: certs for `hosts`, routes for `aliases` (public -> backend)."""
+    """Compose override YAML labelling the plugin service: certs for `hosts`, routes for `aliases` (public -> backend).
+
+    Expects registry-validated hosts and aliases; only `domain` is checked.
+    """
     if not valid_domain(domain):
         raise ValueError(f"invalid domain {domain!r}")
     labels = {
