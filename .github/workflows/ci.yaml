@@ -34,7 +34,8 @@ jobs:
           (umask 077; uv run --locked python -c 'import sys; from ctl.certs import make_cert; c, k = make_cert(sys.argv[1]); open("tls/frps.crt", "w").write(c); open("tls/frps.key", "w").write(k)' tunnel.binarydreams.me)
           docker network create gateway
       - name: The frps router matches the tunnel domain and its subdomains, with the dollar escaped for compose
-        run: docker compose config | grep -E 'reverse-tunnel-frps\.rule: .*tunnel\.binarydreams\.me\$\$`\)$'
+        run: |
+          docker compose config | grep -E 'reverse-tunnel-frps\.rule: .*tunnel\.binarydreams\.me\$\$`\)$'
       - run: docker compose build
       - run: docker compose up -d
       - name: frps loads its certificate and starts
