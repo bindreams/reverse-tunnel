@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -13,7 +14,7 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from dotenv import dotenv_values
 
 from ctl import certs, cli, compose
-from ctl.registry import locked, read_aliases, read_hosts, write_hosts
+from ctl.registry import RegistryError, locked, read_aliases, read_hosts, write_hosts
 
 T = "t.test"
 H = "sha256:" + "1" * 64
@@ -98,6 +99,7 @@ def test_init_idempotent(bridge, capsys):
     [
         ("", True, None, "TUNNEL_DOMAIN is not set"),
         ("TUNNEL_DOMAIN=bad_domain\n", True, None, "TUNNEL_DOMAIN 'bad_domain'"),
+        (f"TUNNEL_DOMAIN={T}\nCOMPOSE_FILE=other.yaml\n", True, None, "COMPOSE_FILE"),
         (f"TUNNEL_DOMAIN={T}\n", False, None, "network 'gateway'"),
         (f"TUNNEL_DOMAIN={T}\n", True, T, f"cannot resolve {T}"),
         (f"TUNNEL_DOMAIN={T}\n", True, f"rt-dns-check.rt-dns-check.{T}", "cannot resolve rt-dns-check"),
@@ -116,6 +118,8 @@ def test_add_then_revoke(inited):
     assert cli.main(["add", "web", H]) == 0
     assert read_hosts(Path("state/hosts")) == {"web": H}
     assert f"*.web.{T}" in GENERATED.read_text()
+    assert cli.main(["add", "web", H2]) == 1  # a typo'd name must not replace another host's token
+    assert read_hosts(Path("state/hosts")) == {"web": H}
     assert cli.main(["revoke", "web"]) == 0
     assert read_hosts(Path("state/hosts")) == {}
     assert f"*.web.{T}" not in GENERATED.read_text()
@@ -217,7 +221,7 @@ def test_docker_failure_after_write_is_reported(inited, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "registry is updated" in err and "plugin was not reloaded" in err and "rerun any ctl command" in err
     assert "web" in read_hosts(Path("state/hosts"))
-    assert cli.main(["list"]) == 1  # nothing written this time
+    assert cli.main(["list"]) == 1
     err = capsys.readouterr().err
     assert "plugin was not reloaded" in err and "registry is updated" not in err
     monkeypatch.setattr(compose, "compose_up_plugin", inited.append)
@@ -235,27 +239,38 @@ def test_list_regenerates(inited, capsys):
 
 
 def test_init_edits_env_in_place(bridge):
-    Path(".env").write_text(f"# mine\nTUNNEL_DOMAIN={T}\nCOMPOSE_FILE=old\nOTHER=1\n")
+    original = f"# mine\nTUNNEL_DOMAIN={T}\nOTHER=1 # no newline at the end"
+    Path(".env").write_text(original)
     assert cli.main(["init"]) == 0
-    text = Path(".env").read_text()
-    assert text.startswith("# mine\n") and text.count("COMPOSE_FILE=") == 1
-    assert dotenv_values(".env") | {"FRPS_TOKEN": "x"} == {
-        "TUNNEL_DOMAIN": T,
-        "COMPOSE_FILE": "compose.yaml:compose.generated.yaml",
-        "OTHER": "1",
-        "FRPS_TOKEN": "x",
-    }
+    env = dotenv_values(".env")
+    assert Path(".env").read_text().startswith(original + "\n")
+    assert re.fullmatch("[0-9a-f]{64}", env.pop("FRPS_TOKEN"))
+    assert env == {"TUNNEL_DOMAIN": T, "OTHER": "1", "COMPOSE_FILE": "compose.yaml:compose.generated.yaml"}
     assert Path(".env").stat().st_mode & 0o777 == 0o600  # it holds the frps token
 
 
-def test_init_never_replaces_trusted_certificate(inited, capsys):
-    kept = {name: Path(name).read_bytes() for name in ["tls/frps.crt", "tls/trust.pem"]}
-    Path("tls/frps.key").unlink()
+def _swap_pair():
+    cert, key = certs.make_cert(T)
+    Path("tls/frps.crt").write_text(cert)
+    Path("tls/frps.key").write_text(key)
+
+
+BREAKS = {
+    "key missing": lambda: Path("tls/frps.key").unlink(),
+    "key not the certificate's": lambda: Path("tls/frps.key").write_text(certs.make_cert(T)[1]),
+    "certificate missing": lambda: Path("tls/frps.crt").unlink(),
+    "certificate not in trust.pem": _swap_pair,
+}
+
+
+@pytest.mark.parametrize("break_it", BREAKS.values(), ids=BREAKS)
+def test_init_never_replaces_trusted_certificate(inited, capsys, break_it):
+    break_it()
+    broken = {path: path.read_bytes() for path in Path("tls").iterdir()}
     capsys.readouterr()
     assert cli.main(["init"]) == 1
     assert "rotation" in capsys.readouterr().err
-    assert kept == {name: Path(name).read_bytes() for name in kept}
-    assert not Path("tls/frps.key").exists()
+    assert broken == {path: path.read_bytes() for path in Path("tls").iterdir()}
 
 
 def test_init_recovers_before_any_host_trusts(inited):
@@ -299,16 +314,35 @@ def test_network_exists_reports_docker_failure(docker, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_STDERR", "permission denied while trying to connect to the docker API")
     with pytest.raises(OSError, match="permission denied"):
         compose.network_exists("gateway")
+    monkeypatch.setenv("FAKE_STDERR", "")
+    monkeypatch.setenv("FAKE_EXIT", "3")
+    with pytest.raises(OSError, match="docker exited with 3"):
+        compose.network_exists("gateway")
     monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
     with pytest.raises(OSError, match="docker is not installed"):
         compose.network_exists("gateway")
 
 
-def test_plugin_reload_leaves_frps_alone(docker, tmp_path):
-    compose.compose_up_plugin(tmp_path)
-    assert Path(f"{docker}.log").read_text() == "compose up -d --no-deps reverse-tunnel-plugin\n"
+def test_plugin_reload_uses_only_the_bridge_compose_files(docker, tmp_path):
+    compose.compose_up_plugin(tmp_path)  # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it
+    assert Path(f"{docker}.log").read_text() == (
+        "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml up -d --no-deps reverse-tunnel-plugin\n"
+    )
+
+
+def test_failed_registry_write_prints_nothing(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+
+    def refuse(path, hosts):
+        raise RegistryError(1, "refused")
+
+    monkeypatch.setattr(cli, "write_hosts", refuse)
+    capsys.readouterr()
+    assert cli.main(["revoke", "web"]) == 1  # the hint would claim a revocation that did not happen
+    out, err = capsys.readouterr()
+    assert out == "" and "state/hosts" in err
 
 
 def test_cert_is_valid_from_yesterday():
     cert = x509.load_pem_x509_certificate(certs.make_cert(T)[0].encode())
-    assert cert.not_valid_before_utc < datetime.now(UTC) - timedelta(hours=23)  # a host whose clock runs behind
+    assert cert.not_valid_before_utc < datetime.now(UTC) - timedelta(hours=23)

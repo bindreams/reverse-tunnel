@@ -17,7 +17,9 @@ def _docker(*args: str, **kwargs) -> subprocess.CompletedProcess:
 
 def compose_up_plugin(folder: Path) -> None:
     """Create or update the plugin container from the bridge folder's compose files, leaving frps alone."""
-    _docker("compose", "up", "-d", "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
+    # -p and -f pin the project and files: COMPOSE_FILE and COMPOSE_PROJECT_NAME in the shell must not redirect it
+    command = ["compose", "-p", "reverse-tunnel", "-f", "compose.yaml", "-f", "compose.generated.yaml"]
+    _docker(*command, "up", "-d", "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
 
 
 def network_exists(name: str) -> bool:
@@ -28,4 +30,4 @@ def network_exists(name: str) -> bool:
     stderr = result.stderr.strip()
     if f"network {name} not found" in stderr or f"No such network: {name}" in stderr:
         return False
-    raise DockerError(stderr)
+    raise DockerError(f"docker exited with {result.returncode}" + (f": {stderr}" if stderr else ""))

@@ -1,8 +1,7 @@
-"""The bridge operator's commands, run as `uv run ctl <command>` in the bridge folder."""
+"""The bridge operator's commands (`uv run ctl <command>`)."""
 
 import argparse
 import contextlib
-import re
 import secrets
 import socket
 import subprocess
@@ -47,58 +46,28 @@ def _create(path: Path, data: bytes, mode: int) -> None:
         atomic_write(path, data, mode, exclusive=True)
 
 
-def _set_env(updates: dict[str, str]) -> None:
-    """Set keys in `.env`, keeping its other lines, and publish it at 0600: it holds the frps token."""
-    text = ENV.read_text()
-    for key, value in updates.items():
-        text = re.sub(rf"(?m)^(export\s+)?{key}\s*=.*\n?", "", text).rstrip("\n") + f"\n{key}={value}\n"
-    atomic_write(ENV, text.encode(), 0o600)
-
-
-def _cert_problem(crt: Path, key: Path, trust: Path) -> str | None:
-    """Why the certificate files are not a usable, trusted pair, or None; ValueError or TypeError on unusable PEM."""
-    if not (crt.exists() and key.exists()):
-        return f"{crt} or {key} is missing"
-    if not certs.matches(crt.read_bytes(), key.read_bytes()):
-        return f"{crt} does not match {key}"
-    if trust.exists() and not certs.in_bundle(crt.read_bytes(), trust.read_bytes()):
-        return f"{crt} is not in {trust}"
-    return None
-
-
 def _init(env: dict) -> None:
-    """Check the deployment and create what is missing."""
+    """Check the deployment and create what is missing; `.env` only ever gains the lines it lacks."""
     domain = env["TUNNEL_DOMAIN"]
-    crt = TLS / "frps.crt"
-    key = TLS / "frps.key"
-    trust = TLS / "trust.pem"
+    if env.get("COMPOSE_FILE", COMPOSE_FILE) != COMPOSE_FILE:
+        raise CtlError(f"COMPOSE_FILE in .env is {env['COMPOSE_FILE']!r}, not {COMPOSE_FILE!r}: edit or remove it")
     if not compose.network_exists("gateway"):
         raise CtlError("docker network 'gateway' does not exist")
     for name in (domain, f"rt-dns-check.rt-dns-check.{domain}"):
         if not resolve(name):
             raise CtlError(f"cannot resolve {name}")
-    rotation = "follow the certificate rotation procedure in the README"
     try:
-        problem = _cert_problem(crt, key, trust)
-        if problem and trust.exists():  # hosts may trust the bundle: never replace the certificate silently
-            raise CtlError(f"{problem}; {rotation}")
-        if not problem and certs.dns_names(crt.read_bytes()) != [domain]:
-            raise CtlError(f"{crt} is not for {domain}; {rotation}")
-    except (ValueError, TypeError) as e:
-        raise CtlError(f"unusable file in {TLS}: {e}; {rotation}") from e
-    updates = {}
-    if not env.get("FRPS_TOKEN"):
-        updates["FRPS_TOKEN"] = secrets.token_hex(32)
-    if env.get("COMPOSE_FILE") != COMPOSE_FILE:
-        updates["COMPOSE_FILE"] = COMPOSE_FILE
-    if updates:
-        _set_env(updates)
-    TLS.mkdir(exist_ok=True)
-    if problem:
-        cert_pem, key_pem = certs.make_cert(domain)
-        atomic_write(key, key_pem.encode(), 0o600)  # the key first: no certificate is ever published without it
-        atomic_write(crt, cert_pem.encode(), 0o644)
-    _create(trust, crt.read_bytes(), 0o644)
+        certs.ensure(domain, TLS)
+    except certs.CertError as e:
+        raise CtlError(str(e)) from e
+    missing = {"FRPS_TOKEN": secrets.token_hex(32), "COMPOSE_FILE": COMPOSE_FILE}
+    lines = [f"{key}={value}\n" for key, value in missing.items() if key not in env]
+    if lines:
+        text = ENV.read_text()
+        if not text.endswith("\n"):
+            text += "\n"
+        atomic_write(ENV, (text + "".join(lines)).encode(), 0o600)  # it holds the frps token
+    _create(TLS / "trust.pem", (TLS / "frps.crt").read_bytes(), 0o644)
     _create(STATE / "hosts", b"", 0o644)
     _create(STATE / "aliases", b"", 0o644)
 
@@ -136,7 +105,7 @@ def _list(args, hosts, aliases, env):
 
 def _join_code(args, hosts, aliases, env):
     if not env.get("FRPS_TOKEN"):
-        raise CtlError("FRPS_TOKEN is not set in .env; run 'ctl init'")
+        raise CtlError("FRPS_TOKEN is missing or empty in .env; run 'ctl init'")
     return encode_join(env["TUNNEL_DOMAIN"], env["FRPS_TOKEN"], (TLS / "trust.pem").read_text())
 
 
@@ -152,9 +121,9 @@ COMMANDS = {
 }
 
 
-def _load(path, read, *args):
+def _registry(call, path, *args):
     try:
-        return read(path, *args)
+        return call(path, *args)
     except RegistryError as e:
         raise CtlError(f"{path}: {e}") from e
 
@@ -178,17 +147,17 @@ def _run(args) -> None:
         if args.command == "init":
             _init(env)
             env = dotenv_values(ENV)
-        hosts = _load(STATE / "hosts", read_hosts)
-        aliases = _load(STATE / "aliases", read_aliases, domain)
+        hosts = _registry(read_hosts, STATE / "hosts")
+        aliases = _registry(read_aliases, STATE / "aliases", domain)
         old_hosts = dict(hosts)
         old_aliases = dict(aliases)
         out = COMMANDS[args.command][0](args, hosts, aliases, env)
-        if out:
-            print(out)  # before the reload: a failing docker must not hide it
         if hosts != old_hosts:
-            write_hosts(STATE / "hosts", hosts)
+            _registry(write_hosts, STATE / "hosts", hosts)
         if aliases != old_aliases:
-            write_aliases(STATE / "aliases", aliases, domain)
+            _registry(write_aliases, STATE / "aliases", aliases, domain)
+        if out:
+            print(out)  # after the write, which may fail; before the reload, which may too
         try:
             atomic_write(GENERATED, render_compose(hosts, aliases, domain).encode(), 0o644)
             compose.compose_up_plugin(Path.cwd())
@@ -206,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
             subparser.add_argument(argument)
     try:
         _run(parser.parse_args(argv))
-    except (CtlError, OSError, ValueError) as e:
+    except (CtlError, OSError) as e:
         print(f"ctl: {e}", file=sys.stderr)
         return 1
     return 0
