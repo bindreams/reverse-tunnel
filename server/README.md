@@ -4,9 +4,10 @@ The server side of reverse-tunnel: `frps` accepts one QUIC connection per host, 
 registered hosts and only their own names. Traefik, already running on the Docker network `gateway`, serves the public
 side. Hosts are set up with the `reverse-tunnel` binary from the main repository.
 
-Needs a Linux server (`ctl` uses `fcntl`, and the images are Linux) with Docker Compose, [uv](https://docs.astral.sh/uv/), and on `gateway` a Traefik that selects containers with
-`traefik.expose=true`, has the entrypoint `websecure`, and has a `letsencrypt` resolver using the DNS-01 challenge
-(host certificates are wildcards).
+Needs a Linux server (`ctl` uses `fcntl`, and the images are Linux) with Docker Compose and
+[uv](https://docs.astral.sh/uv/), and on `gateway` a Traefik that selects containers with `traefik.expose=true`, has
+the entrypoint `websecure`, and has a `letsencrypt` resolver using the DNS-01 challenge (host certificates are
+wildcards).
 
 ## Bring-up
 
