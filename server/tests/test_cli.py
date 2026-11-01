@@ -1,8 +1,10 @@
 import base64
 import json
+import os
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,21 @@ def inited(bridge):
     assert cli.main(["init"]) == 0
     bridge.clear()
     return bridge
+
+
+def docker_down(folder):
+    raise subprocess.CalledProcessError(1, "docker")
+
+
+@pytest.fixture
+def docker(tmp_path, monkeypatch):
+    """A fake `docker`, alone on PATH: logs its arguments, prints $FAKE_STDERR, exits with $FAKE_EXIT."""
+    exe = tmp_path / "bin" / "docker"
+    exe.parent.mkdir()
+    exe.write_text('#!/bin/sh\necho "$@" >> "$0.log"\necho "$FAKE_STDERR" >&2\nexit "${FAKE_EXIT:-0}"\n')
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(exe.parent))
+    return exe
 
 
 def start(*argv):
@@ -140,10 +157,11 @@ def test_alias_requires_backend_under_T(inited):
     assert read_aliases(Path("state/aliases"), T) == {}
 
 
-def test_revoke_prints_restart_hint(inited, capsys):
+def test_revoke_prints_restart_hint(inited, monkeypatch, capsys):
     cli.main(["add", "web", H])
+    monkeypatch.setattr(compose, "compose_up_plugin", docker_down)
     capsys.readouterr()
-    assert cli.main(["revoke", "web"]) == 0
+    assert cli.main(["revoke", "web"]) == 1  # the hint must not depend on the reload
     assert "docker compose restart reverse-tunnel-frps" in capsys.readouterr().out
 
 
@@ -194,14 +212,14 @@ def test_init_domain_change_fails(inited, capsys):
 
 
 def test_docker_failure_after_write_is_reported(inited, monkeypatch, capsys):
-    def fail(folder):
-        raise subprocess.CalledProcessError(1, "docker")
-
-    monkeypatch.setattr(compose, "compose_up_plugin", fail)
+    monkeypatch.setattr(compose, "compose_up_plugin", docker_down)
     assert cli.main(["add", "web", H]) == 1
     err = capsys.readouterr().err
-    assert "plugin was not reloaded" in err and "rerun any ctl command" in err
+    assert "registry is updated" in err and "plugin was not reloaded" in err and "rerun any ctl command" in err
     assert "web" in read_hosts(Path("state/hosts"))
+    assert cli.main(["list"]) == 1  # nothing written this time
+    err = capsys.readouterr().err
+    assert "plugin was not reloaded" in err and "registry is updated" not in err
     monkeypatch.setattr(compose, "compose_up_plugin", inited.append)
     assert cli.main(["list"]) == 0
     assert inited == [Path.cwd()]
@@ -214,3 +232,83 @@ def test_list_regenerates(inited, capsys):
     assert f"*.web.{T}" in GENERATED.read_text()
     assert "web" in capsys.readouterr().out
     assert Path("state/hosts").read_bytes() == hand_edit
+
+
+def test_init_edits_env_in_place(bridge):
+    Path(".env").write_text(f"# mine\nTUNNEL_DOMAIN={T}\nCOMPOSE_FILE=old\nOTHER=1\n")
+    assert cli.main(["init"]) == 0
+    text = Path(".env").read_text()
+    assert text.startswith("# mine\n") and text.count("COMPOSE_FILE=") == 1
+    assert dotenv_values(".env") | {"FRPS_TOKEN": "x"} == {
+        "TUNNEL_DOMAIN": T,
+        "COMPOSE_FILE": "compose.yaml:compose.generated.yaml",
+        "OTHER": "1",
+        "FRPS_TOKEN": "x",
+    }
+    assert Path(".env").stat().st_mode & 0o777 == 0o600  # it holds the frps token
+
+
+def test_init_never_replaces_trusted_certificate(inited, capsys):
+    kept = {name: Path(name).read_bytes() for name in ["tls/frps.crt", "tls/trust.pem"]}
+    Path("tls/frps.key").unlink()
+    capsys.readouterr()
+    assert cli.main(["init"]) == 1
+    assert "rotation" in capsys.readouterr().err
+    assert kept == {name: Path(name).read_bytes() for name in kept}
+    assert not Path("tls/frps.key").exists()
+
+
+def test_init_recovers_before_any_host_trusts(inited):
+    Path("tls/frps.crt").unlink()  # as after init was killed between the key and the certificate
+    Path("tls/trust.pem").unlink()
+    assert cli.main(["init"]) == 0
+    cert = x509.load_pem_x509_certificate(Path("tls/frps.crt").read_bytes())
+    assert load_pem_private_key(Path("tls/frps.key").read_bytes(), None).public_key() == cert.public_key()
+    assert Path("tls/trust.pem").read_bytes() == Path("tls/frps.crt").read_bytes()
+
+
+@pytest.mark.parametrize("name", ["frps.crt", "frps.key", "trust.pem"])
+def test_init_reports_unusable_certificate_files(inited, capsys, name):
+    Path("tls", name).write_text("not a pem")
+    capsys.readouterr()
+    assert cli.main(["init"]) == 1
+    assert "tls" in capsys.readouterr().err
+
+
+def test_init_state_dir_is_readable_by_the_plugin(bridge):
+    old = os.umask(0o077)
+    try:
+        assert cli.main(["init"]) == 0
+    finally:
+        os.umask(old)
+    assert Path("state").stat().st_mode & 0o777 == 0o755
+
+
+def test_init_in_wrong_folder_leaves_nothing(bridge, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    os.chdir(elsewhere)
+    assert cli.main(["init"]) == 1
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_network_exists_reports_docker_failure(docker, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    monkeypatch.setenv("FAKE_STDERR", "Error response from daemon: network gateway not found")
+    assert compose.network_exists("gateway") is False
+    monkeypatch.setenv("FAKE_STDERR", "permission denied while trying to connect to the docker API")
+    with pytest.raises(OSError, match="permission denied"):
+        compose.network_exists("gateway")
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    with pytest.raises(OSError, match="docker is not installed"):
+        compose.network_exists("gateway")
+
+
+def test_plugin_reload_leaves_frps_alone(docker, tmp_path):
+    compose.compose_up_plugin(tmp_path)
+    assert Path(f"{docker}.log").read_text() == "compose up -d --no-deps reverse-tunnel-plugin\n"
+
+
+def test_cert_is_valid_from_yesterday():
+    cert = x509.load_pem_x509_certificate(certs.make_cert(T)[0].encode())
+    assert cert.not_valid_before_utc < datetime.now(UTC) - timedelta(hours=23)  # a host whose clock runs behind
