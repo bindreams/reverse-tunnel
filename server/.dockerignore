@@ -2,6 +2,6 @@
 tls/
 state/
 compose.generated.yaml
-__pycache__/
-.pytest_cache/
-.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# frps v0.71.1: the official release tarball, checked against the SHA-256 published for it
+# frps, pinned by SHA-256 per architecture
 FROM alpine:3.23 AS frp
 ARG TARGETARCH
 RUN <<-EOF

@@ -26,7 +26,7 @@ Joining a host and publishing a service: see the main README. The commands are `
 ## Verify
 
 - `docker compose ps` lists `reverse-tunnel-frps` and `reverse-tunnel-plugin` running.
-- `docker compose logs reverse-tunnel-frps` ends with `frps started successfully` and no plugin errors.
+- `docker compose logs reverse-tunnel-frps | grep 'frps started successfully'` prints a line.
 - `docker compose config` prints the frps router rule ending in your domain followed by `$$` (Compose's escape for `$`).
 - A joined host's `reverse-tunnel status` shows a successful login. "host not registered" means `uv run ctl add` has
   not been run for it.
@@ -39,10 +39,9 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 
 ## Footguns
 
-- Restarting or recreating `reverse-tunnel-frps` drops every tunnel once. Hosts reconnect on their own.
-  `docker compose up -d --build` does that only if frps's image or compose settings changed. After a `git pull` that
-  changed `etc/`, run `docker compose restart reverse-tunnel-frps` (or `up -d --force-recreate reverse-tunnel-frps`):
-  the files are mounted, so the container sees them but frps reads them at start.
+- Restarting or recreating `reverse-tunnel-frps` drops every tunnel once; hosts reconnect on their own. `etc/` is
+  mounted but frps reads it only at start, so after a `git pull` that changed it, run
+  `docker compose restart reverse-tunnel-frps`.
 - Every host trusts the certificate in `tls/trust.pem`. Deleting `tls/` or replacing the certificate outside the
   procedure below locks every host out; `ctl` refuses to regenerate it.
 - `tls/frps.key` and `.env` (the shared frps token) are secrets, and so are backups of this folder.
@@ -53,21 +52,23 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
   mount keeps pointing at the old one.
 - If the plugin is down, connected tunnels keep running, and logins and new names are refused until it is back.
 - `ctl revoke` does not cut the host's current session; it prints the command that does.
-- frps rewrites `X-Forwarded-Proto` to `http` on every request it forwards.
+- Services behind frps always see `X-Forwarded-Proto: http`, even over HTTPS.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `compose.yaml` | `reverse-tunnel-frps` and `reverse-tunnel-plugin`; the frps router is its labels |
-| `compose.generated.yaml` | the plugin's labels (certificates and aliases), generated; gitignored |
+| `compose.generated.yaml` | the plugin's labels (certificates and aliases), generated |
 | `Dockerfile` | target `frps` (the pinned release, checked by SHA-256) and target `plugin` |
 | `etc/frps.toml` | frps config; names no host and no service |
-| `LICENSE`, `.env.example`, `.gitignore`, `.dockerignore` | AGPL-3.0 (the mirror carries it); the `.env` template; what git and Docker builds skip |
+| `LICENSE`, `.env.example`, `.gitignore`, `.dockerignore` | license, `.env` template, ignore lists |
 | `ctl/`, `pyproject.toml`, `uv.lock` | the plugin and `uv run ctl` |
-| `tls/` | `frps.crt`, `frps.key`, and `trust.pem`, the certificates hosts trust; gitignored |
-| `state/` | `hosts` and `aliases` registries, the only thing the plugin container mounts; gitignored |
-| `.env` | `TUNNEL_DOMAIN`, `FRPS_TOKEN`, `COMPOSE_FILE`; gitignored |
+| `tls/` | `frps.crt`, `frps.key`, and `trust.pem`, the certificates hosts trust |
+| `state/` | `hosts` and `aliases` registries |
+| `.env` | `TUNNEL_DOMAIN`, `FRPS_TOKEN`, `COMPOSE_FILE` |
+
+`tls/`, `state/`, `.env` and `compose.generated.yaml` are gitignored.
 
 ## Rotating the certificate
 
