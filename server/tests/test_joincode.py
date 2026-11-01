@@ -15,6 +15,12 @@ def test_token_hash_vector():
     assert token_hash("0" * 64) == "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55"
 
 
+def test_token_hash_accepts_non_ascii():
+    digest = token_hash("é")
+    assert digest.startswith("sha256:")
+    assert digest != token_hash("0" * 64)
+
+
 @pytest.mark.parametrize(
     ("pem", "code"),
     [("bridge.pem", "join-code.txt"), ("bridge-multi.pem", "join-code-multi.txt")],

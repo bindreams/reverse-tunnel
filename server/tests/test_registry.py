@@ -43,7 +43,7 @@ def test_hosts_bad_line_reports_line_number(tmp_path):
         "a " + "1" * 64,
         f"a {H1} extra",
         f"dup {H2}",
-        "a b�c",
+        f"a\u00a0{H1}",  # NBSP is not a field separator
     ],
 )
 def test_registry_rejects_bad_hosts(tmp_path, line):
@@ -52,6 +52,14 @@ def test_registry_rejects_bad_hosts(tmp_path, line):
     with pytest.raises(RegistryError) as err:
         read_hosts(path)
     assert err.value.line_no == 3
+
+
+def test_hosts_undecodable_bytes_name_their_line(tmp_path):
+    path = tmp_path / "hosts"
+    path.write_bytes(f"a {H1}\nb".encode() + b"\xff\xfe " + H1.encode() + b"\n")
+    with pytest.raises(RegistryError) as err:
+        read_hosts(path)
+    assert err.value.line_no == 2
 
 
 @pytest.mark.parametrize(
@@ -65,6 +73,7 @@ def test_registry_rejects_bad_hosts(tmp_path, line):
         "Movies.example.test jellyfin.mothership.t.test",
         "movies.t.test jellyfin.mothership.t.test",  # public name under T
         "t.test jellyfin.mothership.t.test",
+        "localhost jellyfin.mothership.t.test",  # one label
         "movies..example.test jellyfin.mothership.t.test",
         "dup.example.test jellyfin.mothership.t.test",
         "movies.example.test",
@@ -116,6 +125,27 @@ def test_atomic_write_fsyncs(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == [tmp_path / "f"]
 
 
+def test_atomic_write_failure_keeps_the_original_error(tmp_path, monkeypatch):
+    def replace_that_loses_the_temp_file(src, dst):
+        os.unlink(src)
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", replace_that_loses_the_temp_file)
+    with pytest.raises(OSError, match="replace failed"):
+        registry.atomic_write(tmp_path / "f", b"data", 0o600)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_lock_file_mode_0644(tmp_path):
+    old = os.umask(0o077)
+    try:
+        with locked(tmp_path):
+            pass
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE((tmp_path / "lock").stat().st_mode) == 0o644
+
+
 def _blocked_flocks():
     with open("/proc/locks") as f:
         return [line for line in f if "->" in line and f" {os.getpid()} " in line]
@@ -123,17 +153,23 @@ def _blocked_flocks():
 
 def test_locked_excludes(tmp_path):
     acquired = threading.Event()
+    failures = []
 
     def waiter():
-        with locked(tmp_path):
-            acquired.set()
+        try:
+            with locked(tmp_path):
+                acquired.set()
+        except BaseException as exc:
+            failures.append(exc)
 
     thread = threading.Thread(target=waiter)
     with locked(tmp_path):
         thread.start()
-        # Spin until the kernel lists a blocked flock, or the waiter got the lock anyway.
-        while not _blocked_flocks() and not acquired.is_set():
+        # Spin until the kernel lists a blocked flock, or the waiter ended (it got the lock, or died).
+        while thread.is_alive() and not _blocked_flocks():
             os.sched_yield()
+        if failures:
+            raise failures[0]
         assert not acquired.is_set()
     thread.join()
     assert acquired.is_set()

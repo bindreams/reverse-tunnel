@@ -3,12 +3,12 @@ import hashlib
 import yaml
 
 PLUGIN_SERVICE = "reverse-tunnel-plugin"
-_CERTS = "traefik.http.routers.certs"
+_CERTS = "traefik.http.routers.reverse-tunnel-certs"
 
 
 def alias_key(public: str) -> str:
     """The Traefik router and middleware name for an alias: dot-free, so it is safe inside a label key."""
-    return "alias-" + hashlib.sha256(public.encode()).hexdigest()
+    return "reverse-tunnel-alias-" + hashlib.sha256(public.encode()).hexdigest()
 
 
 def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) -> str:
@@ -17,7 +17,7 @@ def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) 
         "traefik.enable": "true",
         "traefik.expose": "true",
         # Without a service port label Traefik drops the container's whole configuration.
-        "traefik.http.services.plugin.loadbalancer.server.port": "9000",
+        "traefik.http.services.reverse-tunnel-plugin.loadbalancer.server.port": "9000",
     }
     if hosts:
         # Only a stand-in router to carry the certificate domains; nothing routes to it.
@@ -39,7 +39,9 @@ def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) 
             f"{router}.tls": "true",
             f"{router}.tls.certresolver": "letsencrypt",
             f"{router}.middlewares": key,
-            f"{router}.service": "frps-vhost@docker",
+            f"{router}.service": "reverse-tunnel-frps-vhost@docker",
             f"traefik.http.middlewares.{key}.headers.customrequestheaders.Host": backend,
         }
-    return yaml.safe_dump({"services": {PLUGIN_SERVICE: {"labels": labels}}}, sort_keys=False)
+    # Compose's list form: label keys this long would make PyYAML emit complex `? ` keys.
+    pairs = sorted(f"{key}={value}" for key, value in labels.items())
+    return yaml.safe_dump({"services": {PLUGIN_SERVICE: {"labels": pairs}}}, sort_keys=False)
