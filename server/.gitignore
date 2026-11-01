@@ -1,0 +1,5 @@
+/.env
+/tls/
+/state/
+/compose.generated.yaml
+/.venv/

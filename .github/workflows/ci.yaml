@@ -16,3 +16,30 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: uv run --locked ctl --help
       - run: uv run --locked pytest
+
+  bridge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Write a test deployment
+        run: |
+          printf 'TUNNEL_DOMAIN=tunnel.binarydreams.me\nFRPS_TOKEN=test-token\nCOMPOSE_FILE=compose.yaml:compose.generated.yaml\n' > .env
+          printf 'services: {}\n' > compose.generated.yaml
+          mkdir tls state
+          touch state/hosts state/aliases
+          (umask 077; uv run --locked python -c 'import sys; from ctl.certs import make_cert; c, k = make_cert(sys.argv[1]); open("tls/frps.crt", "w").write(c); open("tls/frps.key", "w").write(k)' tunnel.binarydreams.me)
+          docker network create gateway
+      - name: The frps router matches the tunnel domain and its subdomains, with the dollar escaped for compose
+        run: docker compose config | grep -E 'reverse-tunnel-frps\.rule: .*tunnel\.binarydreams\.me\$\$`\)$'
+      - run: docker compose build
+      - run: docker compose up -d
+      - name: frps loads its certificate and starts
+        run: grep -q -m1 'frps started successfully' < <(docker compose logs -f reverse-tunnel-frps)
+      - name: The container's label has the dollar unescaped
+        run: docker inspect -f '{{index .Config.Labels "traefik.http.routers.reverse-tunnel-frps.rule"}}' reverse-tunnel-frps | grep -E 'tunnel\.binarydreams\.me\$`\)$'
+      - name: The plugin image, as its non-root user, reads the registries
+        run: docker compose run --rm --no-deps reverse-tunnel-plugin python -c "import ctl.plugin as p, pathlib; p.read_hosts(pathlib.Path('/state/hosts'))"
