@@ -1,1 +1,0 @@
-{"version":"0.1.0","op":"Login","content":{"version":"0.71.1","hostname":"3e945ea936ad","os":"linux","arch":"amd64","user":"alice","privilege_key":"852f5bfd1f9035328555e64a5784dae3","timestamp":1793552529,"metas":{"token":"host-secret"},"client_spec":{},"pool_count":1,"client_address":"127.0.0.1:55526"}}

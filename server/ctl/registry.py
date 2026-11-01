@@ -7,9 +7,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from ctl.names import allowed_names, valid_label
-
-_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+from ctl.joincode import is_token_hash
+from ctl.names import alias_problem, valid_label
 
 
 class RegistryError(Exception):
@@ -19,10 +18,10 @@ class RegistryError(Exception):
 
 
 def atomic_write(path: Path, data: bytes, mode: int) -> None:
-    """Replace `path` with `data` at `mode`: temp file beside it, fsync, rename, fsync the directory."""
+    """Durably replace `path` with `data` at `mode`."""
     with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as f:
         try:
-            os.fchmod(f.fileno(), mode)  # before the data lands, and independent of the umask
+            os.fchmod(f.fileno(), mode)  # independent of the umask
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
@@ -82,47 +81,35 @@ def _read(path: Path, problem: Callable[[str, str], str | None]) -> dict[str, st
     return entries
 
 
-def _write(path: Path, entries: dict[str, str]) -> None:
-    lines = "".join(f"{key} {value}\n" for key, value in sorted(entries.items()))
-    atomic_write(path, lines.encode(), 0o644)
+def _write(path: Path, entries: dict[str, str], problem: Callable[[str, str], str | None]) -> None:
+    lines = []
+    for line_no, (key, value) in enumerate(sorted(entries.items()), 1):
+        if msg := problem(key, value):
+            raise RegistryError(line_no, msg)
+        lines.append(f"{key} {value}\n")
+    atomic_write(path, "".join(lines).encode(), 0o644)
 
 
-def _is_hostname(labels: list[str]) -> bool:
-    """Whether the labels name a host an ACME CA can issue for: not a bare label, not an IP-like all-digit TLD."""
-    return len(labels) >= 2 and all(valid_label(label) for label in labels) and not labels[-1].isdigit()
+def _host_problem(host: str, digest: str) -> str | None:
+    if not valid_label(host):
+        return f"invalid host name {host!r}"
+    if not is_token_hash(digest):
+        return f"invalid hash {digest!r}"
+    return None
 
 
 def read_hosts(path: Path) -> dict[str, str]:
-    def problem(host: str, digest: str) -> str | None:
-        if not valid_label(host):
-            return f"invalid host name {host!r}"
-        if not _HASH.fullmatch(digest):
-            return f"invalid hash {digest!r}"
-        return None
-
-    return _read(path, problem)
+    return _read(path, _host_problem)
 
 
 def write_hosts(path: Path, hosts: dict[str, str]) -> None:
-    _write(path, hosts)
+    _write(path, hosts, _host_problem)
 
 
 def read_aliases(path: Path, domain: str) -> dict[str, str]:
     """Read `<public> <backend>` lines; `domain` is the tunnel domain the backends must lie under."""
-
-    def problem(public: str, backend: str) -> str | None:
-        labels = public.split(".")
-        if not _is_hostname(labels) or len(public) > 253:
-            return f"invalid public name {public!r}"
-        if public == domain or public.endswith(f".{domain}"):
-            return f"public name {public!r} is under the tunnel domain"
-        host = backend.removesuffix(f".{domain}").rsplit(".", 1)[-1]
-        if not allowed_names(host, domain)(backend):
-            return f"backend {backend!r} is not a name under the tunnel domain"
-        return None
-
-    return _read(path, problem)
+    return _read(path, lambda public, backend: alias_problem(public, backend, domain))
 
 
-def write_aliases(path: Path, aliases: dict[str, str]) -> None:
-    _write(path, aliases)
+def write_aliases(path: Path, aliases: dict[str, str], domain: str) -> None:
+    _write(path, aliases, lambda public, backend: alias_problem(public, backend, domain))

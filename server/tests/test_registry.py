@@ -15,6 +15,8 @@ from ctl.registry import (
 )
 
 T = "t.test"
+MOVIES = "movies.binarydreams.me"
+DUP = "dup.binarydreams.me"
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
 
@@ -65,27 +67,33 @@ def test_hosts_undecodable_bytes_name_their_line(tmp_path):
 @pytest.mark.parametrize(
     "line",
     [
-        "movies.example.test jellyfin.other.example",  # backend not under T
-        "movies.example.test a.b.c.t.test",  # backend deeper than s.h.T
-        "movies.example.test t.test",  # backend is T itself
-        "movies.example.test Jellyfin.mothership.t.test",
-        "bad`name.example.test jellyfin.mothership.t.test",
-        "Movies.example.test jellyfin.mothership.t.test",
-        "movies.t.test jellyfin.mothership.t.test",  # public name under T
-        "t.test jellyfin.mothership.t.test",
+        f"{MOVIES} jellyfin.other.example",  # backend not under T
+        f"{MOVIES} a.b.c.t.test",  # backend deeper than s.h.T
+        f"{MOVIES} t.test",  # backend is T itself
+        f"{MOVIES} Jellyfin.mothership.t.test",
+        f"{MOVIES} x.ab--c.t.test",  # reserved double-hyphen host label
+        f"{MOVIES} jellyfin.mothership.t.test.",
+        "bad`name.binarydreams.me jellyfin.mothership.t.test",
+        "Movies.binarydreams.me jellyfin.mothership.t.test",
         "localhost jellyfin.mothership.t.test",  # one label
-        "mo_vies.example.test jellyfin.mothership.t.test",
+        "mo_vies.binarydreams.me jellyfin.mothership.t.test",
+        "ab--c.binarydreams.me jellyfin.mothership.t.test",
+        f"{'a' * 64}.binarydreams.me jellyfin.mothership.t.test",
+        f"{MOVIES}. jellyfin.mothership.t.test",  # trailing dot
         "1.2.3.4 jellyfin.mothership.t.test",  # an IP address, not a hostname
         "example.123 jellyfin.mothership.t.test",  # all-digit last label
         ".".join(["a" * 63] * 3 + ["a" * 62]) + " jellyfin.mothership.t.test",  # 254 characters
-        "movies..example.test jellyfin.mothership.t.test",
-        "dup.example.test jellyfin.mothership.t.test",
-        "movies.example.test",
+        "movies..binarydreams.me jellyfin.mothership.t.test",
+        "movies.test jellyfin.mothership.t.test",  # special-use names are not issuable
+        "movies.example jellyfin.mothership.t.test",
+        "www.example.com jellyfin.mothership.t.test",
+        f"{DUP} jellyfin.mothership.t.test",
+        MOVIES,
     ],
 )
 def test_registry_rejects_bad_aliases(tmp_path, line):
     path = tmp_path / "aliases"
-    path.write_text(f"dup.example.test jellyfin.mothership.t.test\n{line}\n")
+    path.write_text(f"{DUP} jellyfin.mothership.t.test\n{line}\n")
     with pytest.raises(RegistryError) as err:
         read_aliases(path, T)
     assert err.value.line_no == 2
@@ -99,6 +107,80 @@ def test_alias_public_name_may_have_253_characters(tmp_path):
     assert read_aliases(path, T) == {public: "jellyfin.mothership.t.test"}
 
 
+@pytest.mark.parametrize("public", ["movies.tunnel.binarydreams.me", "tunnel.binarydreams.me"])
+def test_alias_public_name_under_the_tunnel_domain_is_rejected(tmp_path, public):
+    path = tmp_path / "aliases"
+    path.write_text(f"{public} jellyfin.mothership.tunnel.binarydreams.me\n")
+    with pytest.raises(RegistryError, match="under the tunnel domain") as err:
+        read_aliases(path, "tunnel.binarydreams.me")
+    assert err.value.line_no == 1
+
+
+def test_hosts_tolerates_a_utf8_bom(tmp_path):
+    path = tmp_path / "hosts"
+    path.write_bytes(b"\xef\xbb\xbf" + f"a {H1}\n".encode())
+    assert read_hosts(path) == {"a": H1}
+
+
+def test_aliases_tolerate_hand_edits(tmp_path):
+    path = tmp_path / "aliases"
+    path.write_bytes(
+        f"# comment\r\n\r\n{MOVIES}\tjellyfin.mothership.t.test\r\n  {DUP} \t s.h.t.test  \n   # indented\n".encode()
+    )
+    assert read_aliases(path, T) == {MOVIES: "jellyfin.mothership.t.test", DUP: "s.h.t.test"}
+
+
+def test_empty_registry_reads_as_empty(tmp_path):
+    path = tmp_path / "registry"
+    path.write_bytes(b"")
+    assert read_hosts(path) == {}
+    assert read_aliases(path, T) == {}
+
+
+def test_missing_registry_raises_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        read_hosts(tmp_path / "hosts")
+    with pytest.raises(FileNotFoundError):
+        read_aliases(tmp_path / "aliases", T)
+
+
+def test_write_hosts_refuses_what_the_reader_rejects(tmp_path):
+    path = tmp_path / "hosts"
+    write_hosts(path, {"keep": H1})
+    for bad in [{"ok": H1, "Bad": H1}, {"ok": H1, "ab--c": H1}, {"ok": "sha256:1"}, {"a b": H1}, {"ok": H1 + "\n"}]:
+        with pytest.raises(RegistryError):
+            write_hosts(path, bad)
+    assert read_hosts(path) == {"keep": H1}
+
+
+def test_write_hosts_error_names_the_line_it_would_have_had(tmp_path):
+    with pytest.raises(RegistryError) as err:
+        write_hosts(tmp_path / "hosts", {"b": "bad", "a": H1})
+    assert err.value.line_no == 2
+    assert not (tmp_path / "hosts").exists()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"movies.test": "jellyfin.mothership.t.test"},
+        {"example.com": "jellyfin.mothership.t.test"},
+        {"ab--c.binarydreams.me": "jellyfin.mothership.t.test"},
+        {MOVIES: "x.ab--c.t.test"},
+        {MOVIES: "other.example"},
+        {"movies.t.test": "jellyfin.mothership.t.test"},
+        {"a b": "jellyfin.mothership.t.test"},
+        {MOVIES: "jellyfin.mothership.t.test\nx"},
+    ],
+)
+def test_write_aliases_refuses_what_the_reader_rejects(tmp_path, bad):
+    path = tmp_path / "aliases"
+    write_aliases(path, {DUP: "s.h.t.test"}, T)
+    with pytest.raises(RegistryError):
+        write_aliases(path, bad, T)
+    assert read_aliases(path, T) == {DUP: "s.h.t.test"}
+
+
 def test_registries_round_trip_sorted_with_lf(tmp_path):
     hosts = tmp_path / "hosts"
     write_hosts(hosts, {"b": H2, "a": H1})
@@ -106,16 +188,16 @@ def test_registries_round_trip_sorted_with_lf(tmp_path):
     assert read_hosts(hosts) == {"a": H1, "b": H2}
 
     aliases = tmp_path / "aliases"
-    write_aliases(aliases, {"z.example.test": "h.t.test", "a.example.test": "s.h.t.test"})
-    assert aliases.read_text() == "a.example.test s.h.t.test\nz.example.test h.t.test\n"
-    assert read_aliases(aliases, T) == {"z.example.test": "h.t.test", "a.example.test": "s.h.t.test"}
+    write_aliases(aliases, {"z.binarydreams.me": "h.t.test", "a.binarydreams.me": "s.h.t.test"}, T)
+    assert aliases.read_text() == "a.binarydreams.me s.h.t.test\nz.binarydreams.me h.t.test\n"
+    assert read_aliases(aliases, T) == {"z.binarydreams.me": "h.t.test", "a.binarydreams.me": "s.h.t.test"}
 
 
 def test_written_mode_0644(tmp_path):
     old = os.umask(0o077)
     try:
         write_hosts(tmp_path / "hosts", {})
-        write_aliases(tmp_path / "aliases", {})
+        write_aliases(tmp_path / "aliases", {}, T)
     finally:
         os.umask(old)
     for name in ["hosts", "aliases"]:
@@ -161,6 +243,32 @@ def test_atomic_write_cleanup_failure_keeps_the_original_error(tmp_path, monkeyp
         registry.atomic_write(tmp_path / "f", b"data", 0o600)
 
 
+def test_atomic_write_over_an_existing_file_gives_new_content_and_mode(tmp_path):
+    target = tmp_path / "f"
+    target.write_bytes(b"old")
+    target.chmod(0o600)
+    registry.atomic_write(target, b"new", 0o644)
+    assert target.read_bytes() == b"new"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_atomic_write_failed_replace_keeps_the_old_file(tmp_path, monkeypatch):
+    target = tmp_path / "f"
+    target.write_bytes(b"old")
+    target.chmod(0o600)
+
+    def failing_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        registry.atomic_write(target, b"new", 0o644)
+    assert target.read_bytes() == b"old"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_lock_file_mode_0644(tmp_path):
     old = os.umask(0o077)
     try:
@@ -177,6 +285,25 @@ def test_locked_works_on_a_read_only_lock_file(tmp_path):
     with locked(tmp_path):
         pass
     assert stat.S_IMODE(lock.stat().st_mode) == 0o444
+
+
+def test_locked_acquires_after_losing_the_creation_race(tmp_path, monkeypatch):
+    real_link = os.link
+
+    def link_after_another_operator_created_it(src, dst):
+        (tmp_path / "lock").touch(mode=0o600)
+        real_link(src, dst)  # raises FileExistsError
+
+    monkeypatch.setattr(os, "link", link_after_another_operator_created_it)
+    with locked(tmp_path):
+        pass
+    assert stat.S_IMODE((tmp_path / "lock").stat().st_mode) == 0o600
+
+
+def test_locked_leaves_only_the_lock_file(tmp_path):
+    with locked(tmp_path):
+        assert [p.name for p in tmp_path.iterdir()] == ["lock"]
+    assert [p.name for p in tmp_path.iterdir()] == ["lock"]
 
 
 def _blocked_flocks():
@@ -198,7 +325,7 @@ def test_locked_excludes(tmp_path):
     thread = threading.Thread(target=waiter)
     with locked(tmp_path):
         thread.start()
-        # Spin until the kernel lists a blocked flock, or the waiter ended (it got the lock, or died).
+        # Wait for the waiter to block on the flock (or end).
         while thread.is_alive() and not _blocked_flocks():
             os.sched_yield()
         if failures:
