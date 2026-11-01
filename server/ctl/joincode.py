@@ -5,7 +5,7 @@ import json
 
 def token_hash(token_hex: str) -> str:
     """The registry form of a per-host token: `sha256:` and the hex digest of the token text."""
-    return "sha256:" + hashlib.sha256(token_hex.encode()).hexdigest()
+    return "sha256:" + hashlib.sha256(token_hex.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def encode_join(domain: str, token: str, cert_pem: str) -> str:

@@ -38,12 +38,25 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
         os.close(dir_fd)
 
 
+def _open_lock(path: Path) -> int:
+    """Open the lock file read-only, first creating it at 0644 if missing: linked into place, so it never appears
+    at another mode, and an existing file (any mode, any owner) is left alone."""
+    try:
+        return os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        pass
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.") as tmp:
+        os.fchmod(tmp.fileno(), 0o644)
+        with contextlib.suppress(FileExistsError):
+            os.link(tmp.name, path)
+    return os.open(path, os.O_RDONLY)
+
+
 @contextmanager
 def locked(state_dir: Path) -> Iterator[None]:
     """Hold the exclusive state lock, waiting for as long as another holder keeps it."""
-    fd = os.open(state_dir / "lock", os.O_RDWR | os.O_CREAT, 0o644)
+    fd = _open_lock(state_dir / "lock")
     try:
-        os.fchmod(fd, 0o644)  # independent of the umask
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
@@ -74,6 +87,11 @@ def _write(path: Path, entries: dict[str, str]) -> None:
     atomic_write(path, lines.encode(), 0o644)
 
 
+def _is_hostname(labels: list[str]) -> bool:
+    """Whether the labels name a host an ACME CA can issue for: not a bare label, not an IP-like all-digit TLD."""
+    return len(labels) >= 2 and all(valid_label(label) for label in labels) and not labels[-1].isdigit()
+
+
 def read_hosts(path: Path) -> dict[str, str]:
     def problem(host: str, digest: str) -> str | None:
         if not valid_label(host):
@@ -93,7 +111,7 @@ def read_aliases(path: Path, domain: str) -> dict[str, str]:
 
     def problem(public: str, backend: str) -> str | None:
         labels = public.split(".")
-        if len(labels) < 2 or not all(valid_label(label) for label in labels) or len(public) > 253:
+        if not _is_hostname(labels) or len(public) > 253:
             return f"invalid public name {public!r}"
         if public == domain or public.endswith(f".{domain}"):
             return f"public name {public!r} is under the tunnel domain"

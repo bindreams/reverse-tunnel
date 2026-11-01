@@ -21,6 +21,10 @@ def test_token_hash_accepts_non_ascii():
     assert digest != token_hash("0" * 64)
 
 
+def test_token_hash_accepts_lone_surrogate():
+    assert token_hash("\ud800").startswith("sha256:")
+
+
 @pytest.mark.parametrize(
     ("pem", "code"),
     [("bridge.pem", "join-code.txt"), ("bridge-multi.pem", "join-code-multi.txt")],

@@ -74,6 +74,10 @@ def test_hosts_undecodable_bytes_name_their_line(tmp_path):
         "movies.t.test jellyfin.mothership.t.test",  # public name under T
         "t.test jellyfin.mothership.t.test",
         "localhost jellyfin.mothership.t.test",  # one label
+        "mo_vies.example.test jellyfin.mothership.t.test",
+        "1.2.3.4 jellyfin.mothership.t.test",  # an IP address, not a hostname
+        "example.123 jellyfin.mothership.t.test",  # all-digit last label
+        ".".join(["a" * 63] * 3 + ["a" * 62]) + " jellyfin.mothership.t.test",  # 254 characters
         "movies..example.test jellyfin.mothership.t.test",
         "dup.example.test jellyfin.mothership.t.test",
         "movies.example.test",
@@ -85,6 +89,14 @@ def test_registry_rejects_bad_aliases(tmp_path, line):
     with pytest.raises(RegistryError) as err:
         read_aliases(path, T)
     assert err.value.line_no == 2
+
+
+def test_alias_public_name_may_have_253_characters(tmp_path):
+    public = ".".join(["a" * 63] * 3 + ["a" * 61])
+    assert len(public) == 253
+    path = tmp_path / "aliases"
+    path.write_text(f"{public} jellyfin.mothership.t.test\n")
+    assert read_aliases(path, T) == {public: "jellyfin.mothership.t.test"}
 
 
 def test_registries_round_trip_sorted_with_lf(tmp_path):
@@ -144,6 +156,14 @@ def test_lock_file_mode_0644(tmp_path):
     finally:
         os.umask(old)
     assert stat.S_IMODE((tmp_path / "lock").stat().st_mode) == 0o644
+
+
+def test_locked_works_on_a_read_only_lock_file(tmp_path):
+    lock = tmp_path / "lock"
+    lock.touch(mode=0o444)
+    with locked(tmp_path):
+        pass
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o444
 
 
 def _blocked_flocks():

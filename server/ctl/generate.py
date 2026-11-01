@@ -2,8 +2,9 @@ import hashlib
 
 import yaml
 
-PLUGIN_SERVICE = "reverse-tunnel-plugin"
-_CERTS = "traefik.http.routers.reverse-tunnel-certs"
+PLUGIN_SERVICE = "reverse-tunnel-plugin"  # the compose service and its Traefik service
+CERTS_ROUTER = "reverse-tunnel-certs"
+FRPS_VHOST_SERVICE = "reverse-tunnel-frps-vhost"  # defined on frps's labels
 
 
 def alias_key(public: str) -> str:
@@ -17,19 +18,20 @@ def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) 
         "traefik.enable": "true",
         "traefik.expose": "true",
         # Without a service port label Traefik drops the container's whole configuration.
-        "traefik.http.services.reverse-tunnel-plugin.loadbalancer.server.port": "9000",
+        f"traefik.http.services.{PLUGIN_SERVICE}.loadbalancer.server.port": "9000",
     }
+    certs = f"traefik.http.routers.{CERTS_ROUTER}"
     if hosts:
         # Only a stand-in router to carry the certificate domains; nothing routes to it.
         labels |= {
-            f"{_CERTS}.rule": "Host(`certs.invalid`)",
-            f"{_CERTS}.service": "noop@internal",
-            f"{_CERTS}.entrypoints": "websecure",
-            f"{_CERTS}.tls.certresolver": "letsencrypt",
+            f"{certs}.rule": "Host(`certs.invalid`)",
+            f"{certs}.service": "noop@internal",
+            f"{certs}.entrypoints": "websecure",
+            f"{certs}.tls.certresolver": "letsencrypt",
         }
     for i, host in enumerate(sorted(hosts)):
-        labels[f"{_CERTS}.tls.domains[{i}].main"] = f"*.{host}.{domain}"
-        labels[f"{_CERTS}.tls.domains[{i}].sans"] = f"{host}.{domain}"
+        labels[f"{certs}.tls.domains[{i}].main"] = f"*.{host}.{domain}"
+        labels[f"{certs}.tls.domains[{i}].sans"] = f"{host}.{domain}"
     for public, backend in sorted(aliases.items()):
         key = alias_key(public)
         router = f"traefik.http.routers.{key}"
@@ -39,7 +41,7 @@ def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) 
             f"{router}.tls": "true",
             f"{router}.tls.certresolver": "letsencrypt",
             f"{router}.middlewares": key,
-            f"{router}.service": "reverse-tunnel-frps-vhost@docker",
+            f"{router}.service": f"{FRPS_VHOST_SERVICE}@docker",
             f"traefik.http.middlewares.{key}.headers.customrequestheaders.Host": backend,
         }
     # Compose's list form: label keys this long would make PyYAML emit complex `? ` keys.
