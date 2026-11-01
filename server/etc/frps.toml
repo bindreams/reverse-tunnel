@@ -1,0 +1,14 @@
+bindPort = 7000
+quicBindPort = 7000
+vhostHTTPPort = 8080
+
+auth.token = "{{ .Envs.FRPS_TOKEN }}"
+transport.tls.force = true
+transport.tls.certFile = "/etc/frps-tls/frps.crt"
+transport.tls.keyFile = "/etc/frps-tls/frps.key"
+
+[[httpPlugins]]
+name = "reverse-tunnel-plugin"
+addr = "reverse-tunnel-plugin:9000"
+path = "/handler"
+ops = ["Login", "NewProxy"]

@@ -1,0 +1,60 @@
+name: reverse-tunnel
+
+services:
+  reverse-tunnel-frps:
+    container_name: reverse-tunnel-frps
+    build:
+      context: .
+      target: frps
+    restart: unless-stopped
+    environment:
+      FRPS_TOKEN: ${FRPS_TOKEN:?run 'uv run ctl init'}
+    ports:
+      - "7000:7000/tcp"
+      - "7000:7000/udp"
+    volumes:
+      # Directories, so files replaced by git or a rotation are seen by the container.
+      - type: bind
+        source: ./etc
+        target: /etc/frps
+        read_only: true
+      - type: bind
+        source: ./tls
+        target: /etc/frps-tls
+        read_only: true
+    networks:
+      - gateway
+      - reverse-tunnel
+    labels:
+      - traefik.enable=true
+      - traefik.expose=true
+      - traefik.docker.network=gateway
+      - traefik.http.routers.reverse-tunnel-frps.rule=HostRegexp(`^([^.]+\.)?[^.]+\.${TUNNEL_DOMAIN:?set TUNNEL_DOMAIN in .env}$$`)
+      - traefik.http.routers.reverse-tunnel-frps.entrypoints=websecure
+      - traefik.http.routers.reverse-tunnel-frps.tls=true
+      - traefik.http.routers.reverse-tunnel-frps.service=reverse-tunnel-frps-vhost
+      - traefik.http.services.reverse-tunnel-frps-vhost.loadbalancer.server.port=8080
+      - traefik.http.services.reverse-tunnel-frps-vhost.loadbalancer.passhostheader=true
+
+  reverse-tunnel-plugin:
+    container_name: reverse-tunnel-plugin
+    build:
+      context: .
+      target: plugin
+    restart: unless-stopped
+    init: true  # python as PID 1 ignores SIGTERM
+    environment:
+      TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:?set TUNNEL_DOMAIN in .env}
+    volumes:
+      # A directory, because os.replace leaves a single-file mount on the old inode.
+      - type: bind
+        source: ./state
+        target: /state
+        read_only: true
+    networks:
+      - reverse-tunnel
+
+networks:
+  gateway:
+    external: true
+  reverse-tunnel:
