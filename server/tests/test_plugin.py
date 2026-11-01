@@ -27,9 +27,10 @@ def captured(name):
     return query, json.loads((SERVER / "testdata" / f"frps-plugin-{name}.body.json").read_text())
 
 
-def post(port, query, body, path="/handler"):
+def post(port, query, body, path="/handler", headers=None):
     data = body if isinstance(body, bytes) else json.dumps(body).encode()
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}?{query}", data) as response:
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}?{query}", data, headers or {})
+    with urllib.request.urlopen(request) as response:
         return json.load(response)
 
 
@@ -50,16 +51,25 @@ def test_login_accepts_registered_token(plugin):
     assert plugin[1](*captured("login")) == ACCEPT
 
 
-def test_login_rejects_unknown_host(plugin):
+def test_login_rejects_unknown_host(plugin, capsys):
     query, body = captured("login")
-    body["content"]["user"] = "mallory"
+    body["content"]["user"] = "mal\nlory"
     assert plugin[1](query, body) == reject("host not registered")
+    assert "reject host='mal\\nlory' reason='host not registered'\n" in capsys.readouterr().err
 
 
 def test_login_rejects_wrong_token(plugin):
     query, body = captured("login")
     body["content"]["metas"]["token"] = "guess"
     assert plugin[1](query, body) == reject("token mismatch")
+
+
+def test_new_proxy_rejects_removed_host(plugin):
+    state, ask = plugin
+    request = captured("newproxy-http")
+    assert ask(*request) == ACCEPT
+    write_hosts(state / "hosts", {})
+    assert ask(*request) == reject("host not registered")
 
 
 def test_new_proxy_rejects_tcp(plugin):
@@ -84,6 +94,15 @@ def test_malformed_body_rejected(plugin):
     wrong_type = {**body, "content": {"user": 5, "metas": {"token": "host-secret"}}}
     for bad in (b"not json", b"[]", no_metas, wrong_type):
         assert plugin[1](query, bad) == reject("malformed request")
+
+
+@pytest.mark.parametrize(
+    "body, headers",
+    [(b"", {"Content-Length": str(2**20 + 1)}), (b"[" * 100_000, {})],
+    ids=["oversized", "too-deeply-nested"],
+)
+def test_unparseable_request_is_malformed(plugin, body, headers):
+    assert plugin[1](captured("login")[0], body, headers=headers) == reject("malformed request")
 
 
 def test_unknown_op_rejected(plugin):

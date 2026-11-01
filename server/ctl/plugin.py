@@ -4,7 +4,7 @@ import hmac
 import json
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,22 +13,33 @@ from ctl.names import allowed_names, valid_domain
 from ctl.registry import RegistryError, read_hosts
 
 ACCEPT = {"reject": False, "unchange": True}
+MAX_BODY = 2**20  # frps's requests are a few hundred bytes
 
 
-def _reject(reason: str, host: str = "-") -> dict:
-    print(f"reject host={host} reason={reason}", file=sys.stderr)
+def _reject(reason: str, host: str | None = None) -> dict:
+    # repr: host and names come from the client and must not forge log lines
+    print(f"reject host={host!r} reason={reason!r}", file=sys.stderr)
     return {"reject": True, "reject_reason": reason}
+
+
+def _unauthenticated(user: str, token: str, hosts: dict[str, str]) -> str | None:
+    """Why `user` with `token` is not a registered host, or None."""
+    if user not in hosts:
+        return "host not registered"
+    if not hmac.compare_digest(token_hash(token), hosts[user]):
+        return "token mismatch"
+    return None
 
 
 def decide(op: str, content: dict, hosts: dict[str, str], domain: str) -> dict:
     """The reply to one frps plugin request, given the registered hosts' token hashes and the tunnel domain."""
     match op, content:
         case "Login", {"user": str(user), "metas": {"token": str(token)}}:
-            if user not in hosts:
-                return _reject("host not registered", user)
-            if not hmac.compare_digest(token_hash(token), hosts[user]):
-                return _reject("token mismatch", user)
-        case "NewProxy", {"user": {"user": str(user)}, "proxy_type": str(kind), **rest}:
+            if reason := _unauthenticated(user, token, hosts):
+                return _reject(reason, user)
+        case "NewProxy", {"user": {"user": str(user), "metas": {"token": str(token)}}, "proxy_type": str(kind), **rest}:
+            if reason := _unauthenticated(user, token, hosts):
+                return _reject(reason, user)
             names, subdomain = rest.get("custom_domains", []), rest.get("subdomain", "")
             if not (isinstance(names, list) and all(isinstance(n, str) for n in names) and isinstance(subdomain, str)):
                 return _reject("malformed request", user)
@@ -45,7 +56,7 @@ def decide(op: str, content: dict, hosts: dict[str, str], domain: str) -> dict:
     return ACCEPT
 
 
-def make_server(state_dir: Path, domain: str, port: int) -> HTTPServer:
+def make_server(state_dir: Path, domain: str, port: int) -> ThreadingHTTPServer:
     """A plugin server bound to `port` (0 picks a free one; see `server_address`); the registry is read per request."""
 
     class Handler(BaseHTTPRequestHandler):
@@ -53,8 +64,9 @@ def make_server(state_dir: Path, domain: str, port: int) -> HTTPServer:
             if urlsplit(self.path).path != "/handler":
                 return self.send_error(404)
             try:
-                request = json.loads(self.rfile.read(max(int(self.headers.get("Content-Length") or 0), 0)))
-            except ValueError:  # a bad Content-Length, or a body that is not JSON
+                length = int(self.headers.get("Content-Length") or 0)
+                request = json.loads(self.rfile.read(length)) if 0 <= length <= MAX_BODY else None
+            except (ValueError, RecursionError):  # a bad Content-Length, or a body that is not JSON
                 request = None
             try:
                 hosts = read_hosts(state_dir / "hosts")
