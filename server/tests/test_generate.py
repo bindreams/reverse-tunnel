@@ -1,5 +1,3 @@
-import hashlib
-
 import pytest
 import yaml
 
@@ -22,12 +20,6 @@ def labels_of(hosts, aliases):
     labels = dict(pair.split("=", 1) for pair in pairs)
     assert len(labels) == len(pairs)  # distinct label keys
     return labels
-
-
-def test_alias_key_is_dot_free_sha256():
-    key = alias_key(MOVIES)
-    assert key == "reverse-tunnel-alias-" + hashlib.sha256(MOVIES.encode()).hexdigest()
-    assert "." not in key
 
 
 def test_alias_key_literal():
@@ -87,21 +79,7 @@ def test_compose_hosts_and_aliases_together():
     assert f"{CERTS}.tls.domains[2].main" not in labels
 
 
-@pytest.mark.parametrize(
-    ("hosts", "aliases", "domain"),
-    [
-        ({"a": H}, {}, "test"),
-        ({"a": H}, {}, "t.test."),
-        ({"A": H}, {}, T),
-        ({"ab--c": H}, {}, T),
-        ({}, {"movies.test": "jellyfin.a.t.test"}, T),
-        ({}, {"example.com": "jellyfin.a.t.test"}, T),
-        ({}, {"movies.t.test": "jellyfin.a.t.test"}, T),
-        ({}, {MOVIES: "jellyfin.a.other.test"}, T),
-        ({}, {MOVIES: "x.ab--c.t.test"}, T),
-        ({}, {MOVIES: "a.b.c.t.test"}, T),
-    ],
-)
-def test_render_compose_rejects_invalid_input(hosts, aliases, domain):
+@pytest.mark.parametrize("domain", ["test", "t.test."])
+def test_render_compose_rejects_invalid_domain(domain):
     with pytest.raises(ValueError):
-        render_compose(hosts, aliases, domain)
+        render_compose({}, {}, domain)

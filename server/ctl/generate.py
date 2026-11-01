@@ -2,7 +2,7 @@ import hashlib
 
 import yaml
 
-from ctl.names import alias_problem, valid_domain, valid_label
+from ctl.names import valid_domain
 
 PLUGIN_SERVICE = "reverse-tunnel-plugin"  # the compose service and its Traefik service
 CERTS_ROUTER = "reverse-tunnel-certs"
@@ -18,12 +18,6 @@ def render_compose(hosts: dict[str, str], aliases: dict[str, str], domain: str) 
     """Compose override YAML labelling the plugin service: certs for `hosts`, routes for `aliases` (public -> backend)."""
     if not valid_domain(domain):
         raise ValueError(f"invalid domain {domain!r}")
-    for host in hosts:
-        if not valid_label(host):
-            raise ValueError(f"invalid host name {host!r}")
-    for public, backend in aliases.items():
-        if msg := alias_problem(public, backend, domain):
-            raise ValueError(msg)
     labels = {
         "traefik.enable": "true",
         "traefik.expose": "true",

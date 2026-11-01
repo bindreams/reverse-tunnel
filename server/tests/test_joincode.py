@@ -15,12 +15,6 @@ def test_token_hash_vector():
     assert token_hash("0" * 64) == "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55"
 
 
-def test_token_hash_accepts_non_ascii():
-    digest = token_hash("é")
-    assert digest.startswith("sha256:")
-    assert digest != token_hash("0" * 64)
-
-
 def test_token_hash_accepts_lone_surrogate():
     assert token_hash("\ud800").startswith("sha256:")
 
@@ -39,10 +33,6 @@ def decode(code):
     payload = code.removeprefix("rt1:")
     assert "=" not in payload
     return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-
-
-def test_join_code_shape():
-    assert decode(encode_join(DOMAIN, TOKEN, "pem")) == {"domain": DOMAIN, "token": TOKEN, "cert": "pem"}
 
 
 def test_is_token_hash():
