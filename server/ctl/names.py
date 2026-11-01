@@ -15,9 +15,10 @@ def valid_label(s: str) -> bool:
 
 
 def valid_domain(domain: str) -> bool:
-    """A tunnel domain: at least two valid labels, at most 253 characters, no trailing dot."""
+    """A tunnel domain: at least two valid labels, at most 125 characters, no trailing dot."""
     labels = domain.split(".")
-    return len(labels) >= 2 and len(domain) <= 253 and all(valid_label(label) for label in labels)
+    # The longest claimable name, `s.h.T` (two 63-character labels and two dots), must fit DNS's 253.
+    return len(labels) >= 2 and len(domain) <= 125 and all(valid_label(label) for label in labels)
 
 
 def owner_host(name: str, domain: str) -> str | None:
