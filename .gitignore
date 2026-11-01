@@ -2,3 +2,6 @@
 /.superpowers/
 /target/
 /CLAUDE.local.md
+__pycache__/
+.pytest_cache/
+.venv/
