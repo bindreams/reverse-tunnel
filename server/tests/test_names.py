@@ -13,6 +13,13 @@ def test_label_rule():
         assert not valid_label(bad)
 
 
+def test_label_rule_refuses_reserved_double_hyphen():
+    assert valid_label("a--b")
+    assert valid_label("a-b--c")
+    assert not valid_label("ab--c")
+    assert not valid_label("xn--abc")
+
+
 def test_allowed_names():
     allowed = allowed_names("mothership", "tunnel.example.test")
     assert allowed("mothership.tunnel.example.test")

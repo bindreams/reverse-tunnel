@@ -148,6 +148,19 @@ def test_atomic_write_failure_keeps_the_original_error(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_atomic_write_cleanup_failure_keeps_the_original_error(tmp_path, monkeypatch):
+    def failing_replace(src, dst):
+        raise OSError("replace failed")
+
+    def failing_unlink(path):
+        raise PermissionError("unlink refused")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    monkeypatch.setattr(os, "unlink", failing_unlink)
+    with pytest.raises(OSError, match="replace failed"):
+        registry.atomic_write(tmp_path / "f", b"data", 0o600)
+
+
 def test_lock_file_mode_0644(tmp_path):
     old = os.umask(0o077)
     try:

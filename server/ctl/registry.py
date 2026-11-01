@@ -28,7 +28,7 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
             os.fsync(f.fileno())
             os.replace(f.name, path)
         except BaseException:
-            with contextlib.suppress(FileNotFoundError):
+            with contextlib.suppress(OSError):
                 os.unlink(f.name)
             raise
     dir_fd = os.open(path.parent, os.O_RDONLY)
@@ -98,6 +98,7 @@ def read_hosts(path: Path) -> dict[str, str]:
             return f"invalid host name {host!r}"
         if not _HASH.fullmatch(digest):
             return f"invalid hash {digest!r}"
+        return None
 
     return _read(path, problem)
 
@@ -116,8 +117,9 @@ def read_aliases(path: Path, domain: str) -> dict[str, str]:
         if public == domain or public.endswith(f".{domain}"):
             return f"public name {public!r} is under the tunnel domain"
         host = backend.removesuffix(f".{domain}").rsplit(".", 1)[-1]
-        if not backend.endswith(f".{domain}") or not allowed_names(host, domain)(backend):
+        if not allowed_names(host, domain)(backend):
             return f"backend {backend!r} is not a name under the tunnel domain"
+        return None
 
     return _read(path, problem)
 
