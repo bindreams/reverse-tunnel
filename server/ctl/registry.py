@@ -17,15 +17,19 @@ class RegistryError(Exception):
         self.line_no = line_no
 
 
-def atomic_write(path: Path, data: bytes, mode: int) -> None:
-    """Durably replace `path` with `data` at `mode`."""
+def atomic_write(path: Path, data: bytes, mode: int, *, exclusive: bool = False) -> None:
+    """Durably replace `path` with `data` at `mode`; with `exclusive`, raise FileExistsError instead if it exists."""
     with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as f:
         try:
             os.fchmod(f.fileno(), mode)  # independent of the umask
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-            os.replace(f.name, path)
+            if exclusive:
+                os.link(f.name, path)
+                os.unlink(f.name)
+            else:
+                os.replace(f.name, path)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(f.name)
