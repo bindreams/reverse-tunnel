@@ -2,4 +2,6 @@
 /tls/
 /state/
 /compose.generated.yaml
-/.venv/
+__pycache__/
+.pytest_cache/
+.venv/

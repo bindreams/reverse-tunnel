@@ -13,14 +13,14 @@ services:
       - "7000:7000/tcp"
       - "7000:7000/udp"
     volumes:
+      # Directories, so files replaced by git or a rotation are seen by the container.
       - type: bind
-        source: ./etc/frps.toml
-        target: /etc/frps/frps.toml
+        source: ./etc
+        target: /etc/frps
         read_only: true
-      # A directory, so a rotated certificate is seen after the files are replaced.
       - type: bind
         source: ./tls
-        target: /etc/frps/tls
+        target: /etc/frps-tls
         read_only: true
     networks:
       - gateway
@@ -42,6 +42,7 @@ services:
       context: .
       target: plugin
     restart: unless-stopped
+    init: true  # python as PID 1 ignores SIGTERM
     environment:
       TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:?set TUNNEL_DOMAIN in .env}
     volumes:

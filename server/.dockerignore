@@ -1,0 +1,7 @@
+.env
+tls/
+state/
+compose.generated.yaml
+__pycache__/
+.pytest_cache/
+.venv/

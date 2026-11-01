@@ -3,8 +3,9 @@ quicBindPort = 7000
 vhostHTTPPort = 8080
 
 auth.token = "{{ .Envs.FRPS_TOKEN }}"
-transport.tls.certFile = "/etc/frps/tls/frps.crt"
-transport.tls.keyFile = "/etc/frps/tls/frps.key"
+transport.tls.force = true
+transport.tls.certFile = "/etc/frps-tls/frps.crt"
+transport.tls.keyFile = "/etc/frps-tls/frps.key"
 
 [[httpPlugins]]
 name = "reverse-tunnel-plugin"

@@ -4,7 +4,7 @@ The server side of reverse-tunnel: `frps` accepts one QUIC connection per host, 
 registered hosts and only their own names. Traefik, already running on the Docker network `gateway`, serves the public
 side. Hosts are set up with the `reverse-tunnel` binary from the main repository.
 
-Needs Docker with Compose, [uv](https://docs.astral.sh/uv/), and on `gateway` a Traefik that selects containers with
+Needs a Linux server (`ctl` uses `fcntl`, and the images are Linux) with Docker Compose, [uv](https://docs.astral.sh/uv/), and on `gateway` a Traefik that selects containers with
 `traefik.expose=true`, has the entrypoint `websecure`, and has a `letsencrypt` resolver using the DNS-01 challenge
 (host certificates are wildcards).
 
@@ -26,7 +26,7 @@ Joining a host and publishing a service: see the main README. The commands are `
 
 - `docker compose ps` lists `reverse-tunnel-frps` and `reverse-tunnel-plugin` running.
 - `docker compose logs reverse-tunnel-frps` ends with `frps started successfully` and no plugin errors.
-- `docker compose config` prints the frps router rule ending in `T$$`.
+- `docker compose config` prints the frps router rule ending in your domain followed by `$$` (Compose's escape for `$`).
 - A joined host's `reverse-tunnel status` shows a successful login. "host not registered" means `uv run ctl add` has
   not been run for it.
 
@@ -38,12 +38,16 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 
 ## Footguns
 
-- Recreating `reverse-tunnel-frps` (`git pull` then `up -d --build`, or `restart`) drops every tunnel once. Hosts
-  reconnect on their own.
+- Restarting or recreating `reverse-tunnel-frps` drops every tunnel once. Hosts reconnect on their own.
+  `docker compose up -d --build` does that only if frps's image or compose settings changed. After a `git pull` that
+  changed `etc/`, run `docker compose restart reverse-tunnel-frps` (or `up -d --force-recreate reverse-tunnel-frps`):
+  the files are mounted, so the container sees them but frps reads them at start.
 - Every host trusts the certificate in `tls/trust.pem`. Deleting `tls/` or replacing the certificate outside the
   procedure below locks every host out; `ctl` refuses to regenerate it.
 - `tls/frps.key` and `.env` (the shared frps token) are secrets, and so are backups of this folder.
-- `compose.generated.yaml` is rewritten by `ctl`; don't edit it. `.env` selects it through `COMPOSE_FILE`.
+- `compose.generated.yaml` is rewritten by `ctl`; don't edit it. `.env` selects it through `COMPOSE_FILE`. A
+  `COMPOSE_FILE` exported in your shell overrides `.env`, so a plain `docker compose up -d` then drops the generated
+  labels until the next `ctl` command.
 - The plugin reads `state/` as a directory mount. Don't change it to a file mount: `ctl` replaces files, and a file
   mount keeps pointing at the old one.
 - If the plugin is down, connected tunnels keep running, and logins and new names are refused until it is back.
@@ -58,6 +62,7 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 | `compose.generated.yaml` | the plugin's labels (certificates and aliases), generated; gitignored |
 | `Dockerfile` | target `frps` (the pinned release, checked by SHA-256) and target `plugin` |
 | `etc/frps.toml` | frps config; names no host and no service |
+| `LICENSE`, `.env.example`, `.gitignore`, `.dockerignore` | AGPL-3.0 (the mirror carries it); the `.env` template; what git and Docker builds skip |
 | `ctl/`, `pyproject.toml`, `uv.lock` | the plugin and `uv run ctl` |
 | `tls/` | `frps.crt`, `frps.key`, and `trust.pem`, the certificates hosts trust; gitignored |
 | `state/` | `hosts` and `aliases` registries, the only thing the plugin container mounts; gitignored |
@@ -71,7 +76,7 @@ nobody is locked out.
 1. Make the new pair, and trust it first:
 
    ```sh
-   (umask 077; uv run python -c 'import sys; from ctl.certs import make_cert; c, k = make_cert(sys.argv[1]); open("tls/new.crt", "w").write(c); open("tls/new.key", "w").write(k)' tunnel.binarydreams.me)
+   (umask 077; . ./.env; uv run python -c 'import sys; from ctl.certs import make_cert; c, k = make_cert(sys.argv[1]); open("tls/new.crt", "w").write(c); open("tls/new.key", "w").write(k)' "$TUNNEL_DOMAIN")
    cat tls/new.crt >> tls/trust.pem
    ```
 
