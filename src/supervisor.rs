@@ -1,25 +1,34 @@
-//! `reverse-tunnel run`: frpc as a contained child, and the WebSocket listener its `tcp` services point at.
+//! `reverse-tunnel run`: frpc as a child, and the WebSocket listener its `tcp` services point at.
+//!
+//! The service manager owns the process tree: `run` neither contains frpc nor lets it start anything, so stopping the
+//! service stops frpc with it.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Error, Result, anyhow, bail, ensure};
 use cosca::{Fd, Stdio};
 use futures_util::{SinkExt, StreamExt};
+use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+use tokio::task::JoinSet;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{StatusCode, header::HOST};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Config;
-use crate::download::{Tools, write_file};
+use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT};
 use crate::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
@@ -27,20 +36,11 @@ use crate::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
 
-pub struct Settings {
-    /// Where the WebSocket listener binds.
-    pub listen: SocketAddr,
-    pub rotate_at: u64,
-}
+/// How long a client has to finish the WebSocket handshake. It is a client's wait, not ours.
+const HANDSHAKE_WITHIN: Duration = Duration::from_secs(60);
 
-impl Default for Settings {
-    fn default() -> Settings {
-        Settings {
-            listen: (Ipv4Addr::LOCALHOST, 0).into(),
-            rotate_at: ROTATE_AT,
-        }
-    }
-}
+/// The largest WebSocket message or frame accepted; SSH over `websocat --binary` sends small ones.
+const MAX_MESSAGE: usize = 1 << 20;
 
 /// What `run` and `run --check` share.
 struct Setup<'a> {
@@ -63,10 +63,11 @@ impl Setup<'_> {
 /// Runs frpc and the listener until one fails, which is always an error. With `check_only`, verifies the configuration
 /// and returns.
 pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
-    run_with(paths, tools, check_only, &Settings::default())
+    run_with(paths, tools, check_only, (Ipv4Addr::LOCALHOST, 0).into())
 }
 
-pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, settings: &Settings) -> Result<ExitCode> {
+/// `run` with the WebSocket listener bound to `listen`; `run` lets the OS pick a port.
+pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAddr) -> Result<ExitCode> {
     let config = paths.config_dir.join("config.yaml");
     let setup = Setup {
         cfg: Config::load(&config)?,
@@ -81,9 +82,9 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, settings: &Setti
     if check_only {
         return runtime.block_on(check(&setup));
     }
-    let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), settings.rotate_at)?;
-    let frpc_log = LogFile::open(paths.log_dir.join(LOG_FRPC), settings.rotate_at)?;
-    let Err(err) = runtime.block_on(supervise(&setup, settings.listen, &log, frpc_log));
+    let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
+    let frpc_log = LogFile::open(paths.log_dir.join(LOG_FRPC), ROTATE_AT)?;
+    let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log));
     log.line(format_args!("{err:#}"));
     Err(err)
 }
@@ -95,11 +96,18 @@ fn token(path: &Path) -> Result<String> {
     Ok(text.trim().to_string())
 }
 
-/// Renders into a private directory, so the config dir is not written, and runs `frpc verify` on it.
-async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
+/// Renders frpc.toml for `port` into a new directory only this account can reach, which goes away with the returned
+/// handle. The config dir is not writable by the service account.
+fn render_config(setup: &Setup<'_>, port: u16) -> Result<(TempDir, PathBuf)> {
     let dir = tempfile::tempdir()?;
     let config = dir.path().join("frpc.toml");
-    fs::write(&config, render(&setup.cfg, CHECK_PORT, setup.paths))?;
+    fs::write(&config, render(&setup.cfg, port, setup.paths))?;
+    Ok((dir, config))
+}
+
+/// Has frpc verify the rendered configuration.
+async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
+    let (_dir, config) = render_config(setup, CHECK_PORT)?;
     let status = setup.frpc(&["verify"], &config).status().await;
     let status = status.with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     ensure!(status.success(), "frpc verify rejected the configuration: {status}");
@@ -111,20 +119,18 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding the WebSocket listener on {listen}"))?;
-    let rendered = render(&setup.cfg, listener.local_addr()?.port(), setup.paths);
-    let config = setup.paths.config_dir.join("frpc.toml");
-    write_file(&config, rendered.as_bytes(), 0o644, true)?;
+    let (_dir, config) = render_config(setup, listener.local_addr()?.port())?;
 
     let mut frpc = setup.frpc(&[], &config);
     frpc.stdin(Stdio::null())?
         .stdout(Stdio::pipe())?
         .stderr(Stdio::merge(Fd::STDOUT))?;
     let mut child = frpc
-        .contain()
         .spawn()
         .with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     let output = child.stdout().context("frpc's output is not piped")?;
-    let pump = tokio::spawn(pump(output, frpc_log, log.clone()));
+    let (broken, read_failed) = oneshot::channel();
+    let pump = tokio::spawn(pump(output, frpc_log, broken));
 
     let routes = Arc::new(ws_routes(&setup.cfg));
     let failure = tokio::select! {
@@ -136,41 +142,71 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
             let Err(err) = failed;
             err
         }
+        Ok(err) = read_failed => err,
     };
-    // Whatever frpc left running ends with it, and then so does its output.
-    if let Err(err) = child.kill_tree() {
-        log.line(format_args!("stopping frpc's processes: {err}"));
+    // frpc starts no processes, so ending it ends its output.
+    let stopped = async {
+        child.kill()?;
+        child.wait().await?;
+        pump.await?;
+        anyhow::Ok(())
+    };
+    if let Err(err) = stopped.await {
+        log.line(format_args!("stopping frpc: {err:#}"));
     }
-    pump.await?;
     Err(failure)
 }
 
-/// Copies frpc's output into its log until it ends.
-async fn pump(mut output: impl AsyncRead + Unpin, to: LogFile, log: LogFile) {
+/// Copies frpc's output into its log until it ends, or reports why it cannot read it.
+async fn pump(mut output: impl AsyncRead + Unpin, to: LogFile, failed: oneshot::Sender<Error>) {
     let mut buf = [0; 8192];
     loop {
         match output.read(&mut buf).await {
             Ok(0) => return,
             Ok(len) => to.write(&buf[..len]),
-            Err(err) => return log.line(format_args!("reading frpc's output: {err}")),
+            Err(err) => {
+                // Nobody listens once `supervise` is already stopping.
+                let _ = failed.send(Error::new(err).context("reading frpc's output"));
+                return;
+            }
         }
     }
 }
 
-/// Serves WebSocket connections until the listening socket fails. One connection's failure is logged and nothing more.
+/// Serves WebSocket connections until the listening socket is broken. One connection's failure is logged and nothing
+/// more.
 async fn listen_loop(listener: TcpListener, routes: Arc<BTreeMap<String, u16>>, log: LogFile) -> Result<Infallible> {
+    let mut open = JoinSet::new();
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(accepted) => accepted,
-            // The client left before we accepted: the listener is fine.
-            Err(err) if matches!(err.kind(), ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset) => {
-                log.line(format_args!("accepting a WebSocket connection: {err}"));
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            // Collects the finished connections, so that the set only holds open ones.
+            Some(ended) = open.join_next() => {
+                if let Err(err) = ended {
+                    log.line(format_args!("a WebSocket connection panicked: {err}"));
+                }
                 continue;
             }
-            Err(err) => return Err(err).context("accepting WebSocket connections"),
+        };
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                log.line(format_args!("accepting a WebSocket connection: {err}"));
+                // The client left before we accepted: nothing is wrong with the listener.
+                if matches!(err.kind(), ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset) {
+                    continue;
+                }
+                // Open connections hold descriptors, and one closing frees one. With none open, the listener is
+                // broken.
+                if open.is_empty() {
+                    return Err(err).context("accepting WebSocket connections");
+                }
+                open.join_next().await;
+                continue;
+            }
         };
         let (routes, log) = (routes.clone(), log.clone());
-        tokio::spawn(async move {
+        open.spawn(async move {
             if let Err(err) = forward(stream, &routes).await {
                 log.line(format_args!("WebSocket connection from {peer}: {err:#}"));
             }
@@ -182,11 +218,14 @@ async fn listen_loop(listener: TcpListener, routes: Arc<BTreeMap<String, u16>>, 
 /// side closes: a WebSocket close closes the TCP connection, and the TCP connection ending closes the WebSocket.
 async fn forward(stream: TcpStream, routes: &BTreeMap<String, u16>) -> Result<()> {
     let (mut host, mut port) = (String::new(), None);
+    let limits = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
     #[expect(
         clippy::result_large_err,
         reason = "the handshake callback must return tungstenite's ErrorResponse"
     )]
-    let ws = tokio_tungstenite::accept_hdr_async(stream, |request: &Request, response: Response| {
+    let route = |request: &Request, response: Response| {
         let header = request.headers().get(HOST).and_then(|value| value.to_str().ok());
         host = header
             .unwrap_or_default()
@@ -196,13 +235,19 @@ async fn forward(stream: TcpStream, routes: &BTreeMap<String, u16>) -> Result<()
             .to_ascii_lowercase();
         port = routes.get(&host).copied();
         port.map(|_| response).ok_or_else(|| {
-            let mut refusal = ErrorResponse::new(Some(format!("no service at {host:?}\n")));
+            let mut refusal = ErrorResponse::new(Some(format!(
+                "no service at {host:?}
+"
+            )));
             *refusal.status_mut() = StatusCode::NOT_FOUND;
             refusal
         })
-    })
-    .await
-    .with_context(|| format!("upgrading for host {host:?}"))?;
+    };
+    let handshake = tokio_tungstenite::accept_hdr_async_with_config(stream, route, Some(limits));
+    let ws = timeout(HANDSHAKE_WITHIN, handshake)
+        .await
+        .with_context(|| format!("no WebSocket handshake within {HANDSHAKE_WITHIN:?}"))?
+        .with_context(|| format!("upgrading for host {host:?}"))?;
     let port = port.expect("the upgrade succeeds only for a route");
     let service = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
         .await
@@ -237,3 +282,7 @@ async fn forward(stream: TcpStream, routes: &BTreeMap<String, u16>) -> Result<()
     // Sends the reply to a close the client began.
     result.and(ws_tx.flush().await.map_err(Error::from))
 }
+
+#[cfg(test)]
+#[path = "supervisor_tests.rs"]
+mod tests;

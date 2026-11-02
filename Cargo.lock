@@ -715,6 +715,7 @@ dependencies = [
  "goetia",
  "hex",
  "known-folders",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
