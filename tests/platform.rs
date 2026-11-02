@@ -314,7 +314,11 @@ fn install_under_umask_077() {
     let machine = Machine::begin();
     let mut install = Command::new("sh");
     install
-        .args(["-c", "umask 077; exec \"$0\" install --host testhost --join \"$1\"", BIN])
+        .args([
+            "-c",
+            "umask 077; exec \"$0\" install --host testhost --join \"$1\"",
+            BIN,
+        ])
         .arg(join_code("tunnel.example.test"));
     machine.run_ok(install);
     assert_installed_as_specified(&machine);
