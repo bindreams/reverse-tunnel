@@ -37,7 +37,7 @@ async fn descriptor_exhaustion_does_not_end_run() {
     })
     .await;
 
-    // Holds the descriptor of the connection the test makes at the end, when the flood may still hold the others.
+    // Created now so its descriptor is reserved before the limit drops.
     let client = TcpSocket::new_v4().unwrap();
     // Descriptors are handed out lowest first, so this leaves room for 16 more, but not for the stub's flood.
     let next = File::open("/dev/null").unwrap().as_raw_fd() as u64;
@@ -56,7 +56,7 @@ async fn descriptor_exhaustion_does_not_end_run() {
     let found = log.iter().find(|line| line.contains("Too many open files"));
     assert!(found.is_some(), "supervisor.log ended");
 
-    // The flood ends, and run is still serving.
+    // 'r' ends the flood.
     live.stub.get_mut().write_all(b"r").await.unwrap();
     let tcp = client
         .connect((Ipv4Addr::LOCALHOST, live.ws_port).into())

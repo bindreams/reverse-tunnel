@@ -35,7 +35,7 @@ use crate::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
 
-/// How long a client has to finish the WebSocket handshake. It is a client's wait, not ours.
+/// How long a client has to finish the WebSocket handshake.
 const HANDSHAKE_WITHIN: Duration = Duration::from_secs(60);
 
 /// The largest WebSocket message or frame accepted; SSH over `websocat --binary` sends small ones.
@@ -65,7 +65,7 @@ pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
     run_with(paths, tools, check_only, (Ipv4Addr::LOCALHOST, 0).into())
 }
 
-/// `run` with the WebSocket listener bound to `listen`; `run` lets the OS pick a port.
+/// `run` with the WebSocket listener bound to `listen`.
 pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAddr) -> Result<ExitCode> {
     let config = paths.config_dir.join("config.yaml");
     let setup = Setup {
@@ -153,7 +153,6 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     };
     // frpc starts no processes, so ending it ends its output.
     let stopped = async {
-        // Only a child still running needs killing; one that exited was already waited for.
         if !exited {
             child.kill()?;
             child.wait().await?;
@@ -272,10 +271,7 @@ async fn forward(stream: TcpStream, routes: &BTreeMap<String, u16>) -> Result<()
             .to_ascii_lowercase();
         port = routes.get(&host).copied();
         port.map(|_| response).ok_or_else(|| {
-            let mut refusal = ErrorResponse::new(Some(format!(
-                "no service at {host:?}
-"
-            )));
+            let mut refusal = ErrorResponse::new(Some(format!("no service at {host:?}\n")));
             *refusal.status_mut() = StatusCode::NOT_FOUND;
             refusal
         })
