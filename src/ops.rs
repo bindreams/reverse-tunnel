@@ -123,7 +123,7 @@ pub fn logs(paths: &Paths, follow: bool, out: &mut impl Write) -> Result<()> {
         name,
         path: paths.log_dir.join(name),
         open: None,
-        done: None,
+        done: Vec::new(),
         pending: Vec::new(),
     });
     let mut shown = None;
@@ -152,19 +152,22 @@ struct Tail {
     path: PathBuf,
     /// The file read so far. A rotation renames it, and it stays readable.
     open: Option<Handle>,
-    /// The last file read to its end: the held file after a rotation, or a `.1`.
-    done: Option<Handle>,
+    /// Every file read to its end since the last pass that left a file in `open`: the held file after a rotation and
+    /// each `.1` shown. A `.1` among them is not shown again.
+    done: Vec<Handle>,
     /// The unterminated last line read so far, held back until its newline arrives.
     pending: Vec<u8>,
 }
 
 impl Tail {
     /// Writes the lines the file has gained. At the start, the rotated `.1` comes first. After a rotation, the rest of
-    /// the old file, then a `.1` that is neither it nor the new file (a second rotation happened since the last
-    /// look), then the new file from its start. `shown` is the name last written under a header. With `finish`, an
-    /// unterminated last line is written too.
+    /// the old file, then a `.1` that was not shown yet and is not the new file (more rotations happened since the
+    /// last look), then the new file from its start. `shown` is the name last written under a header. With `finish`,
+    /// an unterminated last line is written too.
     fn drain(&mut self, out: &mut impl Write, shown: &mut Option<&'static str>, finish: bool) -> io::Result<()> {
-        // Looked at before reading: once the path names another file, the one held gains nothing more.
+        // `.1` is looked at before the current file, so it is never newer than the file the path names. Both are looked
+        // at before reading: once the path names another file, the one held gains nothing more.
+        let older = open_if_present(&self.path.with_file_name(format!("{}.1", self.name)))?;
         let current = open_if_present(&self.path)?;
         let rotated = matches!((&self.open, &current), (Some(open), Some(now)) if open != now);
         if let Some(open) = &mut self.open {
@@ -178,21 +181,19 @@ impl Tail {
             )?;
         }
         if rotated || self.open.is_none() {
-            self.done = self.open.take().or(self.done.take());
-            let older = self.path.with_file_name(format!("{}.1", self.name));
-            if let Some(mut older) = open_if_present(&older)? {
-                let seen = [&self.done, &current]
-                    .into_iter()
-                    .flatten()
-                    .any(|known| *known == older);
+            self.done.extend(self.open.take());
+            if let Some(mut older) = older {
+                let seen = self.done.iter().chain(&current).any(|known| *known == older);
                 if !seen {
                     copy(self.name, &mut self.pending, older.as_file_mut(), out, shown, true)?;
-                    self.done = Some(older);
+                    self.done.push(older);
                 }
             }
             self.open = current;
             if let Some(open) = &mut self.open {
                 copy(self.name, &mut self.pending, open.as_file_mut(), out, shown, finish)?;
+                // Only the held file can be `.1` from here on.
+                self.done.clear();
             }
         }
         Ok(())
@@ -227,10 +228,15 @@ fn copy(
         if len == 0 {
             break;
         }
-        pending.extend_from_slice(&buf[..len]);
-        if let Some(end) = pending.iter().rposition(|&byte| byte == b'\n') {
-            let lines: Vec<u8> = pending.drain(..=end).collect();
-            show(name, &lines, out, shown)?;
+        // `pending` holds no newline, so the last one is in what was just read.
+        match buf[..len].iter().rposition(|&byte| byte == b'\n') {
+            Some(end) => {
+                pending.extend_from_slice(&buf[..=end]);
+                show(name, pending, out, shown)?;
+                pending.clear();
+                pending.extend_from_slice(&buf[end + 1..len]);
+            }
+            None => pending.extend_from_slice(&buf[..len]),
         }
     }
     if finish {
