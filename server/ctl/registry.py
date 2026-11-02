@@ -17,8 +17,8 @@ from ctl.names import alias_problem, valid_label
 
 
 class RegistryError(Exception):
-    def __init__(self, line_no: int, msg: str):
-        super().__init__(f"line {line_no}: {msg}")
+    def __init__(self, line_no: int | None, msg: str):
+        super().__init__(msg if line_no is None else f"line {line_no}: {msg}")
         self.line_no = line_no
 
 
@@ -71,18 +71,24 @@ def locked(state_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 
+def _yaml() -> YAML:
+    """A round-trip, YAML 1.2 loader and dumper; one per call, since an instance is not thread-safe."""
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    yaml.width = 2**31  # an entry is never wrapped onto a second line
+    yaml.emitter.MAX_SIMPLE_KEY_LENGTH = 1024  # nor a long name turned into a `? key` / `: value` pair
+    return yaml
+
+
 def _load(text: str) -> CommentedMap:
     """The registry's YAML, comments and all; an empty document or one of only comments becomes an empty mapping."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")  # so a rewrite is LF throughout
-    yaml = YAML()  # round trip, YAML 1.2; one per call, since an instance is not thread-safe
-    yaml.preserve_quotes = True
+    yaml = _yaml()
     try:
         doc = yaml.load(text)
         if doc is None:
             doc = yaml.load(text + "\n{}\n")  # the comments stay with the mapping
-    except RecursionError as e:
-        raise RegistryError(1, "nested too deeply") from e
-    except YAMLError as e:
+    except Exception as e:  # ruamel raises more than YAMLError: ValueError, TypeError, RecursionError
         mark = getattr(e, "problem_mark", None)
         if isinstance(e, ScannerError):
             mark = e.context_mark or mark  # where the broken key or string starts, not where the scanner gave up
@@ -95,13 +101,17 @@ def _load(text: str) -> CommentedMap:
 
 
 def _problem(key, value, problem: Callable[[str, str], str | None]) -> str | None:
-    if not (isinstance(key, str) and isinstance(value, str)):
-        return f"{key!r}: {value!r} is not a string: put it in quotes"
+    if not isinstance(key, str):
+        return f"key {key!r} is not a string: put it in quotes"
+    if not isinstance(value, str):
+        return f"{key}: the value is a {type(value).__name__}, not a string: put it in quotes"
     return problem(key, value)
 
 
 def _read(path: Path, problem: Callable[[str, str], str | None]) -> CommentedMap:
     doc = _load(path.read_bytes().decode("utf-8-sig", errors="replace"))
+    if doc.merge:
+        raise RegistryError(doc.merge[0].lc.line + 1, "merge keys (<<) are not allowed: give each entry its own line")
     for key, value in doc.items():
         if msg := _problem(key, value, problem):
             raise RegistryError(doc.lc.key(key)[0] + 1, msg)
@@ -109,11 +119,20 @@ def _read(path: Path, problem: Callable[[str, str], str | None]) -> CommentedMap
 
 
 def _write(path: Path, doc: dict, problem: Callable[[str, str], str | None]) -> None:
-    for line_no, (key, value) in enumerate(doc.items(), 1):
+    for key, value in doc.items():
         if msg := _problem(key, value, problem):
-            raise RegistryError(line_no, msg)
+            raise RegistryError(None, f"{key}: {msg}")
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        data = b""
+    try:
+        data.decode("utf-8-sig")  # the reader replaced bad bytes, which a rewrite would keep replaced
+    except UnicodeDecodeError as e:
+        line_no = data.count(b"\n", 0, e.start) + 1
+        raise RegistryError(line_no, "not UTF-8; fix it by hand before ctl rewrites the file") from e
     out = io.StringIO()
-    YAML().dump(doc, out)
+    _yaml().dump(doc, out)
     atomic_write(path, out.getvalue().encode(), 0o644)
 
 

@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -132,3 +133,9 @@ def test_registry_reread_each_request(plugin):
     assert ask(query, body) == reject("host not registered")
     write_hosts(state / "hosts.yaml", {"bob": token_hash("host-secret")})
     assert ask(query, body) == ACCEPT
+
+
+def test_plugin_image_pins_the_locked_ruamel_release():
+    pin = re.search(r"ruamel\.yaml==(\S+) --hash=sha256:(\w+)", (SERVER / "Dockerfile").read_text())
+    lock = (SERVER / "uv.lock").read_text()
+    assert f'name = "ruamel-yaml"\nversion = "{pin[1]}"' in lock and pin[2] in lock

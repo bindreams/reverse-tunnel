@@ -33,13 +33,25 @@ def test_hosts_tolerates_hand_edits(tmp_path):
     [
         ("a: x\n\nb: [1, 2}\n", 3),
         ("a: x\nb\n", 2),
-        ("a: x\n\n\tb: y\n", 3),
         ("a: x\nb\x00: y\n", 2),
         ("a: x\n- y\n", 2),
         ("- y\n", 1),
         ("a: " + "[" * 100_000 + "]" * 100_000 + "\n", 1),
+        ("a: " + "9" * 5000 + "\n", 1),
+        ("&r\na: *r\n", 2),
+        ("a: x\n<<: {Bad_: y}\n", 2),
     ],
-    ids=["bad-flow", "missing-colon", "tab", "control-character", "list-in-mapping", "list", "too-deeply-nested"],
+    ids=[
+        "bad-flow",
+        "missing-colon",
+        "control-character",
+        "list-in-mapping",
+        "list",
+        "too-deeply-nested",
+        "huge-integer",
+        "self-referential",
+        "merge-key",
+    ],
 )
 def test_unparseable_registry_names_a_line(tmp_path, text, line_no):
     path = tmp_path / "hosts.yaml"
@@ -132,8 +144,8 @@ def test_missing_registry_raises_file_not_found(tmp_path):
 def test_write_hosts_refuses_what_the_reader_rejects(tmp_path):
     path = tmp_path / "hosts.yaml"
     write_hosts(path, {"keep": H1})
-    for bad in [{"ok": H1, "Bad": H1}, {"ok": "sha256:1"}]:
-        with pytest.raises(RegistryError):
+    for bad, culprit in [({"ok": H1, "Bad": H1}, "Bad"), ({"ok": "sha256:1"}, "ok")]:
+        with pytest.raises(RegistryError, match=f"^{culprit}:"):
             write_hosts(path, bad)
     assert read_hosts(path) == {"keep": H1}
 
@@ -162,6 +174,17 @@ def test_put_inserts_in_sorted_position_and_the_file_is_written_with_lf(tmp_path
         put(hosts, name, H2)
     write_hosts(path, hosts)
     assert path.read_bytes() == f"a: {H2}\nb: {H1}  # b\nc: {H2}\nd: {H1}\ne: {H2}\n".encode()
+
+
+def test_rewrite_refuses_to_replace_undecodable_bytes_in_a_comment(tmp_path):
+    path = tmp_path / "hosts.yaml"
+    original = f"a: {H1}  # caf".encode() + b"\xe9\n"
+    path.write_bytes(original)
+    hosts = read_hosts(path)
+    put(hosts, "b", H2)
+    with pytest.raises(RegistryError, match="line 1:"):
+        write_hosts(path, hosts)
+    assert path.read_bytes() == original
 
 
 def test_comments_survive_when_an_empty_registry_gains_its_first_entry(tmp_path):

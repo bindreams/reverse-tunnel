@@ -86,7 +86,8 @@ def test_init_idempotent(bridge, capsys):
     assert cli.main(["init"]) == 0
     code = capsys.readouterr().out
     files = {p: p.read_bytes() for p in Path().rglob("*") if p.is_file()}
-    created = ["tls/frps.crt", "tls/frps.key", "tls/trust.pem", "state/hosts.yaml", "state/aliases.yaml", str(GENERATED)]
+    created = ["tls/frps.crt", "tls/frps.key", "tls/trust.pem", "state/hosts.yaml", "state/aliases.yaml"]
+    created.append(str(GENERATED))
     for name in created:
         assert Path(name) in files
     assert Path("tls/frps.key").stat().st_mode & 0o777 == 0o600
@@ -133,6 +134,17 @@ def test_comments_survive_add_and_revoke(inited):
     assert cli.main(["add", "d", H2]) == 0
     assert cli.main(["revoke", "c"]) == 0
     assert Path("state/hosts.yaml").read_text() == f"a: {H}  # one\nd: {H2}\ne: {H}  # three\n"
+
+
+def test_ctl_rewrites_keep_long_entries_on_one_line(inited):
+    host_line = "mothership: sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55  # office laptop\n"
+    alias_line = f"{'a' * 63}.{'b' * 63}.binarydreams.me: {'s' * 63}.{'h' * 63}.{T}\n"
+    Path("state/hosts.yaml").write_text(host_line)
+    Path("state/aliases.yaml").write_text(alias_line)
+    assert cli.main(["add", "web", H]) == 0
+    assert cli.main(["alias", "media.binarydreams.me", f"svc.web.{T}"]) == 0
+    assert Path("state/hosts.yaml").read_text().startswith(host_line)
+    assert Path("state/aliases.yaml").read_text().startswith(alias_line)
 
 
 @pytest.mark.parametrize("host", ["22", "null"])
