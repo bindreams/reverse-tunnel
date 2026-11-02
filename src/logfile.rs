@@ -20,6 +20,7 @@ struct Active {
     file: File,
     size: u64,
     limit: u64,
+    /// The size at which the next rotation is tried: `limit`, or `limit` bytes past the size at a failed one.
     rotate_at: u64,
 }
 
