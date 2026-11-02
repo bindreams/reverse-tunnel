@@ -92,7 +92,7 @@ jobs:
           printf 'TUNNEL_DOMAIN=tunnel.binarydreams.me\nFRPS_TOKEN=test-token\nCOMPOSE_FILE=compose.yaml:compose.generated.yaml\n' > .env
           printf 'services: {}\n' > compose.generated.yaml
           mkdir tls state
-          touch state/hosts state/aliases
+          touch state/hosts.yaml state/aliases.yaml
           (umask 077; . ./.env; uv run --locked python -c 'import sys; from ctl.certs import make_cert; c, k = make_cert(sys.argv[1]); open("tls/frps.crt", "w").write(c); open("tls/frps.key", "w").write(k)' "$TUNNEL_DOMAIN")
           docker network create gateway
       - name: frps router rule ends in the domain and an escaped $$
@@ -111,4 +111,4 @@ jobs:
       - name: Container label has a single $
         run: docker inspect -f '{{index .Config.Labels "traefik.http.routers.reverse-tunnel-frps.rule"}}' reverse-tunnel-frps | grep -E 'tunnel\.binarydreams\.me\$`\)$'
       - name: plugin runs as non-root and reads state/
-        run: docker compose run --rm --no-deps reverse-tunnel-plugin python -c "import ctl.plugin as p, pathlib; p.read_hosts(pathlib.Path('/state/hosts'))"
+        run: docker compose run --rm --no-deps reverse-tunnel-plugin python -c "import ctl.plugin as p, pathlib; p.read_hosts(pathlib.Path('/state/hosts.yaml'))"

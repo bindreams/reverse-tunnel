@@ -86,7 +86,9 @@ def test_init_idempotent(bridge, capsys):
     assert cli.main(["init"]) == 0
     code = capsys.readouterr().out
     files = {p: p.read_bytes() for p in Path().rglob("*") if p.is_file()}
-    for name in ["tls/frps.crt", "tls/frps.key", "tls/trust.pem", "state/hosts", "state/aliases", str(GENERATED)]:
+    created = ["tls/frps.crt", "tls/frps.key", "tls/trust.pem", "state/hosts.yaml", "state/aliases.yaml"]
+    created.append(str(GENERATED))
+    for name in created:
         assert Path(name) in files
     assert Path("tls/frps.key").stat().st_mode & 0o777 == 0o600
     assert cli.main(["init"]) == 0
@@ -116,21 +118,57 @@ def test_init_checks(bridge, monkeypatch, capsys, env, network, unresolvable, me
 
 def test_add_then_revoke(inited):
     assert cli.main(["add", "web", H]) == 0
-    assert read_hosts(Path("state/hosts")) == {"web": H}
+    assert read_hosts(Path("state/hosts.yaml")) == {"web": H}
     assert f"*.web.{T}" in GENERATED.read_text()
     assert cli.main(["add", "web", H2]) == 1  # a typo'd name must not replace another host's token
-    assert read_hosts(Path("state/hosts")) == {"web": H}
+    assert read_hosts(Path("state/hosts.yaml")) == {"web": H}
     assert cli.main(["revoke", "web"]) == 0
-    assert read_hosts(Path("state/hosts")) == {}
+    assert read_hosts(Path("state/hosts.yaml")) == {}
     assert f"*.web.{T}" not in GENERATED.read_text()
     assert cli.main(["revoke", "web"]) == 1
     assert len(inited) == 2
 
 
+def test_comments_survive_add_and_revoke(inited):
+    Path("state/hosts.yaml").write_text(f"a: {H}  # one\nc: {H}  # two\ne: {H}  # three\n")
+    assert cli.main(["add", "d", H2]) == 0
+    assert cli.main(["revoke", "c"]) == 0
+    assert Path("state/hosts.yaml").read_text() == f"a: {H}  # one\nd: {H2}\ne: {H}  # three\n"
+
+
+def test_ctl_rewrites_keep_long_entries_on_one_line(inited):
+    host_line = "mothership: sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55  # office laptop\n"
+    alias_line = f"{'a' * 63}.{'b' * 63}.binarydreams.me: {'s' * 63}.{'h' * 63}.{T}\n"
+    Path("state/hosts.yaml").write_text(host_line)
+    Path("state/aliases.yaml").write_text(alias_line)
+    assert cli.main(["add", "web", H]) == 0
+    assert cli.main(["alias", "media.binarydreams.me", f"svc.web.{T}"]) == 0
+    assert Path("state/hosts.yaml").read_text().startswith(host_line)
+    assert Path("state/aliases.yaml").read_text().startswith(alias_line)
+
+
+@pytest.mark.parametrize("host", ["22", "null", "true", "1e3", "0x1f"])
+def test_quoted_numeric_host_round_trips(inited, host):
+    assert cli.main(["add", host, H]) == 0
+    assert f"'{host}': " in Path("state/hosts.yaml").read_text()
+    assert read_hosts(Path("state/hosts.yaml")) == {host: H}
+
+
+def test_a_syntax_error_in_the_registry_stops_ctl_before_any_change(inited, capsys):
+    broken = f"a: {H}\nb: [1, 2}}\n"
+    Path("state/hosts.yaml").write_text(broken)
+    generated = GENERATED.read_text()
+    assert cli.main(["add", "web", H]) == 1
+    assert "state/hosts.yaml: line 2" in capsys.readouterr().err
+    assert Path("state/hosts.yaml").read_text() == broken
+    assert GENERATED.read_text() == generated
+    assert inited == []
+
+
 @pytest.mark.parametrize("host, digest", [("Bad_Name", H), ("web", "sha256:abc")])
 def test_add_rejects_bad_name_and_bad_hash(inited, host, digest):
     assert cli.main(["add", host, digest]) == 1
-    assert read_hosts(Path("state/hosts")) == {}
+    assert read_hosts(Path("state/hosts.yaml")) == {}
     assert inited == []
 
 
@@ -139,26 +177,26 @@ def test_concurrent_add(inited):
     with locked(state):
         proc = start("add", "b", H2)
         wait_blocked(proc, state / "lock")
-        write_hosts(state / "hosts", {"a": H})  # an add that finished first
+        write_hosts(state / "hosts.yaml", {"a": H})  # an add that finished first
     assert proc.wait() == 0
-    assert set(read_hosts(state / "hosts")) == {"a", "b"}
+    assert set(read_hosts(state / "hosts.yaml")) == {"a", "b"}
     assert f"*.a.{T}" in GENERATED.read_text() and f"*.b.{T}" in GENERATED.read_text()
 
 
 @pytest.mark.parametrize("public", ["nodots", f"x.{T}", "a b.binarydreams.me", "a`b.binarydreams.me"])
 def test_alias_rejects_bad_public_name(inited, public):
     assert cli.main(["alias", public, f"svc.web.{T}"]) == 1
-    assert read_aliases(Path("state/aliases"), T) == {}
+    assert read_aliases(Path("state/aliases.yaml"), T) == {}
     assert inited == []
 
 
 def test_alias_requires_backend_under_T(inited):
     assert cli.main(["alias", "media.binarydreams.me", f"svc.web.{T}"]) == 0
-    assert read_aliases(Path("state/aliases"), T) == {"media.binarydreams.me": f"svc.web.{T}"}
+    assert read_aliases(Path("state/aliases.yaml"), T) == {"media.binarydreams.me": f"svc.web.{T}"}
     assert "Host(`media.binarydreams.me`)" in GENERATED.read_text()
     assert cli.main(["alias", "other.binarydreams.me", "svc.web.binarydreams.me"]) == 1
     assert cli.main(["unalias", "media.binarydreams.me"]) == 0
-    assert read_aliases(Path("state/aliases"), T) == {}
+    assert read_aliases(Path("state/aliases.yaml"), T) == {}
 
 
 def test_revoke_prints_restart_hint(inited, monkeypatch, capsys):
@@ -220,7 +258,7 @@ def test_docker_failure_after_write_is_reported(inited, monkeypatch, capsys):
     assert cli.main(["add", "web", H]) == 1
     err = capsys.readouterr().err
     assert "registry is updated" in err and "plugin was not reloaded" in err and "rerun any ctl command" in err
-    assert "web" in read_hosts(Path("state/hosts"))
+    assert "web" in read_hosts(Path("state/hosts.yaml"))
     assert cli.main(["list"]) == 1
     err = capsys.readouterr().err
     assert "plugin was not reloaded" in err and "registry is updated" not in err
@@ -230,12 +268,12 @@ def test_docker_failure_after_write_is_reported(inited, monkeypatch, capsys):
 
 
 def test_list_regenerates(inited, capsys):
-    hand_edit = f"# mine\r\nweb {H}\r\n".encode()
-    Path("state/hosts").write_bytes(hand_edit)
+    hand_edit = f"# mine\r\nweb: {H}\r\n".encode()
+    Path("state/hosts.yaml").write_bytes(hand_edit)
     assert cli.main(["list"]) == 0
     assert f"*.web.{T}" in GENERATED.read_text()
     assert "web" in capsys.readouterr().out
-    assert Path("state/hosts").read_bytes() == hand_edit
+    assert Path("state/hosts.yaml").read_bytes() == hand_edit
 
 
 def test_init_edits_env_in_place(bridge):
@@ -340,7 +378,7 @@ def test_failed_registry_write_prints_nothing(inited, monkeypatch, capsys):
     capsys.readouterr()
     assert cli.main(["revoke", "web"]) == 1  # the hint would claim a revocation that did not happen
     out, err = capsys.readouterr()
-    assert out == "" and "state/hosts" in err
+    assert out == "" and "state/hosts.yaml" in err
 
 
 def test_cert_is_valid_from_yesterday():

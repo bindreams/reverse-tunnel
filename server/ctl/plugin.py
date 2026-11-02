@@ -1,4 +1,4 @@
-"""The frps HTTP plugin: decides which hosts may log in and which names they may claim. Standard library only."""
+"""The frps HTTP plugin: decides which hosts may log in and which names they may claim."""
 
 import hmac
 import json
@@ -70,7 +70,7 @@ def make_server(state_dir: Path, domain: str, port: int) -> ThreadingHTTPServer:
             except (ValueError, RecursionError):  # a body that is not JSON, or too deeply nested
                 request = None
             try:
-                hosts = read_hosts(state_dir / "hosts")
+                hosts = read_hosts(state_dir / "hosts.yaml")
             except (RegistryError, OSError) as e:
                 print(f"registry unreadable: {e}", file=sys.stderr)
                 reply = _reject("registry unreadable")

@@ -1,6 +1,5 @@
 import json
-import subprocess
-import sys
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -37,7 +36,7 @@ def post(port, query, body, path="/handler", headers=None):
 @pytest.fixture
 def plugin(tmp_path):
     """The state directory and `ask(query, body)`, against a plugin where alice's token is `host-secret`."""
-    write_hosts(tmp_path / "hosts", {"alice": token_hash("host-secret")})
+    write_hosts(tmp_path / "hosts.yaml", {"alice": token_hash("host-secret")})
     server = make_server(tmp_path, T, 0)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
@@ -68,7 +67,7 @@ def test_new_proxy_rejects_removed_host(plugin):
     state, ask = plugin
     request = captured("newproxy-http")
     assert ask(*request) == ACCEPT
-    write_hosts(state / "hosts", {})
+    write_hosts(state / "hosts.yaml", {})
     assert ask(*request) == reject("host not registered")
 
 
@@ -120,10 +119,10 @@ def test_other_path_is_404(plugin):
 def test_bad_registry_rejects_with_reason(plugin, capsys):
     state, ask = plugin
     request = captured("login")
-    (state / "hosts").write_text(f"alice {token_hash('host-secret')}\nbroken\n")
+    (state / "hosts.yaml").write_text(f"alice: {token_hash('host-secret')}\nbroken\n")
     assert ask(*request) == reject("registry unreadable")
     assert "line 2" in capsys.readouterr().err
-    (state / "hosts").unlink()
+    (state / "hosts.yaml").unlink()
     assert ask(*request) == reject("registry unreadable")
 
 
@@ -132,20 +131,12 @@ def test_registry_reread_each_request(plugin):
     query, body = captured("login")
     body["content"]["user"] = "bob"
     assert ask(query, body) == reject("host not registered")
-    write_hosts(state / "hosts", {"bob": token_hash("host-secret")})
+    write_hosts(state / "hosts.yaml", {"bob": token_hash("host-secret")})
     assert ask(query, body) == ACCEPT
 
 
-def test_plugin_runs_stdlib_only(tmp_path):
-    write_hosts(tmp_path / "hosts", {"alice": token_hash("host-secret")})
-    # -I ignores PYTHONPATH and the cwd, so the bootstrap puts `server/` on the path itself.
-    boot = (
-        f"import sys; from pathlib import Path; sys.path.insert(0, {str(SERVER)!r}); from ctl.plugin import make_server;"
-        f"s = make_server(Path({str(tmp_path)!r}), {T!r}, 0); print(s.server_address[1], flush=True); s.serve_forever()"
-    )
-    child = subprocess.Popen([sys.executable, "-I", "-S", "-c", boot], stdout=subprocess.PIPE, text=True)
-    try:
-        assert post(int(child.stdout.readline()), *captured("login")) == ACCEPT
-    finally:
-        child.terminate()
-        child.wait()
+def test_plugin_image_pins_the_locked_ruamel_release():
+    pin = re.search(r"ruamel\.yaml==(\S+) --hash=sha256:(\w+)", (SERVER / "Dockerfile").read_text())
+    assert pin, "the Dockerfile no longer pins ruamel.yaml with a hash"
+    entry = (SERVER / "uv.lock").read_text().split('name = "ruamel-yaml"\n')[1].split("[[package]]")[0]
+    assert f'version = "{pin[1]}"' in entry and pin[2] in entry
