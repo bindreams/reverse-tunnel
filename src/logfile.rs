@@ -45,7 +45,11 @@ impl LogFile {
         if log.size >= log.rotate_at
             && let Err(err) = log.rotate()
         {
-            let note = format!("log rotation failed, retrying in {} bytes: {err:#}\n", log.limit);
+            let note = format!(
+                "{} log rotation failed, retrying in {} bytes: {err:#}\n",
+                now(),
+                log.limit
+            );
             log.append(note.as_bytes());
             log.rotate_at = log.size + log.limit;
         }
@@ -55,8 +59,7 @@ impl LogFile {
     /// Appends `message` as a line that starts with the local time and its UTC offset, e.g.
     /// `2026-11-02T21:04:05+01:00 message`.
     pub fn line(&self, message: impl Display) {
-        let now = Zoned::now().strftime("%Y-%m-%dT%H:%M:%S%:z");
-        self.write(format!("{now} {message}\n").as_bytes());
+        self.write(format!("{} {message}\n", now()).as_bytes());
     }
 
     /// A panic in another thread must not stop logging.
@@ -101,4 +104,9 @@ fn open(path: &Path) -> Result<File> {
         .append(true)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))
+}
+
+/// The local time and its UTC offset, e.g. `2026-11-02T21:04:05+01:00`.
+fn now() -> String {
+    Zoned::now().strftime("%Y-%m-%dT%H:%M:%S%:z").to_string()
 }
