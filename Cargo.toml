@@ -10,7 +10,9 @@ publish = false
 anyhow = "1.0.104"
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
+cosca = { version = "0.6.0", features = ["tokio"] }
 flate2 = "1.1.10"
+futures-util = "0.3.34"
 goetia = { version = "0.2.0", default-features = false }
 hex = "0.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -18,9 +20,24 @@ serde_json = "1.0.154"
 sha2 = "0.11.1"
 tar = { version = "0.4.46", default-features = false }
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "macros", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 yaml_serde = "0.10.7"
 zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
+[target."cfg(unix)".dev-dependencies]
+rustix = { version = "1", default-features = false, features = ["process"] }
+
 [target."cfg(windows)".dependencies]
 known-folders = "1.4.2"
+
+# Stands in for frpc in tests/.
+[[bin]]
+name = "stub-frpc"
+path = "testbin/stub_frpc.rs"
+test = false
+doc = false
