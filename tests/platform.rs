@@ -546,9 +546,13 @@ fn status_and_logs_need_no_elevation() {
         fs::metadata(&frpc_log).is_ok_and(|log| log.len() > 0)
     });
     account::ensure(PROBE).unwrap();
+    // The installed binary: the test binary's own directory is in a home directory.
+    let installed = service::exe(&machine.paths);
     let as_probe = |command: &str| {
         let out = Command::new("sudo")
-            .args(["-n", "-u", PROBE, "--", BIN, command])
+            .args(["-n", "-u", PROBE, "--"])
+            .arg(&installed)
+            .arg(command)
             .output()
             .unwrap();
         assert!(
