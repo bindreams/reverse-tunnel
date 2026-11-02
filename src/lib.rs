@@ -8,6 +8,7 @@ pub mod frpc;
 pub mod install;
 pub mod join;
 pub mod logfile;
+pub mod ops;
 pub mod paths;
 pub mod service;
 pub mod supervisor;

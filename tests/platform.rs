@@ -534,3 +534,36 @@ fn install_is_refused_while_an_uninstall_is_unfinished() {
     );
     assert_eq!(machine.status().pid, supervisor);
 }
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn status_and_logs_need_no_elevation() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let frpc_log = machine.paths.log_dir.join("frpc.log");
+    wait_until("frpc has logged", || {
+        fs::metadata(&frpc_log).is_ok_and(|log| log.len() > 0)
+    });
+    account::ensure(PROBE).unwrap();
+    let as_probe = |command: &str| {
+        let out = Command::new("sudo")
+            .args(["-n", "-u", PROBE, "--", BIN, command])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{command} as {PROBE}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let status = as_probe("status");
+    assert!(status.contains("service: running"), "{status}");
+    assert!(status.contains("bridge: tunnel.example.test"), "{status}");
+    assert!(
+        as_probe("logs").contains("==> frpc.log <=="),
+        "logs did not show frpc.log"
+    );
+}
