@@ -25,6 +25,14 @@ impl Perm {
         }
     }
 
+    pub const fn uid(self, uid: u32) -> Perm {
+        Perm { uid: Some(uid), ..self }
+    }
+
+    pub const fn gid(self, gid: u32) -> Perm {
+        Perm { gid: Some(gid), ..self }
+    }
+
     pub const EXECUTABLE: Perm = Perm::new(0o755);
 }
 

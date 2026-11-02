@@ -209,25 +209,10 @@ fn register(manager: &dyn ServiceManager, spec: &DaemonSpec) -> Result<bool> {
 /// owner. A first run writes `config.yaml` and `secrets/host.token`, both create-new; with `join`, every run
 /// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
-    let secret = Perm {
-        mode: 0o640,
-        uid: None,
-        gid: Some(account.gid),
-    };
+    let secret = Perm::new(0o640).gid(account.gid);
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
-    make_dir(
-        &paths.secrets_dir,
-        Perm {
-            mode: SECRETS_DIR_MODE,
-            ..secret
-        },
-    )?;
-    let logs = Perm {
-        mode: 0o755,
-        uid: Some(account.uid),
-        gid: Some(account.gid),
-    };
-    make_dir(&paths.log_dir, logs)?;
+    make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).gid(account.gid))?;
+    make_dir(&paths.log_dir, Perm::new(0o755).uid(account.uid).gid(account.gid))?;
 
     let config = config_file(paths);
     let created = !config.try_exists()? && create_config(&config, host, join)?;

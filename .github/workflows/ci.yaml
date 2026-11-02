@@ -49,9 +49,17 @@ jobs:
               | jq -r 'select(.target.name == "platform" and .executable != null) | .executable' \
               > "$RUNNER_TEMP/platform-tests"
       - name: Run the platform tests as root
+        timeout-minutes: 10
         run: |
           set -euxo pipefail
-          sudo env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1
+          sudo env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture
+      - name: DIAGNOSTICS
+        if: always()
+        run: |
+          ps -axo pid,uid,ppid,args | grep -e reverse -e frpc || true
+          sudo launchctl print system/reverse-tunnel || true
+          sudo sh -c 'tail -n 50 /Library/Logs/reverse-tunnel/* /var/log/reverse-tunnel/*' || true
+          dscl . -list /Users | tail -5 || true
 
   # Defender flags the frp Windows zip but not frpc.exe; fetch writes only frpc.exe. Fails if Defender, live and with
   # no exclusions, blocks it.
