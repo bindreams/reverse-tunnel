@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, TcpListener as StdListener};
 use std::path::Path;
 
 use futures_util::{SinkExt, StreamExt};
+use jiff::fmt::temporal::Pieces;
 use reverse_tunnel::logfile::LogFile;
 use reverse_tunnel::paths::{LOG_FRPC, LOG_SUPERVISOR};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,6 +26,11 @@ fn recorded(host: &Host, prefix: &str) -> Vec<String> {
         .filter_map(|line| line.strip_prefix(prefix))
         .map(str::to_string)
         .collect()
+}
+
+/// Splits a supervisor.log line into its timestamp and its message.
+fn stamped(line: &str) -> (&str, &str) {
+    line.trim_end().split_once(' ').expect("a timestamp and a message")
 }
 
 fn names(dir: &Path) -> Vec<String> {
@@ -73,7 +79,11 @@ fn child_exit_stops_others_and_exits_nonzero() {
     let host = Host::new("exit 7", SSH);
     let err = format!("{:#}", host.run(false).unwrap_err());
     assert!(err.contains("frpc exited") && err.contains('7'), "{err}");
-    assert_eq!(host.log(LOG_SUPERVISOR).trim_end(), err);
+    let log = host.log(LOG_SUPERVISOR);
+    let (stamp, message) = stamped(&log);
+    let stamp = Pieces::parse(stamp).unwrap_or_else(|e| panic!("{stamp:?} is not RFC 3339: {e}"));
+    assert!(stamp.to_numeric_offset().is_some() && stamp.time().unwrap().subsec_nanosecond() == 0);
+    assert_eq!(message, err);
     assert!(host.log(LOG_FRPC).contains("stub frpc: failing"));
 }
 
@@ -166,7 +176,7 @@ fn listener_bind_failure_is_logged() {
     let taken = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let err = format!("{:#}", host.run_listening(taken.local_addr().unwrap()).unwrap_err());
     assert!(err.contains(&taken.local_addr().unwrap().to_string()), "{err}");
-    assert_eq!(host.log(LOG_SUPERVISOR).trim_end(), err);
+    assert_eq!(stamped(&host.log(LOG_SUPERVISOR)).1, err);
 }
 
 #[test]

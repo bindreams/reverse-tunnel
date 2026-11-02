@@ -17,6 +17,9 @@ gethostname = "1.1.0"
 getrandom = "0.4.3"
 goetia = { version = "0.2.0", default-features = false }
 hex = "0.4.3"
+# The system zone: tz-system finds it; on Windows only a bundled database can resolve its name, and on Unix
+# /etc/localtime is read directly.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result};
+use jiff::Zoned;
 
 /// The size at which a log is rotated.
 pub const ROTATE_AT: u64 = 10 * 1024 * 1024;
@@ -51,8 +52,11 @@ impl LogFile {
         log.append(data);
     }
 
+    /// Appends `message` as a line that starts with the local time and its UTC offset, e.g.
+    /// `2026-11-02T21:04:05+01:00 message`.
     pub fn line(&self, message: impl Display) {
-        self.write(format!("{message}\n").as_bytes());
+        let now = Zoned::now().strftime("%Y-%m-%dT%H:%M:%S%:z");
+        self.write(format!("{now} {message}\n").as_bytes());
     }
 
     /// A panic in another thread must not stop logging.
