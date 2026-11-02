@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -99,7 +99,8 @@ fn token(path: &Path) -> Result<String> {
 /// environment.
 fn render_config(setup: &Setup<'_>, port: u16, dir: &Path) -> Result<PathBuf> {
     let config = dir.join("frpc.toml");
-    fs::write(&config, render(&setup.cfg, port, setup.paths))?;
+    fs::write(&config, render(&setup.cfg, port, setup.paths))
+        .with_context(|| format!("writing {}", config.display()))?;
     Ok(config)
 }
 
@@ -132,7 +133,7 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
         .with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     let output = child.stdout().context("frpc's output is not piped")?;
     let (broken, read_failed) = oneshot::channel();
-    let pump = tokio::spawn(pump(output, frpc_log, broken));
+    let pump = tokio::spawn(pump(output, frpc_log, log.clone(), broken));
 
     let routes = Arc::new(ws_routes(&setup.cfg));
     let mut exited = false;
@@ -148,7 +149,7 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
             let Err(err) = failed;
             err
         }
-        Ok(err) = read_failed => err,
+        Ok(()) = read_failed => anyhow!("frpc's output cannot be read"),
     };
     // frpc starts no processes, so ending it ends its output.
     let stopped = async {
@@ -166,16 +167,17 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     Err(failure)
 }
 
-/// Copies frpc's output into its log until it ends, or reports why it cannot read it.
-async fn pump(mut output: impl AsyncRead + Unpin, to: LogFile, failed: oneshot::Sender<Error>) {
+/// Copies frpc's output into its log until it ends. A read error goes to `supervisor_log` and then to `failed`; the log
+/// has it even when `supervise` is already stopping and nobody receives.
+async fn pump(mut output: impl AsyncRead + Unpin, to: LogFile, supervisor_log: LogFile, failed: oneshot::Sender<()>) {
     let mut buf = [0; 8192];
     loop {
         match output.read(&mut buf).await {
             Ok(0) => return,
             Ok(len) => to.write(&buf[..len]),
             Err(err) => {
-                // Nobody listens once `supervise` is already stopping.
-                let _ = failed.send(Error::new(err).context("reading frpc's output"));
+                supervisor_log.line(format_args!("reading frpc's output: {err}"));
+                let _ = failed.send(());
                 return;
             }
         }
@@ -199,8 +201,7 @@ async fn listen_loop(listener: TcpListener, routes: Arc<BTreeMap<String, u16>>, 
             Ok(accepted) => accepted,
             Err(err) => {
                 log.line(format_args!("accepting a WebSocket connection: {err}"));
-                // The client left before we accepted: nothing is wrong with the listener.
-                if matches!(err.kind(), ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset) {
+                if is_per_connection(&err) {
                     continue;
                 }
                 // Open connections hold descriptors, and one closing frees one. With none open, the listener is
@@ -221,6 +222,27 @@ async fn listen_loop(listener: TcpListener, routes: Arc<BTreeMap<String, u16>>, 
             }
         });
     }
+}
+
+/// Whether `err` from `accept` is about the connection being accepted and not about the listener, so that the next
+/// `accept` is fine: the client left, or Linux reports a network error pending on the new connection (accept(2)).
+fn is_per_connection(err: &io::Error) -> bool {
+    use ErrorKind::{ConnectionAborted, ConnectionReset, HostUnreachable, NetworkDown, NetworkUnreachable};
+    #[cfg(unix)]
+    {
+        let pending = [libc::EPROTO, libc::ENOPROTOOPT, libc::EHOSTDOWN, libc::EOPNOTSUPP];
+        if err.raw_os_error().is_some_and(|code| pending.contains(&code)) {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        if err.raw_os_error() == Some(libc::ENONET) {
+            return true;
+        }
+    }
+    matches!(
+        err.kind(),
+        ConnectionAborted | ConnectionReset | NetworkDown | HostUnreachable | NetworkUnreachable
+    )
 }
 
 fn log_panic(ended: Result<(), JoinError>, log: &LogFile) {

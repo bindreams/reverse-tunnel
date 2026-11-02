@@ -20,7 +20,6 @@ struct Active {
     file: File,
     size: u64,
     limit: u64,
-    /// Where the next rotation is tried: `limit`, or `limit` after a failed one.
     rotate_at: u64,
 }
 
@@ -65,9 +64,11 @@ impl Active {
     fn append(&mut self, data: &[u8]) {
         match self.file.write_all(data) {
             Ok(()) => self.size += data.len() as u64,
-            // `eprintln!` would panic on a closed stderr.
             Err(err) => {
+                // `eprintln!` would panic on a closed stderr.
                 let _ = writeln!(io::stderr(), "writing {}: {err}", self.path.display());
+                // A partial write still counts toward rotation.
+                self.size = self.file.metadata().map_or(self.size, |meta| meta.len());
             }
         }
     }

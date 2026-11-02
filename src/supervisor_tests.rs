@@ -16,10 +16,19 @@ impl AsyncRead for BrokenPipe {
 }
 
 #[tokio::test]
-async fn pump_read_error_is_reported() {
+async fn pump_read_error_is_logged_even_when_nobody_listens() {
     let dir = tempfile::tempdir().unwrap();
-    let log = LogFile::open(dir.path().join("frpc.log"), ROTATE_AT).unwrap();
+    let (frpc_log, supervisor_log) = (dir.path().join("frpc.log"), dir.path().join("supervisor.log"));
     let (broken, failed) = oneshot::channel();
-    pump(BrokenPipe, log, broken).await;
-    assert!(format!("{:#}", failed.await.unwrap()).contains("the pipe broke"));
+    drop(failed);
+    let logs = (
+        LogFile::open(frpc_log, ROTATE_AT).unwrap(),
+        LogFile::open(supervisor_log.clone(), ROTATE_AT).unwrap(),
+    );
+    pump(BrokenPipe, logs.0, logs.1, broken).await;
+    assert!(
+        std::fs::read_to_string(supervisor_log)
+            .unwrap()
+            .contains("the pipe broke")
+    );
 }

@@ -26,13 +26,15 @@ ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 yaml_serde = "0.10.7"
 zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
 [target."cfg(unix)".dev-dependencies]
 rustix = { version = "1", default-features = false, features = ["process"] }
 
 [target."cfg(windows)".dependencies]
 known-folders = "1.4.2"
 
-# Stands in for frpc in tests/supervisor.rs.
 [[bin]]
 name = "stub-frpc"
 path = "testbin/stub_frpc.rs"

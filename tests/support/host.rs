@@ -5,8 +5,8 @@
 use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 use std::thread;
 
 use anyhow::Result;
@@ -46,7 +46,7 @@ impl Host {
         fs::write(paths.secrets_dir.join("bridge.token"), "bridge-secret\n").unwrap();
         fs::write(paths.secrets_dir.join("host.token"), "host-secret\r\n").unwrap();
         let frpc = paths.bin_dir.join(format!("frpc{EXE_SUFFIX}"));
-        fs::copy(env!("CARGO_BIN_EXE_stub-frpc"), &frpc).unwrap();
+        copy_stub(&frpc);
         let record = root.join("record");
         fs::write(
             frpc.with_extension("mode"),
@@ -85,6 +85,17 @@ impl Host {
         let err = format!("{:#}", self.run(false).unwrap_err());
         assert!(err.contains(expected), "{err}");
         assert!(!self.record().exists(), "frpc started");
+    }
+}
+
+/// Copies the stub to `to`. On Unix a `cp` child writes it: a writable descriptor in this process would leak into the
+/// children that other test threads fork, and executing the copy would fail with ETXTBSY while one lives.
+fn copy_stub(to: &Path) {
+    let stub = env!("CARGO_BIN_EXE_stub-frpc");
+    if cfg!(unix) {
+        assert!(Command::new("cp").arg(stub).arg(to).status().unwrap().success());
+    } else {
+        fs::copy(stub, to).unwrap();
     }
 }
 

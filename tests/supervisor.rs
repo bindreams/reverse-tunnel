@@ -36,8 +36,6 @@ fn names(dir: &Path) -> Vec<String> {
     names
 }
 
-// check -----
-
 #[test]
 fn check_renders_and_verifies_without_starting() {
     let host = Host::new("record 0 {record}", SSH);
@@ -63,7 +61,12 @@ fn check_renders_and_verifies_without_starting() {
     assert_eq!(names(&host.paths.log_dir), logs_before);
 }
 
-// the child ends -----
+#[test]
+fn check_fails_when_frpc_rejects_the_config() {
+    let host = Host::new("exit 1", SSH);
+    let err = format!("{:#}", host.run(true).unwrap_err());
+    assert!(err.contains("frpc verify rejected the configuration"), "{err}");
+}
 
 #[test]
 fn child_exit_stops_others_and_exits_nonzero() {
@@ -99,6 +102,8 @@ fn tokens_only_in_frpc_env() {
 fn run_renders_into_the_log_dir_and_leaves_the_config_dir_alone() {
     let host = Host::new("record 3 {record}", SSH);
     let config_before = names(&host.paths.config_dir);
+    // Longer than the render, so a write that does not truncate leaves its tail behind.
+    fs::write(host.paths.log_dir.join("frpc.toml"), "# stale\n".repeat(1000)).unwrap();
     host.run(false).unwrap_err();
 
     assert_eq!(names(&host.paths.config_dir), config_before);
@@ -110,9 +115,13 @@ fn run_renders_into_the_log_dir_and_leaves_the_config_dir_alone() {
             host.paths.log_dir.join("frpc.toml").display().to_string()
         ]
     );
+    let record = fs::read_to_string(host.record()).unwrap();
+    let rendered = record.split_once("TOML\n").unwrap().1;
+    assert!(
+        rendered.starts_with("serverAddr = ") && !rendered.contains("stale"),
+        "{rendered}"
+    );
 }
-
-// refusals before frpc starts -----
 
 #[test]
 fn missing_token_file_is_refused() {
@@ -139,8 +148,9 @@ fn unloadable_config_is_refused() {
 fn unspawnable_tool_is_refused() {
     let host = Host::new("exit 0", SSH);
     fs::remove_file(&host.frpc).unwrap();
-    host.assert_refused("frpc");
-    assert!(host.log(LOG_SUPERVISOR).contains("frpc"));
+    let starting = format!("starting {}", host.frpc.display());
+    host.assert_refused(&starting);
+    assert!(host.log(LOG_SUPERVISOR).contains(&starting));
 }
 
 #[test]
@@ -158,8 +168,6 @@ fn listener_bind_failure_is_logged() {
     assert!(err.contains(&taken.local_addr().unwrap().to_string()), "{err}");
     assert_eq!(host.log(LOG_SUPERVISOR).trim_end(), err);
 }
-
-// rotation -----
 
 #[test]
 fn rotation_keeps_two_files() {
@@ -199,15 +207,18 @@ fn failed_rotation_is_logged_and_retried_at_the_next_threshold() {
     assert_eq!(fs::read_to_string(&path).unwrap(), "e");
 }
 
-// the WebSocket listener -----
+/// More than one read chunk of the supervisor's, so that a payload cut at a chunk boundary shows.
+fn blob(label: &str) -> Vec<u8> {
+    (label.bytes().chain((0..100 * 1024).map(|i| (i % 251) as u8))).collect()
+}
 
 /// Accepts one connection, sends `banner`, and returns what it receives until the peer's end.
-async fn backend(banner: &'static str) -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+async fn backend(banner: Vec<u8>) -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let received = tokio::spawn(async move {
         let (mut conn, _) = listener.accept().await.unwrap();
-        conn.write_all(banner.as_bytes()).await.unwrap();
+        conn.write_all(&banner).await.unwrap();
         let mut received = Vec::new();
         conn.read_to_end(&mut received).await.unwrap();
         received
@@ -215,30 +226,44 @@ async fn backend(banner: &'static str) -> (u16, tokio::task::JoinHandle<Vec<u8>>
     (port, received)
 }
 
-/// Reads the banner, sends `payload`, and closes cleanly.
-async fn talk(mut ws: WebSocketStream<TcpStream>, payload: &str) -> Message {
-    let banner = ws.next().await.unwrap().unwrap();
-    ws.send(Message::binary(payload.as_bytes().to_vec())).await.unwrap();
+/// Reads `banner`, sends `payload`, and closes cleanly.
+async fn talk(mut ws: WebSocketStream<TcpStream>, banner: &[u8], payload: &[u8]) {
+    let mut read = Vec::new();
+    while read.len() < banner.len() {
+        read.extend(ws.next().await.unwrap().unwrap().into_data());
+    }
+    assert!(read == banner, "the banner arrived changed");
+    ws.send(Message::binary(payload.to_vec())).await.unwrap();
     ws.close(None).await.unwrap();
     while let Some(message) = ws.next().await {
         message.unwrap();
     }
-    banner
 }
 
 #[tokio::test]
 async fn ws_forwards_by_host() {
-    let ((ssh_port, ssh), (vnc_port, vnc)) = (backend("ssh banner").await, backend("vnc banner").await);
+    let (ssh_banner, vnc_banner) = (blob("ssh banner"), blob("vnc banner"));
+    let ((ssh_port, ssh), (vnc_port, vnc)) = (backend(ssh_banner.clone()).await, backend(vnc_banner.clone()).await);
     let live = Live::start(&tcp_services(ssh_port, vnc_port)).await;
+    let (to_ssh, to_vnc) = (blob("to ssh"), blob("to vnc"));
 
     // The default service answers at the bare host name, here with a port as a browser or proxy may add.
-    let banner = talk(live.connect("testhost.tunnel.example:443").await.unwrap(), "to ssh").await;
-    assert_eq!(banner, Message::binary(&b"ssh banner"[..]));
-    let banner = talk(live.connect("vnc.testhost.tunnel.example").await.unwrap(), "to vnc").await;
-    assert_eq!(banner, Message::binary(&b"vnc banner"[..]));
+    talk(
+        live.connect("testhost.tunnel.example:443").await.unwrap(),
+        &ssh_banner,
+        &to_ssh,
+    )
+    .await;
+    // Host names are case-insensitive: Traefik forwards them as typed.
+    talk(
+        live.connect("VNC.TESTHOST.TUNNEL.EXAMPLE").await.unwrap(),
+        &vnc_banner,
+        &to_vnc,
+    )
+    .await;
     // A backend sees the end of its stream only when the WebSocket close reached it.
-    assert_eq!(ssh.await.unwrap(), b"to ssh");
-    assert_eq!(vnc.await.unwrap(), b"to vnc");
+    assert!(ssh.await.unwrap() == to_ssh, "the payload arrived changed");
+    assert!(vnc.await.unwrap() == to_vnc, "the payload arrived changed");
     live.stop().await;
 }
 
