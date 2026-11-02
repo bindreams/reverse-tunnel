@@ -147,10 +147,22 @@ def test_ctl_rewrites_keep_long_entries_on_one_line(inited):
     assert Path("state/aliases.yaml").read_text().startswith(alias_line)
 
 
-@pytest.mark.parametrize("host", ["22", "null"])
+@pytest.mark.parametrize("host", ["22", "null", "true", "1e3", "0x1f"])
 def test_quoted_numeric_host_round_trips(inited, host):
     assert cli.main(["add", host, H]) == 0
+    assert f"'{host}': " in Path("state/hosts.yaml").read_text()
     assert read_hosts(Path("state/hosts.yaml")) == {host: H}
+
+
+def test_a_syntax_error_in_the_registry_stops_ctl_before_any_change(inited, capsys):
+    broken = f"a: {H}\nb: [1, 2}}\n"
+    Path("state/hosts.yaml").write_text(broken)
+    generated = GENERATED.read_text()
+    assert cli.main(["add", "web", H]) == 1
+    assert "state/hosts.yaml: line 2" in capsys.readouterr().err
+    assert Path("state/hosts.yaml").read_text() == broken
+    assert GENERATED.read_text() == generated
+    assert inited == []
 
 
 @pytest.mark.parametrize("host, digest", [("Bad_Name", H), ("web", "sha256:abc")])

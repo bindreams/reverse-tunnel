@@ -36,10 +36,10 @@ def test_hosts_tolerates_hand_edits(tmp_path):
         ("a: x\nb\x00: y\n", 2),
         ("a: x\n- y\n", 2),
         ("- y\n", 1),
-        ("a: " + "[" * 100_000 + "]" * 100_000 + "\n", 1),
-        ("a: " + "9" * 5000 + "\n", 1),
+        ("a: x\n\nb: " + "[" * 100_000 + "]" * 100_000 + "\n", None),
+        ("a: x\n\nb: " + "9" * 5000 + "\n", None),
         ("&r\na: *r\n", 2),
-        ("a: x\n<<: {Bad_: y}\n", 2),
+        ("m: &m {a: b}\n<<: *m\n", 2),
     ],
     ids=[
         "bad-flow",
@@ -87,6 +87,14 @@ def test_non_string_key_is_rejected_with_line(tmp_path):
     assert err.value.line_no == 2
 
 
+def test_tagged_value_is_rejected_naming_the_tag(tmp_path):
+    path = tmp_path / "hosts.yaml"
+    path.write_text(f"a: !!str {H1}\n")
+    with pytest.raises(RegistryError, match="tag:yaml.org,2002:str") as err:
+        read_hosts(path)
+    assert err.value.line_no == 1
+
+
 def test_hosts_undecodable_bytes_name_their_line(tmp_path):
     path = tmp_path / "hosts.yaml"
     path.write_bytes(f"a: {H1}\nb".encode() + b"\xff\xfe: " + H1.encode() + b"\n")
@@ -127,9 +135,10 @@ def test_hosts_tolerates_a_utf8_bom(tmp_path):
     assert read_hosts(path) == {"a": H1}
 
 
-def test_empty_registry_reads_as_empty(tmp_path):
+@pytest.mark.parametrize("data", [b"", b"---\n...\n", b"# c\n---\n...\n"], ids=["empty", "markers", "comment-markers"])
+def test_empty_registry_reads_as_empty(tmp_path, data):
     path = tmp_path / "registry.yaml"
-    path.write_bytes(b"")
+    path.write_bytes(data)
     assert read_hosts(path) == {}
     assert read_aliases(path, T) == {}
 
@@ -144,8 +153,9 @@ def test_missing_registry_raises_file_not_found(tmp_path):
 def test_write_hosts_refuses_what_the_reader_rejects(tmp_path):
     path = tmp_path / "hosts.yaml"
     write_hosts(path, {"keep": H1})
-    for bad, culprit in [({"ok": H1, "Bad": H1}, "Bad"), ({"ok": "sha256:1"}, "ok")]:
-        with pytest.raises(RegistryError, match=f"^{culprit}:"):
+    bad_entries = [({"ok": H1, "Bad": H1}, "Bad:"), ({"ok": "sha256:1"}, "ok:"), ({"a": 22}, "a: the value is a int")]
+    for bad, culprit in bad_entries:
+        with pytest.raises(RegistryError, match=f"^{culprit}"):
             write_hosts(path, bad)
     assert read_hosts(path) == {"keep": H1}
 
@@ -311,7 +321,6 @@ def test_locked_excludes(tmp_path):
     thread = threading.Thread(target=waiter)
     with locked(tmp_path):
         thread.start()
-        # Wait for the waiter to block on the flock (or end).
         while thread.is_alive() and not _blocked_flocks():
             os.sched_yield()
         if failures:

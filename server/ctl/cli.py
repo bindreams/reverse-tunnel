@@ -119,7 +119,7 @@ def _join_code(args, hosts, aliases, env):
     return encode_join(env["TUNNEL_DOMAIN"], env["FRPS_TOKEN"], (TLS / "trust.pem").read_text())
 
 
-# command -> (handler, arguments); a handler edits the registries in place and returns text to print after the reload
+# A handler edits the registries in place and returns text to print after the reload.
 COMMANDS = {
     "init": (_join_code, []),
     "add": (_add, ["host", "hash"]),

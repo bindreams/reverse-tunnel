@@ -137,5 +137,6 @@ def test_registry_reread_each_request(plugin):
 
 def test_plugin_image_pins_the_locked_ruamel_release():
     pin = re.search(r"ruamel\.yaml==(\S+) --hash=sha256:(\w+)", (SERVER / "Dockerfile").read_text())
-    lock = (SERVER / "uv.lock").read_text()
-    assert f'name = "ruamel-yaml"\nversion = "{pin[1]}"' in lock and pin[2] in lock
+    assert pin, "the Dockerfile no longer pins ruamel.yaml with a hash"
+    entry = (SERVER / "uv.lock").read_text().split('name = "ruamel-yaml"\n')[1].split("[[package]]")[0]
+    assert f'version = "{pin[1]}"' in entry and pin[2] in entry

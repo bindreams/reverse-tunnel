@@ -2,18 +2,22 @@ import contextlib
 import fcntl
 import io
 import os
+import re
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.comments import CommentedMap, TaggedScalar
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scanner import ScannerError
 
 from ctl.joincode import is_token_hash
 from ctl.names import alias_problem, valid_label
+
+
+MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
 class RegistryError(Exception):
@@ -72,7 +76,7 @@ def locked(state_dir: Path) -> Iterator[None]:
 
 
 def _yaml() -> YAML:
-    """A round-trip, YAML 1.2 loader and dumper; one per call, since an instance is not thread-safe."""
+    """One per call: a ruamel instance is not thread-safe."""
     yaml = YAML()
     yaml.preserve_quotes = True
     yaml.width = 2**31  # an entry is never wrapped onto a second line
@@ -86,32 +90,45 @@ def _load(text: str) -> CommentedMap:
     yaml = _yaml()
     try:
         doc = yaml.load(text)
-        if doc is None:
-            doc = yaml.load(text + "\n{}\n")  # the comments stay with the mapping
+        if doc is None:  # the comments stay with a mapping, after any document-end marker is gone
+            doc = yaml.load(re.sub(r"(?m)^\.\.\.(\s.*)?$", "", text) + "\n{}\n")
     except Exception as e:  # ruamel raises more than YAMLError: ValueError, TypeError, RecursionError
         mark = getattr(e, "problem_mark", None)
         if isinstance(e, ScannerError):
             mark = e.context_mark or mark  # where the broken key or string starts, not where the scanner gave up
-        line_no = mark.line + 1 if mark else text.count("\n", 0, getattr(e, "position", 0)) + 1
+        line_no = mark.line + 1 if mark else None
+        if mark is None and hasattr(e, "position"):
+            line_no = text.count("\n", 0, e.position) + 1
         raise RegistryError(line_no, getattr(e, "problem", None) or str(e)) from e
     if not isinstance(doc, CommentedMap):
         raise RegistryError(1, "expected a mapping of names to values")
+    if doc.merge:
+        merge_key = next(key for key, _ in yaml.compose(text).value if key.tag == MERGE_TAG)
+        raise RegistryError(merge_key.start_mark.line + 1, "merge keys (<<) are not allowed: give each entry a line")
     doc.fa.set_block_style()
     return doc
 
 
+def _kind(scalar) -> str:
+    return f"scalar tagged {scalar.tag.value}" if isinstance(scalar, TaggedScalar) else type(scalar).__name__
+
+
 def _problem(key, value, problem: Callable[[str, str], str | None]) -> str | None:
     if not isinstance(key, str):
-        return f"key {key!r} is not a string: put it in quotes"
+        return f"key {key!r} is a {_kind(key)}, not a string: write it in quotes, without a tag"
     if not isinstance(value, str):
-        return f"{key}: the value is a {type(value).__name__}, not a string: put it in quotes"
+        return f"the value is a {_kind(value)}, not a string: write it in quotes, without a tag"
     return problem(key, value)
 
 
 def _read(path: Path, problem: Callable[[str, str], str | None]) -> CommentedMap:
-    doc = _load(path.read_bytes().decode("utf-8-sig", errors="replace"))
-    if doc.merge:
-        raise RegistryError(doc.merge[0].lc.line + 1, "merge keys (<<) are not allowed: give each entry its own line")
+    data = path.read_bytes()
+    try:
+        text, bad_line = data.decode("utf-8-sig"), None
+    except UnicodeDecodeError as e:  # read on, so the plugin still works; a rewrite would keep the bytes replaced
+        text, bad_line = data.decode("utf-8-sig", errors="replace"), data.count(b"\n", 0, e.start) + 1
+    doc = _load(text)
+    doc.bad_line = bad_line
     for key, value in doc.items():
         if msg := _problem(key, value, problem):
             raise RegistryError(doc.lc.key(key)[0] + 1, msg)
@@ -122,15 +139,8 @@ def _write(path: Path, doc: dict, problem: Callable[[str, str], str | None]) -> 
     for key, value in doc.items():
         if msg := _problem(key, value, problem):
             raise RegistryError(None, f"{key}: {msg}")
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
-        data = b""
-    try:
-        data.decode("utf-8-sig")  # the reader replaced bad bytes, which a rewrite would keep replaced
-    except UnicodeDecodeError as e:
-        line_no = data.count(b"\n", 0, e.start) + 1
-        raise RegistryError(line_no, "not UTF-8; fix it by hand before ctl rewrites the file") from e
+    if bad_line := getattr(doc, "bad_line", None):
+        raise RegistryError(bad_line, "not UTF-8; fix it by hand before ctl rewrites the file")
     out = io.StringIO()
     _yaml().dump(doc, out)
     atomic_write(path, out.getvalue().encode(), 0o644)
@@ -158,7 +168,8 @@ def read_hosts(path: Path) -> CommentedMap:
 
 
 def write_hosts(path: Path, hosts: dict[str, str]) -> None:
-    """Write `hosts`, a mapping from `read_hosts` edited in place (a plain dict is written in its order)."""
+    """`hosts` should be the mapping from `read_hosts`, edited in place, to keep comments; a plain dict is written in
+    its order."""
     _write(path, hosts, _host_problem)
 
 
