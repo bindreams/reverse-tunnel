@@ -47,7 +47,29 @@ jobs:
           Set-MpPreference -DisableRealtimeMonitoring $false
           while (-not (Get-MpComputerStatus).RealTimeProtectionEnabled) { }
           Get-MpComputerStatus | Format-List AntivirusEnabled, RealTimeProtectionEnabled, IoavProtectionEnabled
-          Get-MpPreference | Format-List ExclusionPath, ExclusionExtension, ExclusionProcess
+      - name: Remove every Defender exclusion
+        shell: pwsh
+        run: |
+          $pref = Get-MpPreference
+          if ($pref.ExclusionPath) { Remove-MpPreference -ExclusionPath $pref.ExclusionPath }
+          if ($pref.ExclusionExtension) { Remove-MpPreference -ExclusionExtension $pref.ExclusionExtension }
+          if ($pref.ExclusionProcess) { Remove-MpPreference -ExclusionProcess $pref.ExclusionProcess }
+          $pref = Get-MpPreference
+          $pref | Format-List ExclusionPath, ExclusionExtension, ExclusionProcess
+          if ($pref.ExclusionPath -or $pref.ExclusionExtension -or $pref.ExclusionProcess) { throw 'exclusions remain' }
+      - name: Defender blocks the EICAR test file in the workspace
+        shell: pwsh
+        run: |
+          # The string is split so that this file does not trip Defender where it is read.
+          $eicar = Join-Path $env:GITHUB_WORKSPACE 'eicar.com'
+          try {
+            Set-Content -Path $eicar -NoNewline -Value ('X5O!P%@AP[4\PZX54(P^)7CC)7}' + '$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*')
+          } catch {
+            Write-Output "write refused: $($_.Exception.Message)"
+          }
+          while ((Test-Path $eicar) -and -not (Get-MpThreatDetection | Where-Object { $_.Resources -like '*eicar.com*' })) { }
+          Write-Output "file present: $(Test-Path $eicar)"
+          Get-MpThreatDetection | Format-List ThreatID, Resources, ActionSuccess
       - name: Fetch frpc.exe and run it
         shell: bash
         run: cargo test --locked frpc_verify_accepts_render -- --ignored
