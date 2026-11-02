@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env::consts::EXE_SUFFIX;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use goetia::spec::{DaemonSpec, Kind, Restart, User};
@@ -9,15 +10,20 @@ use crate::paths::Paths;
 const ID: &str = "reverse-tunnel";
 
 #[cfg(windows)]
-const ACCOUNT: &str = r"NT SERVICE\reverse-tunnel";
+pub const ACCOUNT: &str = r"NT SERVICE\reverse-tunnel";
 #[cfg(target_os = "macos")]
-const ACCOUNT: &str = "_reverse-tunnel";
+pub const ACCOUNT: &str = "_reverse-tunnel";
 #[cfg(not(any(windows, target_os = "macos")))]
-const ACCOUNT: &str = "reverse-tunnel";
+pub const ACCOUNT: &str = "reverse-tunnel";
+
+/// Where the installed binary is: the one path the service runs.
+pub fn exe(paths: &Paths) -> PathBuf {
+    paths.bin_dir.join(format!("{ID}{EXE_SUFFIX}"))
+}
 
 /// The one daemon this tool installs. It names a fixed path, so an upgrade never changes the spec.
 pub fn spec(paths: &Paths) -> DaemonSpec {
-    let exe = paths.bin_dir.join(format!("{ID}{EXE_SUFFIX}"));
+    let exe = exe(paths);
     DaemonSpec {
         id: ID.parse().expect("a valid id"),
         name: ID.into(),

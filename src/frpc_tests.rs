@@ -25,6 +25,7 @@ fn paths(config_dir: &str) -> Paths {
         config_dir: PathBuf::from(config_dir),
         secrets_dir: PathBuf::from(config_dir).join("secrets"),
         log_dir: PathBuf::from("logs"),
+        lock: PathBuf::new(),
         link: None,
     }
 }

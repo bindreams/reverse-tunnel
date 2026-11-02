@@ -1,5 +1,5 @@
 use std::env::consts::{ARCH, EXE_SUFFIX, OS};
-use std::io::{Cursor, ErrorKind, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
+use crate::files::{Perm, Replace, write_atomic};
 use crate::paths::Paths;
 
 /// The targets `reverse-tunnel` is released for.
@@ -185,32 +186,9 @@ fn install(pin: &Pin, archive: &[u8], dest_dir: &Path) -> Result<PathBuf> {
         }
         ensure!(found, "{} not in {}", pin.member, pin.url);
     }
-    write_executable(&dest_dir.join(file_name(pin.name, pin.version)), &tool)
-}
-
-/// Writes `data` to `dest` through a temp file in the same directory, so `dest` is never partial. An existing `dest`
-/// is left alone.
-fn write_executable(dest: &Path, data: &[u8]) -> Result<PathBuf> {
-    let dir = dest.parent().expect("dest is inside a directory");
-    let mut file = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("creating a temporary file in {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.as_file().set_permissions(std::fs::Permissions::from_mode(0o755))?;
-    }
-    file.write_all(data)?;
-    file.as_file().sync_all()?;
-    match file.persist_noclobber(dest) {
-        Err(err) if err.error.kind() != ErrorKind::AlreadyExists => {
-            return Err(err).with_context(|| format!("writing {}", dest.display()));
-        }
-        // A concurrent fetch got there first.
-        _ => {}
-    }
-    #[cfg(unix)]
-    std::fs::File::open(dir)?.sync_all()?;
-    Ok(dest.to_path_buf())
+    let dest = dest_dir.join(file_name(pin.name, pin.version));
+    write_atomic(&dest, &tool, Perm::EXECUTABLE, Replace::Never)?;
+    Ok(dest)
 }
 
 #[cfg(test)]

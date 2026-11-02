@@ -94,7 +94,7 @@ fn unique_services<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeMa
 
 /// One DNS label (lowercase, digits, inner hyphens, at most 63 characters, no `--` at positions 3-4). Mirrors
 /// `server/ctl/names.py`.
-fn valid_label(s: &str) -> bool {
+pub fn valid_label(s: &str) -> bool {
     let bytes = s.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 63

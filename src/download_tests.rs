@@ -70,6 +70,7 @@ fn extracts_tar_gz_and_zip() {
             config_dir: PathBuf::new(),
             secrets_dir: PathBuf::new(),
             log_dir: PathBuf::new(),
+            lock: PathBuf::new(),
             link: None,
         };
 

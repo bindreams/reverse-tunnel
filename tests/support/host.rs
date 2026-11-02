@@ -36,6 +36,7 @@ impl Host {
             config_dir: root.join("config"),
             secrets_dir: root.join("config/secrets"),
             log_dir: root.join("logs"),
+            lock: root.join("lock"),
             link: None,
         };
         for dir in [&paths.bin_dir, &paths.secrets_dir, &paths.log_dir] {
