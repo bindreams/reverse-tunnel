@@ -97,6 +97,16 @@ fn pins_cover_release_targets() {
 }
 
 #[test]
+fn pins_carry_one_version() {
+    for pin in PINS {
+        for text in [pin.url, pin.member] {
+            assert!(text.contains(pin.version), "{} lacks {}", text, pin.version);
+        }
+        assert_eq!(pin.version, VERSION, "{}", pin.url);
+    }
+}
+
+#[test]
 fn frp_pin_matches_server_dockerfile() {
     let dockerfile = include_str!("../server/Dockerfile");
     for (target, arch) in [
@@ -104,14 +114,36 @@ fn frp_pin_matches_server_dockerfile() {
         ("aarch64-unknown-linux-gnu", "arm64"),
     ] {
         let pin = PINS.iter().find(|pin| pin.target == target).unwrap();
-        for line in [
-            format!("{arch}) sha256={}", pin.sha256),
-            format!("releases/download/v{}/", pin.version),
-            format!("frp_{}_linux_", pin.version),
-        ] {
-            assert!(dockerfile.contains(&line), "server/Dockerfile lacks `{line}`");
-        }
+        let line = format!("{arch}) sha256={}", pin.sha256);
+        assert!(dockerfile.contains(&line), "server/Dockerfile lacks `{line}`");
     }
+}
+
+#[test]
+fn install_error_names_the_missing_directory() {
+    let archive = tar_gz();
+    let pin = pin_for("https://example.test/frp.tar.gz", "frp/frpc", &archive);
+    let dir = tempfile::tempdir().unwrap().path().join("gone");
+    let err = install(&pin, &archive, &dir).unwrap_err();
+    assert!(format!("{err:#}").contains(dir.to_str().unwrap()), "{err:#}");
+}
+
+#[test]
+fn fetch_keeps_an_installed_version() {
+    let pin = pin_for("https://example.test/unreachable.tar.gz", "frp/frpc", &tar_gz());
+    let dir = tempfile::tempdir().unwrap();
+    let installed = dir.path().join(file_name(pin.name, pin.version));
+    std::fs::write(&installed, b"installed").unwrap();
+    assert_eq!(fetch(&pin, dir.path()).unwrap(), installed);
+    assert_eq!(std::fs::read(&installed).unwrap(), b"installed");
+}
+
+#[test]
+fn download_fails_when_the_server_stalls() {
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/frp.tar.gz", server.local_addr().unwrap());
+    let err = download(&url, Duration::from_millis(200)).unwrap_err();
+    assert!(err.to_string().contains(&url), "{err}");
 }
 
 /// Downloads every pinned URL; CI runs it with `--include-ignored`.

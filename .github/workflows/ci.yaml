@@ -47,6 +47,7 @@ jobs:
           Set-MpPreference -DisableRealtimeMonitoring $false
           while (-not (Get-MpComputerStatus).RealTimeProtectionEnabled) { }
           Get-MpComputerStatus | Format-List AntivirusEnabled, RealTimeProtectionEnabled, IoavProtectionEnabled
+          Get-MpPreference | Format-List ExclusionPath, ExclusionExtension, ExclusionProcess
       - name: Fetch frpc.exe and run it
         shell: bash
         run: cargo test --locked frpc_verify_accepts_render -- --ignored

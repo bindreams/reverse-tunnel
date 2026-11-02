@@ -1,6 +1,9 @@
 use std::env::consts::{ARCH, EXE_SUFFIX, OS};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -17,6 +20,9 @@ pub const RELEASE_TARGETS: [&str; 5] = [
 ];
 
 const VERSION: &str = "0.71.1";
+
+/// How long a download may deliver nothing before `fetch` gives up on it.
+const STALL: Duration = Duration::from_secs(60);
 
 /// A tool release archive, and the one file of it that gets installed. `url` ends in `.zip` or `.tar.gz`.
 pub struct Pin {
@@ -106,14 +112,47 @@ pub fn host_pin() -> Result<&'static Pin> {
         .expect("PINS has every release target"))
 }
 
-/// Downloads `pin` into memory and writes its tool into `dest_dir` as `<name>-<version>`. No archive touches disk.
+/// Writes the pinned tool into `dest_dir`, which must exist, as `<name>-<version>` (`.exe` on Windows), and returns
+/// that path. If the file is already there, returns it without downloading: only this module writes that name, after
+/// the digest check, so it was verified (and on Windows a running one cannot be replaced). Otherwise downloads into
+/// memory, so no archive touches disk.
 pub fn fetch(pin: &Pin, dest_dir: &Path) -> Result<PathBuf> {
+    let dest = dest_dir.join(file_name(pin.name, pin.version));
+    if dest.try_exists()? {
+        return Ok(dest);
+    }
+    install(pin, &download(pin.url, STALL)?, dest_dir)
+}
+
+/// Reads `url` into memory. Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps
+/// progressing is never cut off. A reader thread feeds the chunks so the wait covers connecting too.
+fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
+    let (send, recv) = mpsc::channel();
+    let owned = url.to_string();
+    thread::spawn(move || {
+        let read = || -> Result<()> {
+            let mut body = ureq::get(&owned).call()?.into_body().into_reader();
+            loop {
+                let mut chunk = vec![0; 1 << 16];
+                let len = body.read(&mut chunk)?;
+                chunk.truncate(len);
+                if len == 0 || send.send(Ok(chunk)).is_err() {
+                    return Ok(());
+                }
+            }
+        };
+        if let Err(err) = read() {
+            let _ = send.send(Err(err));
+        }
+    });
     let mut archive = Vec::new();
-    let body = ureq::get(pin.url)
-        .call()
-        .with_context(|| format!("downloading {}", pin.url))?;
-    (body.into_body().into_reader().read_to_end(&mut archive)).with_context(|| format!("downloading {}", pin.url))?;
-    install(pin, &archive, dest_dir)
+    loop {
+        match recv.recv_timeout(stall) {
+            Ok(chunk) => archive.extend(chunk.with_context(|| format!("downloading {url}"))?),
+            Err(RecvTimeoutError::Disconnected) => return Ok(archive),
+            Err(RecvTimeoutError::Timeout) => bail!("downloading {url}: no data for {stall:?}"),
+        }
+    }
 }
 
 /// Checks `archive` against the pinned digest, then writes only the pinned member. A mismatch writes nothing.
@@ -149,7 +188,8 @@ fn install(pin: &Pin, archive: &[u8], dest_dir: &Path) -> Result<PathBuf> {
 /// Writes `data` to `dest` through a temp file in the same directory, so `dest` is never partial.
 fn write_executable(dest: &Path, data: &[u8]) -> Result<PathBuf> {
     let dir = dest.parent().expect("dest is inside a directory");
-    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    let mut file = tempfile::NamedTempFile::new_in(dir)
+        .with_context(|| format!("creating a temporary file in {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -157,7 +197,8 @@ fn write_executable(dest: &Path, data: &[u8]) -> Result<PathBuf> {
     }
     file.write_all(data)?;
     file.as_file().sync_all()?;
-    file.persist(dest)?;
+    file.persist(dest)
+        .with_context(|| format!("writing {}", dest.display()))?;
     #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
     Ok(dest.to_path_buf())
