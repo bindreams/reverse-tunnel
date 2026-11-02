@@ -4,8 +4,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use jiff::fmt::strtime;
+use jiff::tz::TimeZone;
+use jiff::{Unit, Zoned};
 
 /// The size at which a log is rotated.
 pub const ROTATE_AT: u64 = 10 * 1024 * 1024;
@@ -41,18 +45,17 @@ impl LogFile {
     /// full disk cannot stop what is being logged.
     pub fn write(&self, data: &[u8]) {
         let mut log = self.lock();
-        if log.size >= log.rotate_at
-            && let Err(err) = log.rotate()
-        {
-            let note = format!("log rotation failed, retrying in {} bytes: {err:#}\n", log.limit);
-            log.append(note.as_bytes());
-            log.rotate_at = log.size + log.limit;
-        }
+        log.rotate_if_due();
         log.append(data);
     }
 
+    /// Appends `message` as a line stamped with the local time (see `now`).
     pub fn line(&self, message: impl Display) {
-        self.write(format!("{message}\n").as_bytes());
+        let mut log = self.lock();
+        log.rotate_if_due();
+        // Read under the lock, so stamps never go backwards in the file.
+        let line = format!("{} {message}\n", now());
+        log.append(line.as_bytes());
     }
 
     /// A panic in another thread must not stop logging.
@@ -71,6 +74,20 @@ impl Active {
                 // A partial write still counts toward rotation.
                 self.size = self.file.metadata().map_or(self.size, |meta| meta.len());
             }
+        }
+    }
+
+    fn rotate_if_due(&mut self) {
+        if self.size >= self.rotate_at
+            && let Err(err) = self.rotate()
+        {
+            let note = format!(
+                "{} log rotation failed, retrying in {} bytes: {err:#}\n",
+                now(),
+                self.limit
+            );
+            self.append(note.as_bytes());
+            self.rotate_at = self.size + self.limit;
         }
     }
 
@@ -98,3 +115,19 @@ fn open(path: &Path) -> Result<File> {
         .open(path)
         .with_context(|| format!("opening {}", path.display()))
 }
+
+/// The local time and its UTC offset in whole minutes, e.g. `2026-11-02T21:04:05+01:00`; `1970-01-01T00:00:00+00:00`
+/// if the clock or the zone cannot be read.
+fn now() -> String {
+    stamp().unwrap_or_else(|_| "1970-01-01T00:00:00+00:00".to_string())
+}
+
+fn stamp() -> Result<String, jiff::Error> {
+    let zoned = Zoned::try_from(SystemTime::now())?;
+    let offset = zoned.offset().round(Unit::Minute)?;
+    strtime::format("%Y-%m-%dT%H:%M:%S%:z", &zoned.with_time_zone(TimeZone::fixed(offset)))
+}
+
+#[cfg(test)]
+#[path = "logfile_tests.rs"]
+mod tests;

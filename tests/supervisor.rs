@@ -5,6 +5,9 @@ use std::net::{Ipv4Addr, TcpListener as StdListener};
 use std::path::Path;
 
 use futures_util::{SinkExt, StreamExt};
+use jiff::Timestamp;
+use jiff::fmt::temporal::Pieces;
+use jiff::tz::TimeZone;
 use reverse_tunnel::logfile::LogFile;
 use reverse_tunnel::paths::{LOG_FRPC, LOG_SUPERVISOR};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,6 +28,21 @@ fn recorded(host: &Host, prefix: &str) -> Vec<String> {
         .filter_map(|line| line.strip_prefix(prefix))
         .map(str::to_string)
         .collect()
+}
+
+fn stamped(line: &str) -> &str {
+    let (stamp, message) = line.trim_end().split_once(' ').expect("a timestamp and a message");
+    assert_eq!(stamp.len(), "YYYY-MM-DDTHH:MM:SS+HH:MM".len(), "{stamp:?}");
+    let at: Timestamp = stamp
+        .parse()
+        .unwrap_or_else(|e| panic!("{stamp:?} is not RFC 3339: {e}"));
+    let offset = Pieces::parse(stamp).unwrap().to_numeric_offset();
+    assert_eq!(
+        offset,
+        Some(TimeZone::system().to_offset(at)),
+        "{stamp:?} is not local time"
+    );
+    message
 }
 
 fn names(dir: &Path) -> Vec<String> {
@@ -73,7 +91,8 @@ fn child_exit_stops_others_and_exits_nonzero() {
     let host = Host::new("exit 7", SSH);
     let err = format!("{:#}", host.run(false).unwrap_err());
     assert!(err.contains("frpc exited") && err.contains('7'), "{err}");
-    assert_eq!(host.log(LOG_SUPERVISOR).trim_end(), err);
+    let log = host.log(LOG_SUPERVISOR);
+    assert_eq!(stamped(&log), err);
     assert!(host.log(LOG_FRPC).contains("stub frpc: failing"));
 }
 
@@ -166,7 +185,7 @@ fn listener_bind_failure_is_logged() {
     let taken = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let err = format!("{:#}", host.run_listening(taken.local_addr().unwrap()).unwrap_err());
     assert!(err.contains(&taken.local_addr().unwrap().to_string()), "{err}");
-    assert_eq!(host.log(LOG_SUPERVISOR).trim_end(), err);
+    assert_eq!(stamped(&host.log(LOG_SUPERVISOR)), err);
 }
 
 #[test]
@@ -193,10 +212,9 @@ fn failed_rotation_is_logged_and_retried_at_the_next_threshold() {
     log.write(b"aaaaaaaaaaaa");
     log.write(b"b");
     let kept = fs::read_to_string(&path).unwrap();
-    assert!(
-        kept.starts_with("aaaaaaaaaaaa") && kept.contains("rotat") && kept.ends_with('b'),
-        "{kept}"
-    );
+    assert!(kept.starts_with("aaaaaaaaaaaa") && kept.ends_with('b'), "{kept}");
+    let note = kept["aaaaaaaaaaaa".len()..].lines().next().unwrap();
+    assert!(stamped(note).starts_with("log rotation failed"), "{note}");
 
     fs::remove_dir_all(&old).unwrap();
     log.write(b"c");
