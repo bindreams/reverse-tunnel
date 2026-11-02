@@ -104,8 +104,9 @@ impl Machine {
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());
         }
+        let accounts = account_names();
         for account in [service::ACCOUNT, PROBE] {
-            assert!(account::lookup(account).is_none(), "{account} is left from before");
+            assert!(!accounts.contains(account), "{account} is left from before");
         }
         assert!(
             matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })),
@@ -187,6 +188,20 @@ impl Drop for Machine {
     }
 }
 
+/// The name of every user and group, from the account database; the lookup cache that `account::lookup` goes through
+/// can still answer for an account that has just been removed.
+fn account_names() -> BTreeSet<String> {
+    let listing = if cfg!(target_os = "macos") {
+        output_of("dscl", &[".", "-list", "/Users"]) + &output_of("dscl", &[".", "-list", "/Groups"])
+    } else {
+        output_of("getent", &["passwd"]) + &output_of("getent", &["group"])
+    };
+    listing
+        .lines()
+        .map(|line| line.split([':', ' ']).next().unwrap().to_string())
+        .collect()
+}
+
 /// A name this tool gives: `reverse-tunnel*`, or `_reverse-tunnel*` for a macOS account.
 fn ours(path: &Path) -> bool {
     let name = path.file_name().and_then(|name| name.to_str());
@@ -233,16 +248,7 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     for dir in units {
         tree(Path::new(dir), &mut seen);
     }
-    let accounts = if cfg!(target_os = "macos") {
-        output_of("dscl", &[".", "-list", "/Users"]) + &output_of("dscl", &[".", "-list", "/Groups"])
-    } else {
-        output_of("getent", &["passwd"]) + &output_of("getent", &["group"])
-    };
-    seen.extend(
-        accounts
-            .lines()
-            .map(|line| format!("account {}", line.split([':', ' ']).next().unwrap())),
-    );
+    seen.extend(account_names().into_iter().map(|name| format!("account {name}")));
     for installed in machine.manager.list().unwrap() {
         seen.insert(match installed {
             Installed::Ours { spec, .. } => format!("service {}", spec.id),
