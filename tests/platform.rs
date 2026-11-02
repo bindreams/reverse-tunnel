@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -310,18 +310,21 @@ fn acls_as_specified() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
-fn install_under_umask_077() {
-    let machine = Machine::begin();
-    let mut install = Command::new("sh");
-    install
-        .args([
-            "-c",
-            "umask 077; exec \"$0\" install --host testhost --join \"$1\"",
-            BIN,
-        ])
-        .arg(join_code("tunnel.example.test"));
-    machine.run_ok(install);
-    assert_installed_as_specified(&machine);
+fn install_under_umask_077_and_000() {
+    for umask in ["077", "000"] {
+        let machine = Machine::begin();
+        let mut install = Command::new("sh");
+        install
+            .args([
+                "-c",
+                "umask \"$1\"; exec \"$0\" install --host testhost --join \"$2\"",
+                BIN,
+                umask,
+            ])
+            .arg(join_code("tunnel.example.test"));
+        machine.run_ok(install);
+        assert_installed_as_specified(&machine);
+    }
 }
 
 #[test]
@@ -413,12 +416,16 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
+    // What the service account, which owns logs/ and runs frpc, can plant for root to follow.
+    let victim = env::temp_dir().join("rt-uninstall-log-victim");
+    symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
     wait_until_removed();
 
+    assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
     assert_eq!(
         after.difference(&before).collect::<Vec<_>>(),
@@ -431,4 +438,32 @@ fn uninstall_leaves_nothing() {
         "removed besides ours"
     );
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
+    let machine = Machine::begin();
+    machine.install(&join_code("old.example.test"));
+    let rendered = machine.paths.log_dir.join("frpc.toml");
+    wait_until("the supervisor renders its first start", || rendered.exists());
+
+    // A file copied over the link makes the rejoin fail after it wrote the new bridge files.
+    let link = machine.paths.link.as_ref().unwrap();
+    fs::remove_file(link).unwrap();
+    fs::write(link, "").unwrap();
+    let rejoin = join_code("new.example.test");
+    let failed = machine.install_command(&rejoin).output().unwrap();
+    assert!(
+        !failed.status.success(),
+        "the rejoin should fail on the file at {}",
+        link.display()
+    );
+    fs::remove_file(link).unwrap();
+
+    machine.install(&rejoin);
+
+    wait_until("the supervisor starts again with the new domain", || {
+        fs::read_to_string(&rendered).is_ok_and(|text| text.contains("serverAddr = \"new.example.test\""))
+    });
 }
