@@ -17,6 +17,29 @@ jobs:
       - run: uv run --locked ctl --help
       - run: uv run --locked pytest
 
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Install frpc
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -X GET -o "$RUNNER_TEMP/frp.tar.gz" https://github.com/fatedier/frp/releases/download/v0.71.1/frp_0.71.1_linux_amd64.tar.gz
+          echo "1d9875210972a5d1a62b2dc4c48df45ab0af05d3ca1b5e494a014428259df803  $RUNNER_TEMP/frp.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/frp.tar.gz" --strip-components=1 -C "$RUNNER_TEMP" frp_0.71.1_linux_amd64/frpc
+          echo "RT_FRPC=$RUNNER_TEMP/frpc" >> "$GITHUB_ENV"
+      - name: Skip the frpc verification test
+        if: runner.os != 'Linux'
+        shell: bash
+        run: echo "RT_SKIP_FRPC_VERIFY=1" >> "$GITHUB_ENV"
+      - run: cargo test --locked
+
   bridge:
     runs-on: ubuntu-latest
     defaults:
