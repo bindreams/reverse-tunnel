@@ -28,7 +28,7 @@ impl fmt::Debug for JoinInfo {
     }
 }
 
-/// Decodes `rt1: and the unpadded base64url of the JSON object `server/ctl/joincode.py` emits.
+/// Decodes `rt1:` and the unpadded base64url of the JSON object `server/ctl/joincode.py` emits.
 /// ASCII whitespace anywhere in `code` is ignored.
 pub fn decode(code: &str) -> Result<JoinInfo> {
     let code: String = code.split_ascii_whitespace().collect();
