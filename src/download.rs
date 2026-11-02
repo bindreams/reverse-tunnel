@@ -185,28 +185,34 @@ fn install(pin: &Pin, archive: &[u8], dest_dir: &Path) -> Result<PathBuf> {
         }
         ensure!(found, "{} not in {}", pin.member, pin.url);
     }
-    write_executable(&dest_dir.join(file_name(pin.name, pin.version)), &tool)
+    write_file(&dest_dir.join(file_name(pin.name, pin.version)), &tool, 0o755, false)
 }
 
-/// Writes `data` to `dest` through a temp file in the same directory, so `dest` is never partial. An existing `dest`
-/// is left alone.
-fn write_executable(dest: &Path, data: &[u8]) -> Result<PathBuf> {
+/// Writes `data` to `dest` through a temp file in the same directory, so `dest` is never partial. On Unix the file has
+/// permissions `mode`. An existing `dest` is replaced if `overwrite`, and left alone otherwise.
+pub fn write_file(dest: &Path, data: &[u8], mode: u32, overwrite: bool) -> Result<PathBuf> {
     let dir = dest.parent().expect("dest is inside a directory");
     let mut file = tempfile::NamedTempFile::new_in(dir)
         .with_context(|| format!("creating a temporary file in {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        file.as_file().set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        file.as_file().set_permissions(std::fs::Permissions::from_mode(mode))?;
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     file.write_all(data)?;
     file.as_file().sync_all()?;
-    match file.persist_noclobber(dest) {
-        Err(err) if err.error.kind() != ErrorKind::AlreadyExists => {
-            return Err(err).with_context(|| format!("writing {}", dest.display()));
-        }
+    let persisted = if overwrite {
+        file.persist(dest)
+    } else {
+        file.persist_noclobber(dest)
+    };
+    match persisted {
         // A concurrent fetch got there first.
-        _ => {}
+        Err(err) if !overwrite && err.error.kind() == ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err).with_context(|| format!("writing {}", dest.display())),
+        Ok(_) => {}
     }
     #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;

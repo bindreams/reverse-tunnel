@@ -1,0 +1,408 @@
+//! `run` against `testbin/stub_frpc.rs`. These bind ports and spawn processes, so they run in a container or on CI.
+
+use std::env::consts::EXE_SUFFIX;
+use std::fs;
+use std::net::{Ipv4Addr, TcpListener as StdListener};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::thread;
+
+use anyhow::Result;
+use futures_util::{SinkExt, StreamExt};
+use reverse_tunnel::download::Tools;
+use reverse_tunnel::logfile::LogFile;
+use reverse_tunnel::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
+use reverse_tunnel::supervisor::{Settings, run_with};
+use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
+use tokio_tungstenite::tungstenite::{Error, Message};
+use tokio_tungstenite::{WebSocketStream, client_async};
+
+const SSH: &str = "  ssh: {port: 22, type: tcp}\n";
+
+/// A host directory whose frpc is `testbin/stub_frpc.rs`, doing what `mode` says.
+struct Host {
+    dir: TempDir,
+    paths: Paths,
+    frpc: PathBuf,
+}
+
+impl Host {
+    fn new(mode: &str, services: &str) -> Host {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let paths = Paths {
+            bin_dir: root.join("bin"),
+            config_dir: root.join("config"),
+            secrets_dir: root.join("config/secrets"),
+            log_dir: root.join("logs"),
+            link: None,
+        };
+        for dir in [&paths.bin_dir, &paths.secrets_dir, &paths.log_dir] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let config = format!("host: testhost\nbridge: tunnel.example\ndefault: ssh\nservices:\n{services}");
+        fs::write(paths.config_dir.join("config.yaml"), config).unwrap();
+        fs::write(paths.secrets_dir.join("bridge.token"), "bridge-secret\n").unwrap();
+        fs::write(paths.secrets_dir.join("host.token"), "host-secret\r\n").unwrap();
+        let frpc = paths.bin_dir.join(format!("frpc{EXE_SUFFIX}"));
+        fs::copy(env!("CARGO_BIN_EXE_stub-frpc"), &frpc).unwrap();
+        let record = root.join("record");
+        fs::write(
+            frpc.with_extension("mode"),
+            mode.replace("{record}", record.to_str().unwrap()),
+        )
+        .unwrap();
+        Host { dir, paths, frpc }
+    }
+
+    /// Where a stub in `record` mode writes.
+    fn record(&self) -> PathBuf {
+        self.dir.path().join("record")
+    }
+
+    fn run(&self, check_only: bool) -> Result<ExitCode> {
+        self.run_with(check_only, &Settings::default())
+    }
+
+    fn run_with(&self, check_only: bool, settings: &Settings) -> Result<ExitCode> {
+        run_with(
+            &self.paths,
+            &Tools {
+                frpc: self.frpc.clone(),
+            },
+            check_only,
+            settings,
+        )
+    }
+
+    fn log(&self, name: &str) -> String {
+        fs::read_to_string(self.paths.log_dir.join(name)).unwrap()
+    }
+
+    /// Fails `run` with `expected` in its error before the stub starts.
+    fn assert_refused(&self, expected: &str) {
+        let err = format!("{:#}", self.run(false).unwrap_err());
+        assert!(err.contains(expected), "{err}");
+        assert!(!self.record().exists(), "frpc started");
+    }
+}
+
+fn recorded(host: &Host, prefix: &str) -> Vec<String> {
+    let record = fs::read_to_string(host.record()).unwrap();
+    record
+        .lines()
+        .filter_map(|line| line.strip_prefix(prefix))
+        .map(str::to_string)
+        .collect()
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+// check -----
+
+#[test]
+fn check_renders_and_verifies_without_starting() {
+    let host = Host::new("record 0 {record}", SSH);
+    let (config_before, logs_before) = (names(&host.paths.config_dir), names(&host.paths.log_dir));
+
+    host.run(true).unwrap();
+
+    let args = recorded(&host, "ARG ");
+    assert_eq!(&args[..2], ["verify", "-c"]);
+    let rendered = Path::new(&args[2]);
+    assert_eq!(rendered.file_name().unwrap(), "frpc.toml");
+    assert!(
+        !rendered.starts_with(&host.paths.config_dir),
+        "rendered into {}",
+        args[2]
+    );
+    assert!(
+        fs::read_to_string(host.record())
+            .unwrap()
+            .contains("TOML\nserverAddr = \"tunnel.example\"")
+    );
+    assert_eq!(names(&host.paths.config_dir), config_before);
+    assert_eq!(names(&host.paths.log_dir), logs_before);
+}
+
+// the child ends -----
+
+#[test]
+fn child_exit_stops_others_and_exits_nonzero() {
+    let host = Host::new("exit 7", SSH);
+    let err = format!("{:#}", host.run(false).unwrap_err());
+    assert!(err.contains("frpc exited") && err.contains('7'), "{err}");
+    assert_eq!(host.log(LOG_SUPERVISOR).trim_end(), err);
+    assert!(host.log(LOG_FRPC).contains("stub frpc: failing"));
+}
+
+#[test]
+fn tokens_only_in_frpc_env() {
+    let host = Host::new("record 3 {record}", SSH);
+    host.run(false).unwrap_err();
+
+    let env = recorded(&host, "ENV ");
+    assert!(env.contains(&"RT_BRIDGE_TOKEN=bridge-secret".to_string()));
+    assert!(env.contains(&"RT_HOST_TOKEN=host-secret".to_string()));
+    assert!(std::env::var_os("RT_BRIDGE_TOKEN").is_none());
+    let mut seen = vec![recorded(&host, "ARG ").join(" ")];
+    for file in [LOG_SUPERVISOR, LOG_FRPC] {
+        seen.push(host.log(file));
+    }
+    seen.push(fs::read_to_string(host.paths.config_dir.join("frpc.toml")).unwrap());
+    for text in seen {
+        assert!(
+            !text.contains("bridge-secret") && !text.contains("host-secret"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn frpc_toml_is_replaced_at_every_start() {
+    let host = Host::new("exit 0", SSH);
+    fs::write(host.paths.config_dir.join("frpc.toml"), "stale").unwrap();
+    host.run(false).unwrap_err();
+    assert!(
+        fs::read_to_string(host.paths.config_dir.join("frpc.toml"))
+            .unwrap()
+            .starts_with("serverAddr")
+    );
+}
+
+// refusals before frpc starts -----
+
+#[test]
+fn missing_token_file_is_refused() {
+    let host = Host::new("exit 0", SSH);
+    fs::remove_file(host.paths.secrets_dir.join("host.token")).unwrap();
+    host.assert_refused("host.token");
+}
+
+#[test]
+fn empty_token_is_refused() {
+    let host = Host::new("exit 0", SSH);
+    fs::write(host.paths.secrets_dir.join("bridge.token"), " \r\n").unwrap();
+    host.assert_refused("bridge.token");
+}
+
+#[test]
+fn unloadable_config_is_refused() {
+    let host = Host::new("exit 0", SSH);
+    fs::write(host.paths.config_dir.join("config.yaml"), "host: [").unwrap();
+    host.assert_refused("config.yaml");
+}
+
+#[test]
+fn unspawnable_tool_is_refused() {
+    let host = Host::new("exit 0", SSH);
+    fs::remove_file(&host.frpc).unwrap();
+    host.assert_refused("frpc");
+    assert!(host.log(LOG_SUPERVISOR).contains("frpc"));
+}
+
+#[test]
+fn unopenable_log_is_refused() {
+    let host = Host::new("exit 0", SSH);
+    fs::create_dir(host.paths.log_dir.join(LOG_FRPC)).unwrap();
+    host.assert_refused(LOG_FRPC);
+}
+
+#[test]
+fn listener_bind_failure_is_logged() {
+    let host = Host::new("exit 0", SSH);
+    let taken = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let settings = Settings {
+        listen: taken.local_addr().unwrap(),
+        ..Settings::default()
+    };
+    let err = format!("{:#}", host.run_with(false, &settings).unwrap_err());
+    assert!(err.contains(&taken.local_addr().unwrap().to_string()), "{err}");
+    assert_eq!(host.log(LOG_SUPERVISOR).trim_end(), err);
+}
+
+// rotation -----
+
+#[test]
+fn rotation_keeps_two_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.log");
+    let log = LogFile::open(path.clone(), 10).unwrap();
+    for chunk in ["aaaaaaaaaaaa", "b", "cccccccccc", "d"] {
+        log.write(chunk.as_bytes());
+    }
+    assert_eq!(names(dir.path()), ["x.log", "x.log.1"]);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "d");
+    assert_eq!(fs::read_to_string(dir.path().join("x.log.1")).unwrap(), "bcccccccccc");
+}
+
+#[test]
+fn failed_rotation_is_logged_and_retried_at_the_next_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, old) = (dir.path().join("x.log"), dir.path().join("x.log.1"));
+    // A rename cannot replace a directory that holds a file.
+    fs::create_dir(&old).unwrap();
+    fs::write(old.join("blocker"), "").unwrap();
+    let log = LogFile::open(path.clone(), 10).unwrap();
+    log.write(b"aaaaaaaaaaaa");
+    log.write(b"b");
+    let kept = fs::read_to_string(&path).unwrap();
+    assert!(
+        kept.starts_with("aaaaaaaaaaaa") && kept.contains("rotat") && kept.ends_with('b'),
+        "{kept}"
+    );
+
+    fs::remove_dir_all(&old).unwrap();
+    log.write(b"c");
+    assert!(!old.exists(), "retried before the next threshold");
+    log.write(b"dddddddddd");
+    log.write(b"e");
+    assert!(old.is_file());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "e");
+}
+
+// the WebSocket listener -----
+
+/// A supervisor running against a stub frpc that stays up until `stop`.
+struct Live {
+    host: Host,
+    /// What `run` returned.
+    done: oneshot::Receiver<Result<ExitCode>>,
+    /// The stub's connection; the stub exits when this closes.
+    stub: TcpStream,
+}
+
+impl Live {
+    async fn start(services: &str) -> Live {
+        let notify = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let host = Host::new(&format!("hold {}", notify.local_addr().unwrap()), services);
+        let (paths, frpc) = (host.paths.clone(), host.frpc.clone());
+        let (send, mut done) = oneshot::channel();
+        thread::spawn(move || send.send(run_with(&paths, &Tools { frpc }, false, &Settings::default())));
+        let stub = tokio::select! {
+            accepted = notify.accept() => accepted.unwrap().0,
+            result = &mut done => panic!("run ended before the stub started: {:#}", result.unwrap().unwrap_err()),
+        };
+        Live { host, done, stub }
+    }
+
+    /// Where frpc.toml sends the `tcp` services.
+    fn ws_port(&self) -> u16 {
+        let toml = fs::read_to_string(self.host.paths.config_dir.join("frpc.toml")).unwrap();
+        toml.lines()
+            .find_map(|line| line.strip_prefix("localPort = "))
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Opens a WebSocket whose `Host` is `authority`.
+    async fn connect(&self, authority: &str) -> Result<WebSocketStream<TcpStream>, Error> {
+        let tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, self.ws_port())).await.unwrap();
+        Ok(client_async(format!("ws://{authority}/"), tcp).await?.0)
+    }
+
+    /// Stops the stub, then returns the host and why `run` ended.
+    async fn stop(self) -> (Host, String) {
+        drop(self.stub);
+        (self.host, format!("{:#}", self.done.await.unwrap().unwrap_err()))
+    }
+}
+
+/// Accepts one connection, sends `banner`, and returns what it receives until the peer's end.
+async fn backend(banner: &'static str) -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received = tokio::spawn(async move {
+        let (mut conn, _) = listener.accept().await.unwrap();
+        conn.write_all(banner.as_bytes()).await.unwrap();
+        let mut received = Vec::new();
+        conn.read_to_end(&mut received).await.unwrap();
+        received
+    });
+    (port, received)
+}
+
+/// Reads the banner, sends `payload`, and closes cleanly.
+async fn talk(mut ws: WebSocketStream<TcpStream>, payload: &str) -> Message {
+    let banner = ws.next().await.unwrap().unwrap();
+    ws.send(Message::binary(payload.as_bytes().to_vec())).await.unwrap();
+    ws.close(None).await.unwrap();
+    while let Some(message) = ws.next().await {
+        message.unwrap();
+    }
+    banner
+}
+
+fn tcp_services(ssh: u16, vnc: u16) -> String {
+    format!("  ssh: {{port: {ssh}, type: tcp}}\n  vnc: {{port: {vnc}, type: tcp}}\n")
+}
+
+#[tokio::test]
+async fn ws_forwards_by_host() {
+    let ((ssh_port, ssh), (vnc_port, vnc)) = (backend("ssh banner").await, backend("vnc banner").await);
+    let live = Live::start(&tcp_services(ssh_port, vnc_port)).await;
+
+    // The default service answers at the bare host name, here with a port as a browser or proxy may add.
+    let banner = talk(live.connect("testhost.tunnel.example:443").await.unwrap(), "to ssh").await;
+    assert_eq!(banner, Message::binary(&b"ssh banner"[..]));
+    let banner = talk(live.connect("vnc.testhost.tunnel.example").await.unwrap(), "to vnc").await;
+    assert_eq!(banner, Message::binary(&b"vnc banner"[..]));
+    // A backend sees the end of its stream only when the WebSocket close reached it.
+    assert_eq!(ssh.await.unwrap(), b"to ssh");
+    assert_eq!(vnc.await.unwrap(), b"to vnc");
+    live.stop().await;
+}
+
+#[tokio::test]
+async fn ws_unknown_host_refused() {
+    let live = Live::start(&tcp_services(22, 5900)).await;
+    let Err(Error::Http(response)) = live.connect("nosuch.testhost.tunnel.example").await else {
+        panic!("the upgrade was not refused with an HTTP response");
+    };
+    assert_eq!(response.status(), 404);
+    live.stop().await;
+}
+
+#[tokio::test]
+async fn ws_closes_when_the_backend_closes() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { listener.accept().await.unwrap().0.write_all(b"bye").await.unwrap() });
+    let live = Live::start(&tcp_services(port, 5900)).await;
+
+    let mut ws = live.connect("ssh.testhost.tunnel.example").await.unwrap();
+    assert_eq!(ws.next().await.unwrap().unwrap(), Message::binary(&b"bye"[..]));
+    assert!(matches!(ws.next().await, None | Some(Ok(Message::Close(_)))));
+    live.stop().await;
+}
+
+#[tokio::test]
+async fn a_failed_connection_is_logged_and_does_not_stop_run() {
+    // Nothing listens on this port once the listener is gone.
+    let dead = StdListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let live = Live::start(&tcp_services(dead.port(), 5900)).await;
+
+    let mut ws = live.connect("ssh.testhost.tunnel.example").await.unwrap();
+    assert!(matches!(
+        ws.next().await,
+        None | Some(Ok(Message::Close(_))) | Some(Err(_))
+    ));
+    // That run ended because frpc did, not because of the failed connection.
+    let (host, err) = live.stop().await;
+    assert!(err.contains("frpc exited"), "{err}");
+    assert!(host.log(LOG_SUPERVISOR).contains(&dead.to_string()));
+}
