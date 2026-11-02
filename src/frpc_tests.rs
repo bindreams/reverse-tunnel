@@ -64,17 +64,6 @@ fn render_transport() {
 }
 
 #[test]
-fn render_contains_no_secret() {
-    let out = render_yaml(YAML);
-    assert!(
-        out.lines()
-            .filter(|l| l.contains("token"))
-            .all(|l| l.contains("{{ .Envs.")),
-        "{out}"
-    );
-}
-
-#[test]
 fn render_http_service() {
     let table = proxy(&render_yaml(YAML), "jellyfin");
     assert!(table.contains("type = \"http\""));

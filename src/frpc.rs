@@ -8,7 +8,8 @@ use crate::paths::Paths;
 /// listener on `127.0.0.1:ws_port`.
 pub fn render(cfg: &Config, ws_port: u16, paths: &Paths) -> String {
     let (host, bridge) = (&cfg.host, &cfg.bridge);
-    // JSON string escapes are a subset of TOML basic strings', which a Windows path needs for its backslashes.
+    // The path comes from `Paths::system()`; its only character needing an escape is the Windows backslash,
+    // which JSON and TOML basic strings escape alike.
     let ca = serde_json::to_string(&paths.config_dir.join("bridge.pem").to_string_lossy()).unwrap();
     let mut out = format!(
         r#"serverAddr = "{bridge}"

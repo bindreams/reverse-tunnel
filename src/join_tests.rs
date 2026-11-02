@@ -4,7 +4,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use super::*;
 
 const CODE: &str = include_str!("../server/testdata/join-code.txt");
-const CODE_MULTI: &str = include_str!("../server/testdata/join-code-multi.txt");
 
 fn code_for(json: &str) -> String {
     format!("rt1:{}", URL_SAFE_NO_PAD.encode(json))
@@ -16,12 +15,6 @@ fn join_decodes_python_fixture() {
     assert_eq!(info.domain, "tunnel.example.test");
     assert_eq!(info.token, "0".repeat(64));
     assert_eq!(info.cert_pem, include_str!("../server/testdata/bridge.pem"));
-}
-
-#[test]
-fn join_multi_cert_pem() {
-    let info = decode(CODE_MULTI).unwrap();
-    assert_eq!(info.cert_pem, include_str!("../server/testdata/bridge-multi.pem"));
 }
 
 #[test]

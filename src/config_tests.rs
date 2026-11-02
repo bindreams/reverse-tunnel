@@ -34,8 +34,11 @@ fn config_default_must_exist() {
 
 #[test]
 fn config_rejects_duplicate_service() {
-    let doubled = format!("{OK}  ssh:\n    port: 2222\n    type: tcp\n");
-    assert!(error(&doubled).contains("ssh"));
+    // `22` and `'22'` are different YAML values but the same service name.
+    for (first, second) in [("ssh", "ssh"), ("22", "'22'")] {
+        let doubled = format!("{OK}  {first}:\n    port: 1\n    type: tcp\n  {second}:\n    port: 2\n    type: tcp\n");
+        assert!(error(&doubled).contains(first), "{first} and {second} were accepted");
+    }
 }
 
 #[test]
@@ -74,4 +77,9 @@ fn config_rejects_port_0_and_65536() {
     for port in ["0", "65536"] {
         assert!(error(&OK.replace("22", port)).contains("port"), "{port} was accepted");
     }
+}
+
+#[test]
+fn config_accepts_utf8_bom() {
+    Config::parse(&format!("\u{feff}{OK}")).unwrap();
 }

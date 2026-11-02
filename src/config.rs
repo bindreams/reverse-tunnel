@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
+use serde::de::{Deserializer, Error, MapAccess, Visitor};
 
 /// The frps control port, TCP and UDP; shared with `server/compose.yaml`.
 pub const CONTROL_PORT: u16 = 7000;
@@ -15,6 +17,7 @@ pub struct Config {
     /// The tunnel domain T.
     pub bridge: String,
     pub default: Option<String>,
+    #[serde(deserialize_with = "unique_services")]
     pub services: BTreeMap<String, Service>,
 }
 
@@ -39,9 +42,8 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config> {
-        // Parsing into a map keeps the last duplicate silently, and serde_with's `MapPreventDuplicates`
-        // does not name the key. A generic `Value` names it and covers every mapping.
-        yaml_serde::from_str::<yaml_serde::Value>(text)?;
+        // A BOM at the start of a YAML stream is valid, and Windows editors write one.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let cfg: Config = yaml_serde::from_str(text)?;
         ensure!(valid_label(&cfg.host), "host {:?} is not a valid name", cfg.host);
         ensure!(
@@ -61,6 +63,34 @@ impl Config {
         }
         Ok(cfg)
     }
+}
+
+/// Collects the services into a map, failing on a repeated name. A plain `BTreeMap` keeps the last silently, and
+/// serde_with's `MapPreventDuplicates` does not name the key. Names are compared as `Config` sees them, so `22`
+/// and `'22'` collide.
+fn unique_services<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<String, Service>, D::Error> {
+    struct Services;
+
+    impl<'de> Visitor<'de> for Services {
+        type Value = BTreeMap<String, Service>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a map of services")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut services = BTreeMap::new();
+            while let Some((name, service)) = map.next_entry::<String, Service>()? {
+                if services.contains_key(&name) {
+                    return Err(A::Error::custom(format!("duplicate service {name:?}")));
+                }
+                services.insert(name, service);
+            }
+            Ok(services)
+        }
+    }
+
+    deserializer.deserialize_map(Services)
 }
 
 /// One DNS label: lowercase letters, digits and inner hyphens, at most 63 characters, and no hyphens
