@@ -1,9 +1,12 @@
 //! Files and directories are created the way an installation needs them: the final mode and owner are set on the open
 //! handle before any content exists, whatever the umask.
 
-use std::fs::{self, File};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
+
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
 use anyhow::{Context, Result};
 
@@ -54,19 +57,29 @@ pub enum WriteOutcome {
 pub fn apply(file: &File, perm: Perm) -> Result<()> {
     #[cfg(unix)]
     {
+        use std::fs::Permissions;
         use std::os::unix::fs::{PermissionsExt, fchown};
         // Before the mode: a chown can clear setuid and setgid bits.
         fchown(file, perm.uid, perm.gid)?;
-        file.set_permissions(fs::Permissions::from_mode(perm.mode))?;
+        file.set_permissions(Permissions::from_mode(perm.mode))?;
     }
     #[cfg(windows)]
     let _ = (file, perm);
     Ok(())
 }
 
-/// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had.
+/// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had. A new directory is
+/// owner-only until then, so it is never wider than its final mode, whatever the umask.
 pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
-    match fs::create_dir(path) {
+    #[cfg(unix)]
+    let builder = {
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = DirBuilder::new();
+    match builder.create(path) {
         Err(err) if err.kind() != ErrorKind::AlreadyExists => {
             return Err(err).with_context(|| format!("creating {}", path.display()));
         }
@@ -74,6 +87,20 @@ pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
     }
     let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+}
+
+/// Opens `path` for writing and gives it `perm`; a missing file is created owner-only first, like `make_dir`'s. With
+/// `exclusive`, anything already at `path`, a symlink included, is an error: it is never followed.
+pub fn open_file(path: &Path, perm: Perm, exclusive: bool) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).create_new(exclusive);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    apply(&file, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))?;
+    Ok(file)
 }
 
 /// Creates `path` and the ancestors it lacks with `perm`. Directories that exist are left as they are.

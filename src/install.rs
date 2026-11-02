@@ -4,11 +4,11 @@
 //! and each step can be repeated, so an install that failed midway is finished by running it again.
 
 use std::env;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufRead, ErrorKind, Write};
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -18,7 +18,7 @@ use goetia::spec::{DaemonSpec, Id};
 
 use crate::account::{self, Account};
 use crate::config::{Config, valid_label};
-use crate::files::{Perm, Replace, WriteOutcome, apply, make_dir, make_missing_dirs, write_atomic};
+use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
 use crate::{download, service};
@@ -41,16 +41,28 @@ pub struct InstallOpts {
 /// Holds an exclusive lock on the config dir until the file is dropped. `install`, `upgrade` and `uninstall` take it
 /// for their whole run; a second one waits.
 pub fn lock(paths: &Paths) -> Result<File> {
-    make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let path = paths.config_dir.join("lock");
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    apply(&file, Perm::new(0o600))?;
-    file.lock().with_context(|| format!("locking {}", path.display()))?;
-    Ok(file)
+    loop {
+        make_dir(&paths.config_dir, PUBLIC_DIR)?;
+        let file = open_file(&path, Perm::new(0o600), false)?;
+        file.lock().with_context(|| format!("locking {}", path.display()))?;
+        // `uninstall --finish` deletes the config dir while it holds the lock; a run that waited holds a deleted file.
+        let held = file.metadata()?;
+        if fs::metadata(&path).is_ok_and(|named| (named.dev(), named.ino()) == (held.dev(), held.ino())) {
+            return Ok(file);
+        }
+    }
+}
+
+/// Exists from the first change to what the service runs until the service has picked it up, so that a run that fails
+/// in between is made up for by the next.
+fn pending_file(paths: &Paths) -> PathBuf {
+    paths.config_dir.join("restart-pending")
+}
+
+fn mark_pending(paths: &Paths) -> Result<()> {
+    open_file(&pending_file(paths), Perm::new(0o600), false)?;
+    Ok(())
 }
 
 /// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything it reads
@@ -58,6 +70,7 @@ pub fn lock(paths: &Paths) -> Result<File> {
 pub fn install(opts: InstallOpts) -> Result<()> {
     let paths = &opts.paths;
     let _lock = lock(paths)?;
+    let mut changed = pending_file(paths).try_exists()?;
     let join = match opts.join.as_deref() {
         Some(code) => Some(join::decode(code)?),
         None if needs_join(paths) => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
@@ -73,7 +86,10 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     let spec = service::spec(paths);
     let manager = goetia::manager::native()?;
     // The binary and the settings may not exist yet; the manager does not look.
-    let mut changed = register(&*manager, &spec)?;
+    if register(&*manager, &spec)? {
+        mark_pending(paths)?;
+        changed = true;
+    }
     changed |= write_settings(paths, &account, host.as_deref(), join.as_ref())?;
     changed |= place_binaries(paths)?;
 
@@ -82,7 +98,11 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         registration(paths)?
     );
     manager.enable(&spec.id)?;
-    pick_up(&*manager, &spec.id, changed)
+    pick_up(&*manager, &spec.id, changed)?;
+    if changed {
+        fs::remove_file(pending_file(paths)).context("removing the restart marker")?;
+    }
+    Ok(())
 }
 
 /// Prepares the removal and hands it to a detached `uninstall --finish`: stopping the service cuts the tunnel, and
@@ -93,9 +113,16 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
         Err(err) => eprintln!("{err:#}\nRevoke this host on the bridge by running: uv run ctl revoke <host>"),
     }
-    fs::create_dir_all(&paths.log_dir).with_context(|| format!("creating {}", paths.log_dir.display()))?;
+    make_dir(&paths.log_dir, PUBLIC_DIR)?;
     let log_path = paths.log_dir.join("uninstall.log");
-    let log = OpenOptions::new().create(true).append(true).open(&log_path)?;
+    // logs/ belongs to the service account, which may have left a link here; root follows none.
+    match fs::remove_file(&log_path) {
+        Err(err) if err.kind() != ErrorKind::NotFound => {
+            return Err(err).with_context(|| format!("removing {}", log_path.display()));
+        }
+        _ => {}
+    }
+    let log = open_file(&log_path, PUBLIC_FILE, true)?;
     Command::new(env::current_exe()?)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
@@ -120,12 +147,6 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
         Ok(()) | Err(goetia::Error::NotInstalled { .. }) => {}
         Err(err) => return Err(err).context("removing the service"),
     }
-    let exe = service::exe(paths);
-    if let Some(link) = &paths.link
-        && fs::read_link(link).is_ok_and(|target| target == exe)
-    {
-        fs::remove_file(link).with_context(|| format!("removing {}", link.display()))?;
-    }
     for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
         match fs::remove_dir_all(dir) {
             Err(err) if err.kind() != ErrorKind::NotFound => {
@@ -134,7 +155,15 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
             _ => {}
         }
     }
-    account::remove(service::ACCOUNT)
+    account::remove(service::ACCOUNT)?;
+    // Last: until then, a failed removal can be run again by name.
+    let exe = service::exe(paths);
+    if let Some(link) = &paths.link
+        && fs::read_link(link).is_ok_and(|target| target == exe)
+    {
+        fs::remove_file(link).with_context(|| format!("removing {}", link.display()))?;
+    }
+    Ok(())
 }
 
 fn config_file(paths: &Paths) -> std::path::PathBuf {
@@ -215,43 +244,49 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
     make_dir(&paths.log_dir, Perm::new(0o755).uid(account.uid).gid(account.gid))?;
 
     let config = config_file(paths);
-    let created = !config.try_exists()? && create_config(&config, host, join)?;
+    let created = !config.try_exists()? && create_config(paths, host, join)?;
     let mut changed = created;
     if let Some(join) = join {
         if !created {
             let text = fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?;
-            changed |= replace_if_changed(&config, with_bridge(&text, &join.domain, &config)?, PUBLIC_FILE)?;
+            changed |= replace_if_changed(paths, &config, with_bridge(&text, &join.domain, &config)?, PUBLIC_FILE)?;
         }
-        changed |= replace_if_changed(&paths.config_dir.join("bridge.pem"), &join.cert_pem, PUBLIC_FILE)?;
+        changed |= replace_if_changed(paths, &paths.config_dir.join("bridge.pem"), &join.cert_pem, PUBLIC_FILE)?;
         let token = format!("{}\n", join.token);
-        changed |= replace_if_changed(&paths.secrets_dir.join("bridge.token"), token, secret)?;
+        changed |= replace_if_changed(paths, &paths.secrets_dir.join("bridge.token"), token, secret)?;
     }
 
-    let mut random = [0; 32];
-    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
-    let token = format!("{}\n", hex::encode(random));
     let host_token = paths.secrets_dir.join("host.token");
-    changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
+    if !host_token.try_exists()? {
+        let mut random = [0; 32];
+        getrandom::fill(&mut random).context("reading random bytes from the OS")?;
+        let token = format!("{}\n", hex::encode(random));
+        mark_pending(paths)?;
+        changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
+    }
     Ok(changed)
 }
 
 /// Writes a first `config.yaml` publishing ssh. False if it appeared meanwhile.
-fn create_config(config: &Path, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
+fn create_config(paths: &Paths, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
     let host = host.context("there is no config.yaml and no host name for one")?;
     let join = join.context("there is no config.yaml, so a join code is needed")?;
     let text = format!(
         "host: {host}\nbridge: {}\ndefault: ssh\nservices:\n  ssh:\n    port: 22\n    type: tcp\n",
         join.domain
     );
-    Ok(write_atomic(config, text.as_bytes(), PUBLIC_FILE, Replace::Never)? == WriteOutcome::Written)
+    mark_pending(paths)?;
+    let written = write_atomic(&config_file(paths), text.as_bytes(), PUBLIC_FILE, Replace::Never)?;
+    Ok(written == WriteOutcome::Written)
 }
 
 /// Replaces `dest` with `data` unless it holds it already. Whether it wrote.
-fn replace_if_changed(dest: &Path, data: impl AsRef<[u8]>, perm: Perm) -> Result<bool> {
+fn replace_if_changed(paths: &Paths, dest: &Path, data: impl AsRef<[u8]>, perm: Perm) -> Result<bool> {
     let data = data.as_ref();
     if fs::read(dest).is_ok_and(|current| current == data) {
         return Ok(false);
     }
+    mark_pending(paths)?;
     write_atomic(dest, data, perm, Replace::Always)?;
     Ok(true)
 }
@@ -289,14 +324,17 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
     }
     make_dir(&paths.bin_dir, PUBLIC_DIR)?;
 
-    let exe = service::exe(paths);
-    let me = env::current_exe().context("finding this binary")?;
-    let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
-    let mut changed = replace_if_changed(&exe, binary, Perm::EXECUTABLE)?;
+    // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
+    let mut changed = false;
     if !download::tools(paths).frpc.try_exists()? {
+        mark_pending(paths)?;
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
         changed = true;
     }
+    let exe = service::exe(paths);
+    let me = env::current_exe().context("finding this binary")?;
+    let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
+    changed |= replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     if let Some(link) = &paths.link {
         point_link(link, &exe)?;
