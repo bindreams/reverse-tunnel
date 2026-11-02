@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
 use std::process::Command;
+use std::sync::mpsc;
 use std::thread;
 
 use reverse_tunnel::paths::LOG_SUPERVISOR;
@@ -21,15 +22,19 @@ use host::{Live, tcp_services};
 
 #[tokio::test]
 async fn descriptor_exhaustion_does_not_end_run() {
-    // supervisor.log is a FIFO, so the test can wait for a line instead of polling a file.
-    let mut log = None;
-    let mut live = Live::start_with(&tcp_services(22, 5900), |host| {
+    // supervisor.log is a FIFO, so the test can wait for a line instead of polling a file. A thread keeps reading it:
+    // a FIFO holds little, and a write to a full one would block `run`.
+    let (send, log) = mpsc::channel();
+    let mut live = Live::start_with(&tcp_services(22, 5900), move |host| {
         let fifo = host.paths.log_dir.join(LOG_SUPERVISOR);
         assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
-        log = Some(thread::spawn(move || BufReader::new(File::open(fifo).unwrap())));
+        thread::spawn(move || {
+            for line in BufReader::new(File::open(fifo).unwrap()).lines() {
+                let _ = send.send(line.unwrap());
+            }
+        });
     })
     .await;
-    let mut log = log.unwrap().join().unwrap();
 
     // Holds the descriptor of the connection the test makes at the end, when the flood may still hold the others.
     let client = TcpSocket::new_v4().unwrap();
@@ -47,11 +52,8 @@ async fn descriptor_exhaustion_does_not_end_run() {
 
     live.stub.get_mut().write_all(b"f").await.unwrap();
     live.stub.read_line(&mut String::new()).await.unwrap();
-    let mut line = String::new();
-    while !line.contains("Too many open files") {
-        line.clear();
-        assert_ne!(log.read_line(&mut line).unwrap(), 0, "supervisor.log ended");
-    }
+    let found = log.iter().find(|line| line.contains("Too many open files"));
+    assert!(found.is_some(), "supervisor.log ended");
 
     // The flood ends, and run is still serving.
     live.stub.get_mut().write_all(b"r").await.unwrap();
