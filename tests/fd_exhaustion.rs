@@ -37,8 +37,8 @@ async fn descriptor_exhaustion_does_not_end_run() {
     })
     .await;
 
-    // Descriptors are handed out lowest first, so this leaves room for 16 more, but not for the stub's flood. Only the
-    // soft limit drops, so that it can be raised again.
+    // Descriptors are handed out lowest first, so this leaves room for 16 more, but not for the stub's flood. The hard
+    // limit stays, so the soft limit can be raised again.
     let original = getrlimit(Resource::Nofile);
     let next = File::open("/dev/null").unwrap().as_raw_fd() as u64;
     setrlimit(
@@ -55,8 +55,7 @@ async fn descriptor_exhaustion_does_not_end_run() {
     let found = log.iter().find(|line| line.contains("Too many open files"));
     assert!(found.is_some(), "supervisor.log ended");
 
-    // Raised before connecting: until `run` sees the flood end it holds the flood's descriptors, and a connection that
-    // arrives while `accept` fails can be reset (seen on macOS).
+    // Restore the limit first: while `accept` fails with EMFILE, an incoming connection can be reset.
     setrlimit(Resource::Nofile, original).unwrap();
     // 'r' ends the flood.
     live.stub.get_mut().write_all(b"r").await.unwrap();
