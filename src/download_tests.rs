@@ -1,4 +1,4 @@
-use std::io::{Cursor, Write};
+use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::Compression;
@@ -30,7 +30,6 @@ fn zip() -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
-/// A pin for `archive`, whose format `url` names.
 fn pin_for(url: &'static str, member: &'static str, archive: &[u8]) -> Pin {
     Pin {
         name: "frpc",
@@ -146,7 +145,72 @@ fn download_fails_when_the_server_stalls() {
     assert!(err.to_string().contains(&url), "{err}");
 }
 
-/// Downloads every pinned URL; CI runs it with `--include-ignored`.
+#[test]
+fn download_keeps_a_slow_body_that_progresses() {
+    let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/frp.tar.gz", server.local_addr().unwrap());
+    let body: Vec<u8> = (0..12).collect();
+    let sent = body.clone();
+    std::thread::spawn(move || {
+        let (mut conn, _) = server.accept().unwrap();
+        for line in BufReader::new(&conn).lines() {
+            if line.unwrap().is_empty() {
+                break;
+            }
+        }
+        write!(
+            conn,
+            "HTTP/1.1 200 OK
+Content-Length: {}
+
+",
+            sent.len()
+        )
+        .unwrap();
+        for byte in sent {
+            conn.write_all(&[byte]).unwrap();
+            conn.flush().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    // The gaps are shorter than the stall bound and the whole body is longer than it.
+    assert_eq!(download(&url, Duration::from_millis(500)).unwrap(), body);
+}
+
+#[test]
+fn install_keeps_a_file_that_appeared_first() {
+    let archive = tar_gz();
+    let pin = pin_for("https://example.test/frp.tar.gz", "frp/frpc", &archive);
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join(file_name(pin.name, pin.version));
+    std::fs::write(&first, b"first").unwrap();
+    assert_eq!(install(&pin, &archive, dir.path()).unwrap(), first);
+    assert_eq!(std::fs::read(&first).unwrap(), b"first");
+}
+
+#[test]
+fn pins_name_their_target_os_and_arch() {
+    for pin in PINS {
+        let os = match pin.target {
+            t if t.contains("linux") => "linux",
+            t if t.contains("apple") => "darwin",
+            _ => "windows",
+        };
+        let arch = if pin.target.starts_with("x86_64") {
+            "amd64"
+        } else {
+            "arm64"
+        };
+        for text in [pin.url, pin.member] {
+            assert!(
+                text.contains(&format!("_{os}_{arch}")),
+                "{text} is not for {}",
+                pin.target
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore = "downloads from the network"]
 fn fetch_every_pin() {

@@ -31,6 +31,6 @@ fn spec_runs_the_installed_binary_as_the_service_account() {
         "reverse-tunnel"
     };
     assert_eq!(spec.user, User::Name(account.into()));
-    // goetia's injection gate accepts it, so `install` will not fail on the spec.
+    // goetia's blob round-trip rejects specs its injection gate refuses.
     assert_eq!(blob::decode(&blob::encode(&spec)).unwrap().spec, spec);
 }

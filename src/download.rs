@@ -1,16 +1,16 @@
 use std::env::consts::{ARCH, EXE_SUFFIX, OS};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 use crate::paths::Paths;
 
-/// The targets `reverse-tunnel` is released for; `PINS` has one pin for each.
+/// The targets `reverse-tunnel` is released for.
 pub const RELEASE_TARGETS: [&str; 5] = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -32,11 +32,9 @@ pub struct Pin {
     pub url: &'static str,
     /// Lowercase hex SHA-256 of the archive.
     pub sha256: &'static str,
-    /// The path of the tool inside the archive.
     pub member: &'static str,
 }
 
-/// frpc, one pin per release target.
 pub const PINS: &[Pin] = &[
     Pin {
         name: "frpc",
@@ -80,7 +78,6 @@ pub const PINS: &[Pin] = &[
     },
 ];
 
-/// Where the pinned tools sit once fetched into `Paths::bin_dir`.
 pub struct Tools {
     pub frpc: PathBuf,
 }
@@ -113,9 +110,8 @@ pub fn host_pin() -> Result<&'static Pin> {
 }
 
 /// Writes the pinned tool into `dest_dir`, which must exist, as `<name>-<version>` (`.exe` on Windows), and returns
-/// that path. If the file is already there, returns it without downloading: only this module writes that name, after
-/// the digest check, so it was verified (and on Windows a running one cannot be replaced). Otherwise downloads into
-/// memory, so no archive touches disk.
+/// that path. An existing file of that name is kept, not replaced: only this module writes it, after the digest check,
+/// and Windows cannot replace a running one. No archive touches disk.
 pub fn fetch(pin: &Pin, dest_dir: &Path) -> Result<PathBuf> {
     let dest = dest_dir.join(file_name(pin.name, pin.version));
     if dest.try_exists()? {
@@ -124,8 +120,8 @@ pub fn fetch(pin: &Pin, dest_dir: &Path) -> Result<PathBuf> {
     install(pin, &download(pin.url, STALL)?, dest_dir)
 }
 
-/// Reads `url` into memory. Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps
-/// progressing is never cut off. A reader thread feeds the chunks so the wait covers connecting too.
+/// Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps progressing is never cut off. A
+/// reader thread feeds the chunks, so the wait covers connecting too.
 fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
     let (send, recv) = mpsc::channel();
     let owned = url.to_string();
@@ -136,7 +132,8 @@ fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
                 let mut chunk = vec![0; 1 << 16];
                 let len = body.read(&mut chunk)?;
                 chunk.truncate(len);
-                if len == 0 || send.send(Ok(chunk)).is_err() {
+                // An empty chunk is the end of the body.
+                if send.send(Ok(chunk)).is_err() || len == 0 {
                     return Ok(());
                 }
             }
@@ -148,14 +145,20 @@ fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
     let mut archive = Vec::new();
     loop {
         match recv.recv_timeout(stall) {
-            Ok(chunk) => archive.extend(chunk.with_context(|| format!("downloading {url}"))?),
-            Err(RecvTimeoutError::Disconnected) => return Ok(archive),
+            Ok(chunk) => {
+                let chunk = chunk.with_context(|| format!("downloading {url}"))?;
+                if chunk.is_empty() {
+                    return Ok(archive);
+                }
+                archive.extend(chunk);
+            }
+            Err(RecvTimeoutError::Disconnected) => bail!("downloading {url}: the reader stopped before the end"),
             Err(RecvTimeoutError::Timeout) => bail!("downloading {url}: no data for {stall:?}"),
         }
     }
 }
 
-/// Checks `archive` against the pinned digest, then writes only the pinned member. A mismatch writes nothing.
+/// Writes only the pinned member, and only if `archive` matches the pinned digest.
 fn install(pin: &Pin, archive: &[u8], dest_dir: &Path) -> Result<PathBuf> {
     let digest = hex::encode(Sha256::digest(archive));
     ensure!(
@@ -171,21 +174,22 @@ fn install(pin: &Pin, archive: &[u8], dest_dir: &Path) -> Result<PathBuf> {
             .with_context(|| format!("{} in {}", pin.member, pin.url))?
             .read_to_end(&mut tool)?;
     } else {
-        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
-        let mut entries = tar.entries()?;
-        let mut member = entries
-            .find(|entry| {
-                entry
-                    .as_ref()
-                    .is_ok_and(|entry| entry.path().is_ok_and(|path| path == Path::new(pin.member)))
-            })
-            .ok_or_else(|| anyhow!("{} not in {}", pin.member, pin.url))??;
-        member.read_to_end(&mut tool)?;
+        let mut found = false;
+        for entry in tar::Archive::new(flate2::read::GzDecoder::new(archive)).entries()? {
+            let mut entry = entry?;
+            if entry.path()? == Path::new(pin.member) {
+                entry.read_to_end(&mut tool)?;
+                found = true;
+                break;
+            }
+        }
+        ensure!(found, "{} not in {}", pin.member, pin.url);
     }
     write_executable(&dest_dir.join(file_name(pin.name, pin.version)), &tool)
 }
 
-/// Writes `data` to `dest` through a temp file in the same directory, so `dest` is never partial.
+/// Writes `data` to `dest` through a temp file in the same directory, so `dest` is never partial. An existing `dest`
+/// is left alone.
 fn write_executable(dest: &Path, data: &[u8]) -> Result<PathBuf> {
     let dir = dest.parent().expect("dest is inside a directory");
     let mut file = tempfile::NamedTempFile::new_in(dir)
@@ -197,8 +201,13 @@ fn write_executable(dest: &Path, data: &[u8]) -> Result<PathBuf> {
     }
     file.write_all(data)?;
     file.as_file().sync_all()?;
-    file.persist(dest)
-        .with_context(|| format!("writing {}", dest.display()))?;
+    match file.persist_noclobber(dest) {
+        Err(err) if err.error.kind() != ErrorKind::AlreadyExists => {
+            return Err(err).with_context(|| format!("writing {}", dest.display()));
+        }
+        // A concurrent fetch got there first.
+        _ => {}
+    }
     #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
     Ok(dest.to_path_buf())

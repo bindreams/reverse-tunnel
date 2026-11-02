@@ -17,12 +17,14 @@ const ACCOUNT: &str = "reverse-tunnel";
 
 /// The one daemon this tool installs. It names a fixed path, so an upgrade never changes the spec.
 pub fn spec(paths: &Paths) -> DaemonSpec {
-    // `Paths::system()` guarantees Unicode.
     let exe = paths.bin_dir.join(format!("{ID}{EXE_SUFFIX}"));
     DaemonSpec {
         id: ID.parse().expect("a valid id"),
         name: ID.into(),
-        command: vec![exe.to_str().unwrap().into(), "run".into()],
+        command: vec![
+            exe.to_str().expect("Paths::system() guarantees Unicode").into(),
+            "run".into(),
+        ],
         cwd: None,
         env: BTreeMap::new(),
         user: User::Name(ACCOUNT.into()),

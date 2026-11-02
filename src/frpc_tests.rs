@@ -98,7 +98,7 @@ fn ws_routes_cover_tcp_services_and_default() {
     assert_eq!(routes, want);
 }
 
-/// Fetches the host's frpc; CI runs it with `--include-ignored`.
+/// Fetches the host's frpc.
 #[test]
 #[ignore = "downloads frpc from the network"]
 fn frpc_verify_accepts_render() {
