@@ -2,14 +2,15 @@
 //! binary because it lowers the descriptor limit of the whole process.
 #![cfg(unix)]
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::Ipv4Addr;
+use std::os::fd::AsRawFd;
 use std::process::Command;
 use std::thread;
 
 use reverse_tunnel::paths::LOG_SUPERVISOR;
-use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+use rustix::process::{Resource, Rlimit, setrlimit};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpSocket;
 use tokio_tungstenite::client_async;
@@ -32,14 +33,14 @@ async fn descriptor_exhaustion_does_not_end_run() {
 
     // Holds the descriptor of the connection the test makes at the end, when the flood may still hold the others.
     let client = TcpSocket::new_v4().unwrap();
-    // Leaves room for a few connections but not for the stub's flood.
-    let open = fs::read_dir("/dev/fd").unwrap().count() as u64;
-    let limit = getrlimit(Resource::Nofile);
+    // Descriptors are handed out lowest first, so this leaves room for 16 more, but not for the stub's flood.
+    let next = File::open("/dev/null").unwrap().as_raw_fd() as u64;
+    let limit = Some(next + 16);
     setrlimit(
         Resource::Nofile,
         Rlimit {
-            current: Some(open + 16),
-            ..limit
+            current: limit,
+            maximum: limit,
         },
     )
     .unwrap();
