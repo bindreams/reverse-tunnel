@@ -3,14 +3,12 @@ use std::collections::BTreeMap;
 use crate::config::{CONTROL_PORT, Config, Kind};
 use crate::paths::Paths;
 
-/// The frpc.toml for `cfg`. It holds no secret: frpc reads both tokens from the environment variables
-/// `RT_BRIDGE_TOKEN` and `RT_HOST_TOKEN`. Every `tcp` service is proxied to the supervisor's WebSocket
-/// listener on `127.0.0.1:ws_port`.
+/// The frpc.toml for `cfg`. It holds no secret: tokens are read from frpc's environment. `tcp` services point at
+/// `ws_port`.
 pub fn render(cfg: &Config, ws_port: u16, paths: &Paths) -> String {
     let (host, bridge) = (&cfg.host, &cfg.bridge);
-    // The path comes from `Paths::system()`; its only character needing an escape is the Windows backslash,
-    // which JSON and TOML basic strings escape alike.
-    let ca = serde_json::to_string(&paths.config_dir.join("bridge.pem").to_string_lossy()).unwrap();
+    // `Paths::system()` guarantees Unicode, and a Windows backslash escapes alike in JSON and TOML basic strings.
+    let ca = serde_json::to_string(paths.config_dir.join("bridge.pem").to_str().unwrap()).unwrap();
     let mut out = format!(
         r#"serverAddr = "{bridge}"
 serverPort = {CONTROL_PORT}
@@ -55,7 +53,7 @@ pub fn ws_routes(cfg: &Config) -> BTreeMap<String, u16> {
         .collect()
 }
 
-/// The names service `name` is published at: `s.<host>.T`, and `<host>.T` for the default service.
+/// Public hostnames of service `name`; the default service also gets the bare `<host>.T`.
 fn hosts(cfg: &Config, name: &str) -> Vec<String> {
     let mut hosts = vec![format!("{name}.{}.{}", cfg.host, cfg.bridge)];
     if cfg.default.as_deref() == Some(name) {

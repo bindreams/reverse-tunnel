@@ -42,7 +42,7 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config> {
-        // A BOM at the start of a YAML stream is valid, and Windows editors write one.
+        // Windows editors write a leading BOM.
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let cfg: Config = yaml_serde::from_str(text)?;
         ensure!(valid_label(&cfg.host), "host {:?} is not a valid name", cfg.host);
@@ -65,8 +65,7 @@ impl Config {
     }
 }
 
-/// Collects the services into a map, failing on a repeated name. A plain `BTreeMap` keeps the last silently, and
-/// serde_with's `MapPreventDuplicates` does not name the key. Names are compared as `Config` sees them, so `22`
+/// Collects the services into a map, failing with the name on a repeat. Names compare as `Config` sees them, so `22`
 /// and `'22'` collide.
 fn unique_services<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeMap<String, Service>, D::Error> {
     struct Services;
@@ -93,8 +92,8 @@ fn unique_services<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BTreeMa
     deserializer.deserialize_map(Services)
 }
 
-/// One DNS label: lowercase letters, digits and inner hyphens, at most 63 characters, and no hyphens
-/// at the third and fourth position (reserved by DNS, refused by ACME CAs). Mirrors `server/ctl/names.py`.
+/// One DNS label (lowercase, digits, inner hyphens, at most 63 characters, no `--` at positions 3-4). Mirrors
+/// `server/ctl/names.py`.
 fn valid_label(s: &str) -> bool {
     let bytes = s.as_bytes();
     !bytes.is_empty()

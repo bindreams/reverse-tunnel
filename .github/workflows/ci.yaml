@@ -27,7 +27,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      # The frpc verification test runs on Linux only; the other legs opt out by name.
       - name: Install frpc
         if: runner.os == 'Linux'
         run: |

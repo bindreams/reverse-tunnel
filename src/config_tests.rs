@@ -34,7 +34,6 @@ fn config_default_must_exist() {
 
 #[test]
 fn config_rejects_duplicate_service() {
-    // `22` and `'22'` are different YAML values but the same service name.
     for (first, second) in [("ssh", "ssh"), ("22", "'22'")] {
         let doubled = format!("{OK}  {first}:\n    port: 1\n    type: tcp\n  {second}:\n    port: 2\n    type: tcp\n");
         assert!(error(&doubled).contains(first), "{first} and {second} were accepted");

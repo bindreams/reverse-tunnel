@@ -31,7 +31,7 @@ fn join_ignores_whitespace() {
 
 #[test]
 fn join_rejects_malformed_codes() {
-    let good = r#"{"domain": "tunnel.example.test", "token": "t", "cert": "c"}"#;
+    let good = r#"{"domain": "tunnel.example.test", "token": "t", "cert": "-----BEGIN CERTIFICATE-----"}"#;
     let cases = [
         ("wrong prefix", CODE.trim().replacen("rt1:", "rt2:", 1)),
         ("bad base64", "rt1:!!!!".to_string()),
@@ -44,6 +44,15 @@ fn join_rejects_malformed_codes() {
             "invalid domain",
             code_for(&good.replace("tunnel.example.test", "Not_A_Domain")),
         ),
+        (
+            "empty token",
+            code_for(&good.replace(r#""token": "t""#, r#""token": """#)),
+        ),
+        (
+            "token with a quote",
+            code_for(&good.replace(r#""token": "t""#, r#""token": "a\"b""#)),
+        ),
+        ("empty cert", code_for(&good.replace("-----BEGIN CERTIFICATE-----", ""))),
     ];
     for (name, code) in cases {
         assert!(decode(&code).is_err(), "{name} was accepted");
@@ -57,4 +66,10 @@ fn token_hash_vector() {
         token_hash(&"0".repeat(64)),
         "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55"
     );
+}
+
+#[test]
+fn join_info_debug_hides_the_token() {
+    let info = decode(CODE).unwrap();
+    assert!(!format!("{info:?}").contains(&info.token));
 }
