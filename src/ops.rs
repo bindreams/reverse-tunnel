@@ -2,8 +2,8 @@
 //! every local user may read. Nothing here reads `secrets_dir`.
 
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, Read, Write};
-use std::path::PathBuf;
+use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -93,7 +93,9 @@ fn last_login(paths: &Paths) -> Result<String> {
             Err(err) if err.kind() == ErrorKind::NotFound => continue,
             Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
         };
-        if let Some(result) = text.lines().rev().find_map(login_result) {
+        // Only a line ended by its newline is whole: `pump` can leave the file cut off mid-line.
+        let whole = &text[..text.rfind('\n').map_or(0, |end| end + 1)];
+        if let Some(result) = whole.lines().rev().find_map(login_result) {
             return Ok(result);
         }
     }
@@ -113,19 +115,22 @@ fn login_result(line: &str) -> Option<String> {
     Some(format!("failed ({stamp}): {}", reason.trim_end()))
 }
 
-/// Prints `supervisor.log` and `frpc.log`, each under a `==> name <==` line, and with `follow` keeps printing what
-/// they gain, including across a rotation, until `out` is closed. `frpc.toml` and the rotated `.1` files are not shown.
+/// Prints `supervisor.log` and `frpc.log`, each under a `==> name <==` line and each preceded by its rotated `.1`, and
+/// with `follow` keeps printing what they gain, including across rotations and truncation, until `out` is closed.
+/// `frpc.toml` is not shown.
 pub fn logs(paths: &Paths, follow: bool, out: &mut impl Write) -> Result<()> {
     let mut tails = [LOG_SUPERVISOR, LOG_FRPC].map(|name| Tail {
         name,
         path: paths.log_dir.join(name),
         open: None,
+        done: None,
+        pending: Vec::new(),
     });
     let mut shown = None;
     let ended = loop {
         let pass = tails
             .iter_mut()
-            .try_for_each(|tail| tail.drain(out, &mut shown))
+            .try_for_each(|tail| tail.drain(out, &mut shown, !follow))
             .and_then(|()| out.flush());
         match pass {
             Err(err) => break Err(err),
@@ -147,47 +152,114 @@ struct Tail {
     path: PathBuf,
     /// The file read so far. A rotation renames it, and it stays readable.
     open: Option<Handle>,
+    /// The last file read to its end: the held file after a rotation, or a `.1`.
+    done: Option<Handle>,
+    /// The unterminated last line read so far, held back until its newline arrives.
+    pending: Vec<u8>,
 }
 
 impl Tail {
-    /// Writes what the file has gained. After a rotation, the rest of the old file, then the new one from its start.
-    /// `shown` is the name last written under a header.
-    fn drain(&mut self, out: &mut impl Write, shown: &mut Option<&'static str>) -> io::Result<()> {
+    /// Writes the lines the file has gained. At the start, the rotated `.1` comes first. After a rotation, the rest of
+    /// the old file, then a `.1` that is neither it nor the new file (a second rotation happened since the last
+    /// look), then the new file from its start. `shown` is the name last written under a header. With `finish`, an
+    /// unterminated last line is written too.
+    fn drain(&mut self, out: &mut impl Write, shown: &mut Option<&'static str>, finish: bool) -> io::Result<()> {
         // Looked at before reading: once the path names another file, the one held gains nothing more.
-        let rotated = self
-            .open
-            .as_ref()
-            .is_some_and(|open| Handle::from_path(&self.path).is_ok_and(|now| now != *open));
+        let current = open_if_present(&self.path)?;
+        let rotated = matches!((&self.open, &current), (Some(open), Some(now)) if open != now);
         if let Some(open) = &mut self.open {
-            copy(self.name, open.as_file_mut(), out, shown)?;
+            copy(
+                self.name,
+                &mut self.pending,
+                open.as_file_mut(),
+                out,
+                shown,
+                finish || rotated,
+            )?;
         }
         if rotated || self.open.is_none() {
-            self.open = match Handle::from_path(&self.path) {
-                Ok(handle) => Some(handle),
-                Err(err) if err.kind() == ErrorKind::NotFound => None,
-                Err(err) => return Err(err),
-            };
+            self.done = self.open.take().or(self.done.take());
+            let older = self.path.with_file_name(format!("{}.1", self.name));
+            if let Some(mut older) = open_if_present(&older)? {
+                let seen = [&self.done, &current]
+                    .into_iter()
+                    .flatten()
+                    .any(|known| *known == older);
+                if !seen {
+                    copy(self.name, &mut self.pending, older.as_file_mut(), out, shown, true)?;
+                    self.done = Some(older);
+                }
+            }
+            self.open = current;
             if let Some(open) = &mut self.open {
-                copy(self.name, open.as_file_mut(), out, shown)?;
+                copy(self.name, &mut self.pending, open.as_file_mut(), out, shown, finish)?;
             }
         }
         Ok(())
     }
 }
 
-fn copy(name: &'static str, file: &mut File, out: &mut impl Write, shown: &mut Option<&'static str>) -> io::Result<()> {
+fn open_if_present(path: &Path) -> io::Result<Option<Handle>> {
+    match Handle::from_path(path) {
+        Ok(handle) => Ok(Some(handle)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Writes the complete lines `file` has gained under a header, and holds the rest in `pending`. A file shorter than
+/// the read position was truncated: it is read again from its start. With `finish`, `pending` is written as a line.
+fn copy(
+    name: &'static str,
+    pending: &mut Vec<u8>,
+    file: &mut File,
+    out: &mut impl Write,
+    shown: &mut Option<&'static str>,
+    finish: bool,
+) -> io::Result<()> {
+    if file.stream_position()? > file.metadata()?.len() {
+        show_pending(name, pending, out, shown)?;
+        file.seek(SeekFrom::Start(0))?;
+    }
     let mut buf = [0; 8192];
     loop {
         let len = file.read(&mut buf)?;
         if len == 0 {
-            return Ok(());
+            break;
         }
-        if *shown != Some(name) {
-            writeln!(out, "==> {name} <==")?;
-            *shown = Some(name);
+        pending.extend_from_slice(&buf[..len]);
+        if let Some(end) = pending.iter().rposition(|&byte| byte == b'\n') {
+            let lines: Vec<u8> = pending.drain(..=end).collect();
+            show(name, &lines, out, shown)?;
         }
-        out.write_all(&buf[..len])?;
     }
+    if finish {
+        show_pending(name, pending, out, shown)?;
+    }
+    Ok(())
+}
+
+/// Writes an unterminated line, ended, and forgets it.
+fn show_pending(
+    name: &'static str,
+    pending: &mut Vec<u8>,
+    out: &mut impl Write,
+    shown: &mut Option<&'static str>,
+) -> io::Result<()> {
+    if !pending.is_empty() {
+        pending.push(b'\n');
+        show(name, pending, out, shown)?;
+        pending.clear();
+    }
+    Ok(())
+}
+
+fn show(name: &'static str, data: &[u8], out: &mut impl Write, shown: &mut Option<&'static str>) -> io::Result<()> {
+    if *shown != Some(name) {
+        writeln!(out, "==> {name} <==")?;
+        *shown = Some(name);
+    }
+    out.write_all(data)
 }
 
 #[cfg(test)]

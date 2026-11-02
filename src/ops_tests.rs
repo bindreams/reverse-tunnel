@@ -96,6 +96,10 @@ fn status_reports_last_login_line() {
         login(&format!("{LOGIN_SUCCESS}{TOKEN_MISMATCH}"), None),
         "last login: failed (2026-11-01 17:02:16.471): token mismatch"
     );
+    // A last line cut off mid-write is not a result yet.
+    let cut =
+        format!("{LOGIN_SUCCESS}2026-11-01 17:02:20.000 [W] [client/service.go:346] connect to server error: host not");
+    assert_eq!(login(&cut, None), "last login: success (2026-11-01 17:02:16.481)");
     // A log that has just rotated holds no result yet.
     let fresh = "2026-11-01 17:03:00.000 [I] [client/service.go:335] try to connect to server...\n";
     assert_eq!(
@@ -141,5 +145,13 @@ fn logs_follow_survives_rotation() {
     log.write(b"two\n");
     receive_until(&chunks, &mut seen, "two\n");
 
-    assert_eq!(seen, format!("{header}one\ntwo\n"));
+    // An administrator clears a log with `: > frpc.log`: what it gains next is read from its start.
+    let frpc = paths.log_dir.join(LOG_FRPC);
+    fs::write(&frpc, "a longer line\n").unwrap();
+    receive_until(&chunks, &mut seen, "a longer line\n");
+    fs::write(&frpc, "new\n").unwrap();
+    receive_until(&chunks, &mut seen, "new\n");
+
+    let frpc_header = format!("==> {LOG_FRPC} <==\n");
+    assert_eq!(seen, format!("{header}one\ntwo\n{frpc_header}a longer line\nnew\n"));
 }
