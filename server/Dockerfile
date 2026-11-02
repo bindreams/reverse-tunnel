@@ -21,9 +21,12 @@ COPY --from=frp /usr/local/bin/frps /usr/local/bin/frps
 ENTRYPOINT ["frps"]
 CMD ["-c", "/etc/frps/frps.toml"]
 
-# plugin: standard library only; the registries come in as a mount
+# plugin: ruamel.yaml (pure Python, no dependencies), the same release uv.lock pins; the registries come in as a mount
 FROM python:3.13-slim AS plugin
 WORKDIR /app
+RUN pip install --no-cache-dir --require-hashes -r /dev/stdin <<-EOF
+	ruamel.yaml==0.19.1 --hash=sha256:27592957fedf6e0b62f281e96effd28043345e0e66001f97683aa9a40c667c93
+EOF
 COPY ctl ctl
 USER nobody
 CMD ["python", "-m", "ctl.plugin", "/state"]

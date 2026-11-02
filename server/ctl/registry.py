@@ -1,11 +1,16 @@
 import contextlib
 import fcntl
+import io
 import os
-import re
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError
+from ruamel.yaml.scanner import ScannerError
 
 from ctl.joincode import is_token_hash
 from ctl.names import alias_problem, valid_label
@@ -66,32 +71,59 @@ def locked(state_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def _read(path: Path, problem: Callable[[str, str], str | None]) -> dict[str, str]:
-    entries = {}
-    text = path.read_bytes().decode("utf-8-sig", errors="replace")
-    for line_no, line in enumerate(text.split("\n"), 1):
-        line = line.strip(" \t\r\n")
-        if not line or line.startswith("#"):
-            continue
-        fields = re.split(r"[ \t]+", line)
-        if len(fields) != 2:
-            raise RegistryError(line_no, "expected two fields")
-        key, value = fields
-        if msg := problem(key, value):
-            raise RegistryError(line_no, msg)
-        if key in entries:
-            raise RegistryError(line_no, f"duplicate entry {key}")
-        entries[key] = value
-    return entries
+def _load(text: str) -> CommentedMap:
+    """The registry's YAML, comments and all; an empty document or one of only comments becomes an empty mapping."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")  # so a rewrite is LF throughout
+    yaml = YAML()  # round trip, YAML 1.2; one per call, since an instance is not thread-safe
+    yaml.preserve_quotes = True
+    try:
+        doc = yaml.load(text)
+        if doc is None:
+            doc = yaml.load(text + "\n{}\n")  # the comments stay with the mapping
+    except RecursionError as e:
+        raise RegistryError(1, "nested too deeply") from e
+    except YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        if isinstance(e, ScannerError):
+            mark = e.context_mark or mark  # where the broken key or string starts, not where the scanner gave up
+        line_no = mark.line + 1 if mark else text.count("\n", 0, getattr(e, "position", 0)) + 1
+        raise RegistryError(line_no, getattr(e, "problem", None) or str(e)) from e
+    if not isinstance(doc, CommentedMap):
+        raise RegistryError(1, "expected a mapping of names to values")
+    doc.fa.set_block_style()
+    return doc
 
 
-def _write(path: Path, entries: dict[str, str], problem: Callable[[str, str], str | None]) -> None:
-    lines = []
-    for line_no, (key, value) in enumerate(sorted(entries.items()), 1):
-        if msg := problem(key, value):
+def _problem(key, value, problem: Callable[[str, str], str | None]) -> str | None:
+    if not (isinstance(key, str) and isinstance(value, str)):
+        return f"{key!r}: {value!r} is not a string: put it in quotes"
+    return problem(key, value)
+
+
+def _read(path: Path, problem: Callable[[str, str], str | None]) -> CommentedMap:
+    doc = _load(path.read_bytes().decode("utf-8-sig", errors="replace"))
+    for key, value in doc.items():
+        if msg := _problem(key, value, problem):
+            raise RegistryError(doc.lc.key(key)[0] + 1, msg)
+    return doc
+
+
+def _write(path: Path, doc: dict, problem: Callable[[str, str], str | None]) -> None:
+    for line_no, (key, value) in enumerate(doc.items(), 1):
+        if msg := _problem(key, value, problem):
             raise RegistryError(line_no, msg)
-        lines.append(f"{key} {value}\n")
-    atomic_write(path, "".join(lines).encode(), 0o644)
+    out = io.StringIO()
+    YAML().dump(doc, out)
+    atomic_write(path, out.getvalue().encode(), 0o644)
+
+
+def put(doc: CommentedMap, key: str, value: str) -> None:
+    """Set `doc[key]`; a new key goes before the first key that sorts after it, beside the comments already there."""
+    if key in doc:
+        doc[key] = value
+        return
+    position = next((i for i, existing in enumerate(doc) if existing > key), len(doc))
+    doc.insert(position, key, value)
 
 
 def _host_problem(host: str, digest: str) -> str | None:
@@ -102,16 +134,17 @@ def _host_problem(host: str, digest: str) -> str | None:
     return None
 
 
-def read_hosts(path: Path) -> dict[str, str]:
+def read_hosts(path: Path) -> CommentedMap:
     return _read(path, _host_problem)
 
 
 def write_hosts(path: Path, hosts: dict[str, str]) -> None:
+    """Write `hosts`, a mapping from `read_hosts` edited in place (a plain dict is written in its order)."""
     _write(path, hosts, _host_problem)
 
 
-def read_aliases(path: Path, domain: str) -> dict[str, str]:
-    """Read `<public> <backend>` lines; `domain` is the tunnel domain the backends must lie under."""
+def read_aliases(path: Path, domain: str) -> CommentedMap:
+    """Read `<public>: <backend>` entries; `domain` is the tunnel domain the backends must lie under."""
     return _read(path, lambda public, backend: alias_problem(public, backend, domain))
 
 

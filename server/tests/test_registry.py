@@ -8,6 +8,7 @@ from ctl import registry
 from ctl.registry import (
     RegistryError,
     locked,
+    put,
     read_aliases,
     read_hosts,
     write_aliases,
@@ -22,41 +23,61 @@ H2 = "sha256:" + "2" * 64
 
 
 def test_hosts_tolerates_hand_edits(tmp_path):
-    path = tmp_path / "hosts"
-    path.write_bytes(f"# comment\r\n\r\nzeta {H1}\r\n  alpha\t{H2}  \n   # indented\nmid {H1}".encode())
+    path = tmp_path / "hosts.yaml"
+    path.write_bytes(f"# comment\r\n\r\nzeta: {H1}\r\n  # indented\r\nalpha: {H2}  # mine \nmid: {H1}".encode())
     assert read_hosts(path) == {"zeta": H1, "alpha": H2, "mid": H1}
 
 
-def test_hosts_bad_line_reports_line_number(tmp_path):
-    path = tmp_path / "hosts"
-    path.write_text(f"a {H1}\n\n# c\nb\n")
+@pytest.mark.parametrize(
+    "text, line_no",
+    [
+        ("a: x\n\nb: [1, 2}\n", 3),
+        ("a: x\nb\n", 2),
+        ("a: x\n\n\tb: y\n", 3),
+        ("a: x\nb\x00: y\n", 2),
+        ("a: x\n- y\n", 2),
+        ("- y\n", 1),
+        ("a: " + "[" * 100_000 + "]" * 100_000 + "\n", 1),
+    ],
+    ids=["bad-flow", "missing-colon", "tab", "control-character", "list-in-mapping", "list", "too-deeply-nested"],
+)
+def test_unparseable_registry_names_a_line(tmp_path, text, line_no):
+    path = tmp_path / "hosts.yaml"
+    path.write_text(text)
     with pytest.raises(RegistryError) as err:
         read_hosts(path)
-    assert err.value.line_no == 4
+    assert err.value.line_no == line_no
 
 
 @pytest.mark.parametrize(
     "line",
     [
-        f"Bad {H1}",
-        "a sha256:" + "1" * 63,
-        "a sha256:" + "A" * 64,
-        "a " + "1" * 64,
-        f"a {H1} extra",
-        f"dup {H2}",
+        f"Bad: {H1}",
+        "a: sha256:" + "1" * 63,
+        "a: sha256:" + "A" * 64,
+        "a: " + "1" * 64,
+        f"dup: {H2}",
     ],
 )
 def test_registry_rejects_bad_hosts(tmp_path, line):
-    path = tmp_path / "hosts"
-    path.write_text(f"ok {H1}\ndup {H1}\n{line}\n", encoding="utf-8")
+    path = tmp_path / "hosts.yaml"
+    path.write_text(f"ok: {H1}\ndup: {H1}\n{line}\n", encoding="utf-8")
     with pytest.raises(RegistryError) as err:
         read_hosts(path)
     assert err.value.line_no == 3
 
 
+def test_non_string_key_is_rejected_with_line(tmp_path):
+    path = tmp_path / "hosts.yaml"
+    path.write_text(f"a: {H1}\nnull: {H1}\n")
+    with pytest.raises(RegistryError, match="quote") as err:
+        read_hosts(path)
+    assert err.value.line_no == 2
+
+
 def test_hosts_undecodable_bytes_name_their_line(tmp_path):
-    path = tmp_path / "hosts"
-    path.write_bytes(f"a {H1}\nb".encode() + b"\xff\xfe " + H1.encode() + b"\n")
+    path = tmp_path / "hosts.yaml"
+    path.write_bytes(f"a: {H1}\nb".encode() + b"\xff\xfe: " + H1.encode() + b"\n")
     with pytest.raises(RegistryError) as err:
         read_hosts(path)
     assert err.value.line_no == 2
@@ -65,15 +86,15 @@ def test_hosts_undecodable_bytes_name_their_line(tmp_path):
 @pytest.mark.parametrize(
     "line",
     [
-        "Movies.binarydreams.me jellyfin.mothership.t.test",
-        f"{MOVIES} jellyfin.other.example",
-        f"{DUP} jellyfin.mothership.t.test",
-        MOVIES,
+        "Movies.binarydreams.me: jellyfin.mothership.t.test",
+        f"{MOVIES}: jellyfin.other.example",
+        f"{DUP}: jellyfin.mothership.t.test",
+        f"{MOVIES}:",
     ],
 )
 def test_registry_rejects_bad_aliases(tmp_path, line):
-    path = tmp_path / "aliases"
-    path.write_text(f"{DUP} jellyfin.mothership.t.test\n{line}\n")
+    path = tmp_path / "aliases.yaml"
+    path.write_text(f"{DUP}: jellyfin.mothership.t.test\n{line}\n")
     with pytest.raises(RegistryError) as err:
         read_aliases(path, T)
     assert err.value.line_no == 2
@@ -81,21 +102,21 @@ def test_registry_rejects_bad_aliases(tmp_path, line):
 
 @pytest.mark.parametrize("public", ["movies.tunnel.binarydreams.me", "tunnel.binarydreams.me"])
 def test_alias_public_name_under_the_tunnel_domain_is_rejected(tmp_path, public):
-    path = tmp_path / "aliases"
-    path.write_text(f"{public} jellyfin.mothership.tunnel.binarydreams.me\n")
+    path = tmp_path / "aliases.yaml"
+    path.write_text(f"{public}: jellyfin.mothership.tunnel.binarydreams.me\n")
     with pytest.raises(RegistryError, match="under the tunnel domain") as err:
         read_aliases(path, "tunnel.binarydreams.me")
     assert err.value.line_no == 1
 
 
 def test_hosts_tolerates_a_utf8_bom(tmp_path):
-    path = tmp_path / "hosts"
-    path.write_bytes(b"\xef\xbb\xbf" + f"a {H1}\n".encode())
+    path = tmp_path / "hosts.yaml"
+    path.write_bytes(b"\xef\xbb\xbf" + f"a: {H1}\n".encode())
     assert read_hosts(path) == {"a": H1}
 
 
 def test_empty_registry_reads_as_empty(tmp_path):
-    path = tmp_path / "registry"
+    path = tmp_path / "registry.yaml"
     path.write_bytes(b"")
     assert read_hosts(path) == {}
     assert read_aliases(path, T) == {}
@@ -103,13 +124,13 @@ def test_empty_registry_reads_as_empty(tmp_path):
 
 def test_missing_registry_raises_file_not_found(tmp_path):
     with pytest.raises(FileNotFoundError):
-        read_hosts(tmp_path / "hosts")
+        read_hosts(tmp_path / "hosts.yaml")
     with pytest.raises(FileNotFoundError):
-        read_aliases(tmp_path / "aliases", T)
+        read_aliases(tmp_path / "aliases.yaml", T)
 
 
 def test_write_hosts_refuses_what_the_reader_rejects(tmp_path):
-    path = tmp_path / "hosts"
+    path = tmp_path / "hosts.yaml"
     write_hosts(path, {"keep": H1})
     for bad in [{"ok": H1, "Bad": H1}, {"ok": "sha256:1"}]:
         with pytest.raises(RegistryError):
@@ -126,33 +147,40 @@ def test_write_hosts_refuses_what_the_reader_rejects(tmp_path):
     ],
 )
 def test_write_aliases_refuses_what_the_reader_rejects(tmp_path, bad):
-    path = tmp_path / "aliases"
+    path = tmp_path / "aliases.yaml"
     write_aliases(path, {DUP: "s.h.t.test"}, T)
     with pytest.raises(RegistryError):
         write_aliases(path, bad, T)
     assert read_aliases(path, T) == {DUP: "s.h.t.test"}
 
 
-def test_registries_round_trip_sorted_with_lf(tmp_path):
-    hosts = tmp_path / "hosts"
-    write_hosts(hosts, {"b": H2, "a": H1})
-    assert hosts.read_bytes() == f"a {H1}\nb {H2}\n".encode()
-    assert read_hosts(hosts) == {"a": H1, "b": H2}
+def test_put_inserts_in_sorted_position_and_the_file_is_written_with_lf(tmp_path):
+    path = tmp_path / "hosts.yaml"
+    path.write_bytes(f"b: {H1}  # b\r\nd: {H1}\r\n".encode())
+    hosts = read_hosts(path)
+    for name in ["e", "c", "a"]:
+        put(hosts, name, H2)
+    write_hosts(path, hosts)
+    assert path.read_bytes() == f"a: {H2}\nb: {H1}  # b\nc: {H2}\nd: {H1}\ne: {H2}\n".encode()
 
-    aliases = tmp_path / "aliases"
-    write_aliases(aliases, {"z.binarydreams.me": "h.t.test", "a.binarydreams.me": "s.h.t.test"}, T)
-    assert aliases.read_text() == "a.binarydreams.me s.h.t.test\nz.binarydreams.me h.t.test\n"
-    assert read_aliases(aliases, T) == {"z.binarydreams.me": "h.t.test", "a.binarydreams.me": "s.h.t.test"}
+
+def test_comments_survive_when_an_empty_registry_gains_its_first_entry(tmp_path):
+    path = tmp_path / "hosts.yaml"
+    path.write_text("# my hosts\n")
+    hosts = read_hosts(path)
+    put(hosts, "a", H1)
+    write_hosts(path, hosts)
+    assert path.read_text() == f"# my hosts\n\na: {H1}\n"
 
 
 def test_written_mode_0644(tmp_path):
     old = os.umask(0o077)
     try:
-        write_hosts(tmp_path / "hosts", {})
-        write_aliases(tmp_path / "aliases", {}, T)
+        write_hosts(tmp_path / "hosts.yaml", {})
+        write_aliases(tmp_path / "aliases.yaml", {}, T)
     finally:
         os.umask(old)
-    for name in ["hosts", "aliases"]:
+    for name in ["hosts.yaml", "aliases.yaml"]:
         assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o644
 
 

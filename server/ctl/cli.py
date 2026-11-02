@@ -14,7 +14,16 @@ from ctl import certs, compose
 from ctl.generate import render_compose
 from ctl.joincode import encode_join, is_token_hash
 from ctl.names import alias_problem, valid_domain, valid_label
-from ctl.registry import RegistryError, atomic_write, locked, read_aliases, read_hosts, write_aliases, write_hosts
+from ctl.registry import (
+    RegistryError,
+    atomic_write,
+    locked,
+    put,
+    read_aliases,
+    read_hosts,
+    write_aliases,
+    write_hosts,
+)
 
 STATE = Path("state")
 TLS = Path("tls")
@@ -68,8 +77,8 @@ def _init(env: dict) -> None:
             text += "\n"
         atomic_write(ENV, (text + "".join(lines)).encode(), 0o600)  # it holds the frps token
     _create(TLS / "trust.pem", (TLS / "frps.crt").read_bytes(), 0o644)
-    _create(STATE / "hosts", b"", 0o644)
-    _create(STATE / "aliases", b"", 0o644)
+    _create(STATE / "hosts.yaml", b"", 0o644)
+    _create(STATE / "aliases.yaml", b"", 0o644)
 
 
 def _add(args, hosts, aliases, env):
@@ -77,8 +86,9 @@ def _add(args, hosts, aliases, env):
         raise CtlError(f"invalid host name {args.host!r}")
     if not is_token_hash(args.hash):
         raise CtlError(f"invalid hash {args.hash!r}")
-    if hosts.setdefault(args.host, args.hash) != args.hash:
+    if hosts.get(args.host, args.hash) != args.hash:
         raise CtlError(f"{args.host} is registered with another hash; revoke it first")
+    put(hosts, args.host, args.hash)
 
 
 def _revoke(args, hosts, aliases, env):
@@ -90,7 +100,7 @@ def _revoke(args, hosts, aliases, env):
 def _alias(args, hosts, aliases, env):
     if problem := alias_problem(args.public, args.backend, env["TUNNEL_DOMAIN"]):
         raise CtlError(problem)
-    aliases[args.public] = args.backend
+    put(aliases, args.public, args.backend)
 
 
 def _unalias(args, hosts, aliases, env):
@@ -147,15 +157,15 @@ def _run(args) -> None:
         if args.command == "init":
             _init(env)
             env = dotenv_values(ENV)
-        hosts = _registry(read_hosts, STATE / "hosts")
-        aliases = _registry(read_aliases, STATE / "aliases", domain)
+        hosts = _registry(read_hosts, STATE / "hosts.yaml")
+        aliases = _registry(read_aliases, STATE / "aliases.yaml", domain)
         old_hosts = dict(hosts)
         old_aliases = dict(aliases)
         out = COMMANDS[args.command][0](args, hosts, aliases, env)
         if hosts != old_hosts:
-            _registry(write_hosts, STATE / "hosts", hosts)
+            _registry(write_hosts, STATE / "hosts.yaml", hosts)
         if aliases != old_aliases:
-            _registry(write_aliases, STATE / "aliases", aliases, domain)
+            _registry(write_aliases, STATE / "aliases.yaml", aliases, domain)
         if out:
             print(out)  # after the write, which may fail; before the reload, which may too
         try:

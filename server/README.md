@@ -50,6 +50,8 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
   labels until the next `ctl` command.
 - The plugin reads `state/` as a directory mount. Don't change it to a file mount: `ctl` replaces files, and a file
   mount keeps pointing at the old one.
+- The registries are YAML; `ctl` edits them in place and keeps your comments. A comment on its own line may move to a
+  neighbouring entry when `ctl` adds or removes one; a comment at the end of an entry's line stays with it.
 - If the plugin is down, connected tunnels keep running, and logins and new names are refused until it is back.
 - `ctl revoke` does not cut the host's current session; it prints the command that does.
 - Services behind frps always see `X-Forwarded-Proto: http`, even over HTTPS.
@@ -65,7 +67,7 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 | `LICENSE`, `.env.example`, `.gitignore`, `.dockerignore` | license, `.env` template, ignore lists |
 | `ctl/`, `pyproject.toml`, `uv.lock` | the plugin and `uv run ctl` |
 | `tls/` | `frps.crt`, `frps.key`, and `trust.pem`, the certificates hosts trust |
-| `state/` | `hosts` and `aliases` registries |
+| `state/` | `hosts.yaml` and `aliases.yaml`, the registries |
 | `.env` | `TUNNEL_DOMAIN`, `FRPS_TOKEN`, `COMPOSE_FILE` |
 
 `tls/`, `state/`, `.env` and `compose.generated.yaml` are gitignored.
