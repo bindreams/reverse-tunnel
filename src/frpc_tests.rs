@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::*;
+use crate::download::{fetch, host_pin};
 use crate::paths::Paths;
 
 const YAML: &str = "\
@@ -97,16 +98,12 @@ fn ws_routes_cover_tcp_services_and_default() {
     assert_eq!(routes, want);
 }
 
+/// Fetches the host's frpc.
 #[test]
+#[ignore = "downloads frpc from the network"]
 fn frpc_verify_accepts_render() {
-    let Some(frpc) = std::env::var_os("RT_FRPC") else {
-        assert!(
-            std::env::var_os("RT_SKIP_FRPC_VERIFY").is_some(),
-            "this test needs frpc 0.71.1: set RT_FRPC to its path, or RT_SKIP_FRPC_VERIFY=1 to skip the test"
-        );
-        return;
-    };
     let dir = tempfile::tempdir().unwrap();
+    let frpc = fetch(host_pin().unwrap(), dir.path()).unwrap();
     std::fs::write(
         dir.path().join("bridge.pem"),
         include_str!("../server/testdata/bridge.pem"),

@@ -27,18 +27,57 @@ jobs:
       - uses: actions/checkout@v4
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Install frpc
-        if: runner.os == 'Linux'
-        run: |
-          curl -fsSL -X GET -o "$RUNNER_TEMP/frp.tar.gz" https://github.com/fatedier/frp/releases/download/v0.71.1/frp_0.71.1_linux_amd64.tar.gz
-          echo "1d9875210972a5d1a62b2dc4c48df45ab0af05d3ca1b5e494a014428259df803  $RUNNER_TEMP/frp.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/frp.tar.gz" --strip-components=1 -C "$RUNNER_TEMP" frp_0.71.1_linux_amd64/frpc
-          echo "RT_FRPC=$RUNNER_TEMP/frpc" >> "$GITHUB_ENV"
-      - name: Skip the frpc verification test
-        if: runner.os != 'Linux'
+      - name: Test, fetching every pinned frpc
         shell: bash
-        run: echo "RT_SKIP_FRPC_VERIFY=1" >> "$GITHUB_ENV"
-      - run: cargo test --locked
+        run: cargo test --locked -- --include-ignored
+
+  # Defender flags the frp Windows zip but not frpc.exe; fetch writes only frpc.exe. Fails if Defender, live and with
+  # no exclusions, blocks it.
+  defender:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the tests
+        shell: bash
+        run: cargo test --locked --no-run
+      - name: Turn real-time protection on
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $false
+          while (-not (Get-MpComputerStatus).RealTimeProtectionEnabled) { }
+          if (-not (Get-MpComputerStatus).RealTimeProtectionEnabled) { throw 'real-time protection is off' }
+          Get-MpComputerStatus | Format-List AntivirusEnabled, RealTimeProtectionEnabled, IoavProtectionEnabled
+      - name: Remove every Defender exclusion
+        shell: pwsh
+        run: |
+          $pref = Get-MpPreference
+          if ($pref.ExclusionPath) { Remove-MpPreference -ExclusionPath $pref.ExclusionPath }
+          if ($pref.ExclusionExtension) { Remove-MpPreference -ExclusionExtension $pref.ExclusionExtension }
+          if ($pref.ExclusionProcess) { Remove-MpPreference -ExclusionProcess $pref.ExclusionProcess }
+          $pref = Get-MpPreference
+          $pref | Format-List ExclusionPath, ExclusionExtension, ExclusionProcess
+          if ($pref.ExclusionPath -or $pref.ExclusionExtension -or $pref.ExclusionProcess) { throw 'exclusions remain' }
+      - name: Defender blocks the EICAR test file in the workspace
+        shell: pwsh
+        run: |
+          # Split so that this file does not trip Defender.
+          $eicar = Join-Path $env:GITHUB_WORKSPACE 'eicar.com'
+          try {
+            Set-Content -Path $eicar -NoNewline -Value ('X5O!P%@AP[4\PZX54(P^)7CC)7}' + '$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*')
+          } catch {
+            Write-Output "write refused: $($_.Exception.Message)"
+          }
+          Get-MpComputerStatus | Format-List AMServiceEnabled, AMRunningMode, OnAccessProtectionEnabled, RealTimeProtectionEnabled, BehaviorMonitorEnabled, IsTamperProtected, AntivirusSignatureVersion
+          Get-Service WinDefend | Format-List Name, Status
+          if (-not (Test-Path $eicar)) { throw 'the EICAR file was removed on write, before the read' }
+          Get-Content -Path $eicar -ErrorAction Continue
+          while ((Test-Path $eicar) -and -not (Get-MpThreatDetection | Where-Object { $_.Resources -like '*eicar.com*' })) { }
+          Get-MpThreatDetection | Format-List ThreatID, Resources, ActionSuccess
+          if (-not (Get-MpThreatDetection | Where-Object { $_.Resources -like '*eicar.com*' })) { throw 'no EICAR detection' }
+      - name: Fetch frpc.exe and run it
+        shell: bash
+        run: cargo test --locked frpc_verify_accepts_render -- --ignored
 
   bridge:
     runs-on: ubuntu-latest
