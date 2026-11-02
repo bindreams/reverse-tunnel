@@ -1,9 +1,9 @@
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result};
 
@@ -40,7 +40,7 @@ impl LogFile {
     /// Appends `data`. A write that fails is reported on stderr, which the service manager keeps, and dropped, so a
     /// full disk cannot stop what is being logged.
     pub fn write(&self, data: &[u8]) {
-        let mut log = self.0.lock().unwrap();
+        let mut log = self.lock();
         if log.size >= log.rotate_at
             && let Err(err) = log.rotate()
         {
@@ -54,13 +54,21 @@ impl LogFile {
     pub fn line(&self, message: impl Display) {
         self.write(format!("{message}\n").as_bytes());
     }
+
+    /// A panic in another thread must not stop logging.
+    fn lock(&self) -> MutexGuard<'_, Active> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Active {
     fn append(&mut self, data: &[u8]) {
         match self.file.write_all(data) {
             Ok(()) => self.size += data.len() as u64,
-            Err(err) => eprintln!("writing {}: {err}", self.path.display()),
+            // `eprintln!` would panic on a closed stderr.
+            Err(err) => {
+                let _ = writeln!(io::stderr(), "writing {}: {err}", self.path.display());
+            }
         }
     }
 

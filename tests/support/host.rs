@@ -15,7 +15,7 @@ use reverse_tunnel::paths::Paths;
 use reverse_tunnel::supervisor::{run, run_with};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::{WebSocketStream, client_async};
@@ -142,4 +142,12 @@ impl Live {
 
 pub fn tcp_services(ssh: u16, vnc: u16) -> String {
     format!("  ssh: {{port: {ssh}, type: tcp}}\n  vnc: {{port: {vnc}, type: tcp}}\n")
+}
+
+/// A port whose connects are refused: bound but not listening, so no other process can take it while the socket lives.
+pub fn refused_port() -> (TcpSocket, u16) {
+    let held = TcpSocket::new_v4().unwrap();
+    held.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+    let port = held.local_addr().unwrap().port();
+    (held, port)
 }

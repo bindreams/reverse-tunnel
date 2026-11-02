@@ -16,11 +16,10 @@ use std::time::Duration;
 use anyhow::{Context, Error, Result, anyhow, bail, ensure};
 use cosca::{Fd, Stdio};
 use futures_util::{SinkExt, StreamExt};
-use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -96,18 +95,19 @@ fn token(path: &Path) -> Result<String> {
     Ok(text.trim().to_string())
 }
 
-/// Renders frpc.toml for `port` into a new directory only this account can reach, which goes away with the returned
-/// handle. The config dir is not writable by the service account.
-fn render_config(setup: &Setup<'_>, port: u16) -> Result<(TempDir, PathBuf)> {
-    let dir = tempfile::tempdir()?;
-    let config = dir.path().join("frpc.toml");
+/// Renders frpc.toml for `port` into `dir` and returns its path. It holds no secret: frpc reads the tokens from its
+/// environment.
+fn render_config(setup: &Setup<'_>, port: u16, dir: &Path) -> Result<PathBuf> {
+    let config = dir.join("frpc.toml");
     fs::write(&config, render(&setup.cfg, port, setup.paths))?;
-    Ok((dir, config))
+    Ok(config)
 }
 
 /// Has frpc verify the rendered configuration.
 async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
-    let (_dir, config) = render_config(setup, CHECK_PORT)?;
+    // `--check` runs as the caller, who may not write the log dir.
+    let dir = tempfile::tempdir()?;
+    let config = render_config(setup, CHECK_PORT, dir.path())?;
     let status = setup.frpc(&["verify"], &config).status().await;
     let status = status.with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     ensure!(status.success(), "frpc verify rejected the configuration: {status}");
@@ -119,7 +119,9 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding the WebSocket listener on {listen}"))?;
-    let (_dir, config) = render_config(setup, listener.local_addr()?.port())?;
+    // The log dir is the one directory the service account may write. A stopped `run` cannot clean up after itself
+    // (the service manager kills it), so every start overwrites the same file.
+    let config = render_config(setup, listener.local_addr()?.port(), &setup.paths.log_dir)?;
 
     let mut frpc = setup.frpc(&[], &config);
     frpc.stdin(Stdio::null())?
@@ -189,9 +191,7 @@ async fn listen_loop(listener: TcpListener, routes: Arc<BTreeMap<String, u16>>, 
             accepted = listener.accept() => accepted,
             // Collects the finished connections, so that the set only holds open ones.
             Some(ended) = open.join_next() => {
-                if let Err(err) = ended {
-                    log.line(format_args!("a WebSocket connection panicked: {err}"));
-                }
+                log_panic(ended, &log);
                 continue;
             }
         };
@@ -208,7 +208,9 @@ async fn listen_loop(listener: TcpListener, routes: Arc<BTreeMap<String, u16>>, 
                 if open.is_empty() {
                     return Err(err).context("accepting WebSocket connections");
                 }
-                open.join_next().await;
+                if let Some(ended) = open.join_next().await {
+                    log_panic(ended, &log);
+                }
                 continue;
             }
         };
@@ -218,6 +220,12 @@ async fn listen_loop(listener: TcpListener, routes: Arc<BTreeMap<String, u16>>, 
                 log.line(format_args!("WebSocket connection from {peer}: {err:#}"));
             }
         });
+    }
+}
+
+fn log_panic(ended: Result<(), JoinError>, log: &LogFile) {
+    if let Err(err) = ended {
+        log.line(format_args!("a WebSocket connection panicked: {err}"));
     }
 }
 

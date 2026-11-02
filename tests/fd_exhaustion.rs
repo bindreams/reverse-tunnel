@@ -18,14 +18,15 @@ use tokio_tungstenite::client_async;
 
 #[path = "support/host.rs"]
 mod host;
-use host::{Live, tcp_services};
+use host::{Live, refused_port, tcp_services};
 
 #[tokio::test]
 async fn descriptor_exhaustion_does_not_end_run() {
     // supervisor.log is a FIFO, so the test can wait for a line instead of polling a file. A thread keeps reading it:
     // a FIFO holds little, and a write to a full one would block `run`.
     let (send, log) = mpsc::channel();
-    let mut live = Live::start_with(&tcp_services(22, 5900), move |host| {
+    let (_held, dead) = refused_port();
+    let mut live = Live::start_with(&tcp_services(dead, dead), move |host| {
         let fifo = host.paths.log_dir.join(LOG_SUPERVISOR);
         assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
         thread::spawn(move || {

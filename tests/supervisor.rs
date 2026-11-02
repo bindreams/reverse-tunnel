@@ -8,13 +8,13 @@ use futures_util::{SinkExt, StreamExt};
 use reverse_tunnel::logfile::LogFile;
 use reverse_tunnel::paths::{LOG_FRPC, LOG_SUPERVISOR};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::{Error, Message};
 
 #[path = "support/host.rs"]
 mod host;
-use host::{Host, Live, tcp_services};
+use host::{Host, Live, refused_port, tcp_services};
 
 const SSH: &str = "  ssh: {port: 22, type: tcp}\n";
 
@@ -84,20 +84,9 @@ fn tokens_only_in_frpc_env() {
     assert!(env.contains(&"RT_HOST_TOKEN=host-secret".to_string()));
     assert!(std::env::var_os("RT_BRIDGE_TOKEN").is_none());
     let mut seen = vec![recorded(&host, "ARG ").join(" ")];
-    for file in [LOG_SUPERVISOR, LOG_FRPC] {
+    for file in [LOG_SUPERVISOR, LOG_FRPC, "frpc.toml"] {
         seen.push(host.log(file));
     }
-    let record = fs::read_to_string(host.record()).unwrap();
-    seen.push(
-        record
-            .split_once(
-                "TOML
-",
-            )
-            .unwrap()
-            .1
-            .to_string(),
-    );
     for text in seen {
         assert!(
             !text.contains("bridge-secret") && !text.contains("host-secret"),
@@ -107,15 +96,20 @@ fn tokens_only_in_frpc_env() {
 }
 
 #[test]
-fn run_leaves_the_config_dir_alone() {
+fn run_renders_into_the_log_dir_and_leaves_the_config_dir_alone() {
     let host = Host::new("record 3 {record}", SSH);
     let config_before = names(&host.paths.config_dir);
     host.run(false).unwrap_err();
 
     assert_eq!(names(&host.paths.config_dir), config_before);
     let args = recorded(&host, "ARG ");
-    assert_eq!(args[0], "-c");
-    assert!(!Path::new(&args[1]).exists(), "{} was left behind", args[1]);
+    assert_eq!(
+        args[..2],
+        [
+            "-c".to_string(),
+            host.paths.log_dir.join("frpc.toml").display().to_string()
+        ]
+    );
 }
 
 // refusals before frpc starts -----
@@ -250,7 +244,8 @@ async fn ws_forwards_by_host() {
 
 #[tokio::test]
 async fn ws_unknown_host_refused() {
-    let live = Live::start(&tcp_services(22, 5900)).await;
+    let (_held, dead) = refused_port();
+    let live = Live::start(&tcp_services(dead, dead)).await;
     let Err(Error::Http(response)) = live.connect("nosuch.testhost.tunnel.example").await else {
         panic!("the upgrade was not refused with an HTTP response");
     };
@@ -263,7 +258,8 @@ async fn ws_closes_when_the_backend_closes() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move { listener.accept().await.unwrap().0.write_all(b"bye").await.unwrap() });
-    let live = Live::start(&tcp_services(port, 5900)).await;
+    let (_held, dead) = refused_port();
+    let live = Live::start(&tcp_services(port, dead)).await;
 
     let mut ws = live.connect("ssh.testhost.tunnel.example").await.unwrap();
     assert_eq!(ws.next().await.unwrap().unwrap(), Message::binary(&b"bye"[..]));
@@ -273,16 +269,13 @@ async fn ws_closes_when_the_backend_closes() {
 
 #[tokio::test]
 async fn a_failed_connection_is_logged_and_does_not_stop_run() {
-    // Bound but not listening: connects are refused, and no other process can take the port.
-    let held = TcpSocket::new_v4().unwrap();
-    held.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
-    let dead = held.local_addr().unwrap();
-    let live = Live::start(&tcp_services(dead.port(), 5900)).await;
+    let (_held, dead) = refused_port();
+    let live = Live::start(&tcp_services(dead, dead)).await;
 
     let mut ws = live.connect("ssh.testhost.tunnel.example").await.unwrap();
     assert!(matches!(ws.next().await, Some(Err(_))));
     // That run ended because frpc did, not because of the failed connection.
     let (host, err) = live.stop().await;
     assert!(err.contains("frpc exited"), "{err}");
-    assert!(host.log(LOG_SUPERVISOR).contains(&dead.to_string()));
+    assert!(host.log(LOG_SUPERVISOR).contains(&format!("127.0.0.1:{dead}")));
 }
