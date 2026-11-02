@@ -48,8 +48,11 @@ pub fn lock(paths: &Paths) -> Result<File> {
         file.lock().with_context(|| format!("locking {}", path.display()))?;
         // `uninstall --finish` deletes the config dir while it holds the lock; a run that waited holds a deleted file.
         let held = file.metadata()?;
-        if fs::metadata(&path).is_ok_and(|named| (named.dev(), named.ino()) == (held.dev(), held.ino())) {
-            return Ok(file);
+        match fs::metadata(&path) {
+            Ok(named) if (named.dev(), named.ino()) == (held.dev(), held.ino()) => return Ok(file),
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("checking {}", path.display())),
         }
     }
 }
@@ -115,8 +118,13 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     }
     make_dir(&paths.log_dir, PUBLIC_DIR)?;
     let log_path = paths.log_dir.join("uninstall.log");
-    // logs/ belongs to the service account, which may have left a link here; root follows none.
-    match fs::remove_file(&log_path) {
+    // logs/ belongs to the service account, which may have left anything here; root follows no link.
+    let removed = match fs::symlink_metadata(&log_path) {
+        Ok(entry) if entry.is_dir() => fs::remove_dir_all(&log_path),
+        Ok(_) => fs::remove_file(&log_path),
+        Err(err) => Err(err),
+    };
+    match removed {
         Err(err) if err.kind() != ErrorKind::NotFound => {
             return Err(err).with_context(|| format!("removing {}", log_path.display()));
         }
@@ -147,23 +155,27 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
         Ok(()) | Err(goetia::Error::NotInstalled { .. }) => {}
         Err(err) => return Err(err).context("removing the service"),
     }
-    for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
-        match fs::remove_dir_all(dir) {
-            Err(err) if err.kind() != ErrorKind::NotFound => {
-                return Err(err).with_context(|| format!("removing {}", dir.display()));
-            }
-            _ => {}
-        }
-    }
+    remove_dir(&paths.log_dir)?;
     account::remove(service::ACCOUNT)?;
-    // Last: until then, a failed removal can be run again by name.
+    remove_dir(&paths.bin_dir)?;
     let exe = service::exe(paths);
     if let Some(link) = &paths.link
         && fs::read_link(link).is_ok_and(|target| target == exe)
     {
         fs::remove_file(link).with_context(|| format!("removing {}", link.display()))?;
     }
-    Ok(())
+    // Last: it holds the lock, so a run that starts now waits until everything else is gone. Until the link goes, it
+    // points at the binary, so a failed removal can be run again by name.
+    remove_dir(&paths.config_dir)
+}
+
+fn remove_dir(dir: &Path) -> Result<()> {
+    match fs::remove_dir_all(dir) {
+        Err(err) if err.kind() != ErrorKind::NotFound => {
+            Err(err).with_context(|| format!("removing {}", dir.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn config_file(paths: &Paths) -> std::path::PathBuf {

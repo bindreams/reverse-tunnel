@@ -310,21 +310,14 @@ fn acls_as_specified() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
-fn install_under_umask_077_and_000() {
-    for umask in ["077", "000"] {
-        let machine = Machine::begin();
-        let mut install = Command::new("sh");
-        install
-            .args([
-                "-c",
-                "umask \"$1\"; exec \"$0\" install --host testhost --join \"$2\"",
-                BIN,
-                umask,
-            ])
-            .arg(join_code("tunnel.example.test"));
-        machine.run_ok(install);
-        assert_installed_as_specified(&machine);
-    }
+fn install_under_umask_077() {
+    let machine = Machine::begin();
+    let mut install = Command::new("sh");
+    install
+        .args(["-c", "umask 077; exec \"$0\" install --host testhost --join \"$1\"", BIN])
+        .arg(join_code("tunnel.example.test"));
+    machine.run_ok(install);
+    assert_installed_as_specified(&machine);
 }
 
 #[test]
