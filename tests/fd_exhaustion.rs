@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use reverse_tunnel::paths::LOG_SUPERVISOR;
-use rustix::process::{Resource, Rlimit, setrlimit};
+use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpSocket;
 use tokio_tungstenite::client_async;
@@ -37,16 +37,15 @@ async fn descriptor_exhaustion_does_not_end_run() {
     })
     .await;
 
-    // Created now so its descriptor is reserved before the limit drops.
-    let client = TcpSocket::new_v4().unwrap();
-    // Descriptors are handed out lowest first, so this leaves room for 16 more, but not for the stub's flood.
+    // Descriptors are handed out lowest first, so this leaves room for 16 more, but not for the stub's flood. The hard
+    // limit stays, so the soft limit can be raised again.
+    let original = getrlimit(Resource::Nofile);
     let next = File::open("/dev/null").unwrap().as_raw_fd() as u64;
-    let limit = Some(next + 16);
     setrlimit(
         Resource::Nofile,
         Rlimit {
-            current: limit,
-            maximum: limit,
+            current: Some(next + 16),
+            maximum: original.maximum,
         },
     )
     .unwrap();
@@ -56,9 +55,12 @@ async fn descriptor_exhaustion_does_not_end_run() {
     let found = log.iter().find(|line| line.contains("Too many open files"));
     assert!(found.is_some(), "supervisor.log ended");
 
+    // Restore the limit first: while `accept` fails with EMFILE, an incoming connection can be reset.
+    setrlimit(Resource::Nofile, original).unwrap();
     // 'r' ends the flood.
     live.stub.get_mut().write_all(b"r").await.unwrap();
-    let tcp = client
+    let tcp = TcpSocket::new_v4()
+        .unwrap()
         .connect((Ipv4Addr::LOCALHOST, live.ws_port).into())
         .await
         .unwrap();
