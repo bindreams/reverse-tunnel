@@ -12,6 +12,7 @@ fn spec_runs_the_installed_binary_as_the_service_account() {
         config_dir: PathBuf::new(),
         secrets_dir: PathBuf::new(),
         log_dir: PathBuf::new(),
+        lock: PathBuf::new(),
         link: None,
     };
     let spec = spec(&paths);

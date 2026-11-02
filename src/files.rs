@@ -1,14 +1,14 @@
 //! Files and directories are created the way an installation needs them: the final mode and owner are set on the open
 //! handle before any content exists, whatever the umask.
 
-use std::fs::{DirBuilder, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 /// Mode and owner for a file or directory. `None` leaves the creator as owner or group. Windows files take their
 /// directory's ACL, and ignore this.
@@ -69,7 +69,8 @@ pub fn apply(file: &File, perm: Perm) -> Result<()> {
 }
 
 /// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had. A new directory is
-/// owner-only until then, so it is never wider than its final mode, whatever the umask.
+/// owner-only until then, so it is never wider than its final mode, whatever the umask. Fails if something else is
+/// there, a link to a directory included.
 pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
     #[cfg(unix)]
     let builder = {
@@ -80,13 +81,19 @@ pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
     #[cfg(not(unix))]
     let builder = DirBuilder::new();
     match builder.create(path) {
-        Err(err) if err.kind() != ErrorKind::AlreadyExists => {
-            return Err(err).with_context(|| format!("creating {}", path.display()));
-        }
-        _ => {}
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => ensure_directory(path)?,
+        Err(err) => return Err(err).with_context(|| format!("creating {}", path.display())),
+        Ok(()) => {}
     }
     let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+}
+
+/// Fails unless `path` is a directory itself, not a link to one.
+fn ensure_directory(path: &Path) -> Result<()> {
+    let entry = fs::symlink_metadata(path).with_context(|| format!("looking at {}", path.display()))?;
+    ensure!(entry.is_dir(), "{} is not a directory", path.display());
+    Ok(())
 }
 
 /// Opens `path` for writing and gives it `perm`; a missing file is created owner-only first, like `make_dir`'s. With
@@ -103,10 +110,13 @@ pub fn open_file(path: &Path, perm: Perm, exclusive: bool) -> Result<File> {
     Ok(file)
 }
 
-/// Creates `path` and the ancestors it lacks with `perm`. Directories that exist are left as they are.
+/// Creates `path` and the ancestors it lacks with `perm`. Directories that exist are left as they are; anything else
+/// there is an error.
 pub fn make_missing_dirs(path: &Path, perm: Perm) -> Result<()> {
-    if path.try_exists()? {
-        return Ok(());
+    match fs::symlink_metadata(path) {
+        Ok(_) => return ensure_directory(path),
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("looking at {}", path.display())),
     }
     if let Some(parent) = path.parent() {
         make_missing_dirs(parent, perm)?;
@@ -135,6 +145,8 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
         Ok(_) => {}
     }
     #[cfg(unix)]
-    File::open(dir)?.sync_all()?;
+    File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("syncing {}", dir.display()))?;
     Ok(WriteOutcome::Written)
 }

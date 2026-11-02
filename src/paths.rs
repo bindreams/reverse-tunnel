@@ -14,6 +14,9 @@ pub struct Paths {
     /// `bridge.token` and `host.token`, readable by administrators and the service account.
     pub secrets_dir: PathBuf,
     pub log_dir: PathBuf,
+    /// Held by `install` and `uninstall` for their whole run. No removal touches it. On Windows, the name of the
+    /// global mutex.
+    pub lock: PathBuf,
     /// The symlink to the binary on `PATH`; none on Windows.
     pub link: Option<PathBuf>,
 }
@@ -21,7 +24,7 @@ pub struct Paths {
 impl Paths {
     /// The system's paths. Fails if one is not valid Unicode, so later code may rely on that.
     pub fn system() -> Result<Paths> {
-        let (bin_dir, config_dir, log_dir, link) = layout()?;
+        let (bin_dir, config_dir, log_dir, lock, link) = layout()?;
         for dir in [&bin_dir, &config_dir, &log_dir] {
             ensure!(dir.to_str().is_some(), "{} is not valid Unicode", dir.display());
         }
@@ -30,6 +33,7 @@ impl Paths {
             bin_dir,
             config_dir,
             log_dir,
+            lock,
             link,
         })
     }
@@ -38,32 +42,40 @@ impl Paths {
 /// The install, config and log directories and the link, from the system's known folders (not
 /// `%ProgramFiles%`, which the installing user's environment can override).
 #[cfg(windows)]
-fn layout() -> Result<(PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
+fn layout() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     use anyhow::Context;
     use known_folders::{KnownFolder, get_known_folder_path};
 
     let folder = |folder| get_known_folder_path(folder).context("the system has no such known folder");
     let config_dir = folder(KnownFolder::ProgramData)?.join("reverse-tunnel");
     let bin_dir = folder(KnownFolder::ProgramFiles)?.join("reverse-tunnel");
-    Ok((bin_dir, config_dir.clone(), config_dir.join("logs"), None))
+    Ok((
+        bin_dir,
+        config_dir.clone(),
+        config_dir.join("logs"),
+        r"Global\reverse-tunnel".into(),
+        None,
+    ))
 }
 
 #[cfg(target_os = "macos")]
-fn layout() -> Result<(PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
+fn layout() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     Ok((
         "/usr/local/lib/reverse-tunnel".into(),
         "/Library/Application Support/reverse-tunnel".into(),
         "/Library/Logs/reverse-tunnel".into(),
+        "/var/run/reverse-tunnel.lock".into(),
         Some("/usr/local/bin/reverse-tunnel".into()),
     ))
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn layout() -> Result<(PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
+fn layout() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     Ok((
         "/usr/local/lib/reverse-tunnel".into(),
         "/etc/reverse-tunnel".into(),
         "/var/log/reverse-tunnel".into(),
+        "/run/reverse-tunnel.lock".into(),
         Some("/usr/local/bin/reverse-tunnel".into()),
     ))
 }

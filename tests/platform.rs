@@ -30,9 +30,9 @@ const CERT: &str = include_str!("../server/testdata/bridge.pem");
 /// An account the test creates, to stand in for any local user.
 const PROBE: &str = "rtprobe";
 
-/// A join code for a domain that never resolves.
+/// A join code for a domain that never resolves; its token names the domain.
 fn join_code(domain: &str) -> String {
-    let json = serde_json::json!({"domain": domain, "token": "shared-token", "cert": CERT});
+    let json = serde_json::json!({"domain": domain, "token": format!("token-for-{domain}"), "cert": CERT});
     format!("rt1:{}", URL_SAFE_NO_PAD.encode(json.to_string()))
 }
 
@@ -104,6 +104,20 @@ impl Machine {
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());
         }
+        for account in [service::ACCOUNT, PROBE] {
+            assert!(account::lookup(account).is_none(), "{account} is left from before");
+        }
+        assert!(
+            matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })),
+            "the service is left from before"
+        );
+        if let Some(link) = &paths.link {
+            assert!(
+                link.symlink_metadata().is_err(),
+                "{} is left from before",
+                link.display()
+            );
+        }
         Machine { paths, manager, id }
     }
 
@@ -173,14 +187,22 @@ impl Drop for Machine {
     }
 }
 
-/// Every name the machine keeps that an install could leave behind: the directories it touches, the service
-/// manager's units, and the accounts.
+/// A name this tool gives: `reverse-tunnel*`, or `_reverse-tunnel*` for a macOS account.
+fn ours(path: &Path) -> bool {
+    let name = path.file_name().and_then(|name| name.to_str());
+    name.is_some_and(|name| name.trim_start_matches('_').starts_with("reverse-tunnel"))
+}
+
+/// Every name of ours the machine keeps that an install could leave behind: files and directories next to the
+/// install's, the service manager's units, and every account.
 fn snapshot(machine: &Machine) -> BTreeSet<String> {
     fn tree(dir: &Path, into: &mut BTreeSet<String>) {
         let Ok(entries) = fs::read_dir(dir) else { return };
         for entry in entries {
             let path = entry.unwrap().path();
-            into.insert(path.display().to_string());
+            if ours(&path) {
+                into.insert(path.display().to_string());
+            }
             tree(&path, into);
         }
     }
@@ -197,7 +219,10 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
         .chain(paths.link.as_deref().and_then(Path::parent))
     {
         for entry in fs::read_dir(parent).unwrap() {
-            seen.insert(entry.unwrap().path().display().to_string());
+            let path = entry.unwrap().path();
+            if ours(&path) {
+                seen.insert(path.display().to_string());
+            }
         }
     }
     let units: &[&str] = if cfg!(target_os = "macos") {
@@ -257,6 +282,13 @@ fn assert_installed_as_specified(machine: &Machine) {
         assert_eq!((meta.uid(), meta.gid()), (0, service.gid), "owner of {token}");
     }
     assert_eq!(fs::metadata(&paths.log_dir).unwrap().uid(), service.uid);
+    let link = paths.link.as_ref().unwrap();
+    assert_eq!(
+        fs::read_link(link).unwrap(),
+        service::exe(paths),
+        "where {} points",
+        link.display()
+    );
 
     for readable in [
         paths.config_dir.join("config.yaml"),
@@ -380,20 +412,20 @@ fn uninstall_survives_session_end() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
 
-    // A session of its own, as ssh's, which is killed once `uninstall` has returned: the tunnel it ran over goes with
+    // A session of its own, as ssh's, which is killed once the removal has started: the tunnel it ran over goes with
     // the service.
-    let mut session = Command::new("sh");
-    session
-        .args(["-c", "\"$0\" uninstall; echo returned; read _", BIN])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .process_group(0);
+    let mut session = Command::new(BIN);
+    session.arg("uninstall").stdout(Stdio::piped()).process_group(0);
     let mut session = session.spawn().unwrap();
     let mut output = BufReader::new(session.stdout.take().unwrap());
     let mut line = String::new();
-    while line.trim() != "returned" {
+    while !line.starts_with("Removing.") {
         line.clear();
-        assert_ne!(output.read_line(&mut line).unwrap(), 0, "uninstall did not return");
+        assert_ne!(
+            output.read_line(&mut line).unwrap(),
+            0,
+            "uninstall ended before starting the removal"
+        );
     }
     let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
     kill_process_group(group, Signal::KILL).unwrap();
@@ -420,7 +452,6 @@ fn uninstall_leaves_nothing() {
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
-    wait_until_removed();
 
     assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
@@ -451,10 +482,16 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
     fs::write(link, "").unwrap();
     let rejoin = join_code("new.example.test");
     let failed = machine.install_command(&rejoin).output().unwrap();
+    let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success(),
-        "the rejoin should fail on the file at {}",
+        !failed.status.success() && stderr.contains(&link.display().to_string()),
+        "the rejoin should fail on the file at {}: {stderr}",
         link.display()
+    );
+    let token = fs::read_to_string(machine.secrets().join("bridge.token")).unwrap();
+    assert_eq!(
+        token, "token-for-new.example.test\n",
+        "the rejoin failed before it wrote the bridge files"
     );
     fs::remove_file(link).unwrap();
 
@@ -463,4 +500,31 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
     wait_until("the supervisor starts again with the new domain", || {
         fs::read_to_string(&rendered).is_ok_and(|text| text.contains("serverAddr = \"new.example.test\""))
     });
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn install_is_refused_while_an_uninstall_is_unfinished() {
+    let machine = Machine::begin();
+    machine.install(&join_code("old.example.test"));
+    let supervisor = machine.status().pid;
+    // What an uninstall leaves while its removal runs, or after it failed.
+    fs::write(machine.paths.config_dir.join("uninstalling"), "").unwrap();
+
+    let refused = machine
+        .install_command(&join_code("new.example.test"))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && stderr.contains("uninstall is in progress"),
+        "{stderr}"
+    );
+    let config = fs::read_to_string(machine.paths.config_dir.join("config.yaml")).unwrap();
+    assert!(
+        config.contains("old.example.test"),
+        "the refused install changed config.yaml"
+    );
+    assert_eq!(machine.status().pid, supervisor);
 }

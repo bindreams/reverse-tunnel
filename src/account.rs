@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Result, ensure};
 
-/// The ids of an account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Account {
     pub uid: u32,
@@ -39,21 +38,28 @@ fn run(args: &[&str]) -> Result<String> {
 
 // Commands are named by absolute path: root's `PATH` may lack `sbin` (`su` without `-`).
 
-/// Creates the account `name` with its group, unless `existing` says it is there: one command makes both.
+/// Creates the account `name` unless `existing` says it is there, with a group of its own, or into that group if a
+/// failed run left it.
 #[cfg(target_os = "linux")]
 fn complete(name: &str, existing: Option<Account>) -> Result<()> {
     if existing.is_none() {
-        run(&[
+        let group: &[&str] = if uzers::get_group_by_name(name).is_some() {
+            &["--gid", name]
+        } else {
+            &["--user-group"]
+        };
+        let mut args = vec![
             "/usr/sbin/useradd",
             "--system",
-            "--user-group",
             "--no-create-home",
             "--home-dir",
             "/nonexistent",
             "--shell",
             "/usr/sbin/nologin",
-            name,
-        ])?;
+        ];
+        args.extend(group);
+        args.push(name);
+        run(&args)?;
     }
     Ok(())
 }
@@ -64,33 +70,42 @@ pub fn remove(name: &str) -> Result<()> {
     if lookup(name).is_some() {
         run(&["/usr/sbin/userdel", name])?;
     }
+    // `userdel` keeps the group when another user has it as primary group or the system does not delete user groups,
+    // and a failed run can leave the group alone.
+    if uzers::get_group_by_name(name).is_some() {
+        run(&["/usr/sbin/groupdel", name])?;
+    }
     Ok(())
 }
 
-// macOS ================================================================================================================
-
 /// Writes every attribute of the user and the group, which `dscl -create` does whether or not the record exists, so a
-/// run that stopped midway is finished by the next. An account that exists keeps its id.
+/// run that stopped midway is finished by the next. An account that exists keeps its id; a new one gets a free id,
+/// and another if someone else took it meanwhile.
 #[cfg(target_os = "macos")]
 fn complete(name: &str, existing: Option<Account>) -> Result<()> {
-    let id = match existing {
+    let mut id = match existing {
         Some(account) => account.uid,
         None => free_id()?,
+    };
+    loop {
+        let (user, group, value) = (format!("/Users/{name}"), format!("/Groups/{name}"), id.to_string());
+        let (user, group, value) = (user.as_str(), group.as_str(), value.as_str());
+        for [record, key, value] in [
+            [group, "PrimaryGroupID", value],
+            [user, "UniqueID", value],
+            [user, "PrimaryGroupID", value],
+            [user, "UserShell", "/usr/bin/false"],
+            [user, "NFSHomeDirectory", "/var/empty"],
+            [user, "Password", "*"],
+        ] {
+            run(&["/usr/bin/dscl", ".", "-create", record, key, value])?;
+        }
+        // Choosing and writing an id are two commands, so ask again who holds it.
+        if existing.is_some() || !ids_in_use()?.iter().any(|(holder, held)| *held == id && holder != name) {
+            return Ok(());
+        }
+        id = free_id()?;
     }
-    .to_string();
-    let (user, group) = (format!("/Users/{name}"), format!("/Groups/{name}"));
-    let (user, group, id) = (user.as_str(), group.as_str(), id.as_str());
-    for [record, key, value] in [
-        [group, "PrimaryGroupID", id],
-        [user, "UniqueID", id],
-        [user, "PrimaryGroupID", id],
-        [user, "UserShell", "/usr/bin/false"],
-        [user, "NFSHomeDirectory", "/var/empty"],
-        [user, "Password", "*"],
-    ] {
-        run(&["/usr/bin/dscl", ".", "-create", record, key, value])?;
-    }
-    Ok(())
 }
 
 /// Removes the user and the group, each if present.
@@ -107,19 +122,25 @@ pub fn remove(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Every user and group the system knows, local or from a directory service, with its id.
+#[cfg(target_os = "macos")]
+fn ids_in_use() -> Result<Vec<(String, u32)>> {
+    let mut used = Vec::new();
+    for (records, key) in [("/Users", "UniqueID"), ("/Groups", "PrimaryGroupID")] {
+        for line in run(&["/usr/bin/dscl", "/Search", "-list", records, key])?.lines() {
+            let mut fields = line.split_whitespace();
+            if let (Some(name), Some(id)) = (fields.next(), fields.next_back().and_then(|id| id.parse().ok())) {
+                used.push((name.to_string(), id));
+            }
+        }
+    }
+    Ok(used)
+}
+
 /// The lowest id from 200 to 399, which Apple sets aside for system accounts, that is neither a user's nor a group's.
 #[cfg(target_os = "macos")]
 fn free_id() -> Result<u32> {
-    let mut used = std::collections::BTreeSet::new();
-    for (records, key) in [("/Users", "UniqueID"), ("/Groups", "PrimaryGroupID")] {
-        for line in run(&["/usr/bin/dscl", ".", "-list", records, key])?.lines() {
-            used.extend(
-                line.split_whitespace()
-                    .next_back()
-                    .and_then(|id| id.parse::<u32>().ok()),
-            );
-        }
-    }
+    let used: Vec<u32> = ids_in_use()?.into_iter().map(|(_, id)| id).collect();
     (200..400)
         .find(|id| !used.contains(id))
         .context("every system id from 200 to 399 is taken")

@@ -30,6 +30,7 @@ zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"
+named-lock = "0.4.1"
 uzers = "0.12.2"
 
 [target."cfg(unix)".dev-dependencies]

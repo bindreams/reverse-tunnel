@@ -45,8 +45,10 @@ impl Machine {
             config_dir: root.join("config"),
             secrets_dir: root.join("config/secrets"),
             log_dir: root.join("logs"),
+            lock: root.join("lock"),
             link: None,
         };
+        fs::create_dir(&paths.config_dir).unwrap();
         let account = Account {
             uid: uzers::get_current_uid(),
             gid: uzers::get_current_gid(),
@@ -90,6 +92,11 @@ fn hostname_normalization() {
         let err = format!("{:#}", normalize_host(machine).unwrap_err());
         assert!(err.contains("--host") && err.contains(machine), "{err}");
     }
+    let long = "a".repeat(64);
+    for host in ["Desktop", "my_box", long.as_str(), ""] {
+        let err = format!("{:#}", host_name(Some(host)).unwrap_err());
+        assert!(err.contains("--host"), "{host:?}: {err}");
+    }
 }
 
 #[test]
@@ -123,11 +130,9 @@ fn token_file_format() {
 
 #[test]
 fn registration_line() {
-    let line = super::registration_line("mothership", &"0".repeat(64));
-    assert_eq!(
-        line,
-        "uv run ctl add mothership sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55"
-    );
+    let token = "0".repeat(64);
+    let line = super::registration_line("mothership", &token);
+    assert_eq!(line, format!("uv run ctl add mothership {}", join::token_hash(&token)));
 }
 
 #[test]
@@ -186,26 +191,39 @@ fn rejoin_rewrites_bridge_files_only() {
 }
 
 #[test]
-fn rejoin_with_service_named_bridge() {
+fn rejoin_changes_only_the_bridge_value() {
+    let services = "services:\n  ssh: {port: 22, type: tcp}\n  bridge:\n    port: 8080\n    type: http\n";
+    // A service called `bridge`; a config edited on Windows; a last line without a newline.
+    let rows = [
+        (
+            format!("host: mothership\nbridge: old.example.test\n{services}"),
+            format!("host: mothership\nbridge: new.example.test\n{services}"),
+        ),
+        (
+            "\u{feff}host: m\r\nbridge: old.example.test\r\nservices: {}\r\n".to_string(),
+            "\u{feff}host: m\r\nbridge: new.example.test\r\nservices: {}\r\n".to_string(),
+        ),
+        (
+            "host: m\nservices: {}\nbridge: old.example.test".to_string(),
+            "host: m\nservices: {}\nbridge: new.example.test".to_string(),
+        ),
+    ];
     let machine = Machine::new();
     machine.settings(Some("mothership"), Some(CODE));
-    let services = "services:\n  ssh: {port: 22, type: tcp}\n  bridge:\n    port: 8080\n    type: http\n";
-    fs::write(
-        machine.config(),
-        format!("host: mothership\nbridge: old.example.test\n{services}"),
-    )
-    .unwrap();
+    for (before, after) in rows {
+        fs::write(machine.config(), &before).unwrap();
 
-    machine.settings(None, Some(&code_for("new.example.test", "t", CERT)));
+        machine.settings(None, Some(&code_for("new.example.test", "t", CERT)));
 
-    let text = fs::read_to_string(machine.config()).unwrap();
-    assert_eq!(text, format!("host: mothership\nbridge: new.example.test\n{services}"));
+        assert_eq!(fs::read_to_string(machine.config()).unwrap(), after, "{before:?}");
+    }
 }
 
 #[test]
 fn rejoin_needs_exactly_one_bridge_line() {
     let config = Path::new("/etc/reverse-tunnel/config.yaml");
-    for text in ["host: a\nservices: {}\n", "bridge: a\nbridge: b\n"] {
+    let folded = "host: a\nbridge: >-\n  old.example.test\nservices: {}\n";
+    for text in ["host: a\nservices: {}\n", "bridge: a\nbridge: b\n", folded] {
         let err = with_bridge(text, "new.example.test", config).unwrap_err();
         assert!(err.to_string().contains("/etc/reverse-tunnel/config.yaml"), "{err}");
     }

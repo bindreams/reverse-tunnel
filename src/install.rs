@@ -4,9 +4,9 @@
 //! and each step can be repeated, so an install that failed midway is finished by running it again.
 
 use std::env;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::symlink;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail, ensure};
 use goetia::decide::Outcome;
 use goetia::manager::{Budget, ServiceManager};
 use goetia::spec::{DaemonSpec, Id};
+use named_lock::{NamedLock, NamedLockGuard};
 
 use crate::account::{self, Account};
 use crate::config::{Config, valid_label};
@@ -38,23 +39,24 @@ pub struct InstallOpts {
     pub paths: Paths,
 }
 
-/// Holds an exclusive lock on the config dir until the file is dropped. `install`, `upgrade` and `uninstall` take it
-/// for their whole run; a second one waits.
-pub fn lock(paths: &Paths) -> Result<File> {
-    let path = paths.config_dir.join("lock");
-    loop {
-        make_dir(&paths.config_dir, PUBLIC_DIR)?;
-        let file = open_file(&path, Perm::new(0o600), false)?;
-        file.lock().with_context(|| format!("locking {}", path.display()))?;
-        // `uninstall --finish` deletes the config dir while it holds the lock; a run that waited holds a deleted file.
-        let held = file.metadata()?;
-        match fs::metadata(&path) {
-            Ok(named) if (named.dev(), named.ino()) == (held.dev(), held.ino()) => return Ok(file),
-            Ok(_) => {}
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("checking {}", path.display())),
-        }
-    }
+/// Holds the exclusive lock until the guard is dropped. `install` and `uninstall --finish` take it for their whole
+/// run; a second one waits.
+pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
+    // Made here, owner-only: named-lock would use the umask's mode, and whoever can open the file can hold the lock.
+    open_file(&paths.lock, Perm::new(0o600), false)?;
+    NamedLock::with_path(&paths.lock)
+        .and_then(|lock| lock.lock())
+        .with_context(|| format!("locking {}", paths.lock.display()))
+}
+
+/// Exists from the moment `uninstall` commits to removing everything until the removal is done. While it does,
+/// `install` refuses, so that it cannot install what the removal is about to delete.
+fn uninstalling_file(paths: &Paths) -> PathBuf {
+    paths.config_dir.join("uninstalling")
+}
+
+fn uninstall_log(paths: &Paths) -> PathBuf {
+    paths.log_dir.join("uninstall.log")
 }
 
 /// Exists from the first change to what the service runs until the service has picked it up, so that a run that fails
@@ -73,13 +75,19 @@ fn mark_pending(paths: &Paths) -> Result<()> {
 pub fn install(opts: InstallOpts) -> Result<()> {
     let paths = &opts.paths;
     let _lock = lock(paths)?;
+    ensure!(
+        !uninstalling_file(paths).try_exists()?,
+        "an uninstall is in progress or failed: see {}, and run `reverse-tunnel uninstall` to finish it",
+        uninstall_log(paths).display()
+    );
+    make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let mut changed = pending_file(paths).try_exists()?;
     let join = match opts.join.as_deref() {
         Some(code) => Some(join::decode(code)?),
-        None if needs_join(paths) => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
+        None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
         None => None,
     };
-    let host = if config_file(paths).exists() {
+    let host = if config_file(paths).try_exists()? {
         None
     } else {
         Some(host_name(opts.host.as_deref())?)
@@ -89,10 +97,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     let spec = service::spec(paths);
     let manager = goetia::manager::native()?;
     // The binary and the settings may not exist yet; the manager does not look.
-    if register(&*manager, &spec)? {
-        mark_pending(paths)?;
-        changed = true;
-    }
+    changed |= register(&*manager, &spec, paths)?;
     changed |= write_settings(paths, &account, host.as_deref(), join.as_ref())?;
     changed |= place_binaries(paths)?;
 
@@ -108,30 +113,24 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     Ok(())
 }
 
-/// Prepares the removal and hands it to a detached `uninstall --finish`: stopping the service cuts the tunnel, and
-/// with it the session this runs in.
+/// Prepares the removal, hands it to a detached `uninstall --finish` (stopping the service cuts the tunnel, and with
+/// it the session this runs in) and waits for it. If the session ends, the removal carries on.
 pub fn uninstall(paths: &Paths) -> Result<()> {
-    let _lock = lock(paths)?;
+    let lock = lock(paths)?;
     match revoke_line(paths) {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
         Err(err) => eprintln!("{err:#}\nRevoke this host on the bridge by running: uv run ctl revoke <host>"),
     }
+    make_dir(&paths.config_dir, PUBLIC_DIR)?;
+    open_file(&uninstalling_file(paths), Perm::new(0o600), false)?;
     make_dir(&paths.log_dir, PUBLIC_DIR)?;
-    let log_path = paths.log_dir.join("uninstall.log");
+    let log_path = uninstall_log(paths);
     // logs/ belongs to the service account, which may have left anything here; root follows no link.
-    let removed = match fs::symlink_metadata(&log_path) {
-        Ok(entry) if entry.is_dir() => fs::remove_dir_all(&log_path),
-        Ok(_) => fs::remove_file(&log_path),
-        Err(err) => Err(err),
-    };
-    match removed {
-        Err(err) if err.kind() != ErrorKind::NotFound => {
-            return Err(err).with_context(|| format!("removing {}", log_path.display()));
-        }
-        _ => {}
-    }
+    remove_entry(&log_path)?;
     let log = open_file(&log_path, PUBLIC_FILE, true)?;
-    Command::new(env::current_exe()?)
+    // `--finish` takes the lock itself; an `install` in between is refused by the marker.
+    drop(lock);
+    let mut finish = Command::new(env::current_exe()?)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
@@ -141,9 +140,16 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         .spawn()
         .context("starting the removal")?;
     println!(
-        "The removal continues in the background; its log is {}.",
+        "Removing. If this session ends, the removal continues; its log is {}.",
         log_path.display()
     );
+    let status = finish.wait().context("waiting for the removal")?;
+    ensure!(
+        status.success(),
+        "the removal failed ({status}): see {}, and run `reverse-tunnel uninstall` to finish it",
+        log_path.display()
+    );
+    println!("Removed.");
     Ok(())
 }
 
@@ -155,41 +161,86 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
         Ok(()) | Err(goetia::Error::NotInstalled { .. }) => {}
         Err(err) => return Err(err).context("removing the service"),
     }
-    remove_dir(&paths.log_dir)?;
+    // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
+    // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the logs go late,
+    // so that a failure above them is written to `uninstall.log`; and the marker is last, since `install` is refused
+    // while it exists.
+    remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
-    remove_dir(&paths.bin_dir)?;
-    let exe = service::exe(paths);
-    if let Some(link) = &paths.link
-        && fs::read_link(link).is_ok_and(|target| target == exe)
-    {
-        fs::remove_file(link).with_context(|| format!("removing {}", link.display()))?;
-    }
-    // Last: it holds the lock, so a run that starts now waits until everything else is gone. Until the link goes, it
-    // points at the binary, so a failed removal can be run again by name.
-    remove_dir(&paths.config_dir)
+    remove_link(paths)?;
+    remove_files(paths)
+        .context("the binary may be gone, but any `reverse-tunnel` binary can run `reverse-tunnel uninstall` again")
 }
 
-fn remove_dir(dir: &Path) -> Result<()> {
-    match fs::remove_dir_all(dir) {
+/// Removes the link to the binary, unless it points elsewhere.
+fn remove_link(paths: &Paths) -> Result<()> {
+    let Some(link) = &paths.link else { return Ok(()) };
+    match fs::read_link(link) {
+        Ok(target) if target == service::exe(paths) => {
+            fs::remove_file(link).with_context(|| format!("removing {}", link.display()))
+        }
+        Ok(target) => {
+            eprintln!("Leaving {}: it points to {}.", link.display(), target.display());
+            Ok(())
+        }
+        Err(err) if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::InvalidInput) => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("reading the link {}", link.display())),
+    }
+}
+
+/// Removes the bin dir, the config dir's contents, the logs and, last, the marker and the config dir.
+fn remove_files(paths: &Paths) -> Result<()> {
+    remove_entry(&paths.bin_dir)?;
+    let marker = uninstalling_file(paths);
+    match fs::read_dir(&paths.config_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let path = entry?.path();
+                if path != marker {
+                    remove_entry(&path)?;
+                }
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("reading {}", paths.config_dir.display())),
+    }
+    remove_entry(&paths.log_dir)?;
+    remove_entry(&marker)?;
+    remove_entry(&paths.config_dir)
+}
+
+/// Removes `path`, a directory with its contents, unless it is already gone. A link is removed, not followed.
+fn remove_entry(path: &Path) -> Result<()> {
+    let removed = match fs::symlink_metadata(path) {
+        Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(err) => Err(err),
+    };
+    match removed {
         Err(err) if err.kind() != ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("removing {}", dir.display()))
+            Err(err).with_context(|| format!("removing {}", path.display()))
         }
         _ => Ok(()),
     }
 }
 
-fn config_file(paths: &Paths) -> std::path::PathBuf {
+fn config_file(paths: &Paths) -> PathBuf {
     paths.config_dir.join("config.yaml")
 }
 
 /// Whether a join code is needed: some file it provides is missing.
-fn needs_join(paths: &Paths) -> bool {
+fn needs_join(paths: &Paths) -> Result<bool> {
     let files = [
         config_file(paths),
         paths.config_dir.join("bridge.pem"),
         paths.secrets_dir.join("bridge.token"),
     ];
-    files.iter().any(|file| !file.exists())
+    for file in files {
+        if !file.try_exists()? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The host name for a new `config.yaml`.
@@ -238,7 +289,10 @@ fn prompt_join(input: &mut impl BufRead, prompt: &mut impl Write) -> Result<Join
 }
 
 /// Registers the service without starting it. Whether it was created or changed.
-fn register(manager: &dyn ServiceManager, spec: &DaemonSpec) -> Result<bool> {
+fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> Result<bool> {
+    if manager.preview_install(spec)? != Outcome::UpToDate {
+        mark_pending(paths)?;
+    }
     match manager.install(spec, false)? {
         Outcome::UpToDate => Ok(false),
         Outcome::Create | Outcome::Update { .. } | Outcome::Stale { .. } => Ok(true),
@@ -251,7 +305,6 @@ fn register(manager: &dyn ServiceManager, spec: &DaemonSpec) -> Result<bool> {
 /// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
     let secret = Perm::new(0o640).gid(account.gid);
-    make_dir(&paths.config_dir, PUBLIC_DIR)?;
     make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).gid(account.gid))?;
     make_dir(&paths.log_dir, Perm::new(0o755).uid(account.uid).gid(account.gid))?;
 
@@ -275,6 +328,10 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
         let token = format!("{}\n", hex::encode(random));
         mark_pending(paths)?;
         changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
+    }
+    // A file left by an earlier account keeps that account's group, whatever its content.
+    for name in ["host.token", "bridge.token"] {
+        open_file(&paths.secrets_dir.join(name), secret, false)?;
     }
     Ok(changed)
 }
@@ -321,11 +378,20 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     };
     let line = lines[at];
     let eol = &line[line.trim_end_matches(['\r', '\n']).len()..];
-    Ok(format!(
+    let rewritten = format!(
         "{bom}{}bridge: {domain}{eol}{}",
         lines[..at].concat(),
         lines[at + 1..].concat()
-    ))
+    );
+    // A value that does not sit on the `bridge:` line (a folded or next-line scalar) would be read differently.
+    let config = Config::parse(&rewritten).with_context(|| format!("{} after setting its bridge", file.display()))?;
+    ensure!(
+        config.bridge == domain,
+        "{} would name the bridge {:?} instead of {domain}: put the value of `bridge:` on its line",
+        file.display(),
+        config.bridge
+    );
+    Ok(rewritten)
 }
 
 /// Puts this binary, the pinned frpc and the symlink in place. Whether the binary or frpc changed.
@@ -371,14 +437,16 @@ fn clean_bin_dir(paths: &Paths) -> Result<()> {
 fn point_link(link: &Path, target: &Path) -> Result<()> {
     match fs::read_link(link) {
         Ok(current) if current == target => return Ok(()),
-        Ok(_) => fs::remove_file(link)?,
+        Ok(_) => fs::remove_file(link).with_context(|| format!("replacing {}", link.display()))?,
         Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => return Err(err).with_context(|| format!("{} exists and is not a symlink", link.display())),
+        Err(err) if err.kind() == ErrorKind::InvalidInput => {
+            return Err(err).with_context(|| format!("{} exists and is not a symlink", link.display()));
+        }
+        Err(err) => return Err(err).with_context(|| format!("reading the link {}", link.display())),
     }
     symlink(target, link).with_context(|| format!("linking {}", link.display()))
 }
 
-/// The line that registers this host on the bridge.
 fn registration(paths: &Paths) -> Result<String> {
     let host = Config::load(&config_file(paths))?.host;
     let token_file = paths.secrets_dir.join("host.token");
@@ -390,7 +458,6 @@ fn registration_line(host: &str, token: &str) -> String {
     format!("uv run ctl add {host} {}", join::token_hash(token))
 }
 
-/// The line that removes this host from the bridge.
 fn revoke_line(paths: &Paths) -> Result<String> {
     Ok(format!("uv run ctl revoke {}", Config::load(&config_file(paths))?.host))
 }

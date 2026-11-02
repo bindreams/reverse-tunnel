@@ -32,7 +32,7 @@ jobs:
       - name: Fetch every pinned frpc
         run: cargo test --locked --lib -- --ignored
 
-  # Installs the real service on the runner, as root. Windows follows with its install.
+  # Installs the real service on the runner, as root.
   platform:
     strategy:
       fail-fast: false
