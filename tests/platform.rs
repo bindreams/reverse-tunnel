@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -370,19 +371,21 @@ fn uninstall_survives_session_end() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
 
-    // A session of its own, as ssh's: it ends the moment the service stops.
+    // A session of its own, as ssh's, which is killed once `uninstall` has returned: the tunnel it ran over goes with
+    // the service.
     let mut session = Command::new("sh");
     session
-        .args(["-c", "\"$0\" uninstall; read _", BIN])
+        .args(["-c", "\"$0\" uninstall; echo returned; read _", BIN])
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .process_group(0);
     let mut session = session.spawn().unwrap();
-    wait_until("the service stops", || {
-        machine
-            .manager
-            .status(&machine.id)
-            .is_ok_and(|s| s.state != State::Running)
-    });
+    let mut output = BufReader::new(session.stdout.take().unwrap());
+    let mut line = String::new();
+    while line.trim() != "returned" {
+        line.clear();
+        assert_ne!(output.read_line(&mut line).unwrap(), 0, "uninstall did not return");
+    }
     let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
     kill_process_group(group, Signal::KILL).unwrap();
     session.wait().unwrap();
