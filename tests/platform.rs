@@ -43,6 +43,15 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
+/// Waits for the detached `uninstall --finish`, which `uninstall` starts, to end.
+fn wait_until_removed() {
+    wait_until("the removal ends", || {
+        !processes()
+            .iter()
+            .any(|process| process.args.ends_with("uninstall --finish"))
+    });
+}
+
 fn output_of(program: &str, args: &[&str]) -> String {
     let out = Command::new(program).args(args).output().unwrap();
     assert!(
@@ -390,10 +399,7 @@ fn uninstall_survives_session_end() {
     kill_process_group(group, Signal::KILL).unwrap();
     session.wait().unwrap();
 
-    wait_until("the removal ends", || {
-        account::lookup(service::ACCOUNT).is_none()
-            || !processes().iter().any(|p| p.args.ends_with("uninstall --finish"))
-    });
+    wait_until_removed();
     assert!(
         account::lookup(service::ACCOUNT).is_none(),
         "the removal died with the session"
@@ -411,7 +417,7 @@ fn uninstall_leaves_nothing() {
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
-    wait_until("the removal ends", || account::lookup(service::ACCOUNT).is_none());
+    wait_until_removed();
 
     let after = snapshot(&machine);
     assert_eq!(
