@@ -35,7 +35,7 @@ jobs:
   # real-time protection removes or blocks it.
   defender:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build the tests
@@ -67,6 +67,11 @@ jobs:
           } catch {
             Write-Output "write refused: $($_.Exception.Message)"
           }
+          Get-MpComputerStatus | Format-List AMServiceEnabled, AMRunningMode, OnAccessProtectionEnabled, RealTimeProtectionEnabled, BehaviorMonitorEnabled, IsTamperProtected, AntivirusSignatureVersion
+          Get-Service WinDefend | Format-List Name, Status
+          Write-Output "file present after write: $(Test-Path $eicar)"
+          Get-Content -Path $eicar -ErrorAction Continue
+          Write-Output "file present after read: $(Test-Path $eicar)"
           while ((Test-Path $eicar) -and -not (Get-MpThreatDetection | Where-Object { $_.Resources -like '*eicar.com*' })) { }
           Write-Output "file present: $(Test-Path $eicar)"
           Get-MpThreatDetection | Format-List ThreatID, Resources, ActionSuccess
