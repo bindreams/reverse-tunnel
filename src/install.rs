@@ -106,11 +106,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         registration(paths)?
     );
     manager.enable(&spec.id)?;
-    pick_up(&*manager, &spec.id, changed)?;
-    if changed {
-        fs::remove_file(pending_file(paths)).context("removing the restart marker")?;
-    }
-    Ok(())
+    pick_up(&*manager, &spec.id, paths, changed)
 }
 
 /// Prepares the removal, hands it to a detached `uninstall --finish` (stopping the service cuts the tunnel, and with
@@ -146,11 +142,23 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     let status = finish.wait().context("waiting for the removal")?;
     ensure!(
         status.success(),
-        "the removal failed ({status}): see {}, and run `reverse-tunnel uninstall` to finish it",
-        log_path.display()
+        "the removal failed ({status}): see {}, and {} to finish it",
+        log_path.display(),
+        rerun_uninstall(paths)
     );
-    println!("Removed.");
+    // Without a pty, the session's end closes this pipe.
+    let _ = writeln!(io::stdout(), "Removed.");
     Ok(())
+}
+
+/// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
+fn rerun_uninstall(paths: &Paths) -> String {
+    let exe = service::exe(paths);
+    if exe.exists() {
+        format!("run `{} uninstall`", exe.display())
+    } else {
+        "run `uninstall` with any `reverse-tunnel` binary (the installed one is gone)".to_string()
+    }
 }
 
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
@@ -162,9 +170,9 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
         Err(err) => return Err(err).context("removing the service"),
     }
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
-    // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the logs go late,
-    // so that a failure above them is written to `uninstall.log`; and the marker is last, since `install` is refused
-    // while it exists.
+    // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
+    // until the rest is gone, since `install` is refused while it exists; and `logs/` is last, so that a failure above
+    // is written to `uninstall.log`.
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
     remove_link(paths)?;
@@ -188,7 +196,7 @@ fn remove_link(paths: &Paths) -> Result<()> {
     }
 }
 
-/// Removes the bin dir, the config dir's contents, the logs and, last, the marker and the config dir.
+/// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs.
 fn remove_files(paths: &Paths) -> Result<()> {
     remove_entry(&paths.bin_dir)?;
     let marker = uninstalling_file(paths);
@@ -204,9 +212,9 @@ fn remove_files(paths: &Paths) -> Result<()> {
         Err(err) if err.kind() == ErrorKind::NotFound => {}
         Err(err) => return Err(err).with_context(|| format!("reading {}", paths.config_dir.display())),
     }
-    remove_entry(&paths.log_dir)?;
     remove_entry(&marker)?;
-    remove_entry(&paths.config_dir)
+    remove_entry(&paths.config_dir)?;
+    remove_entry(&paths.log_dir)
 }
 
 /// Removes `path`, a directory with its contents, unless it is already gone. A link is removed, not followed.
@@ -465,7 +473,21 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 /// Has the service run what is now in place. After a change it is killed, and the manager restarts it; it is never
 /// stopped first, because run over the tunnel the stop cuts this session and the start never comes. Without one, it
 /// is started, which leaves a running service alone.
-fn pick_up(manager: &dyn ServiceManager, id: &Id, changed: bool) -> Result<()> {
+///
+/// The restart marker is removed just before, since nothing that runs after the kill is sure to run; it is put back
+/// if the service was not picked up.
+fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
+    if changed {
+        remove_entry(&pending_file(paths))?;
+    }
+    let picked = restart(manager, id, changed);
+    if picked.is_err() && changed {
+        mark_pending(paths)?;
+    }
+    picked
+}
+
+fn restart(manager: &dyn ServiceManager, id: &Id, changed: bool) -> Result<()> {
     if changed {
         match manager.kill(id) {
             Ok(()) => return Ok(()),

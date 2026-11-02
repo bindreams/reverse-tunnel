@@ -18,7 +18,7 @@ pub fn lookup(name: &str) -> Option<Account> {
 
 /// The account `name`, created if it is missing, and completed if a failed run left part of it.
 pub fn ensure(name: &str) -> Result<Account> {
-    complete(name, lookup(name))?;
+    complete(name)?;
     lookup(name).with_context(|| format!("created {name}, but the system does not list it"))
 }
 
@@ -38,11 +38,10 @@ fn run(args: &[&str]) -> Result<String> {
 
 // Commands are named by absolute path: root's `PATH` may lack `sbin` (`su` without `-`).
 
-/// Creates the account `name` unless `existing` says it is there, with a group of its own, or into that group if a
-/// failed run left it.
+/// Creates the account `name` unless it is there, with a group of its own, or into that group if a failed run left it.
 #[cfg(target_os = "linux")]
-fn complete(name: &str, existing: Option<Account>) -> Result<()> {
-    if existing.is_none() {
+fn complete(name: &str) -> Result<()> {
+    if lookup(name).is_none() {
         let group: &[&str] = if uzers::get_group_by_name(name).is_some() {
             &["--gid", name]
         } else {
@@ -80,11 +79,15 @@ pub fn remove(name: &str) -> Result<()> {
 
 /// Writes every attribute of the user and the group, which `dscl -create` does whether or not the record exists, so a
 /// run that stopped midway is finished by the next. An account that exists keeps its id; a new one gets a free id,
-/// and another if someone else took it meanwhile.
+/// and another if someone else took it meanwhile. Whether it exists is read from the local directory, not from
+/// `getpwnam`, whose cache can answer for an account just removed.
 #[cfg(target_os = "macos")]
-fn complete(name: &str, existing: Option<Account>) -> Result<()> {
+fn complete(name: &str) -> Result<()> {
+    let existing = listed_ids("/Users", "UniqueID", ".")?
+        .into_iter()
+        .find_map(|(holder, id)| (holder == name).then_some(id));
     let mut id = match existing {
-        Some(account) => account.uid,
+        Some(id) => id,
         None => free_id()?,
     };
     loop {
@@ -122,18 +125,24 @@ pub fn remove(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The name and `key` (an id) of every record of `records` that the directory node `node` lists.
+#[cfg(target_os = "macos")]
+fn listed_ids(records: &str, key: &str, node: &str) -> Result<Vec<(String, u32)>> {
+    let listing = run(&["/usr/bin/dscl", node, "-list", records, key])?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.to_string(), fields.next_back()?.parse().ok()?))
+        })
+        .collect())
+}
+
 /// Every user and group the system knows, local or from a directory service, with its id.
 #[cfg(target_os = "macos")]
 fn ids_in_use() -> Result<Vec<(String, u32)>> {
-    let mut used = Vec::new();
-    for (records, key) in [("/Users", "UniqueID"), ("/Groups", "PrimaryGroupID")] {
-        for line in run(&["/usr/bin/dscl", "/Search", "-list", records, key])?.lines() {
-            let mut fields = line.split_whitespace();
-            if let (Some(name), Some(id)) = (fields.next(), fields.next_back().and_then(|id| id.parse().ok())) {
-                used.push((name.to_string(), id));
-            }
-        }
-    }
+    let mut used = listed_ids("/Users", "UniqueID", "/Search")?;
+    used.extend(listed_ids("/Groups", "PrimaryGroupID", "/Search")?);
     Ok(used)
 }
 

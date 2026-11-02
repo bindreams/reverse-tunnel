@@ -439,7 +439,7 @@ fn uninstall_survives_session_end() {
 
     wait_until_removed();
     assert!(
-        account::lookup(service::ACCOUNT).is_none(),
+        !account_names().contains(service::ACCOUNT),
         "the removal died with the session"
     );
 }

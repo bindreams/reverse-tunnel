@@ -253,7 +253,7 @@ fn kill_not_running_starts() {
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
 
-    pick_up(&manager, &spec.id, true).unwrap();
+    pick_up(&manager, &spec.id, &machine.paths, true).unwrap();
 
     assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
     let id = spec.id.to_string();
