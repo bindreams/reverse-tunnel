@@ -133,9 +133,13 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     let pump = tokio::spawn(pump(output, frpc_log, broken));
 
     let routes = Arc::new(ws_routes(&setup.cfg));
+    let mut exited = false;
     let failure = tokio::select! {
         status = child.wait() => match status {
-            Ok(status) => anyhow!("frpc exited: {status}"),
+            Ok(status) => {
+                exited = true;
+                anyhow!("frpc exited: {status}")
+            }
             Err(err) => Error::new(err).context("waiting for frpc"),
         },
         failed = listen_loop(listener, routes, log.clone()) => {
@@ -146,8 +150,11 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     };
     // frpc starts no processes, so ending it ends its output.
     let stopped = async {
-        child.kill()?;
-        child.wait().await?;
+        // Only a child still running needs killing; one that exited was already waited for.
+        if !exited {
+            child.kill()?;
+            child.wait().await?;
+        }
         pump.await?;
         anyhow::Ok(())
     };
