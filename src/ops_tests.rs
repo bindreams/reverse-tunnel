@@ -1,25 +1,20 @@
 use std::fs;
-use std::io::{self, Write};
-use std::sync::mpsc;
-use std::thread;
 
 use goetia::manager::fake::Fake;
 use tempfile::TempDir;
 
 use super::*;
-use crate::logfile::LogFile;
-use crate::paths::{LOG_FRPC, LOG_SUPERVISOR};
+use crate::paths::LOG_FRPC;
 use crate::service;
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
-/// SHA-256 of `CERT`'s DER, as `openssl x509 -fingerprint -sha256` prints it.
+/// SHA-256 of `CERT`'s DER.
 const FINGERPRINT: &str =
     "6C:F6:B8:24:0E:D8:DC:B3:29:84:C0:87:32:EF:1C:59:66:C0:06:8F:BB:63:B5:E4:9E:E8:AB:3B:BE:91:C4:DE";
 const LOGIN_SUCCESS: &str = include_str!("../server/testdata/frpc-login-success.log");
 const HOST_NOT_REGISTERED: &str = include_str!("../server/testdata/frpc-host-not-registered.log");
 const TOKEN_MISMATCH: &str = include_str!("../server/testdata/frpc-token-mismatch.log");
 
-/// A host's directories in a temp dir, with a config.yaml and a bridge.pem.
 fn host() -> (TempDir, Paths) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -91,7 +86,6 @@ fn status_reports_last_login_line() {
         login(HOST_NOT_REGISTERED, None),
         "last login: failed (2026-11-01 17:02:14.316): host not registered"
     );
-    // The newest result wins, not the first.
     assert_eq!(
         login(&format!("{LOGIN_SUCCESS}{TOKEN_MISMATCH}"), None),
         "last login: failed (2026-11-01 17:02:16.471): token mismatch"
@@ -106,52 +100,12 @@ fn status_reports_last_login_line() {
         login(fresh, Some(LOGIN_SUCCESS)),
         "last login: success (2026-11-01 17:02:16.481)"
     );
-}
-
-/// What `logs` wrote, one chunk per message; once the receiver is gone, writing fails like a closed pipe.
-struct Chunks(mpsc::Sender<String>);
-
-impl Write for Chunks {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let sent = self.0.send(String::from_utf8_lossy(data).into_owned());
-        sent.map(|()| data.len()).map_err(|_| io::ErrorKind::BrokenPipe.into())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Receives until everything received so far ends with `expected`.
-fn receive_until(chunks: &mpsc::Receiver<String>, seen: &mut String, expected: &str) {
-    while !seen.ends_with(expected) {
-        seen.push_str(&chunks.recv().expect("logs -f ended"));
-    }
-}
-
-#[test]
-fn logs_follow_survives_rotation() {
-    let (_dir, paths) = host();
-    let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), 4).unwrap();
-    log.write(b"one\n");
-    let (send, chunks) = mpsc::channel();
-    let followed = paths.clone();
-    thread::spawn(move || logs(&followed, true, &mut Chunks(send)));
-    let mut seen = String::new();
-    let header = format!("==> {LOG_SUPERVISOR} <==\n");
-
-    receive_until(&chunks, &mut seen, "one\n");
-    // This write rotates the file: `one` moves to `.1`, and a new file is started.
-    log.write(b"two\n");
-    receive_until(&chunks, &mut seen, "two\n");
-
-    // An administrator clears a log with `: > frpc.log`: what it gains next is read from its start.
-    let frpc = paths.log_dir.join(LOG_FRPC);
-    fs::write(&frpc, "a longer line\n").unwrap();
-    receive_until(&chunks, &mut seen, "a longer line\n");
-    fs::write(&frpc, "new\n").unwrap();
-    receive_until(&chunks, &mut seen, "new\n");
-
-    let frpc_header = format!("==> {LOG_FRPC} <==\n");
-    assert_eq!(seen, format!("{header}one\ntwo\n{frpc_header}a longer line\nnew\n"));
+    // A rotation between two chunks splits a line across the files.
+    let head = format!("{LOGIN_SUCCESS}2026-11-01 17:02:");
+    let tail = "14.316 [W] [client/service.go:346] connect to server error: host not registered
+";
+    assert_eq!(
+        login(tail, Some(&head)),
+        "last login: failed (2026-11-01 17:02:14.316): host not registered"
+    );
 }

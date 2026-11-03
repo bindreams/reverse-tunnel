@@ -47,12 +47,6 @@ enum Command {
     Stop,
     /// Shows the service's state, the bridge and the last login result.
     Status,
-    /// Shows the service's logs.
-    Logs {
-        /// Keep showing what the logs gain, until interrupted.
-        #[arg(short, long)]
-        follow: bool,
-    },
 }
 
 fn main() -> Result<ExitCode> {
@@ -98,10 +92,6 @@ fn main() -> Result<ExitCode> {
                 &Paths::system()?,
                 &mut io::stdout().lock(),
             )?;
-            Ok(ExitCode::SUCCESS)
-        }
-        Command::Logs { follow } => {
-            ops::logs(&Paths::system()?, follow, &mut io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
         }
         #[cfg(windows)]

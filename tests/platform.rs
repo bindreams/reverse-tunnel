@@ -537,7 +537,7 @@ fn install_is_refused_while_an_uninstall_is_unfinished() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
-fn status_and_logs_need_no_elevation() {
+fn status_needs_no_elevation() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
@@ -566,8 +566,6 @@ fn status_and_logs_need_no_elevation() {
     let status = as_probe("status");
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
-    assert!(
-        as_probe("logs").contains("==> frpc.log <=="),
-        "logs did not show frpc.log"
-    );
+    assert!(status.contains("certificate: SHA-256 "), "{status}");
+    assert!(status.contains("last login: "), "{status}");
 }
