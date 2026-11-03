@@ -100,13 +100,16 @@ fn child_exit_stops_others_and_exits_nonzero() {
 fn run_replaces_the_record_of_an_earlier_run_before_anything_can_fail() {
     let host = Host::new("exit 7", SSH);
     let record = host.paths.log_dir.join(CONNECTION_RECORD);
-    fs::write(&record, "connected since 2026-11-01T17:02:16+00:00\n").unwrap();
+    fs::write(&record, "1 connected since 2026-11-01T17:02:16+00:00\n").unwrap();
     fs::write(host.paths.secrets_dir.join("host.token"), "\n").unwrap();
 
     host.assert_refused("is empty");
 
     let text = fs::read_to_string(record).unwrap();
-    assert!(text.starts_with("not connected since "), "{text}");
+    assert!(
+        text.starts_with(&format!("{} not connected since ", std::process::id())),
+        "{text}"
+    );
 }
 
 #[test]

@@ -56,7 +56,7 @@ fn status_shows_domain_and_fingerprint_not_token() {
 }
 
 #[test]
-fn status_reports_the_server_connection_only_of_a_running_service() {
+fn status_shows_the_record_only_of_the_run_that_is_the_service() {
     let (_dir, paths) = host();
     let manager = Fake::default();
     manager.install(&service::spec(&paths), false).unwrap();
@@ -73,17 +73,25 @@ fn status_reports_the_server_connection_only_of_a_running_service() {
             .unwrap_or("")
             .to_string()
     };
-    let record = "connected since 2026-11-03T15:54:46+01:00\n";
 
-    // A service that stopped or died leaves its last record behind.
+    // A stopped service has no pid, and a service that died leaves its last record behind.
     assert_eq!(
-        connection(Some(record)),
-        "server connection: none (service not running)"
+        connection(Some("1 connected since 2026-11-03T15:54:46+01:00\n")),
+        "server connection: none recorded"
     );
     manager.start(&id, Budget::Unbounded).unwrap();
+    let pid = manager.status(&id).unwrap().pid.expect("a running service has a pid");
     assert_eq!(connection(None), "server connection: none recorded");
+    // The service has started and its run has not written yet, or its write failed.
     assert_eq!(
-        connection(Some(record)),
+        connection(Some(&format!(
+            "{} connected since 2026-11-03T15:54:46+01:00\n",
+            pid + 1
+        ))),
+        "server connection: none recorded"
+    );
+    assert_eq!(
+        connection(Some(&format!("{pid} connected since 2026-11-03T15:54:46+01:00\n"))),
         "server connection: connected since 2026-11-03T15:54:46+01:00"
     );
 }

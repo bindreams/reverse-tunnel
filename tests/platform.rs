@@ -567,7 +567,7 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
-    // The running service wrote a record that this account can read.
+    // The record shown names the supervisor that goetia reports as the service, and this account can read it.
     assert!(status.contains("server connection: "), "{status}");
     assert!(!status.contains("server connection: none"), "{status}");
 }

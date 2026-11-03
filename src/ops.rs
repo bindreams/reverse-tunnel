@@ -2,7 +2,7 @@
 //! local user may read. Nothing here reads `secrets_dir`.
 
 use std::fs;
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -56,12 +56,7 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;
     }
-    let connection = if matches!(state.state, State::Running) {
-        server_connection(paths)?
-    } else {
-        // A service that stopped or died leaves its last record behind.
-        "none (service not running)".into()
-    };
+    let connection = server_connection(paths, state.pid).unwrap_or_else(|| "none recorded".into());
     writeln!(out, "server connection: {connection}")?;
     Ok(())
 }
@@ -88,14 +83,13 @@ fn fingerprints(pem: &str) -> Result<Vec<String>> {
     Ok(found)
 }
 
-/// The line the running `run` keeps on frpc's connection to the server, or a note that there is none.
-fn server_connection(paths: &Paths) -> Result<String> {
-    let path = paths.log_dir.join(CONNECTION_RECORD);
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok(text.trim_end().to_string()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok("none recorded".into()),
-        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
-    }
+/// The text of the record that the service's own process (`pid`) keeps on frpc's connection to the server. A record
+/// starts with the id of the process that wrote it, so one left by an earlier run, or not yet replaced by this one, is
+/// not shown.
+fn server_connection(paths: &Paths, pid: Option<u32>) -> Option<String> {
+    let record = fs::read_to_string(paths.log_dir.join(CONNECTION_RECORD)).ok()?;
+    let (writer, text) = record.trim_end().split_once(' ')?;
+    (writer.parse::<u32>().ok()? == pid?).then(|| text.to_string())
 }
 
 #[cfg(test)]

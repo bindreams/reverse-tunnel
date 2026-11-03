@@ -10,7 +10,7 @@ use std::io::{self, ErrorKind};
 use std::mem;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -322,11 +322,13 @@ impl Connection {
         }
     }
 
-    /// Replaces the file through a rename, so that a reader sees the old line or the new one. The caller reports a
-    /// failure: frpc's output matters more than the record.
+    /// Replaces the file through a rename, so that a reader sees the old line or the new one. The line starts with this
+    /// process's id, which is how `status` tells this run's record from an earlier run's. The caller reports a failure:
+    /// frpc's output matters more than the record.
     fn record(&self) -> io::Result<()> {
         let temp = self.path.with_extension("tmp");
-        fs::write(&temp, format!("{}\n", self.text())).and_then(|()| fs::rename(&temp, &self.path))
+        let line = format!("{} {}\n", process::id(), self.text());
+        fs::write(&temp, line).and_then(|()| fs::rename(&temp, &self.path))
     }
 }
 
