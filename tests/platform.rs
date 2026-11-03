@@ -567,5 +567,7 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
+    // The running service wrote a record that this account can read.
     assert!(status.contains("server connection: "), "{status}");
+    assert!(!status.contains("server connection: none"), "{status}");
 }

@@ -1,5 +1,6 @@
 use std::fs;
 
+use goetia::manager::Budget;
 use goetia::manager::fake::Fake;
 use tempfile::TempDir;
 
@@ -55,15 +56,16 @@ fn status_shows_domain_and_fingerprint_not_token() {
 }
 
 #[test]
-fn status_reports_the_server_connection_record() {
+fn status_reports_the_server_connection_only_of_a_running_service() {
     let (_dir, paths) = host();
     let manager = Fake::default();
     manager.install(&service::spec(&paths), false).unwrap();
-    let connection = |text_before: Option<&str>| {
-        let record = paths.log_dir.join(CONNECTION_RECORD);
-        let _ = fs::remove_file(&record);
-        if let Some(text) = text_before {
-            fs::write(&record, text).unwrap();
+    let id = service::spec(&paths).id;
+    let connection = |record: Option<&str>| {
+        let path = paths.log_dir.join(CONNECTION_RECORD);
+        let _ = fs::remove_file(&path);
+        if let Some(text) = record {
+            fs::write(&path, text).unwrap();
         }
         let text = status_text(&manager, &paths);
         text.lines()
@@ -71,10 +73,17 @@ fn status_reports_the_server_connection_record() {
             .unwrap_or("")
             .to_string()
     };
+    let record = "connected since 2026-11-03T15:54:46+01:00\n";
 
+    // A service that stopped or died leaves its last record behind.
+    assert_eq!(
+        connection(Some(record)),
+        "server connection: none (service not running)"
+    );
+    manager.start(&id, Budget::Unbounded).unwrap();
     assert_eq!(connection(None), "server connection: none recorded");
     assert_eq!(
-        connection(Some("lost at 2026-11-03T15:54:46+01:00\n")),
-        "server connection: lost at 2026-11-03T15:54:46+01:00"
+        connection(Some(record)),
+        "server connection: connected since 2026-11-03T15:54:46+01:00"
     );
 }

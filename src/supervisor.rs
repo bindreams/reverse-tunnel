@@ -68,6 +68,10 @@ pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
 
 /// `run` with the WebSocket listener bound to `listen`.
 pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAddr) -> Result<ExitCode> {
+    // First, so that nothing below can leave an earlier run's record in place. `--check` runs as the caller, who may
+    // not write the log dir.
+    let connection = Connection::new(paths.log_dir.join(CONNECTION_RECORD), now());
+    let first = (!check_only).then(|| connection.record());
     let config = paths.config_dir.join("config.yaml");
     let setup = Setup {
         cfg: Config::load(&config)?,
@@ -84,7 +88,10 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
     }
     let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
     let frpc_log = LogFile::open(paths.log_dir.join(LOG_FRPC), ROTATE_AT)?;
-    let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log));
+    if let Some(Err(err)) = first {
+        log.line(format_args!("recording frpc's connection: {err}"));
+    }
+    let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log, connection));
     log.line(format_args!("{err:#}"));
     Err(err)
 }
@@ -117,16 +124,19 @@ async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
 }
 
 /// Starts the listener and frpc, and returns why the first of them stopped, after stopping the other.
-async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_log: LogFile) -> Result<Infallible> {
+async fn supervise(
+    setup: &Setup<'_>,
+    listen: SocketAddr,
+    log: &LogFile,
+    frpc_log: LogFile,
+    connection: Connection,
+) -> Result<Infallible> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding the WebSocket listener on {listen}"))?;
     // The log dir is the one directory the service account may write. A stopped `run` cannot clean up after itself
     // (the service manager kills it), so every start overwrites the same file.
     let config = render_config(setup, listener.local_addr()?.port(), &setup.paths.log_dir)?;
-
-    let connection = setup.paths.log_dir.join(CONNECTION_RECORD);
-    record(&connection, &format!("connecting since {}", now()), log);
 
     let mut frpc = setup.frpc(&[], &config);
     frpc.stdin(Stdio::null())?
@@ -170,31 +180,29 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     Err(failure)
 }
 
-/// Copies frpc's output into its log until it ends, and keeps `connection` up to date with what the output says about
-/// the server. A read error goes to `supervisor_log` and then to `failed`; the log has it even when `supervise` is
-/// already stopping and nobody receives.
+/// Copies frpc's output into its log until it ends, and keeps the `connection` record up to date with what the output
+/// says about the server. A read error goes to `supervisor_log` and then to `failed`; the log has it even when
+/// `supervise` is already stopping and nobody receives.
 async fn pump(
     mut output: impl AsyncRead + Unpin,
     to: LogFile,
     supervisor_log: LogFile,
     failed: oneshot::Sender<()>,
-    connection: PathBuf,
+    mut connection: Connection,
 ) {
     let mut buf = [0; 8192];
-    // The start of a line whose end has not been read yet.
-    let mut partial = Vec::new();
+    let mut lines = Lines::default();
     loop {
         match output.read(&mut buf).await {
             Ok(0) => return,
             Ok(len) => {
                 to.write(&buf[..len]);
-                for &byte in &buf[..len] {
-                    if byte != b'\n' {
-                        partial.push(byte);
-                    } else if let Some(text) = classify(&String::from_utf8_lossy(&mem::take(&mut partial)), &now()) {
-                        record(&connection, &text, &supervisor_log);
+                lines.feed(&buf[..len], |line| {
+                    let changed = classify(line).is_some_and(|event| connection.apply(event, &now()));
+                    if let Some(Err(err)) = changed.then(|| connection.record()) {
+                        supervisor_log.line(format_args!("recording frpc's connection: {err}"));
                     }
-                }
+                });
             }
             Err(err) => {
                 supervisor_log.line(format_args!("reading frpc's output: {err}"));
@@ -205,28 +213,120 @@ async fn pump(
     }
 }
 
-/// The connection record that a line of frpc's output gives, if it reports on the server connection (one per host,
-/// not an SSH session). After a login, frpc puts its run id in front of the message, which tells a reconnect attempt
-/// from the first attempt.
-fn classify(line: &str, stamp: &str) -> Option<String> {
+/// Splits a byte stream into lines, holding a partial line across `feed` calls.
+#[derive(Default)]
+struct Lines {
+    /// The start of a line whose end has not been read yet.
+    partial: Vec<u8>,
+    /// Inside a line that outgrew `ROTATE_AT`: input is dropped up to the next newline. No line frpc writes is longer
+    /// than its whole log file.
+    skipping: bool,
+}
+
+impl Lines {
+    /// Calls `whole` with each line that `data` completes, without its newline.
+    fn feed(&mut self, data: &[u8], mut whole: impl FnMut(&str)) {
+        for &byte in data {
+            if byte == b'\n' {
+                if !mem::take(&mut self.skipping) {
+                    whole(&String::from_utf8_lossy(&self.partial));
+                }
+                self.partial.clear();
+            } else if !self.skipping {
+                self.partial.push(byte);
+                if self.partial.len() as u64 > ROTATE_AT {
+                    self.partial = Vec::new();
+                    self.skipping = true;
+                }
+            }
+        }
+    }
+}
+
+/// What a line of frpc's output says about its control connection to the server (one per host, not an SSH session).
+#[derive(Debug, PartialEq)]
+enum Event {
+    LoggedIn,
+    /// A reconnect attempt began: the connection was lost.
+    Retrying,
+    /// An attempt failed, with the reason frpc gives.
+    Failed(String),
+}
+
+/// The event a line gives, if any. After a login, frpc puts its run id in front of the message, which tells a
+/// reconnect attempt from the first attempt.
+fn classify(line: &str) -> Option<Event> {
     let line = line.trim_end();
     if line.contains("login to server success") {
-        return Some(format!("connected since {stamp}"));
+        return Some(Event::LoggedIn);
     }
     if let Some((_, reason)) = line.split_once("connect to server error: ") {
-        return Some(format!("refused at {stamp}: {reason}"));
+        return Some(Event::Failed(reason.to_string()));
     }
     let before = line.strip_suffix("] try to connect to server...")?;
     let run_id = before.rsplit('[').next()?;
-    (run_id.len() == 16 && run_id.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| format!("lost at {stamp}"))
+    (run_id.len() == 16 && run_id.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(Event::Retrying)
 }
 
-/// Replaces the file `path` with the line `text`, through a rename, so that a reader sees the old line or the new one.
-/// A failure goes to `log`; frpc's output matters more than the record.
-fn record(path: &Path, text: &str, log: &LogFile) {
-    let temp = path.with_extension("tmp");
-    if let Err(err) = fs::write(&temp, format!("{text}\n")).and_then(|()| fs::rename(&temp, path)) {
-        log.line(format_args!("recording frpc's connection in {}: {err}", path.display()));
+/// Whether frpc is connected to the server, and the file at `path` that says so: `connected since <stamp>` or
+/// `not connected since <stamp>`, with `: <reason>` after the latest error. The "since" of a not-connected period is
+/// where it began (the start of `run`, or the loss) and only a login ends it, so an outage reads the same through
+/// every retry.
+struct Connection {
+    path: PathBuf,
+    connected: bool,
+    since: String,
+    reason: Option<String>,
+}
+
+impl Connection {
+    /// Not connected since `since`, the start of `run`.
+    fn new(path: PathBuf, since: String) -> Connection {
+        Connection {
+            path,
+            connected: false,
+            since,
+            reason: None,
+        }
+    }
+
+    /// Takes `event`, seen at `stamp`. Returns whether the record changed.
+    fn apply(&mut self, event: Event, stamp: &str) -> bool {
+        if event == Event::LoggedIn {
+            *self = Connection::new(mem::take(&mut self.path), stamp.into());
+            self.connected = true;
+            return true;
+        }
+        // A loss starts a not-connected period; inside one, only the reason changes.
+        let mut changed = mem::take(&mut self.connected);
+        if changed {
+            self.since = stamp.into();
+            self.reason = None;
+        }
+        if let Event::Failed(reason) = event
+            && self.reason.as_ref() != Some(&reason)
+        {
+            self.reason = Some(reason);
+            changed = true;
+        }
+        changed
+    }
+
+    /// The record's line.
+    fn text(&self) -> String {
+        let since = &self.since;
+        match (self.connected, &self.reason) {
+            (true, _) => format!("connected since {since}"),
+            (false, None) => format!("not connected since {since}"),
+            (false, Some(reason)) => format!("not connected since {since}: {reason}"),
+        }
+    }
+
+    /// Replaces the file through a rename, so that a reader sees the old line or the new one. The caller reports a
+    /// failure: frpc's output matters more than the record.
+    fn record(&self) -> io::Result<()> {
+        let temp = self.path.with_extension("tmp");
+        fs::write(&temp, format!("{}\n", self.text())).and_then(|()| fs::rename(&temp, &self.path))
     }
 }
 

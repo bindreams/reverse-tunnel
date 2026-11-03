@@ -56,7 +56,13 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;
     }
-    writeln!(out, "server connection: {}", server_connection(paths)?)?;
+    let connection = if matches!(state.state, State::Running) {
+        server_connection(paths)?
+    } else {
+        // A service that stopped or died leaves its last record behind.
+        "none (service not running)".into()
+    };
+    writeln!(out, "server connection: {connection}")?;
     Ok(())
 }
 
@@ -82,7 +88,7 @@ fn fingerprints(pem: &str) -> Result<Vec<String>> {
     Ok(found)
 }
 
-/// The line `run` keeps on frpc's connection to the server, or a note that there is none.
+/// The line the running `run` keeps on frpc's connection to the server, or a note that there is none.
 fn server_connection(paths: &Paths) -> Result<String> {
     let path = paths.log_dir.join(CONNECTION_RECORD);
     match fs::read_to_string(&path) {
