@@ -571,3 +571,29 @@ fn status_needs_no_elevation() {
     assert!(status.contains("server connection: "), "{status}");
     assert!(!status.contains("server connection: none"), "{status}");
 }
+
+#[test]
+#[ignore = "temporary pid measurement"]
+fn measure_pid() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let pid = machine.status().pid;
+    let ps = output_of("ps", &["-axo", "pid=,ppid=,args="]);
+    let prefix = machine.paths.bin_dir.display().to_string();
+    let ours: Vec<&str> = ps.lines().filter(|line| line.contains(&prefix)).collect();
+    println!("MEASURE goetia pid={pid:?}");
+    for line in &ours {
+        println!("MEASURE ps {line}");
+    }
+    let frpc_parents: Vec<&str> = ours
+        .iter()
+        .filter(|line| line.contains("/frpc-"))
+        .map(|line| line.split_whitespace().nth(1).unwrap())
+        .collect();
+    assert!(!frpc_parents.is_empty());
+    assert!(
+        frpc_parents.iter().all(|ppid| ppid.parse::<u32>().ok() == pid),
+        "goetia pid {pid:?} is not frpc's parent: {ours:?}"
+    );
+}
