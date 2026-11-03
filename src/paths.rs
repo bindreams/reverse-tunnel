@@ -4,6 +4,8 @@ use anyhow::{Result, ensure};
 
 pub const LOG_FRPC: &str = "frpc.log";
 pub const LOG_SUPERVISOR: &str = "supervisor.log";
+/// In `log_dir`: one line on frpc's connection to the server, kept by `run`, read by `status`.
+pub const CONNECTION_RECORD: &str = "connection";
 
 /// Where an installation keeps its files on this OS.
 #[derive(Debug, Clone)]

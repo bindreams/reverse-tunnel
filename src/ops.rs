@@ -11,7 +11,7 @@ use goetia::manager::{Budget, ServiceManager, State};
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
-use crate::paths::{LOG_FRPC, Paths};
+use crate::paths::{CONNECTION_RECORD, Paths};
 use crate::service;
 
 pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
@@ -56,7 +56,7 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;
     }
-    writeln!(out, "last login: {}", last_login(paths)?)?;
+    writeln!(out, "server connection: {}", server_connection(paths)?)?;
     Ok(())
 }
 
@@ -82,38 +82,14 @@ fn fingerprints(pem: &str) -> Result<Vec<String>> {
     Ok(found)
 }
 
-/// The newest login result in `frpc.log.1` followed by `frpc.log`, read as one stream: a rotation can fall inside a
-/// line.
-fn last_login(paths: &Paths) -> Result<String> {
-    let mut log = Vec::new();
-    for name in [format!("{LOG_FRPC}.1"), LOG_FRPC.to_string()] {
-        let path = paths.log_dir.join(name);
-        match fs::read(&path) {
-            Ok(bytes) => log.extend(bytes),
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
-        }
+/// The line `run` keeps on frpc's connection to the server, or a note that there is none.
+fn server_connection(paths: &Paths) -> Result<String> {
+    let path = paths.log_dir.join(CONNECTION_RECORD);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(text.trim_end().to_string()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok("none recorded".into()),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
     }
-    let text = String::from_utf8_lossy(&log);
-    // Only a line ended by its newline is whole: `pump` can leave the file cut off mid-line.
-    let whole = &text[..text.rfind('\n').map_or(0, |end| end + 1)];
-    Ok(whole
-        .lines()
-        .rev()
-        .find_map(login_result)
-        .unwrap_or_else(|| "no login recorded".into()))
-}
-
-/// The login result a frpc log line `<date> <time> [level] [source] ...` reports, if any.
-fn login_result(line: &str) -> Option<String> {
-    let mut fields = line.splitn(3, ' ');
-    let stamp = format!("{} {}", fields.next()?, fields.next()?);
-    let message = fields.next()?;
-    if message.contains("login to server success") {
-        return Some(format!("success ({stamp})"));
-    }
-    let (_, reason) = message.split_once("connect to server error: ")?;
-    Some(format!("failed ({stamp}): {}", reason.trim_end()))
 }
 
 #[cfg(test)]

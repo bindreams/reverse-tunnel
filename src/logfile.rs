@@ -118,7 +118,7 @@ fn open(path: &Path) -> Result<File> {
 
 /// The local time and its UTC offset in whole minutes, e.g. `2026-11-02T21:04:05+01:00`; `1970-01-01T00:00:00+00:00`
 /// if the clock or the zone cannot be read.
-fn now() -> String {
+pub fn now() -> String {
     stamp().unwrap_or_else(|_| "1970-01-01T00:00:00+00:00".to_string())
 }
 

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs;
 use std::io::{self, ErrorKind};
+use std::mem;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -29,8 +30,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use crate::config::Config;
 use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
-use crate::logfile::{LogFile, ROTATE_AT};
-use crate::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::logfile::{LogFile, ROTATE_AT, now};
+use crate::paths::{CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR, Paths};
 
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
@@ -124,6 +125,9 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     // (the service manager kills it), so every start overwrites the same file.
     let config = render_config(setup, listener.local_addr()?.port(), &setup.paths.log_dir)?;
 
+    let connection = setup.paths.log_dir.join(CONNECTION_RECORD);
+    record(&connection, &format!("connecting since {}", now()), log);
+
     let mut frpc = setup.frpc(&[], &config);
     frpc.stdin(Stdio::null())?
         .stdout(Stdio::pipe())?
@@ -133,7 +137,7 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
         .with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     let output = child.stdout().context("frpc's output is not piped")?;
     let (broken, read_failed) = oneshot::channel();
-    let pump = tokio::spawn(pump(output, frpc_log, log.clone(), broken));
+    let pump = tokio::spawn(pump(output, frpc_log, log.clone(), broken, connection));
 
     let routes = Arc::new(ws_routes(&setup.cfg));
     let mut exited = false;
@@ -166,20 +170,63 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     Err(failure)
 }
 
-/// Copies frpc's output into its log until it ends. A read error goes to `supervisor_log` and then to `failed`; the log
-/// has it even when `supervise` is already stopping and nobody receives.
-async fn pump(mut output: impl AsyncRead + Unpin, to: LogFile, supervisor_log: LogFile, failed: oneshot::Sender<()>) {
+/// Copies frpc's output into its log until it ends, and keeps `connection` up to date with what the output says about
+/// the server. A read error goes to `supervisor_log` and then to `failed`; the log has it even when `supervise` is
+/// already stopping and nobody receives.
+async fn pump(
+    mut output: impl AsyncRead + Unpin,
+    to: LogFile,
+    supervisor_log: LogFile,
+    failed: oneshot::Sender<()>,
+    connection: PathBuf,
+) {
     let mut buf = [0; 8192];
+    // The start of a line whose end has not been read yet.
+    let mut partial = Vec::new();
     loop {
         match output.read(&mut buf).await {
             Ok(0) => return,
-            Ok(len) => to.write(&buf[..len]),
+            Ok(len) => {
+                to.write(&buf[..len]);
+                for &byte in &buf[..len] {
+                    if byte != b'\n' {
+                        partial.push(byte);
+                    } else if let Some(text) = classify(&String::from_utf8_lossy(&mem::take(&mut partial)), &now()) {
+                        record(&connection, &text, &supervisor_log);
+                    }
+                }
+            }
             Err(err) => {
                 supervisor_log.line(format_args!("reading frpc's output: {err}"));
                 let _ = failed.send(());
                 return;
             }
         }
+    }
+}
+
+/// The connection record that a line of frpc's output gives, if it reports on the server connection (one per host,
+/// not an SSH session). After a login, frpc puts its run id in front of the message, which tells a reconnect attempt
+/// from the first attempt.
+fn classify(line: &str, stamp: &str) -> Option<String> {
+    let line = line.trim_end();
+    if line.contains("login to server success") {
+        return Some(format!("connected since {stamp}"));
+    }
+    if let Some((_, reason)) = line.split_once("connect to server error: ") {
+        return Some(format!("refused at {stamp}: {reason}"));
+    }
+    let before = line.strip_suffix("] try to connect to server...")?;
+    let run_id = before.rsplit('[').next()?;
+    (run_id.len() == 16 && run_id.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| format!("lost at {stamp}"))
+}
+
+/// Replaces the file `path` with the line `text`, through a rename, so that a reader sees the old line or the new one.
+/// A failure goes to `log`; frpc's output matters more than the record.
+fn record(path: &Path, text: &str, log: &LogFile) {
+    let temp = path.with_extension("tmp");
+    if let Err(err) = fs::write(&temp, format!("{text}\n")).and_then(|()| fs::rename(&temp, path)) {
+        log.line(format_args!("recording frpc's connection in {}: {err}", path.display()));
     }
 }
 

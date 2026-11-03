@@ -9,7 +9,7 @@ use jiff::Timestamp;
 use jiff::fmt::temporal::Pieces;
 use jiff::tz::TimeZone;
 use reverse_tunnel::logfile::LogFile;
-use reverse_tunnel::paths::{LOG_FRPC, LOG_SUPERVISOR};
+use reverse_tunnel::paths::{CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::WebSocketStream;
@@ -94,6 +94,18 @@ fn child_exit_stops_others_and_exits_nonzero() {
     let log = host.log(LOG_SUPERVISOR);
     assert_eq!(stamped(&log), err);
     assert!(host.log(LOG_FRPC).contains("stub frpc: failing"));
+}
+
+#[test]
+fn start_replaces_the_record_of_an_earlier_run() {
+    let host = Host::new("exit 7", SSH);
+    let record = host.paths.log_dir.join(CONNECTION_RECORD);
+    fs::write(&record, "connected since 2026-11-01T17:02:16+00:00\n").unwrap();
+
+    host.run(false).unwrap_err();
+
+    let text = fs::read_to_string(record).unwrap();
+    assert!(text.starts_with("connecting since "), "{text}");
 }
 
 #[test]
