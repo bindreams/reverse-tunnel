@@ -579,12 +579,16 @@ fn status_needs_no_elevation() {
     );
     assert!(status.contains("server connection: not connected since "), "{status}");
 
-    // The lock dies with the supervisor, whatever else is left running.
+    // The lock dies with the supervisor, whatever else is left running. The manager restarts the service, so either
+    // no run holds the lock, or a run that started after the old one's lock was released does.
     let supervisor = machine.status().pid.expect("a running service has a pid");
     machine.manager.kill(&machine.id).unwrap();
-    wait_until("the supervisor is gone", || {
-        processes().iter().all(|process| process.pid != supervisor)
+    wait_until("the lock has died with the killed supervisor", || {
+        // Read before `status`: a new run takes the lock only after the old one's is released, so a record shown after
+        // seeing one cannot be the old run's.
+        let restarted = machine.status();
+        let restarted = restarted.state == State::Running && restarted.pid.is_some_and(|pid| pid != supervisor);
+        let status = as_probe("status");
+        status.contains("server connection: none recorded") || (restarted && status.contains("server connection: "))
     });
-    let status = as_probe("status");
-    assert!(status.contains("server connection: none recorded"), "{status}");
 }

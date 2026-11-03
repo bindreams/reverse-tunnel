@@ -9,7 +9,7 @@ use jiff::Timestamp;
 use jiff::fmt::temporal::Pieces;
 use jiff::tz::TimeZone;
 use reverse_tunnel::logfile::LogFile;
-use reverse_tunnel::paths::{CONNECTION_LOCK, CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR};
+use reverse_tunnel::paths::{CONNECTION_LOCK, CONNECTION_RECORD, INSTANCE_LOCK, LOG_FRPC, LOG_SUPERVISOR};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::WebSocketStream;
@@ -107,6 +107,24 @@ fn run_replaces_the_record_of_an_earlier_run_before_anything_can_fail() {
 
     let text = fs::read_to_string(record).unwrap();
     assert!(text.starts_with("not connected since "), "{text}");
+}
+
+#[test]
+fn a_second_run_is_refused_and_leaves_the_first_ones_record() {
+    let host = Host::new("exit 7", SSH);
+    let record = host.paths.log_dir.join(CONNECTION_RECORD);
+    let first = "connected since 2026-11-01T17:02:16+00:00
+";
+    fs::write(&record, first).unwrap();
+    // What a running supervisor holds, taken through another handle.
+    let instance = File::create(host.paths.log_dir.join(INSTANCE_LOCK)).unwrap();
+    instance.lock().unwrap();
+
+    host.assert_refused("another supervisor is running");
+
+    assert_eq!(fs::read_to_string(&record).unwrap(), first);
+    assert!(!host.paths.log_dir.join(CONNECTION_LOCK).exists());
+    assert!(host.log(LOG_SUPERVISOR).contains("another supervisor is running"));
 }
 
 #[test]

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, ErrorKind};
 use std::mem;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT, now};
-use crate::paths::{CONNECTION_LOCK, CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::paths::{CONNECTION_LOCK, CONNECTION_RECORD, INSTANCE_LOCK, LOG_FRPC, LOG_SUPERVISOR, Paths};
 
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
@@ -88,7 +88,18 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
             .build()?
             .block_on(check(&setup));
     }
-    // First, so that nothing below can leave an earlier run's record in place.
+    // Before anything touches the record: a second supervisor would replace the live one's record.
+    let instance = paths.log_dir.join(INSTANCE_LOCK);
+    let _instance = try_hold(&instance)
+        .with_context(|| format!("locking {}", instance.display()))?
+        .ok_or_else(|| {
+            let refusal = anyhow!("another supervisor is running");
+            if let Ok(log) = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT) {
+                log.line(format_args!("{refusal}"));
+            }
+            refusal
+        })?;
+    // So that nothing below can leave an earlier run's record in place.
     let connection = Connection::new(paths.log_dir.join(CONNECTION_RECORD), now());
     let announced = connection.announce(&paths.log_dir.join(CONNECTION_LOCK));
     let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
@@ -354,12 +365,26 @@ impl Connection {
 }
 
 /// Creates the file at `path` if it is missing and locks it exclusively, waiting for whoever holds it. The OS releases
-/// the lock when the returned file is dropped or the process ends, however it ends. Opened for writing and not
-/// appending: Windows refuses a lock on an append-only handle.
+/// the lock when the returned file is dropped or the process ends, however it ends.
 pub(crate) fn hold(path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new().create(true).write(true).truncate(false).open(path)?;
+    let file = lock_file(path)?;
     file.lock()?;
     Ok(file)
+}
+
+/// `hold` without waiting: `None` when someone else holds the lock.
+fn try_hold(path: &Path) -> io::Result<Option<File>> {
+    let file = lock_file(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(err)) => Err(err),
+    }
+}
+
+/// Opened for writing and not appending: Windows refuses a lock on an append-only handle.
+fn lock_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new().create(true).write(true).truncate(false).open(path)
 }
 
 /// Serves WebSocket connections until the listening socket is broken. One connection's failure is logged and nothing
