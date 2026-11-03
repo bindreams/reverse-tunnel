@@ -5,12 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind};
 use std::mem;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::process::{self, ExitCode};
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT, now};
-use crate::paths::{CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::paths::{CONNECTION_LOCK, CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR, Paths};
 
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
@@ -51,7 +51,19 @@ struct Setup<'a> {
     tokens: [(&'static str, String); 2],
 }
 
-impl Setup<'_> {
+impl<'a> Setup<'a> {
+    fn load(paths: &'a Paths, tools: &'a Tools) -> Result<Setup<'a>> {
+        Ok(Setup {
+            cfg: Config::load(&paths.config_dir.join("config.yaml"))?,
+            paths,
+            tools,
+            tokens: [
+                ("RT_BRIDGE_TOKEN", token(&paths.secrets_dir.join("bridge.token"))?),
+                ("RT_HOST_TOKEN", token(&paths.secrets_dir.join("host.token"))?),
+            ],
+        })
+    }
+
     /// `frpc <subcommand> -c <config>`; the tokens are in this child's environment and no other.
     fn frpc(&self, subcommand: &[&str], config: &Path) -> cosca::tokio::Command {
         let mut frpc = cosca::tokio::run([&self.tools.frpc]);
@@ -68,29 +80,25 @@ pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
 
 /// `run` with the WebSocket listener bound to `listen`.
 pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAddr) -> Result<ExitCode> {
-    // First, so that nothing below can leave an earlier run's record in place. `--check` runs as the caller, who may
-    // not write the log dir.
-    let connection = Connection::new(paths.log_dir.join(CONNECTION_RECORD), now());
-    let first = (!check_only).then(|| connection.record());
-    let config = paths.config_dir.join("config.yaml");
-    let setup = Setup {
-        cfg: Config::load(&config)?,
-        paths,
-        tools,
-        tokens: [
-            ("RT_BRIDGE_TOKEN", token(&paths.secrets_dir.join("bridge.token"))?),
-            ("RT_HOST_TOKEN", token(&paths.secrets_dir.join("host.token"))?),
-        ],
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     if check_only {
-        return runtime.block_on(check(&setup));
+        // `--check` runs as the caller, who may not write the log dir.
+        let setup = Setup::load(paths, tools)?;
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(check(&setup));
     }
+    // First, so that nothing below can leave an earlier run's record in place.
+    let connection = Connection::new(paths.log_dir.join(CONNECTION_RECORD), now());
+    let announced = connection.announce(&paths.log_dir.join(CONNECTION_LOCK));
     let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
+    // Held until the run ends: the record counts only while this lock does.
+    let _lock = announced
+        .map_err(|err| log.line(format_args!("recording frpc's connection: {err:#}")))
+        .ok();
+    let setup = Setup::load(paths, tools)?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let frpc_log = LogFile::open(paths.log_dir.join(LOG_FRPC), ROTATE_AT)?;
-    if let Some(Err(err)) = first {
-        log.line(format_args!("recording frpc's connection: {err}"));
-    }
     let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log, connection));
     log.line(format_args!("{err:#}"));
     Err(err)
@@ -322,14 +330,36 @@ impl Connection {
         }
     }
 
-    /// Replaces the file through a rename, so that a reader sees the old line or the new one. The line starts with this
-    /// process's id, which is how `status` tells this run's record from an earlier run's. The caller reports a failure:
-    /// frpc's output matters more than the record.
+    /// Replaces the file through a rename, so that a reader sees the old line or the new one. The caller reports a
+    /// failure: frpc's output matters more than the record.
     fn record(&self) -> io::Result<()> {
         let temp = self.path.with_extension("tmp");
-        let line = format!("{} {}\n", process::id(), self.text());
-        fs::write(&temp, line).and_then(|()| fs::rename(&temp, &self.path))
+        fs::write(
+            &temp,
+            format!(
+                "{}
+",
+                self.text()
+            ),
+        )
+        .and_then(|()| fs::rename(&temp, &self.path))
     }
+
+    /// Writes the record, then takes the lock at `lock`, which makes it count (see `hold`). Without a record, no lock
+    /// is taken.
+    fn announce(&self, lock: &Path) -> Result<File> {
+        self.record().context("writing the record")?;
+        hold(lock).with_context(|| format!("locking {}", lock.display()))
+    }
+}
+
+/// Creates the file at `path` if it is missing and locks it exclusively, waiting for whoever holds it. The OS releases
+/// the lock when the returned file is dropped or the process ends, however it ends. Opened for writing and not
+/// appending: Windows refuses a lock on an append-only handle.
+pub(crate) fn hold(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new().create(true).write(true).truncate(false).open(path)?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Serves WebSocket connections until the listening socket is broken. One connection's failure is logged and nothing

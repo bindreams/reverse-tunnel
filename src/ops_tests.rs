@@ -1,12 +1,12 @@
-use std::fs;
+use std::fs::{self, File};
 
-use goetia::manager::Budget;
 use goetia::manager::fake::Fake;
 use tempfile::TempDir;
 
 use super::*;
-use crate::paths::CONNECTION_RECORD;
+use crate::paths::{CONNECTION_LOCK, CONNECTION_RECORD};
 use crate::service;
+use crate::supervisor::hold;
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 /// SHA-256 of `CERT`'s DER.
@@ -55,43 +55,53 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(!text.contains("secret"), "{text}");
 }
 
+/// What `run` keeps while it is connected or trying, taken through another handle than `status` opens.
+fn hold_lock(paths: &Paths) -> File {
+    hold(&paths.log_dir.join(CONNECTION_LOCK)).unwrap()
+}
+
+fn connection_line(manager: &Fake, paths: &Paths) -> String {
+    let text = status_text(manager, paths);
+    text.lines()
+        .find(|line| line.starts_with("server connection"))
+        .unwrap_or("")
+        .to_string()
+}
+
 #[test]
-fn status_shows_the_record_only_of_the_run_that_is_the_service() {
+fn status_shows_the_record_only_while_its_writer_holds_the_lock() {
     let (_dir, paths) = host();
     let manager = Fake::default();
     manager.install(&service::spec(&paths), false).unwrap();
-    let id = service::spec(&paths).id;
-    let connection = |record: Option<&str>| {
-        let path = paths.log_dir.join(CONNECTION_RECORD);
-        let _ = fs::remove_file(&path);
-        if let Some(text) = record {
-            fs::write(&path, text).unwrap();
-        }
-        let text = status_text(&manager, &paths);
-        text.lines()
-            .find(|line| line.starts_with("server connection"))
-            .unwrap_or("")
-            .to_string()
-    };
+    fs::write(
+        paths.log_dir.join(CONNECTION_RECORD),
+        "connected since 2026-11-03T15:54:46+01:00
+",
+    )
+    .unwrap();
+    let none = "server connection: none recorded";
 
-    // A stopped service has no pid, and a service that died leaves its last record behind.
+    // The first write succeeded and the lock failed, or the record is from a version that took no lock.
+    assert_eq!(connection_line(&manager, &paths), none);
+    let lock = hold_lock(&paths);
     assert_eq!(
-        connection(Some("1 connected since 2026-11-03T15:54:46+01:00\n")),
-        "server connection: none recorded"
-    );
-    manager.start(&id, Budget::Unbounded).unwrap();
-    let pid = manager.status(&id).unwrap().pid.expect("a running service has a pid");
-    assert_eq!(connection(None), "server connection: none recorded");
-    // The service has started and its run has not written yet, or its write failed.
-    assert_eq!(
-        connection(Some(&format!(
-            "{} connected since 2026-11-03T15:54:46+01:00\n",
-            pid + 1
-        ))),
-        "server connection: none recorded"
-    );
-    assert_eq!(
-        connection(Some(&format!("{pid} connected since 2026-11-03T15:54:46+01:00\n"))),
+        connection_line(&manager, &paths),
         "server connection: connected since 2026-11-03T15:54:46+01:00"
     );
+    // The writer died, and its record stayed behind.
+    drop(lock);
+    assert_eq!(connection_line(&manager, &paths), none);
+}
+
+#[test]
+fn status_fails_when_the_record_of_a_live_run_cannot_be_read() {
+    let (_dir, paths) = host();
+    let manager = Fake::default();
+    manager.install(&service::spec(&paths), false).unwrap();
+    fs::create_dir(paths.log_dir.join(CONNECTION_RECORD)).unwrap();
+    let _lock = hold_lock(&paths);
+
+    let err = status(&manager, &paths, &mut Vec::new()).unwrap_err();
+
+    assert!(format!("{err:#}").contains(CONNECTION_RECORD), "{err:#}");
 }

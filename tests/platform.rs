@@ -20,7 +20,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use goetia::manager::{self, Installed, ServiceManager, State, Status};
 use goetia::spec::Id;
 use reverse_tunnel::account::{self, Account};
-use reverse_tunnel::paths::Paths;
+use reverse_tunnel::paths::{CONNECTION_LOCK, Paths};
 use reverse_tunnel::service;
 use rustix::process::{Pid, Signal, kill_process_group};
 
@@ -451,6 +451,8 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
+    // logs/ is removed with the supervisor's lock file in it.
+    assert!(machine.paths.log_dir.join(CONNECTION_LOCK).exists());
     // What the service account, which owns logs/ and runs frpc, can plant for root to follow.
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
     symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
@@ -567,7 +569,22 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
-    // The record shown names the supervisor that goetia reports as the service, and this account can read it.
-    assert!(status.contains("server connection: "), "{status}");
-    assert!(!status.contains("server connection: none"), "{status}");
+    // The supervisor holds the lock on the lock file, which this account can take a shared lock on only if it can
+    // open the file, and the lock tells it apart from a free one: the record is shown.
+    let lock = machine.paths.log_dir.join(CONNECTION_LOCK);
+    assert!(
+        mode_of(&lock) & 0o004 != 0,
+        "{} is not readable by everyone",
+        lock.display()
+    );
+    assert!(status.contains("server connection: not connected since "), "{status}");
+
+    // The lock dies with the supervisor, whatever else is left running.
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+    machine.manager.kill(&machine.id).unwrap();
+    wait_until("the supervisor is gone", || {
+        processes().iter().all(|process| process.pid != supervisor)
+    });
+    let status = as_probe("status");
+    assert!(status.contains("server connection: none recorded"), "{status}");
 }

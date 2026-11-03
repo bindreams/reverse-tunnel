@@ -6,6 +6,9 @@ pub const LOG_FRPC: &str = "frpc.log";
 pub const LOG_SUPERVISOR: &str = "supervisor.log";
 /// In `log_dir`: one line on frpc's connection to the server, kept by `run`, read by `status`.
 pub const CONNECTION_RECORD: &str = "connection";
+/// In `log_dir`: held locked by `run` while it keeps the record, which counts only for that long. A file of its own,
+/// because the record is replaced by rename and a Windows lock is mandatory.
+pub const CONNECTION_LOCK: &str = "connection.lock";
 
 /// Where an installation keeps its files on this OS.
 #[derive(Debug, Clone)]

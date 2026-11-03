@@ -1,6 +1,6 @@
 //! `run` against `testbin/stub_frpc.rs`. These bind ports and spawn processes, so they run in a container or on CI.
 
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::net::{Ipv4Addr, TcpListener as StdListener};
 use std::path::Path;
 
@@ -9,7 +9,7 @@ use jiff::Timestamp;
 use jiff::fmt::temporal::Pieces;
 use jiff::tz::TimeZone;
 use reverse_tunnel::logfile::LogFile;
-use reverse_tunnel::paths::{CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR};
+use reverse_tunnel::paths::{CONNECTION_LOCK, CONNECTION_RECORD, LOG_FRPC, LOG_SUPERVISOR};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::WebSocketStream;
@@ -106,10 +106,42 @@ fn run_replaces_the_record_of_an_earlier_run_before_anything_can_fail() {
     host.assert_refused("is empty");
 
     let text = fs::read_to_string(record).unwrap();
-    assert!(
-        text.starts_with(&format!("{} not connected since ", std::process::id())),
-        "{text}"
-    );
+    assert!(text.starts_with("not connected since "), "{text}");
+}
+
+#[test]
+fn a_failed_first_record_or_lock_is_logged_though_the_config_fails_later() {
+    for (blocked, reported) in [(CONNECTION_RECORD, "writing the record"), (CONNECTION_LOCK, "locking")] {
+        let host = Host::new("exit 7", SSH);
+        fs::create_dir(host.paths.log_dir.join(blocked)).unwrap();
+        fs::write(
+            host.paths.secrets_dir.join("host.token"),
+            "
+",
+        )
+        .unwrap();
+
+        host.assert_refused("is empty");
+
+        let log = host.log(LOG_SUPERVISOR);
+        assert!(log.contains(reported), "{blocked} blocked: {log}");
+        // Without a record there is no lock to take.
+        assert_eq!(
+            host.paths.log_dir.join(CONNECTION_LOCK).exists(),
+            blocked != CONNECTION_RECORD
+        );
+    }
+}
+
+#[tokio::test]
+async fn run_holds_the_lock_that_makes_its_record_count_until_it_ends() {
+    let live = Live::start(SSH).await;
+    let lock = File::open(live.host.paths.log_dir.join(CONNECTION_LOCK)).unwrap();
+    assert!(matches!(lock.try_lock_shared(), Err(TryLockError::WouldBlock)));
+
+    live.stop().await;
+
+    lock.try_lock_shared().unwrap();
 }
 
 #[test]

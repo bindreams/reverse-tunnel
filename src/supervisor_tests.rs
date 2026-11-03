@@ -145,10 +145,7 @@ async fn a_line_split_across_reads_is_still_recognised() {
 
     assert_eq!(frpc_log, SUCCESS_LINE);
     let text = std::fs::read_to_string(record).unwrap();
-    assert!(
-        text.starts_with(&format!("{} connected since ", std::process::id())),
-        "{text}"
-    );
+    assert!(text.starts_with("connected since "), "{text}");
 }
 
 #[tokio::test]
