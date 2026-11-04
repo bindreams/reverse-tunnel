@@ -45,7 +45,7 @@ enum Command {
     Start,
     /// Stops the service. It starts again at boot if it is enabled. Needs root.
     Stop,
-    /// Shows the service's state, the bridge and frpc's connection to the server.
+    /// Shows the service's state and the bridge.
     Status,
 }
 

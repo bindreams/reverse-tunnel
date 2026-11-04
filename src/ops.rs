@@ -1,8 +1,8 @@
 //! `start`, `stop` and `status`: the service through goetia, and the files in `config_dir` and `log_dir`, which every
 //! local user may read. Nothing here reads `secrets_dir`.
 
-use std::fs::{self, File, TryLockError};
-use std::io::{ErrorKind, Write};
+use std::fs;
+use std::io::Write;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -11,7 +11,7 @@ use goetia::manager::{Budget, ServiceManager, State};
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
-use crate::paths::{CONNECTION_LOCK, CONNECTION_RECORD, Paths};
+use crate::paths::Paths;
 use crate::service;
 
 pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
@@ -56,8 +56,6 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;
     }
-    let connection = server_connection(paths)?.unwrap_or_else(|| "none recorded".into());
-    writeln!(out, "server connection: {connection}")?;
     Ok(())
 }
 
@@ -81,27 +79,6 @@ fn fingerprints(pem: &str) -> Result<Vec<String>> {
         .collect::<Result<Vec<_>>>()?;
     ensure!(!found.is_empty(), "no certificate");
     Ok(found)
-}
-
-/// The text of the record of frpc's connection to the server, while the `run` that keeps it holds the lock on
-/// `CONNECTION_LOCK`. The OS drops that lock when the process ends, however it ends, so a record left by a dead run,
-/// or one whose first write or lock failed, is not shown: `None`.
-fn server_connection(paths: &Paths) -> Result<Option<String>> {
-    let lock_path = paths.log_dir.join(CONNECTION_LOCK);
-    let lock = match File::open(&lock_path) {
-        Ok(lock) => lock,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).with_context(|| format!("opening {}", lock_path.display())),
-    };
-    match lock.try_lock_shared() {
-        // Nobody holds it. The lock is released with `lock`.
-        Ok(()) => return Ok(None),
-        Err(TryLockError::WouldBlock) => {}
-        Err(TryLockError::Error(err)) => return Err(err).with_context(|| format!("locking {}", lock_path.display())),
-    }
-    let path = paths.log_dir.join(CONNECTION_RECORD);
-    let record = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(Some(record.trim_end().to_string()))
 }
 
 #[cfg(test)]

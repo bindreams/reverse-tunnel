@@ -5,9 +5,8 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs;
 use std::io::{self, ErrorKind};
-use std::mem;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -30,8 +29,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use crate::config::Config;
 use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
-use crate::logfile::{LogFile, ROTATE_AT, now};
-use crate::paths::{CONNECTION_LOCK, CONNECTION_RECORD, INSTANCE_LOCK, LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::logfile::{LogFile, ROTATE_AT};
+use crate::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
 
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
@@ -51,19 +50,7 @@ struct Setup<'a> {
     tokens: [(&'static str, String); 2],
 }
 
-impl<'a> Setup<'a> {
-    fn load(paths: &'a Paths, tools: &'a Tools) -> Result<Setup<'a>> {
-        Ok(Setup {
-            cfg: Config::load(&paths.config_dir.join("config.yaml"))?,
-            paths,
-            tools,
-            tokens: [
-                ("RT_BRIDGE_TOKEN", token(&paths.secrets_dir.join("bridge.token"))?),
-                ("RT_HOST_TOKEN", token(&paths.secrets_dir.join("host.token"))?),
-            ],
-        })
-    }
-
+impl Setup<'_> {
     /// `frpc <subcommand> -c <config>`; the tokens are in this child's environment and no other.
     fn frpc(&self, subcommand: &[&str], config: &Path) -> cosca::tokio::Command {
         let mut frpc = cosca::tokio::run([&self.tools.frpc]);
@@ -80,37 +67,23 @@ pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
 
 /// `run` with the WebSocket listener bound to `listen`.
 pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAddr) -> Result<ExitCode> {
-    if check_only {
-        // `--check` runs as the caller, who may not write the log dir.
-        let setup = Setup::load(paths, tools)?;
-        return tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(check(&setup));
-    }
-    // Before anything touches the record: a second supervisor would replace the live one's record.
-    let instance = paths.log_dir.join(INSTANCE_LOCK);
-    let _instance = try_hold(&instance)
-        .with_context(|| format!("locking {}", instance.display()))?
-        .ok_or_else(|| {
-            let refusal = anyhow!("another supervisor is running");
-            if let Ok(log) = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT) {
-                log.line(format_args!("{refusal}"));
-            }
-            refusal
-        })?;
-    // So that nothing below can leave an earlier run's record in place.
-    let connection = Connection::new(paths.log_dir.join(CONNECTION_RECORD), now());
-    let announced = connection.announce(&paths.log_dir.join(CONNECTION_LOCK));
-    let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
-    // Held until the run ends: the record counts only while this lock does.
-    let _lock = announced
-        .map_err(|err| log.line(format_args!("recording frpc's connection: {err:#}")))
-        .ok();
-    let setup = Setup::load(paths, tools)?;
+    let config = paths.config_dir.join("config.yaml");
+    let setup = Setup {
+        cfg: Config::load(&config)?,
+        paths,
+        tools,
+        tokens: [
+            ("RT_BRIDGE_TOKEN", token(&paths.secrets_dir.join("bridge.token"))?),
+            ("RT_HOST_TOKEN", token(&paths.secrets_dir.join("host.token"))?),
+        ],
+    };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    if check_only {
+        return runtime.block_on(check(&setup));
+    }
+    let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
     let frpc_log = LogFile::open(paths.log_dir.join(LOG_FRPC), ROTATE_AT)?;
-    let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log, connection));
+    let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log));
     log.line(format_args!("{err:#}"));
     Err(err)
 }
@@ -143,13 +116,7 @@ async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
 }
 
 /// Starts the listener and frpc, and returns why the first of them stopped, after stopping the other.
-async fn supervise(
-    setup: &Setup<'_>,
-    listen: SocketAddr,
-    log: &LogFile,
-    frpc_log: LogFile,
-    connection: Connection,
-) -> Result<Infallible> {
+async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_log: LogFile) -> Result<Infallible> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding the WebSocket listener on {listen}"))?;
@@ -166,7 +133,7 @@ async fn supervise(
         .with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     let output = child.stdout().context("frpc's output is not piped")?;
     let (broken, read_failed) = oneshot::channel();
-    let pump = tokio::spawn(pump(output, frpc_log, log.clone(), broken, connection));
+    let pump = tokio::spawn(pump(output, frpc_log, log.clone(), broken));
 
     let routes = Arc::new(ws_routes(&setup.cfg));
     let mut exited = false;
@@ -199,30 +166,14 @@ async fn supervise(
     Err(failure)
 }
 
-/// Copies frpc's output into its log until it ends, and keeps the `connection` record up to date with what the output
-/// says about the server. A read error goes to `supervisor_log` and then to `failed`; the log has it even when
-/// `supervise` is already stopping and nobody receives.
-async fn pump(
-    mut output: impl AsyncRead + Unpin,
-    to: LogFile,
-    supervisor_log: LogFile,
-    failed: oneshot::Sender<()>,
-    mut connection: Connection,
-) {
+/// Copies frpc's output into its log until it ends. A read error goes to `supervisor_log` and then to `failed`; the log
+/// has it even when `supervise` is already stopping and nobody receives.
+async fn pump(mut output: impl AsyncRead + Unpin, to: LogFile, supervisor_log: LogFile, failed: oneshot::Sender<()>) {
     let mut buf = [0; 8192];
-    let mut lines = Lines::default();
     loop {
         match output.read(&mut buf).await {
             Ok(0) => return,
-            Ok(len) => {
-                to.write(&buf[..len]);
-                lines.feed(&buf[..len], |line| {
-                    let changed = classify(line).is_some_and(|event| connection.apply(event, &now()));
-                    if let Some(Err(err)) = changed.then(|| connection.record()) {
-                        supervisor_log.line(format_args!("recording frpc's connection: {err}"));
-                    }
-                });
-            }
+            Ok(len) => to.write(&buf[..len]),
             Err(err) => {
                 supervisor_log.line(format_args!("reading frpc's output: {err}"));
                 let _ = failed.send(());
@@ -230,161 +181,6 @@ async fn pump(
             }
         }
     }
-}
-
-/// Splits a byte stream into lines, holding a partial line across `feed` calls.
-#[derive(Default)]
-struct Lines {
-    /// The start of a line whose end has not been read yet.
-    partial: Vec<u8>,
-    /// Inside a line that outgrew `ROTATE_AT`: input is dropped up to the next newline. No line frpc writes is longer
-    /// than its whole log file.
-    skipping: bool,
-}
-
-impl Lines {
-    /// Calls `whole` with each line that `data` completes, without its newline.
-    fn feed(&mut self, data: &[u8], mut whole: impl FnMut(&str)) {
-        for &byte in data {
-            if byte == b'\n' {
-                if !mem::take(&mut self.skipping) {
-                    whole(&String::from_utf8_lossy(&self.partial));
-                }
-                self.partial.clear();
-            } else if !self.skipping {
-                self.partial.push(byte);
-                if self.partial.len() as u64 > ROTATE_AT {
-                    self.partial = Vec::new();
-                    self.skipping = true;
-                }
-            }
-        }
-    }
-}
-
-/// What a line of frpc's output says about its control connection to the server (one per host, not an SSH session).
-#[derive(Debug, PartialEq)]
-enum Event {
-    LoggedIn,
-    /// A reconnect attempt began: the connection was lost.
-    Retrying,
-    /// An attempt failed, with the reason frpc gives.
-    Failed(String),
-}
-
-/// The event a line gives, if any. After a login, frpc puts its run id in front of the message, which tells a
-/// reconnect attempt from the first attempt.
-fn classify(line: &str) -> Option<Event> {
-    let line = line.trim_end();
-    if line.contains("login to server success") {
-        return Some(Event::LoggedIn);
-    }
-    if let Some((_, reason)) = line.split_once("connect to server error: ") {
-        return Some(Event::Failed(reason.to_string()));
-    }
-    let before = line.strip_suffix("] try to connect to server...")?;
-    let run_id = before.rsplit('[').next()?;
-    (run_id.len() == 16 && run_id.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(Event::Retrying)
-}
-
-/// Whether frpc is connected to the server, and the file at `path` that says so: `connected since <stamp>` or
-/// `not connected since <stamp>`, with `: <reason>` after the latest error. The "since" of a not-connected period is
-/// where it began (the start of `run`, or the loss) and only a login ends it, so an outage reads the same through
-/// every retry.
-struct Connection {
-    path: PathBuf,
-    connected: bool,
-    since: String,
-    reason: Option<String>,
-}
-
-impl Connection {
-    /// Not connected since `since`, the start of `run`.
-    fn new(path: PathBuf, since: String) -> Connection {
-        Connection {
-            path,
-            connected: false,
-            since,
-            reason: None,
-        }
-    }
-
-    /// Takes `event`, seen at `stamp`. Returns whether the record changed.
-    fn apply(&mut self, event: Event, stamp: &str) -> bool {
-        if event == Event::LoggedIn {
-            *self = Connection::new(mem::take(&mut self.path), stamp.into());
-            self.connected = true;
-            return true;
-        }
-        // A loss starts a not-connected period; inside one, only the reason changes.
-        let mut changed = mem::take(&mut self.connected);
-        if changed {
-            self.since = stamp.into();
-            self.reason = None;
-        }
-        if let Event::Failed(reason) = event
-            && self.reason.as_ref() != Some(&reason)
-        {
-            self.reason = Some(reason);
-            changed = true;
-        }
-        changed
-    }
-
-    /// The record's line.
-    fn text(&self) -> String {
-        let since = &self.since;
-        match (self.connected, &self.reason) {
-            (true, _) => format!("connected since {since}"),
-            (false, None) => format!("not connected since {since}"),
-            (false, Some(reason)) => format!("not connected since {since}: {reason}"),
-        }
-    }
-
-    /// Replaces the file through a rename, so that a reader sees the old line or the new one. The caller reports a
-    /// failure: frpc's output matters more than the record.
-    fn record(&self) -> io::Result<()> {
-        let temp = self.path.with_extension("tmp");
-        fs::write(
-            &temp,
-            format!(
-                "{}
-",
-                self.text()
-            ),
-        )
-        .and_then(|()| fs::rename(&temp, &self.path))
-    }
-
-    /// Writes the record, then takes the lock at `lock`, which makes it count (see `hold`). Without a record, no lock
-    /// is taken.
-    fn announce(&self, lock: &Path) -> Result<File> {
-        self.record().context("writing the record")?;
-        hold(lock).with_context(|| format!("locking {}", lock.display()))
-    }
-}
-
-/// Creates the file at `path` if it is missing and locks it exclusively, waiting for whoever holds it. The OS releases
-/// the lock when the returned file is dropped or the process ends, however it ends.
-pub(crate) fn hold(path: &Path) -> io::Result<File> {
-    let file = lock_file(path)?;
-    file.lock()?;
-    Ok(file)
-}
-
-/// `hold` without waiting: `None` when someone else holds the lock.
-fn try_hold(path: &Path) -> io::Result<Option<File>> {
-    let file = lock_file(path)?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(TryLockError::WouldBlock) => Ok(None),
-        Err(TryLockError::Error(err)) => Err(err),
-    }
-}
-
-/// Opened for writing and not appending: Windows refuses a lock on an append-only handle.
-fn lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).write(true).truncate(false).open(path)
 }
 
 /// Serves WebSocket connections until the listening socket is broken. One connection's failure is logged and nothing

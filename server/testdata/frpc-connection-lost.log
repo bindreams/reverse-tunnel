@@ -1,7 +1,0 @@
-2026-11-03 15:53:28.329 [I] [sub/root.go:194] start frpc service for config file [frpc.toml] with aggregated configuration
-2026-11-03 15:53:28.329 [I] [client/service.go:335] try to connect to server...
-2026-11-03 15:53:28.539 [I] [client/service.go:355] [470d7b95e00f5b55] login to server success, get run id [470d7b95e00f5b55]
-2026-11-03 15:53:28.539 [I] [proxy/proxy_manager.go:183] [470d7b95e00f5b55] proxy added: [ssh]
-2026-11-03 15:53:28.540 [I] [client/control.go:174] [470d7b95e00f5b55] [ssh] start proxy success
-2026-11-03 15:53:57.718 [I] [client/service.go:335] [470d7b95e00f5b55] try to connect to server...
-2026-11-03 15:54:02.720 [W] [client/service.go:346] [470d7b95e00f5b55] connect to server error: timeout: no recent network activity
