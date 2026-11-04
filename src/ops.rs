@@ -1,5 +1,5 @@
-//! `start`, `stop` and `status`: the service through goetia, and the files in `config_dir` and `log_dir`, which every
-//! local user may read. Nothing here reads `secrets_dir`.
+//! `start`, `stop` and `status`: the service through goetia, and the files in `config_dir`, which every local user
+//! may read. Nothing here reads `secrets_dir`.
 
 use std::fs;
 use std::io::Write;
@@ -16,13 +16,17 @@ use crate::service;
 
 pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.start(&service::spec(paths).id, Budget::Unbounded)?;
-    println!("The service is running.");
+    let _ = writeln!(std::io::stdout(), "The service is running.");
     Ok(())
 }
 
 pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.stop(&service::spec(paths).id, Budget::Unbounded)?;
-    println!("The service is stopped. It starts again at boot if it is enabled.");
+    // Ignored: `stop` over the tunnel ends the session that would read it.
+    let _ = writeln!(
+        std::io::stdout(),
+        "The service is stopped. It starts again at boot if it is enabled."
+    );
     Ok(())
 }
 

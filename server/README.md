@@ -28,8 +28,8 @@ Joining a host and publishing a service: see the main README. The commands are `
 - `docker compose ps` lists `reverse-tunnel-frps` and `reverse-tunnel-plugin` running.
 - `docker compose logs reverse-tunnel-frps | grep 'frps started successfully'` prints a line.
 - `docker compose config` prints the frps router rule ending in your domain followed by `$$` (Compose's escape for `$`).
-- A joined host's `reverse-tunnel status` shows a successful login. "host not registered" means `uv run ctl add` has
-  not been run for it.
+- A joined host's `frpc.log` shows `login to server success`. "host not registered" means `uv run ctl add` has not
+  been run for it.
 
 ## Teardown
 
