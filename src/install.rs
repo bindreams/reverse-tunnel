@@ -475,7 +475,7 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 /// is started, which leaves a running service alone.
 ///
 /// The restart marker is removed just before, since nothing that runs after the kill is sure to run; it is put back
-/// if the service was not picked up, so that the next `install` tries again.
+/// if the service was not picked up.
 fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
     if !changed {
         manager.start(id, Budget::Unbounded)?;
