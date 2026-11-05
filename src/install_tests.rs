@@ -259,3 +259,25 @@ fn kill_not_running_starts() {
     let id = spec.id.to_string();
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
 }
+
+#[test]
+fn restart_failure_is_retried_by_install() {
+    let machine = Machine::new();
+    let spec = service::spec(&machine.paths);
+    // Never installed: the kill fails with something other than NotRunning.
+    let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
+
+    assert!(format!("{err:#}").contains("run `reverse-tunnel install` again"), "{err:#}");
+    assert!(pending_file(&machine.paths).exists());
+}
+
+#[test]
+fn restart_failure_unrecorded_asks_for_a_local_restart() {
+    let machine = Machine::new();
+    let spec = service::spec(&machine.paths);
+    fs::remove_dir(&machine.paths.config_dir).unwrap();
+
+    let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
+
+    assert!(format!("{err:#}").contains("not over the tunnel"), "{err:#}");
+}
