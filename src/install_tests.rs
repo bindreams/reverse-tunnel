@@ -275,12 +275,14 @@ fn restart_failure_is_retried_by_install() {
 }
 
 #[test]
-fn restart_failure_unrecorded_asks_for_a_local_restart() {
+fn restart_failure_unrecorded_asks_for_a_reboot() {
     let machine = Machine::new();
     let spec = service::spec(&machine.paths);
     fs::remove_dir(&machine.paths.config_dir).unwrap();
 
     let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
 
-    assert!(format!("{err:#}").contains("not over the tunnel"), "{err:#}");
+    let message = format!("{err:#}");
+    assert!(message.contains("reboot the host"), "{message}");
+    assert!(!message.contains("install` again"), "{message}");
 }

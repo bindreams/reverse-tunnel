@@ -89,5 +89,6 @@ nobody is locked out.
    every host has it.
 3. Switch frps: `mv tls/new.key tls/frps.key && mv tls/new.crt tls/frps.crt && chmod 644 tls/frps.crt`, then
    `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check that each host's `frpc.log`
-   (or `frpc.log.1`, if it rotated since) has a `login to server success` stamped after the restart.
+   has a `login to server success` stamped after the restart (or `frpc.log.1` has, if the log rotated since; only one
+   older file is kept, so check soon after the restart).
 4. Delete the old certificate from `tls/trust.pem`, leaving the new one. New join codes carry only that.

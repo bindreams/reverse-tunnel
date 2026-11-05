@@ -135,10 +135,11 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         .process_group(0)
         .spawn()
         .context("starting the removal")?;
-    println!(
+    // The removal may already have cut the session.
+    ops::println_best_effort(&format!(
         "Removing. If this session ends, the removal continues; its log is {}.",
         log_path.display()
-    );
+    ));
     let status = finish.wait().context("waiting for the removal")?;
     ensure!(
         status.success(),
@@ -476,31 +477,32 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 /// The restart marker is removed just before, since nothing that runs after the kill is sure to run; it is put back
 /// if the service was not picked up, so that the next `install` tries again.
 fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
-    if changed {
-        remove_entry(&pending_file(paths))?;
+    if !changed {
+        manager.start(id, Budget::Unbounded)?;
+        return Ok(());
     }
-    let Err(err) = restart(manager, id, changed) else {
+    remove_entry(&pending_file(paths))?;
+    let Err(err) = restart(manager, id) else {
         return Ok(());
     };
-    if changed && let Err(unmarked) = mark_pending(paths) {
+    // A reboot survives the cut that a stop over the tunnel would make, and the service is enabled at boot.
+    if let Err(unmarked) = mark_pending(paths) {
         return Err(err.context(format!(
-            "the service was not restarted, and recording that for the next `install` failed ({unmarked:#}); from a \
-             session not over the tunnel, run `reverse-tunnel stop`, then `reverse-tunnel start`"
+            "the new files are in place, but the service was not restarted, and recording that for the next \
+             `install` failed ({unmarked:#}); reboot the host to restart it"
         )));
     }
-    Err(err.context("the service was not restarted; run `reverse-tunnel install` again to retry"))
+    Err(err.context(
+        "the new files are in place, but the service was not restarted; run `reverse-tunnel install` again to retry",
+    ))
 }
 
-fn restart(manager: &dyn ServiceManager, id: &Id, changed: bool) -> Result<()> {
-    if changed {
-        match manager.kill(id) {
-            Ok(()) => return Ok(()),
-            Err(goetia::Error::NotRunning { .. }) => {}
-            Err(err) => return Err(err.into()),
-        }
+fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {
+    match manager.kill(id) {
+        Ok(()) => Ok(()),
+        Err(goetia::Error::NotRunning { .. }) => Ok(manager.start(id, Budget::Unbounded)?),
+        Err(err) => Err(err.into()),
     }
-    manager.start(id, Budget::Unbounded)?;
-    Ok(())
 }
 
 #[cfg(test)]
