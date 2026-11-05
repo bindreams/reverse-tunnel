@@ -124,11 +124,6 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     // logs/ belongs to the service account, which may have left anything here; root follows no link.
     remove_entry(&log_path)?;
     let log = open_file(&log_path, PUBLIC_FILE, true)?;
-    // Before the removal starts, which may cut the session.
-    println!(
-        "Removing. If this session ends, the removal continues; its log is {}.",
-        log_path.display()
-    );
     // `--finish` takes the lock itself; an `install` in between is refused by the marker.
     drop(lock);
     let mut finish = Command::new(env::current_exe()?)
@@ -140,6 +135,11 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         .process_group(0)
         .spawn()
         .context("starting the removal")?;
+    // The removal may already have cut the session.
+    ops::println_best_effort(&format!(
+        "Removing. If this session ends, the removal continues; its log is {}.",
+        log_path.display()
+    ));
     let status = finish.wait().context("waiting for the removal")?;
     ensure!(
         status.success(),
@@ -485,13 +485,10 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     let Err(err) = restart(manager, id) else {
         return Ok(());
     };
-    let not_restarted = "the new files are in place, but the service was not restarted";
-    match mark_pending(paths) {
-        Ok(()) => Err(err.context(format!("{not_restarted}; run `reverse-tunnel install` again to retry"))),
-        Err(unmarked) => Err(err.context(format!(
-            "{not_restarted}, and the next `install` will not retry it ({unmarked:#})"
-        ))),
-    }
+    mark_pending(paths)?;
+    Err(err.context(
+        "the new files are in place, but the service was not restarted; run `reverse-tunnel install` again to retry",
+    ))
 }
 
 fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {

@@ -286,16 +286,3 @@ fn restart_failure_is_retried_by_install() {
     );
     assert!(pending_file(&machine.paths).exists());
 }
-
-#[test]
-fn restart_failure_unrecorded_says_install_will_not_retry() {
-    let machine = Machine::new();
-    let spec = service::spec(&machine.paths);
-    fs::remove_dir(&machine.paths.config_dir).unwrap();
-
-    let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
-
-    let message = format!("{err:#}");
-    assert!(message.contains("will not retry"), "{message}");
-    assert!(!message.contains("install` again"), "{message}");
-}
