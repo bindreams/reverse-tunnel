@@ -247,6 +247,19 @@ fn bin_dir_loses_old_versions_and_temp_files() {
 }
 
 #[test]
+fn unchanged_install_leaves_a_running_service_alone() {
+    let machine = Machine::new();
+    let spec = service::spec(&machine.paths);
+    let manager = Fake::default();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+
+    pick_up(&manager, &spec.id, &machine.paths, false).unwrap();
+
+    assert_eq!(manager.calls(), [("start", spec.id.to_string())]);
+}
+
+#[test]
 fn kill_not_running_starts() {
     let machine = Machine::new();
     let spec = service::spec(&machine.paths);
@@ -275,7 +288,7 @@ fn restart_failure_is_retried_by_install() {
 }
 
 #[test]
-fn restart_failure_unrecorded_asks_for_a_reboot() {
+fn restart_failure_unrecorded_says_install_will_not_retry() {
     let machine = Machine::new();
     let spec = service::spec(&machine.paths);
     fs::remove_dir(&machine.paths.config_dir).unwrap();
@@ -283,6 +296,6 @@ fn restart_failure_unrecorded_asks_for_a_reboot() {
     let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
 
     let message = format!("{err:#}");
-    assert!(message.contains("reboot the host"), "{message}");
+    assert!(message.contains("will not retry"), "{message}");
     assert!(!message.contains("install` again"), "{message}");
 }
