@@ -22,7 +22,7 @@ use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
-use crate::{download, service};
+use crate::{download, ops, service};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -146,8 +146,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         log_path.display(),
         rerun_uninstall(paths)
     );
-    // Without a pty, the session's end closes this pipe.
-    let _ = writeln!(io::stdout(), "Removed.");
+    ops::println_best_effort("Removed.");
     Ok(())
 }
 
@@ -475,16 +474,21 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 /// is started, which leaves a running service alone.
 ///
 /// The restart marker is removed just before, since nothing that runs after the kill is sure to run; it is put back
-/// if the service was not picked up.
+/// if the service was not picked up, so that the next `install` tries again.
 fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
     if changed {
         remove_entry(&pending_file(paths))?;
     }
-    let picked = restart(manager, id, changed);
-    if picked.is_err() && changed {
-        mark_pending(paths)?;
+    let Err(err) = restart(manager, id, changed) else {
+        return Ok(());
+    };
+    if changed && let Err(unmarked) = mark_pending(paths) {
+        return Err(err.context(format!(
+            "the service was not restarted, and recording that for the next `install` failed ({unmarked:#}); from a \
+             session not over the tunnel, run `reverse-tunnel stop`, then `reverse-tunnel start`"
+        )));
     }
-    picked
+    Err(err.context("the service was not restarted; run `reverse-tunnel install` again to retry"))
 }
 
 fn restart(manager: &dyn ServiceManager, id: &Id, changed: bool) -> Result<()> {
@@ -492,11 +496,7 @@ fn restart(manager: &dyn ServiceManager, id: &Id, changed: bool) -> Result<()> {
         match manager.kill(id) {
             Ok(()) => return Ok(()),
             Err(goetia::Error::NotRunning { .. }) => {}
-            Err(err) => {
-                bail!(
-                    "the new files are in place, but the service was not restarted ({err}); run `reverse-tunnel install` again to retry"
-                )
-            }
+            Err(err) => return Err(err.into()),
         }
     }
     manager.start(id, Budget::Unbounded)?;

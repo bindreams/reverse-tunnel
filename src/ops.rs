@@ -16,14 +16,20 @@ use crate::service;
 
 pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.start(&service::spec(paths).id, Budget::Unbounded)?;
-    println!("The service is running.");
+    println_best_effort("The service is running.");
     Ok(())
 }
 
 pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.stop(&service::spec(paths).id, Budget::Unbounded)?;
-    println!("The service is stopped. It starts again at boot if it is enabled.");
+    println_best_effort("The service is stopped. It starts again at boot if it is enabled.");
     Ok(())
+}
+
+/// Prints a line reporting what is already done, and ignores a closed stdout rather than panicking: a command that
+/// stops the service over the tunnel ends the session that would read it.
+pub fn println_best_effort(message: &str) {
+    let _ = writeln!(std::io::stdout(), "{message}");
 }
 
 /// Never prints a token.

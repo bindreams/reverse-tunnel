@@ -85,9 +85,9 @@ nobody is locked out.
    cat tls/new.crt >> tls/trust.pem
    ```
 
-2. `uv run ctl join-code`, and re-run `reverse-tunnel install` with the new code on every host (or put the new
-   `bridge.pem` on each and restart its service). Do not go on until every host has it.
+2. `uv run ctl join-code`, and re-run `reverse-tunnel install` with the new code on every host. Do not go on until
+   every host has it.
 3. Switch frps: `mv tls/new.key tls/frps.key && mv tls/new.crt tls/frps.crt && chmod 644 tls/frps.crt`, then
    `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check that each host's `frpc.log`
-   shows a new `login to server success`.
+   (or `frpc.log.1`, if it rotated since) has a `login to server success` stamped after the restart.
 4. Delete the old certificate from `tls/trust.pem`, leaving the new one. New join codes carry only that.

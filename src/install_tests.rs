@@ -267,7 +267,10 @@ fn restart_failure_is_retried_by_install() {
     // Never installed: the kill fails with something other than NotRunning.
     let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
 
-    assert!(format!("{err:#}").contains("run `reverse-tunnel install` again"), "{err:#}");
+    assert!(
+        format!("{err:#}").contains("run `reverse-tunnel install` again"),
+        "{err:#}"
+    );
     assert!(pending_file(&machine.paths).exists());
 }
 
