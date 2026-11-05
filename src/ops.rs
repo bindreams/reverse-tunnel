@@ -16,17 +16,13 @@ use crate::service;
 
 pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.start(&service::spec(paths).id, Budget::Unbounded)?;
-    let _ = writeln!(std::io::stdout(), "The service is running.");
+    println!("The service is running.");
     Ok(())
 }
 
 pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.stop(&service::spec(paths).id, Budget::Unbounded)?;
-    // Ignored: `stop` over the tunnel ends the session that would read it.
-    let _ = writeln!(
-        std::io::stdout(),
-        "The service is stopped. It starts again at boot if it is enabled."
-    );
+    println!("The service is stopped. It starts again at boot if it is enabled.");
     Ok(())
 }
 

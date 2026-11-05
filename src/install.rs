@@ -494,7 +494,7 @@ fn restart(manager: &dyn ServiceManager, id: &Id, changed: bool) -> Result<()> {
             Err(goetia::Error::NotRunning { .. }) => {}
             Err(err) => {
                 bail!(
-                    "the new files are in place, but the service was not restarted ({err}); run `reverse-tunnel stop`, then `reverse-tunnel start`"
+                    "the new files are in place, but the service was not restarted ({err}); run `reverse-tunnel install` again to retry"
                 )
             }
         }
