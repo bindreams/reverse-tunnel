@@ -126,6 +126,8 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     let log = open_file(&log_path, PUBLIC_FILE, true)?;
     // `--finish` takes the lock itself; an `install` in between is refused by the marker.
     drop(lock);
+    // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
+    println!("Its log will be {}.", log_path.display());
     let mut finish = Command::new(env::current_exe()?)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
@@ -136,10 +138,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         .spawn()
         .context("starting the removal")?;
     // The removal may already have cut the session.
-    ops::println_best_effort(&format!(
-        "Removing. If this session ends, the removal continues; its log is {}.",
-        log_path.display()
-    ));
+    ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let status = finish.wait().context("waiting for the removal")?;
     ensure!(
         status.success(),
@@ -485,10 +484,13 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     let Err(err) = restart(manager, id) else {
         return Ok(());
     };
-    mark_pending(paths)?;
-    Err(err.context(
-        "the new files are in place, but the service was not restarted; run `reverse-tunnel install` again to retry",
-    ))
+    let restart_failed = "the new files are in place, but the service was not restarted";
+    match mark_pending(paths) {
+        Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
+        Err(write) => Err(write.context(format!(
+            "{restart_failed} ({err:#}), and the marker for retrying it could not be written"
+        ))),
+    }
 }
 
 fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {
