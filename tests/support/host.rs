@@ -31,14 +31,7 @@ impl Host {
     pub fn new(mode: &str, services: &str) -> Host {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let paths = Paths {
-            bin_dir: root.join("bin"),
-            config_dir: root.join("config"),
-            secrets_dir: root.join("config/secrets"),
-            log_dir: root.join("logs"),
-            lock: root.join("lock"),
-            link: None,
-        };
+        let paths = Paths::testing(root);
         for dir in [&paths.bin_dir, &paths.secrets_dir, &paths.log_dir] {
             fs::create_dir_all(dir).unwrap();
         }

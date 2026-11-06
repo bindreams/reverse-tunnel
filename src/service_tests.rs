@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use goetia::blob;
 use goetia::spec::{Restart, User};
 
@@ -7,14 +5,7 @@ use super::*;
 
 #[test]
 fn spec_runs_the_installed_binary_as_the_service_account() {
-    let paths = Paths {
-        bin_dir: PathBuf::from("/opt/reverse-tunnel"),
-        config_dir: PathBuf::new(),
-        secrets_dir: PathBuf::new(),
-        log_dir: PathBuf::new(),
-        lock: PathBuf::new(),
-        link: None,
-    };
+    let paths = Paths::testing("/opt/reverse-tunnel");
     let spec = spec(&paths);
 
     assert_eq!(spec.id.as_str(), "reverse-tunnel");
