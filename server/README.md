@@ -88,7 +88,8 @@ nobody is locked out.
 2. `uv run ctl join-code`, and re-run `reverse-tunnel install` with the new code on every host. Do not go on until
    every host has it.
 3. Switch frps: `mv tls/new.key tls/frps.key && mv tls/new.crt tls/frps.crt && chmod 644 tls/frps.crt`, then
-   `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check that each host's `frpc.log`
-   has a `login to server success` stamped after the restart, or `frpc.log.1` has if the log passed 10 MiB since. Only
-   those two are kept, so check soon after the restart.
+   `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check that each host has a
+   `login` line since the restart:
+   `docker compose logs --no-log-prefix --since <time of the restart> reverse-tunnel-plugin | grep '^login '`
+   prints `login host='<name>'` for each one.
 4. Delete the old certificate from `tls/trust.pem`, leaving the new one. New join codes carry only that.
