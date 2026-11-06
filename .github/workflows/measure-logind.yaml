@@ -1,0 +1,130 @@
+name: Measure logind
+
+# Temporary: measures what ends with a logind session. Deleted before the PR is ready.
+on:
+  push:
+    paths: [".github/workflows/measure-logind.yaml"]
+  workflow_dispatch:
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Set up a user that can log in and use sudo
+        run: |
+          set -euxo pipefail
+          systemctl --version | head -1
+          loginctl --version >/dev/null
+          command -v sshd || sudo apt-get install -y openssh-server
+          sudo systemctl start ssh
+          sudo useradd -m -s /bin/bash probe
+          sudo usermod -p '*' probe
+          echo 'probe ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/probe
+          sudo -u probe ssh-keygen -q -t ed25519 -N '' -f /home/probe/.ssh/id_ed25519 || {
+            sudo -u probe mkdir -p /home/probe/.ssh
+            sudo -u probe ssh-keygen -q -t ed25519 -N '' -f /home/probe/.ssh/id_ed25519
+          }
+          sudo -u probe cp /home/probe/.ssh/id_ed25519.pub /home/probe/.ssh/authorized_keys
+          sudo chmod 700 /home/probe /home/probe/.ssh
+          sudo chmod 600 /home/probe/.ssh/id_ed25519 /home/probe/.ssh/authorized_keys
+          sudo -u probe sh -c 'ssh-keyscan localhost >> /home/probe/.ssh/known_hosts'
+          sudo -u probe ssh -o BatchMode=yes localhost 'echo logged in as $(id -un); loginctl list-sessions --no-legend'
+      - name: Write the probes
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/measure
+          cat > /tmp/measure/a.sh <<'EOF'
+          echo $$ > "$1/a.pid"
+          exec sleep infinity
+          EOF
+          cat > /tmp/measure/launch_a.py <<'EOF'
+          # A detached child in its own process group, as `uninstall` starts `--finish`.
+          import subprocess, sys
+          D = subprocess.DEVNULL
+          subprocess.Popen(["sh", sys.argv[1] + "/a.sh", sys.argv[2]], process_group=0, stdin=D, stdout=D, stderr=D)
+          EOF
+          cat > /tmp/measure/b.sh <<'EOF'
+          echo $$ > "$1/b.pid"
+          echo started
+          exec 3<>"$1/b.fifo"
+          read x <&3
+          echo finished
+          exit 3
+          EOF
+          cat > /tmp/measure/session.sh <<'EOF'
+          # Runs as the probe user, inside the logind session. $1 is the case's directory, $2 the case's tag.
+          set -eu
+          D=$1
+          echo "$XDG_SESSION_ID" > "$D/session"
+          sudo python3 /tmp/measure/launch_a.py /tmp/measure "$D"
+          {
+            sudo systemd-run --wait --collect --unit="measure-b-$2" \
+              -p "StandardOutput=append:$D/b.log" -p "StandardError=append:$D/b.log" -- sh /tmp/measure/b.sh "$D"
+            echo "$?" > "$D/b.client.status"
+          } </dev/null >"$D/b.client" 2>&1 &
+          until [ -s "$D/a.pid" ] && [ -s "$D/b.pid" ]; do sleep 0.1; done
+          EOF
+          cat > /tmp/measure/case.sh <<'EOF'
+          # case.sh <launcher: ssh|su> <KillUserProcesses: yes|no>; prints RESULT lines.
+          set -uo pipefail
+          launcher=$1 mode=$2 tag=$1-$2
+          D=/tmp/measure/$tag
+          rm -rf "$D"; mkdir -p "$D"; chmod 777 "$D"; mkfifo -m 666 "$D/b.fifo"
+          if [ "$mode" = yes ]; then
+            mkdir -p /etc/systemd/logind.conf.d
+            printf '[Login]\nKillUserProcesses=yes\n' > /etc/systemd/logind.conf.d/zz-measure.conf
+          else
+            rm -f /etc/systemd/logind.conf.d/zz-measure.conf
+          fi
+          systemctl restart systemd-logind
+          systemd-analyze cat-config systemd/logind.conf | grep -i KillUserProcesses || true
+          case $launcher in
+            ssh) ssh -n -o BatchMode=yes -i /home/probe/.ssh/id_ed25519 probe@localhost "bash /tmp/measure/session.sh $D $tag" ;;
+            su) su -l probe -c "bash /tmp/measure/session.sh $D $tag" ;;
+          esac
+          echo "launcher exited with $?"
+          sid=$(cat "$D/session" 2>/dev/null || true)
+          echo "RESULT $tag session id: '${sid}'"
+          [ -n "$sid" ] || { echo "RESULT $tag NO LOGIND SESSION"; exit 0; }
+          until ! loginctl show-session "$sid" >/dev/null 2>&1; do sleep 0.2; done
+          if [ "$mode" = yes ]; then
+            until [ "$(systemctl show -p ActiveState --value "session-$sid.scope")" = inactive ]; do sleep 0.2; done
+          fi
+          alive() { [ -e "/proc/$1" ] && ! grep -q '^State:.*Z' "/proc/$1/status"; }
+          apid=$(cat "$D/a.pid"); bpid=$(cat "$D/b.pid")
+          if alive "$apid"; then echo "RESULT $tag a (detached process group): ALIVE"; kill "$apid"; else echo "RESULT $tag a (detached process group): DEAD"; fi
+          if alive "$bpid" && systemctl is-active -q "measure-b-$tag"; then
+            echo "RESULT $tag b (systemd-run unit): ALIVE"
+            echo go > "$D/b.fifo"
+            until ! systemctl is-active -q "measure-b-$tag"; do sleep 0.2; done
+            echo "RESULT $tag b log: $(tr '\n' ' ' < "$D/b.log")"
+            if [ "$mode" = no ]; then
+              until [ -e "$D/b.client.status" ]; do sleep 0.2; done
+              echo "RESULT $tag b client (still alive, no kill) exit status: $(cat "$D/b.client.status")"
+            else
+              echo "RESULT $tag b client status file present: $([ -e "$D/b.client.status" ] && echo yes || echo no, client died with the session)"
+            fi
+          else
+            echo "RESULT $tag b (systemd-run unit): DEAD"
+          fi
+          rm -f /etc/systemd/logind.conf.d/zz-measure.conf
+          EOF
+      - name: Measure
+        run: |
+          set -uo pipefail
+          for launcher in ssh su; do
+            for mode in yes no; do
+              echo "::group::$launcher KillUserProcesses=$mode"
+              sudo bash /tmp/measure/case.sh "$launcher" "$mode" 2>&1 | tee -a /tmp/measure/all.log
+              echo "::endgroup::"
+            done
+          done
+          echo "== summary =="
+          grep '^RESULT' /tmp/measure/all.log
+      - name: A systemd-run --wait client reports the command's exit status
+        run: |
+          set +e
+          sudo systemd-run --wait --collect --unit=measure-exit -- sh -c 'exit 3'
+          echo "RESULT systemd-run --wait exit status: $?"
+          systemctl --version | head -1
