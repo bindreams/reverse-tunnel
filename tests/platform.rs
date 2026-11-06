@@ -534,3 +534,33 @@ fn install_is_refused_while_an_uninstall_is_unfinished() {
     );
     assert_eq!(machine.status().pid, supervisor);
 }
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn status_needs_no_elevation() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    account::ensure(PROBE).unwrap();
+    // The installed binary: the test binary's own directory is in a home directory.
+    let installed = service::exe(&machine.paths);
+    let as_probe = |command: &str| {
+        let out = Command::new("sudo")
+            .args(["-n", "-u", PROBE, "--"])
+            .arg(&installed)
+            .arg(command)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{command} as {PROBE}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    let status = as_probe("status");
+    assert!(status.contains("service: running"), "{status}");
+    assert!(status.contains("bridge: tunnel.example.test"), "{status}");
+    assert!(status.contains("certificate: SHA-256 "), "{status}");
+}

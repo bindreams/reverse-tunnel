@@ -247,6 +247,19 @@ fn bin_dir_loses_old_versions_and_temp_files() {
 }
 
 #[test]
+fn unchanged_install_leaves_a_running_service_alone() {
+    let machine = Machine::new();
+    let spec = service::spec(&machine.paths);
+    let manager = Fake::default();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+
+    pick_up(&manager, &spec.id, &machine.paths, false).unwrap();
+
+    assert_eq!(manager.calls(), [("start", spec.id.to_string())]);
+}
+
+#[test]
 fn kill_not_running_starts() {
     let machine = Machine::new();
     let spec = service::spec(&machine.paths);
@@ -258,4 +271,18 @@ fn kill_not_running_starts() {
     assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
     let id = spec.id.to_string();
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
+}
+
+#[test]
+fn restart_failure_is_retried_by_install() {
+    let machine = Machine::new();
+    let spec = service::spec(&machine.paths);
+    // Never installed: the kill fails with something other than NotRunning.
+    let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("run `reverse-tunnel install` again"),
+        "{err:#}"
+    );
+    assert!(pending_file(&machine.paths).exists());
 }

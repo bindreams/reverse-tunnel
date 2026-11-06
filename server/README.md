@@ -28,8 +28,9 @@ Joining a host and publishing a service: see the main README. The commands are `
 - `docker compose ps` lists `reverse-tunnel-frps` and `reverse-tunnel-plugin` running.
 - `docker compose logs reverse-tunnel-frps | grep 'frps started successfully'` prints a line.
 - `docker compose config` prints the frps router rule ending in your domain followed by `$$` (Compose's escape for `$`).
-- A joined host's `reverse-tunnel status` shows a successful login. "host not registered" means `uv run ctl add` has
-  not been run for it.
+- A joined host's `frpc.log` (in `/var/log/reverse-tunnel` on Linux, `/Library/Logs/reverse-tunnel` on macOS,
+  `%ProgramData%\reverse-tunnel\logs` on Windows) shows `login to server success`. "host not registered" means
+  `uv run ctl add` has not been run for it.
 
 ## Teardown
 
@@ -84,8 +85,10 @@ nobody is locked out.
    cat tls/new.crt >> tls/trust.pem
    ```
 
-2. `uv run ctl join-code`, and re-run `reverse-tunnel install` with the new code on every host (or put the new
-   `bridge.pem` on each and restart its service). Do not go on until every host has it.
+2. `uv run ctl join-code`, and re-run `reverse-tunnel install` with the new code on every host. Do not go on until
+   every host has it.
 3. Switch frps: `mv tls/new.key tls/frps.key && mv tls/new.crt tls/frps.crt && chmod 644 tls/frps.crt`, then
-   `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check their `status`.
+   `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check that each host's `frpc.log`
+   has a `login to server success` stamped after the restart, or `frpc.log.1` has if the log passed 10 MiB since. Only
+   those two are kept, so check soon after the restart.
 4. Delete the old certificate from `tls/trust.pem`, leaving the new one. New join codes carry only that.

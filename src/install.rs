@@ -22,7 +22,7 @@ use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
-use crate::{download, service};
+use crate::{download, ops, service};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -135,10 +135,11 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         .process_group(0)
         .spawn()
         .context("starting the removal")?;
-    println!(
+    // The removal may already have cut the session.
+    ops::println_best_effort(&format!(
         "Removing. If this session ends, the removal continues; its log is {}.",
         log_path.display()
-    );
+    ));
     let status = finish.wait().context("waiting for the removal")?;
     ensure!(
         status.success(),
@@ -146,8 +147,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         log_path.display(),
         rerun_uninstall(paths)
     );
-    // Without a pty, the session's end closes this pipe.
-    let _ = writeln!(io::stdout(), "Removed.");
+    ops::println_best_effort("Removed.");
     Ok(())
 }
 
@@ -477,30 +477,26 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 /// The restart marker is removed just before, since nothing that runs after the kill is sure to run; it is put back
 /// if the service was not picked up.
 fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
-    if changed {
-        remove_entry(&pending_file(paths))?;
+    if !changed {
+        manager.start(id, Budget::Unbounded)?;
+        return Ok(());
     }
-    let picked = restart(manager, id, changed);
-    if picked.is_err() && changed {
-        mark_pending(paths)?;
-    }
-    picked
+    remove_entry(&pending_file(paths))?;
+    let Err(err) = restart(manager, id) else {
+        return Ok(());
+    };
+    mark_pending(paths)?;
+    Err(err.context(
+        "the new files are in place, but the service was not restarted; run `reverse-tunnel install` again to retry",
+    ))
 }
 
-fn restart(manager: &dyn ServiceManager, id: &Id, changed: bool) -> Result<()> {
-    if changed {
-        match manager.kill(id) {
-            Ok(()) => return Ok(()),
-            Err(goetia::Error::NotRunning { .. }) => {}
-            Err(err) => {
-                bail!(
-                    "the new files are in place, but the service was not restarted ({err}); run `reverse-tunnel start`"
-                )
-            }
-        }
+fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {
+    match manager.kill(id) {
+        Ok(()) => Ok(()),
+        Err(goetia::Error::NotRunning { .. }) => Ok(manager.start(id, Budget::Unbounded)?),
+        Err(err) => Err(err.into()),
     }
-    manager.start(id, Budget::Unbounded)?;
-    Ok(())
 }
 
 #[cfg(test)]
