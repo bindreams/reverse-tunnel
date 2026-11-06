@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 use super::*;
@@ -19,19 +18,8 @@ services:
 ";
 const WS_PORT: u16 = 41234;
 
-fn paths(config_dir: &str) -> Paths {
-    Paths {
-        bin_dir: PathBuf::from("bin"),
-        config_dir: PathBuf::from(config_dir),
-        secrets_dir: PathBuf::from(config_dir).join("secrets"),
-        log_dir: PathBuf::from("logs"),
-        lock: PathBuf::new(),
-        link: None,
-    }
-}
-
 fn render_yaml(yaml: &str) -> String {
-    render(&Config::parse(yaml).unwrap(), WS_PORT, &paths("config"))
+    render(&Config::parse(yaml).unwrap(), WS_PORT, &Paths::testing("root"))
 }
 
 /// The text of the `[[proxies]]` table named `name`.
@@ -45,7 +33,7 @@ fn proxy(out: &str, name: &str) -> String {
 
 #[test]
 fn render_transport() {
-    let p = paths("config");
+    let p = Paths::testing("root");
     let ca = serde_json::to_string(p.config_dir.join("bridge.pem").to_str().unwrap()).unwrap();
     let out = render(&Config::parse(YAML).unwrap(), WS_PORT, &p);
     for line in [
@@ -105,17 +93,15 @@ fn ws_routes_cover_tcp_services_and_default() {
 fn frpc_verify_accepts_render() {
     let dir = tempfile::tempdir().unwrap();
     let frpc = fetch(host_pin().unwrap(), dir.path()).unwrap();
+    let paths = Paths::testing(dir.path());
+    std::fs::create_dir(&paths.config_dir).unwrap();
     std::fs::write(
-        dir.path().join("bridge.pem"),
+        paths.config_dir.join("bridge.pem"),
         include_str!("../server/testdata/bridge.pem"),
     )
     .unwrap();
     let toml = dir.path().join("frpc.toml");
-    let out = render(
-        &Config::parse(YAML).unwrap(),
-        WS_PORT,
-        &paths(dir.path().to_str().unwrap()),
-    );
+    let out = render(&Config::parse(YAML).unwrap(), WS_PORT, &paths);
     std::fs::write(&toml, out).unwrap();
     let verify = Command::new(frpc).args(["verify", "-c"]).arg(&toml).output().unwrap();
     assert!(

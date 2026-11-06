@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, ensure};
 
@@ -22,6 +22,19 @@ pub struct Paths {
 }
 
 impl Paths {
+    /// Paths for tests: fixed names under `root`, and no link.
+    pub fn testing(root: impl AsRef<Path>) -> Paths {
+        let root = root.as_ref();
+        Paths {
+            bin_dir: root.join("bin"),
+            config_dir: root.join("config"),
+            secrets_dir: root.join("config/secrets"),
+            log_dir: root.join("logs"),
+            lock: root.join("lock"),
+            link: None,
+        }
+    }
+
     /// The system's paths. Fails if one is not valid Unicode, so later code may rely on that.
     pub fn system() -> Result<Paths> {
         let (bin_dir, config_dir, log_dir, lock, link) = layout()?;

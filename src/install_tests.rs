@@ -40,14 +40,7 @@ impl Machine {
     fn new() -> Machine {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let paths = Paths {
-            bin_dir: root.join("bin"),
-            config_dir: root.join("config"),
-            secrets_dir: root.join("config/secrets"),
-            log_dir: root.join("logs"),
-            lock: root.join("lock"),
-            link: None,
-        };
+        let paths = Paths::testing(root);
         fs::create_dir(&paths.config_dir).unwrap();
         let account = Account {
             uid: uzers::get_current_uid(),

@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Cursor, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -65,20 +65,14 @@ fn extracts_tar_gz_and_zip() {
     ] {
         let pin = pin_for(url, member, &archive);
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths {
-            bin_dir: dir.path().to_path_buf(),
-            config_dir: PathBuf::new(),
-            secrets_dir: PathBuf::new(),
-            log_dir: PathBuf::new(),
-            lock: PathBuf::new(),
-            link: None,
-        };
+        let paths = Paths::testing(dir.path());
+        std::fs::create_dir(&paths.bin_dir).unwrap();
 
-        let written = install(&pin, &archive, dir.path()).unwrap();
+        let written = install(&pin, &archive, &paths.bin_dir).unwrap();
 
         assert_eq!(written, tools(&paths).frpc, "{url}");
         assert_eq!(std::fs::read(&written).unwrap(), BINARY, "{url}");
-        assert_eq!(entries(dir.path()).len(), 1, "{url}: only the member is written");
+        assert_eq!(entries(&paths.bin_dir).len(), 1, "{url}: only the member is written");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
