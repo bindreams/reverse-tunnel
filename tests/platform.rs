@@ -425,6 +425,7 @@ fn uninstall_survives_session_end() {
     let mut session = session.spawn().unwrap();
     let mut output = BufReader::new(session.stdout.take().unwrap());
     let mut line = String::new();
+    let mut said_log = false;
     while !line.starts_with("Removing.") {
         line.clear();
         assert_ne!(
@@ -432,7 +433,10 @@ fn uninstall_survives_session_end() {
             0,
             "uninstall ended before starting the removal"
         );
+        said_log |= line.starts_with("Its log will be ") && line.contains("uninstall.log");
     }
+    // The removal may cut the session before anything after "Removing." is read.
+    assert!(said_log, "the log path was not printed before the removal started");
     let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
     kill_process_group(group, Signal::KILL).unwrap();
     session.wait().unwrap();
