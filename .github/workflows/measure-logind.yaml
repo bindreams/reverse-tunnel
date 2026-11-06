@@ -26,6 +26,8 @@ jobs:
             sudo -u probe ssh-keygen -q -t ed25519 -N '' -f /home/probe/.ssh/id_ed25519
           }
           sudo -u probe cp /home/probe/.ssh/id_ed25519.pub /home/probe/.ssh/authorized_keys
+          sudo chmod 700 /home/probe /home/probe/.ssh
+          sudo chmod 600 /home/probe/.ssh/id_ed25519 /home/probe/.ssh/authorized_keys
           sudo -u probe sh -c 'ssh-keyscan localhost >> /home/probe/.ssh/known_hosts'
           sudo -u probe ssh -o BatchMode=yes localhost 'echo logged in as $(id -un); loginctl list-sessions --no-legend'
       - name: Write the probes
