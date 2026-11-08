@@ -679,3 +679,52 @@ fn status_needs_no_elevation() {
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
 }
+
+#[cfg(target_os = "linux")]
+fn diag_variant(label: &str, user: &str, drop_in: &str) {
+    fs::create_dir_all(Path::new(KillUserProcesses::DROP_IN).parent().unwrap()).unwrap();
+    fs::write(KillUserProcesses::DROP_IN, drop_in).unwrap();
+    output_of("systemctl", &["restart", "systemd-logind"]);
+    let mut session = Command::new("su");
+    session
+        .args(["-s", "/bin/sh", "-l", user, "-c"])
+        .arg("echo session=$XDG_SESSION_ID; sleep 1000 & echo pid=$!; exec sleep 1001")
+        .stdout(Stdio::piped());
+    let mut session = session.spawn().unwrap();
+    let mut out = BufReader::new(session.stdout.take().unwrap());
+    let (mut id, mut pid) = (String::new(), String::new());
+    out.read_line(&mut id).unwrap();
+    out.read_line(&mut pid).unwrap();
+    let id = id.trim().strip_prefix("session=").unwrap().to_string();
+    let pid = pid.trim().strip_prefix("pid=").unwrap().to_string();
+    eprintln!("DIAG {label}: session {id} pid {pid}: {}", output_of("loginctl", &["show-session", &id, "-p", "State", "-p", "Leader", "-p", "Scope", "-p", "User"]).replace('
+', " "));
+    eprintln!("DIAG {label}: pkill {:?}", Command::new("pkill").args(["-KILL", "-P", &session.id().to_string()]).status());
+    session.wait().unwrap();
+    for _ in 0..12 {
+        let state = Command::new("loginctl").args(["show-session", &id, "-p", "State"]).output().unwrap();
+        let alive = Path::new(&format!("/proc/{pid}")).exists();
+        eprintln!("DIAG {label}: {} sleep alive={alive}", String::from_utf8_lossy(&state.stdout).trim());
+        thread::sleep(Duration::from_millis(500));
+    }
+    let _ = Command::new("kill").arg(&pid).status();
+    let _ = Command::new("loginctl").args(["terminate-session", &id]).status();
+    wait_until("session gone", || !Command::new("loginctl").args(["show-session", &id]).output().unwrap().status.success());
+    fs::remove_file(KillUserProcesses::DROP_IN).unwrap();
+    output_of("systemctl", &["restart", "systemd-logind"]);
+}
+
+#[test]
+#[ignore = "diag"]
+#[cfg(target_os = "linux")]
+fn diag_kill() {
+    account::ensure(PROBE).unwrap();
+    diag_variant("root-empty-exclude", "root", "[Login]
+KillUserProcesses=yes
+KillExcludeUsers=
+");
+    diag_variant("probe", PROBE, "[Login]
+KillUserProcesses=yes
+");
+    let _ = account::remove(PROBE);
+}
