@@ -521,8 +521,16 @@ fn uninstall_survives_logind_session_end() {
             .find_map(|line| line.strip_prefix("session="))
             .expect("su -l opens a logind session");
         // The leader exits, as when ssh drops; logind then kills what is left in the scope because of the drop-in.
+        eprintln!("DIAG kill: {}", output_of("busctl", &["get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "KillUserProcesses"]));
+        eprintln!("DIAG before kill: {}", output_of("loginctl", &["show-session", id, "-p", "State", "-p", "Leader", "-p", "Scope"]));
+        eprintln!("DIAG procs before: {:?}", processes().iter().filter(|p| p.args.contains("uninstall")).map(|p| (p.pid, p.args.clone())).collect::<Vec<_>>());
         session.kill().unwrap();
         session.wait().unwrap();
+        for _ in 0..20 {
+            let state = Command::new("loginctl").args(["show-session", id, "-p", "State"]).output().unwrap();
+            eprintln!("DIAG state: {} {:?}", String::from_utf8_lossy(&state.stdout).trim(), processes().iter().filter(|p| p.args.contains("uninstall")).map(|p| p.pid).collect::<Vec<_>>());
+            thread::sleep(Duration::from_millis(100));
+        }
         wait_until("logind has ended the session", || {
             !Command::new("loginctl")
                 .args(["show-session", id])
