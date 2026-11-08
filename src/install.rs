@@ -142,17 +142,18 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
 }
 
 /// Starts `uninstall --finish` so that it outlives the session that runs `uninstall`, with its output appended to
-/// `log_path`. The returned child is waited on; it ends with the removal.
+/// `log_path`. Returns once the removal has started; the child is waited on, and ends with the removal.
 ///
 /// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
-/// a process of its own does not escape that. The unit opens `log_path` itself, as root.
+/// a process of its own does not escape that. The unit opens `log_path` itself, as root. `systemd-run` says "Running
+/// as unit" once the unit is started; until then, the end of the session could end the removal before it began.
 #[cfg(target_os = "linux")]
-fn spawn_finish(exe: &Path, log_path: &Path, log: fs::File) -> io::Result<std::process::Child> {
+fn spawn_finish(exe: &Path, log_path: &Path, log: fs::File) -> Result<std::process::Child> {
     // The unit opens the log by name; the file this process made is only what makes it exist, as root.
     drop(log);
     let output = format!("append:{}", log_path.display());
-    Command::new("systemd-run")
-        .args(["--quiet", "--wait", "--collect", "--unit=reverse-tunnel-uninstall"])
+    let mut client = Command::new("systemd-run")
+        .args(["--wait", "--collect", "--unit=reverse-tunnel-uninstall"])
         .args(["-p", &format!("StandardOutput={output}")])
         .args(["-p", &format!("StandardError={output}")])
         .arg("--")
@@ -160,21 +161,34 @@ fn spawn_finish(exe: &Path, log_path: &Path, log: fs::File) -> io::Result<std::p
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
+        .context("running systemd-run")?;
+    let mut stderr = io::BufReader::new(client.stderr.take().expect("stderr is piped"));
+    let mut line = String::new();
+    stderr.read_line(&mut line)?;
+    if !line.starts_with("Running as unit:") {
+        // Its error, if it said one. The client is done: it has nothing left to wait for.
+        client.wait()?;
+        bail!("systemd-run did not start the removal: {}", line.trim_end());
+    }
+    // Kept open: the client's later lines would otherwise kill it with SIGPIPE, and the removal would look failed.
+    client.stderr = Some(stderr.into_inner());
+    Ok(client)
 }
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone.
 #[cfg(not(target_os = "linux"))]
-fn spawn_finish(exe: &Path, _log_path: &Path, log: fs::File) -> io::Result<std::process::Child> {
+fn spawn_finish(exe: &Path, _log_path: &Path, log: fs::File) -> Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
-    Command::new(exe)
+    Ok(Command::new(exe)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
         .process_group(0)
-        .spawn()
+        .spawn()?)
 }
 
 /// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
