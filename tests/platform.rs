@@ -697,8 +697,7 @@ fn diag_variant(label: &str, user: &str, drop_in: &str) {
     out.read_line(&mut pid).unwrap();
     let id = id.trim().strip_prefix("session=").unwrap().to_string();
     let pid = pid.trim().strip_prefix("pid=").unwrap().to_string();
-    eprintln!("DIAG {label}: session {id} pid {pid}: {}", output_of("loginctl", &["show-session", id.as_str(), "-p", "State", "-p", "Leader", "-p", "Scope", "-p", "User"]).replace('
-', " "));
+    eprintln!("DIAG {label}: session {id} pid {pid}: {}", output_of("loginctl", &["show-session", id.as_str(), "-p", "State", "-p", "Leader", "-p", "Scope", "-p", "User"]).replace('\n', " "));
     eprintln!("DIAG {label}: pkill {:?}", Command::new("pkill").args(["-KILL", "-P", session.id().to_string().as_str()]).status());
     session.wait().unwrap();
     for _ in 0..12 {
