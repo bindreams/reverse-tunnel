@@ -145,7 +145,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
 /// a process of its own does not escape that. `systemd-run` says "Running as unit" once the unit is started; until
 /// then, the end of the session could end the removal before it began. The unit's output before the log is the
 /// journal's.
-#[cfg(target_os = "linux")]
+#[cfg(any())]
 fn spawn_finish(exe: &Path) -> Result<std::process::Child> {
     let mut client = Command::new("systemd-run")
         .args(["--wait", "--collect", "--unit=reverse-tunnel-uninstall", "--"])
@@ -187,7 +187,6 @@ fn spawn_finish(exe: &Path) -> Result<std::process::Child> {
 }
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone.
-#[cfg(not(target_os = "linux"))]
 fn spawn_finish(exe: &Path) -> Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
