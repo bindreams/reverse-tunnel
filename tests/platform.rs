@@ -510,7 +510,7 @@ impl Drop for KillUserProcesses {
 #[cfg(target_os = "linux")]
 fn uninstall_survives_logind_session_end() {
     let _kill = KillUserProcesses::set();
-    // A real logind session, which ends the way an ssh login does: its leader exits.
+    // A real logind session, which ends when its command does, as an ssh login ends with its shell.
     let mut session = Command::new("su");
     session
         .args(["-l", "root", "-c"])
@@ -520,8 +520,9 @@ fn uninstall_survives_logind_session_end() {
             .lines()
             .find_map(|line| line.strip_prefix("session="))
             .expect("su -l opens a logind session");
-        // The leader exits, as when ssh drops; logind then kills what is left in the scope because of the drop-in.
-        session.kill().unwrap();
+        // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the scope
+        // because of the drop-in. (A `su` killed outright leaves the scope alone.)
+        output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
         session.wait().unwrap();
         wait_until("logind has ended the session", || {
             !Command::new("loginctl")
