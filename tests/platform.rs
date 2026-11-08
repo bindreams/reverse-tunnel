@@ -429,9 +429,9 @@ fn rejoin_takes_effect() {
     assert_ne!(machine.status().pid, supervisor);
 }
 
-/// Runs `session` (which must run `uninstall`) on the installed `machine` until the removal has started, ends the
+/// Runs `session` (which must run `uninstall`, on an installed machine) until the removal has started, ends the
 /// session with `end`, which is given the session and what it printed, and returns once the removal is over.
-fn uninstall_survives(machine: &Machine, mut session: Command, end: impl FnOnce(&mut Child, &str)) {
+fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) {
     let mut session = session.stdout(Stdio::piped()).spawn().unwrap();
     let mut output = BufReader::new(session.stdout.take().unwrap());
     let mut printed = String::new();
@@ -466,7 +466,7 @@ fn uninstall_survives_session_end() {
     machine.install(&join_code("tunnel.example.test"));
     let mut session = Command::new(BIN);
     session.arg("uninstall").process_group(0);
-    uninstall_survives(&machine, session, |session, _| {
+    uninstall_survives(session, |session, _| {
         let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
         kill_process_group(group, Signal::KILL).unwrap();
     });
@@ -549,7 +549,7 @@ fn uninstall_survives_logind_session_end() {
     session
         .args(["-s", "/bin/sh", "-l", PROBE, "-c"])
         .arg(format!("echo session=$XDG_SESSION_ID; exec sudo -n '{BIN}' uninstall"));
-    uninstall_survives(&machine, session, |session, printed| {
+    uninstall_survives(session, |session, printed| {
         let id = printed
             .lines()
             .find_map(|line| line.strip_prefix("session="))
