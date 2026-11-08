@@ -44,16 +44,19 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 }
 
 /// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit, which is running
-/// from when `systemd-run` says so, before the process has exec'd.
+/// from when `systemd-run` says so, before the process has exec'd, and is not over while it activates or deactivates.
 fn wait_until_removed() {
     wait_until("the removal ends", || {
-        let unit_running = cfg!(target_os = "linux")
-            && Command::new("systemctl")
-                .args(["is-active", "--quiet", "reverse-tunnel-uninstall.service"])
-                .status()
-                .unwrap()
-                .success();
-        !unit_running
+        let unit_in_transition = cfg!(target_os = "linux")
+            && !matches!(
+                output_of(
+                    "systemctl",
+                    &["show", "-p", "ActiveState", "--value", "reverse-tunnel-uninstall.service"]
+                )
+                .trim(),
+                "inactive" | "failed"
+            );
+        !unit_in_transition
             && !processes()
                 .iter()
                 .any(|process| process.args.ends_with("uninstall --finish"))
@@ -501,17 +504,27 @@ impl Drop for KillUserProcesses {
 #[cfg(target_os = "linux")]
 fn uninstall_survives_logind_session_end() {
     let _kill = KillUserProcesses::set();
-    // A real logind session, which ends the way an ssh login does, and takes with it everything left in its scope.
+    // A real logind session, which ends the way an ssh login does: its leader exits.
     let mut session = Command::new("su");
     session
         .args(["-l", "root", "-c"])
         .arg(format!("echo session=$XDG_SESSION_ID; exec '{BIN}' uninstall"));
-    uninstall_survives(session, |_, printed| {
+    uninstall_survives(session, |session, printed| {
         let id = printed
             .lines()
             .find_map(|line| line.strip_prefix("session="))
             .expect("su -l opens a logind session");
-        output_of("loginctl", &["terminate-session", id]);
+        // The leader exits, as when ssh drops; logind then kills what is left in the scope because of the drop-in.
+        session.kill().unwrap();
+        session.wait().unwrap();
+        wait_until("logind has ended the session", || {
+            !Command::new("loginctl")
+                .args(["show-session", id])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        });
     });
 }
 
@@ -543,6 +556,30 @@ fn uninstall_leaves_nothing() {
         "removed besides ours"
     );
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn finish_logs_to_a_file_it_creates_itself() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    // What the service account, which owns logs/, can plant for root to follow, after `uninstall` has started.
+    let victim = env::temp_dir().join("rt-finish-log-victim");
+    symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
+    // The removal reports a link it leaves; that line is the output to look for.
+    let link = machine.paths.link.as_ref().unwrap();
+    fs::remove_file(link).unwrap();
+    symlink("/rt-elsewhere", link).unwrap();
+
+    let finish = Command::new(BIN).args(["uninstall", "--finish"]).output().unwrap();
+
+    fs::remove_file(link).unwrap();
+    assert!(finish.status.success(), "{finish:?}");
+    assert!(!victim.exists(), "--finish wrote through a link in logs/");
+    assert!(
+        finish.stdout.is_empty() && finish.stderr.is_empty(),
+        "--finish wrote to what it inherited, not to its log: {finish:?}"
+    );
 }
 
 #[test]
