@@ -522,7 +522,7 @@ fn uninstall_survives_logind_session_end() {
             .expect("su -l opens a logind session");
         // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the scope
         // because of the drop-in. (A `su` killed outright leaves the scope alone.)
-        output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
+        output_of("pkill", &["-KILL", "-P", session.id().to_string().as_str()]);
         session.wait().unwrap();
         wait_until("logind has ended the session", || {
             !Command::new("loginctl")
@@ -697,19 +697,19 @@ fn diag_variant(label: &str, user: &str, drop_in: &str) {
     out.read_line(&mut pid).unwrap();
     let id = id.trim().strip_prefix("session=").unwrap().to_string();
     let pid = pid.trim().strip_prefix("pid=").unwrap().to_string();
-    eprintln!("DIAG {label}: session {id} pid {pid}: {}", output_of("loginctl", &["show-session", &id, "-p", "State", "-p", "Leader", "-p", "Scope", "-p", "User"]).replace('
+    eprintln!("DIAG {label}: session {id} pid {pid}: {}", output_of("loginctl", &["show-session", id.as_str(), "-p", "State", "-p", "Leader", "-p", "Scope", "-p", "User"]).replace('
 ', " "));
-    eprintln!("DIAG {label}: pkill {:?}", Command::new("pkill").args(["-KILL", "-P", &session.id().to_string()]).status());
+    eprintln!("DIAG {label}: pkill {:?}", Command::new("pkill").args(["-KILL", "-P", session.id().to_string().as_str()]).status());
     session.wait().unwrap();
     for _ in 0..12 {
-        let state = Command::new("loginctl").args(["show-session", &id, "-p", "State"]).output().unwrap();
+        let state = Command::new("loginctl").args(["show-session", id.as_str(), "-p", "State"]).output().unwrap();
         let alive = Path::new(&format!("/proc/{pid}")).exists();
         eprintln!("DIAG {label}: {} sleep alive={alive}", String::from_utf8_lossy(&state.stdout).trim());
         thread::sleep(Duration::from_millis(500));
     }
     let _ = Command::new("kill").arg(&pid).status();
-    let _ = Command::new("loginctl").args(["terminate-session", &id]).status();
-    wait_until("session gone", || !Command::new("loginctl").args(["show-session", &id]).output().unwrap().status.success());
+    let _ = Command::new("loginctl").args(["terminate-session", id.as_str()]).status();
+    wait_until("session gone", || !Command::new("loginctl").args(["show-session", id.as_str()]).output().unwrap().status.success());
     fs::remove_file(KillUserProcesses::DROP_IN).unwrap();
     output_of("systemctl", &["restart", "systemd-logind"]);
 }
