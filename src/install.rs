@@ -6,6 +6,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -118,16 +119,12 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     }
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     open_file(&uninstalling_file(paths), Perm::new(0o600), false)?;
-    make_dir(&paths.log_dir, PUBLIC_DIR)?;
-    let log_path = uninstall_log(paths);
-    // logs/ belongs to the service account, which may have left anything here; root follows no link.
-    remove_entry(&log_path)?;
-    let log = open_file(&log_path, PUBLIC_FILE, true)?;
     // `--finish` takes the lock itself; an `install` in between is refused by the marker.
     drop(lock);
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
+    let log_path = uninstall_log(paths);
     println!("Its log will be {}.", log_path.display());
-    let mut finish = spawn_finish(&env::current_exe()?, &log_path, log).context("starting the removal")?;
+    let mut finish = spawn_finish(&env::current_exe()?).context("starting the removal")?;
     // The removal may already have cut the session.
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let status = finish.wait().context("waiting for the removal")?;
@@ -141,22 +138,17 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Starts `uninstall --finish` so that it outlives the session that runs `uninstall`, with its output appended to
-/// `log_path`. Returns once the removal has started; the child is waited on, and ends with the removal.
+/// Starts `uninstall --finish` so that it outlives the session that runs `uninstall`. Returns once the removal has
+/// started; the child is waited on, and ends with the removal. `--finish` writes its own log (see `redirect_to_log`).
 ///
 /// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
-/// a process of its own does not escape that. The unit opens `log_path` itself, as root. `systemd-run` says "Running
-/// as unit" once the unit is started; until then, the end of the session could end the removal before it began.
+/// a process of its own does not escape that. `systemd-run` says "Running as unit" once the unit is started; until
+/// then, the end of the session could end the removal before it began. The unit's output before the log is the
+/// journal's.
 #[cfg(target_os = "linux")]
-fn spawn_finish(exe: &Path, log_path: &Path, log: fs::File) -> Result<std::process::Child> {
-    // The unit opens the log by name; the file this process made is only what makes it exist, as root.
-    drop(log);
-    let output = format!("append:{}", log_path.display());
+fn spawn_finish(exe: &Path) -> Result<std::process::Child> {
     let mut client = Command::new("systemd-run")
-        .args(["--wait", "--collect", "--unit=reverse-tunnel-uninstall"])
-        .args(["-p", &format!("StandardOutput={output}")])
-        .args(["-p", &format!("StandardError={output}")])
-        .arg("--")
+        .args(["--wait", "--collect", "--unit=reverse-tunnel-uninstall", "--"])
         .arg(exe)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
@@ -165,12 +157,29 @@ fn spawn_finish(exe: &Path, log_path: &Path, log: fs::File) -> Result<std::proce
         .spawn()
         .context("running systemd-run")?;
     let mut stderr = io::BufReader::new(client.stderr.take().expect("stderr is piped"));
-    let mut line = String::new();
-    stderr.read_line(&mut line)?;
-    if !line.starts_with("Running as unit:") {
-        // Its error, if it said one. The client is done: it has nothing left to wait for.
-        client.wait()?;
-        bail!("systemd-run did not start the removal: {}", line.trim_end());
+    let mut said = String::new();
+    loop {
+        let mut line = String::new();
+        let read = match stderr.read_line(&mut line) {
+            Ok(read) => read,
+            Err(err) => {
+                // Not waited on, the client would outlive this error as a zombie.
+                let _ = client.kill();
+                let _ = client.wait();
+                return Err(err).context("reading systemd-run's output");
+            }
+        };
+        if read == 0 {
+            let status = client.wait().context("waiting for systemd-run")?;
+            bail!(
+                "systemd-run ended ({status}) without starting the removal: {}",
+                said.trim_end()
+            );
+        }
+        if line.starts_with("Running as unit:") {
+            break;
+        }
+        said.push_str(&line);
     }
     // Kept open: the client's later lines would otherwise kill it with SIGPIPE, and the removal would look failed.
     client.stderr = Some(stderr.into_inner());
@@ -179,16 +188,33 @@ fn spawn_finish(exe: &Path, log_path: &Path, log: fs::File) -> Result<std::proce
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone.
 #[cfg(not(target_os = "linux"))]
-fn spawn_finish(exe: &Path, _log_path: &Path, log: fs::File) -> Result<std::process::Child> {
+fn spawn_finish(exe: &Path) -> Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
     Ok(Command::new(exe)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .process_group(0)
         .spawn()?)
+}
+
+/// Points stdout and stderr at `uninstall.log`, which this makes, as root, before it does anything else. `logs/`
+/// belongs to the service account, which runs until the removal stops it and may have left or replaced anything here;
+/// the file is opened here by this process, so no link is followed.
+fn redirect_to_log(paths: &Paths) -> Result<()> {
+    make_dir(&paths.log_dir, PUBLIC_DIR)?;
+    let log_path = uninstall_log(paths);
+    remove_entry(&log_path)?;
+    let log = open_file(&log_path, PUBLIC_FILE, true)?;
+    for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: `log` is an open descriptor, and `fd` is one of this process's own, which dup2 replaces.
+        if unsafe { libc::dup2(log.as_raw_fd(), fd) } < 0 {
+            return Err(io::Error::last_os_error()).context("pointing stdout and stderr at the log");
+        }
+    }
+    Ok(())
 }
 
 /// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
@@ -201,8 +227,10 @@ fn rerun_uninstall(paths: &Paths) -> String {
     }
 }
 
-/// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
+/// Removes the service, then the files and the account, with its output in `uninstall.log`. Repeating it finishes what
+/// a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
+    redirect_to_log(paths)?;
     let _lock = lock(paths)?;
     let spec = service::spec(paths);
     match goetia::manager::native()?.uninstall(&spec.id) {

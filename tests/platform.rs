@@ -51,7 +51,13 @@ fn wait_until_removed() {
             && !matches!(
                 output_of(
                     "systemctl",
-                    &["show", "-p", "ActiveState", "--value", "reverse-tunnel-uninstall.service"]
+                    &[
+                        "show",
+                        "-p",
+                        "ActiveState",
+                        "--value",
+                        "reverse-tunnel-uninstall.service"
+                    ]
                 )
                 .trim(),
                 "inactive" | "failed"
