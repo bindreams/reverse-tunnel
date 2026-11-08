@@ -429,12 +429,9 @@ fn rejoin_takes_effect() {
     assert_ne!(machine.status().pid, supervisor);
 }
 
-/// Runs `session` (which must run `uninstall`) until the removal has started, ends the session with `end`, which is
-/// given the session and what it printed, and returns once the removal is over.
-fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-
+/// Runs `session` (which must run `uninstall`) on the installed `machine` until the removal has started, ends the
+/// session with `end`, which is given the session and what it printed, and returns once the removal is over.
+fn uninstall_survives(machine: &Machine, mut session: Command, end: impl FnOnce(&mut Child, &str)) {
     let mut session = session.stdout(Stdio::piped()).spawn().unwrap();
     let mut output = BufReader::new(session.stdout.take().unwrap());
     let mut printed = String::new();
@@ -465,15 +462,18 @@ fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) 
 fn uninstall_survives_session_end() {
     // A session of its own, as ssh's, which is killed once the removal has started: the tunnel it ran over goes with
     // the service.
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
     let mut session = Command::new(BIN);
     session.arg("uninstall").process_group(0);
-    uninstall_survives(session, |session, _| {
+    uninstall_survives(&machine, session, |session, _| {
         let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
         kill_process_group(group, Signal::KILL).unwrap();
     });
 }
 
-/// `KillUserProcesses=yes`, for everyone: it kills what a logind session leaves in its scope when it ends.
+/// `KillUserProcesses=yes`: logind kills what a session leaves in its scope when it ends. Not for root, whom logind
+/// leaves alone however `KillExcludeUsers=` is set.
 #[cfg(target_os = "linux")]
 struct KillUserProcesses;
 
@@ -483,12 +483,10 @@ impl KillUserProcesses {
 
     fn set() -> KillUserProcesses {
         fs::create_dir_all(Path::new(Self::DROP_IN).parent().unwrap()).unwrap();
-        // An empty KillExcludeUsers= drops root, whom logind spares by default.
         fs::write(
             Self::DROP_IN,
             "[Login]
 KillUserProcesses=yes
-KillExcludeUsers=
 ",
         )
         .unwrap();
@@ -505,17 +503,53 @@ impl Drop for KillUserProcesses {
     }
 }
 
+/// `PROBE` may run anything as root without a password.
+#[cfg(target_os = "linux")]
+struct ProbeSudoers;
+
+#[cfg(target_os = "linux")]
+impl ProbeSudoers {
+    const FILE: &'static str = "/etc/sudoers.d/zz-reverse-tunnel-test";
+
+    fn allow() -> ProbeSudoers {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(
+            Self::FILE,
+            format!(
+                "{PROBE} ALL=(root) NOPASSWD: ALL
+"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(Self::FILE, fs::Permissions::from_mode(0o440)).unwrap();
+        ProbeSudoers
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ProbeSudoers {
+    fn drop(&mut self) {
+        fs::remove_file(Self::FILE).unwrap();
+    }
+}
+
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(target_os = "linux")]
 fn uninstall_survives_logind_session_end() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
     let _kill = KillUserProcesses::set();
-    // A real logind session, which ends when its command does, as an ssh login ends with its shell.
+    account::ensure(PROBE).unwrap();
+    let _sudoers = ProbeSudoers::allow();
+    // A real logind session of an ordinary user, who runs `uninstall` as root with sudo, as an administrator logged in
+    // over ssh does.
     let mut session = Command::new("su");
     session
-        .args(["-l", "root", "-c"])
-        .arg(format!("echo session=$XDG_SESSION_ID; exec '{BIN}' uninstall"));
-    uninstall_survives(session, |session, printed| {
+        .args(["-s", "/bin/sh", "-l", PROBE, "-c"])
+        .arg(format!("echo session=$XDG_SESSION_ID; exec sudo -n '{BIN}' uninstall"));
+    uninstall_survives(&machine, session, |session, printed| {
         let id = printed
             .lines()
             .find_map(|line| line.strip_prefix("session="))
