@@ -7,7 +7,6 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
 use std::os::unix::fs::symlink;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -109,8 +108,8 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     pick_up(&*manager, &spec.id, paths, changed)
 }
 
-/// Prepares the removal, hands it to a detached `uninstall --finish` (stopping the service cuts the tunnel, and with
-/// it the session this runs in) and waits for it. If the session ends, the removal carries on.
+/// Prepares the removal, hands it to `uninstall --finish`, detached (see `spawn_finish`; stopping the service cuts the
+/// tunnel, and with it the session this runs in) and waits for it. If the session ends, the removal carries on.
 pub fn uninstall(paths: &Paths) -> Result<()> {
     let lock = lock(paths)?;
     match revoke_line(paths) {
@@ -128,15 +127,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     drop(lock);
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
     println!("Its log will be {}.", log_path.display());
-    let mut finish = Command::new(env::current_exe()?)
-        .args(["uninstall", "--finish"])
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        // Its own process group: the session's hangup does not reach it.
-        .process_group(0)
-        .spawn()
-        .context("starting the removal")?;
+    let mut finish = spawn_finish(&env::current_exe()?, &log_path, log).context("starting the removal")?;
     // The removal may already have cut the session.
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let status = finish.wait().context("waiting for the removal")?;
@@ -148,6 +139,42 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     );
     ops::println_best_effort("Removed.");
     Ok(())
+}
+
+/// Starts `uninstall --finish` so that it outlives the session that runs `uninstall`, with its output appended to
+/// `log_path`. The returned child is waited on; it ends with the removal.
+///
+/// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
+/// a process of its own does not escape that. The unit opens `log_path` itself, as root.
+#[cfg(target_os = "linux")]
+fn spawn_finish(exe: &Path, log_path: &Path, log: fs::File) -> io::Result<std::process::Child> {
+    // The unit opens the log by name; the file this process made is only what makes it exist, as root.
+    drop(log);
+    let output = format!("append:{}", log_path.display());
+    Command::new("systemd-run")
+        .args(["--quiet", "--wait", "--collect", "--unit=reverse-tunnel-uninstall"])
+        .args(["-p", &format!("StandardOutput={output}")])
+        .args(["-p", &format!("StandardError={output}")])
+        .arg("--")
+        .arg(exe)
+        .args(["uninstall", "--finish"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+}
+
+/// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone.
+#[cfg(not(target_os = "linux"))]
+fn spawn_finish(exe: &Path, _log_path: &Path, log: fs::File) -> io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+
+    Command::new(exe)
+        .args(["uninstall", "--finish"])
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .process_group(0)
+        .spawn()
 }
 
 /// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
