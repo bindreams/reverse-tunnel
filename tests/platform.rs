@@ -43,12 +43,20 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
-/// Waits for the detached `uninstall --finish`, which `uninstall` starts, to end.
+/// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit, which is running
+/// from when `systemd-run` says so, before the process has exec'd.
 fn wait_until_removed() {
     wait_until("the removal ends", || {
-        !processes()
-            .iter()
-            .any(|process| process.args.ends_with("uninstall --finish"))
+        let unit_running = cfg!(target_os = "linux")
+            && Command::new("systemctl")
+                .args(["is-active", "--quiet", "reverse-tunnel-uninstall.service"])
+                .status()
+                .unwrap()
+                .success();
+        !unit_running
+            && !processes()
+                .iter()
+                .any(|process| process.args.ends_with("uninstall --finish"))
     });
 }
 
