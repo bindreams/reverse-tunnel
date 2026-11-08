@@ -521,16 +521,8 @@ fn uninstall_survives_logind_session_end() {
             .find_map(|line| line.strip_prefix("session="))
             .expect("su -l opens a logind session");
         // The leader exits, as when ssh drops; logind then kills what is left in the scope because of the drop-in.
-        eprintln!("DIAG kill: {}", output_of("busctl", &["get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", "KillUserProcesses"]));
-        eprintln!("DIAG before kill: {}", output_of("loginctl", &["show-session", id, "-p", "State", "-p", "Leader", "-p", "Scope"]));
-        eprintln!("DIAG procs before: {:?}", processes().iter().filter(|p| p.args.contains("uninstall")).map(|p| (p.pid, p.args.clone())).collect::<Vec<_>>());
         session.kill().unwrap();
         session.wait().unwrap();
-        for _ in 0..20 {
-            let state = Command::new("loginctl").args(["show-session", id, "-p", "State"]).output().unwrap();
-            eprintln!("DIAG state: {} {:?}", String::from_utf8_lossy(&state.stdout).trim(), processes().iter().filter(|p| p.args.contains("uninstall")).map(|p| p.pid).collect::<Vec<_>>());
-            thread::sleep(Duration::from_millis(100));
-        }
         wait_until("logind has ended the session", || {
             !Command::new("loginctl")
                 .args(["show-session", id])
@@ -685,4 +677,51 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
+}
+
+#[cfg(target_os = "linux")]
+fn diag_variant(label: &str, user: &str, drop_in: &str) {
+    fs::create_dir_all(Path::new(KillUserProcesses::DROP_IN).parent().unwrap()).unwrap();
+    fs::write(KillUserProcesses::DROP_IN, drop_in).unwrap();
+    output_of("systemctl", &["restart", "systemd-logind"]);
+    let show = |p: &str| {
+        output_of("busctl", &["get-property", "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", p])
+    };
+    eprintln!("DIAG {label}: KillUserProcesses={} KillExcludeUsers={} KillOnlyUsers={}", show("KillUserProcesses").trim(), show("KillExcludeUsers").trim(), show("KillOnlyUsers").trim());
+    let mut session = Command::new("su");
+    session
+        .args(["-s", "/bin/sh", "-l", user, "-c"])
+        .arg("echo session=$XDG_SESSION_ID; sleep 1000 & echo pid=$!; exec sleep 1001")
+        .stdout(Stdio::piped());
+    let mut session = session.spawn().unwrap();
+    let mut out = BufReader::new(session.stdout.take().unwrap());
+    let (mut id, mut pid) = (String::new(), String::new());
+    out.read_line(&mut id).unwrap();
+    out.read_line(&mut pid).unwrap();
+    let id = id.trim().strip_prefix("session=").unwrap().to_string();
+    let pid = pid.trim().strip_prefix("pid=").unwrap().to_string();
+    eprintln!("DIAG {label}: session {id} pid {pid}: {}", output_of("loginctl", &["show-session", &id, "-p", "State", "-p", "Leader", "-p", "Scope", "-p", "User"]).replace('\n', " "));
+    session.kill().unwrap();
+    session.wait().unwrap();
+    for _ in 0..12 {
+        let state = Command::new("loginctl").args(["show-session", &id, "-p", "State"]).output().unwrap();
+        let alive = Path::new(&format!("/proc/{pid}")).exists();
+        eprintln!("DIAG {label}: {} sleep alive={alive}", String::from_utf8_lossy(&state.stdout).trim());
+        thread::sleep(Duration::from_millis(500));
+    }
+    let _ = Command::new("kill").arg(&pid).status();
+    let _ = Command::new("loginctl").args(["terminate-session", &id]).status();
+    fs::remove_file(KillUserProcesses::DROP_IN).unwrap();
+    output_of("systemctl", &["restart", "systemd-logind"]);
+}
+
+#[test]
+#[ignore = "diag"]
+#[cfg(target_os = "linux")]
+fn diag_kill() {
+    account::ensure(PROBE).unwrap();
+    diag_variant("root-empty-exclude", "root", "[Login]\nKillUserProcesses=yes\nKillExcludeUsers=\n");
+    diag_variant("root-only", "root", "[Login]\nKillUserProcesses=yes\nKillExcludeUsers=\nKillOnlyUsers=root\n");
+    diag_variant("probe", PROBE, "[Login]\nKillUserProcesses=yes\n");
+    let _ = account::remove(PROBE);
 }
