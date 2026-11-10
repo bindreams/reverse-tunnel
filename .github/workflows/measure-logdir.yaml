@@ -1,0 +1,25 @@
+name: measure-logdir
+on: push
+jobs:
+  measure:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Who can write the log directory's parent
+        run: |
+          set -x
+          if [ "$(uname)" = Darwin ]; then
+            ls -ld /Library/Logs
+            dscl . -read /Groups/admin GroupMembership
+            sudo dscl . -create /Users/_rtm UniqueID 399; sudo dscl . -create /Users/_rtm PrimaryGroupID 399; sudo dscl . -create /Users/_rtm UserShell /usr/bin/false
+            sudo -u _rtm /bin/test -w /Library/Logs && echo "_rtm CAN write /Library/Logs" || echo "_rtm cannot write /Library/Logs"
+            sudo -u _rtm /bin/sh -c 'touch /Library/Logs/rt-x' && echo CAN-touch || echo cannot-touch
+          else
+            ls -ld /var/log
+            getent group syslog
+            sudo useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --user-group rtm
+            id rtm
+            sudo -u rtm test -w /var/log && echo "rtm CAN write /var/log" || echo "rtm cannot write /var/log"
+          fi
