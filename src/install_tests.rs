@@ -291,4 +291,9 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     let text = format!("{err:#}");
     assert!(text.contains("the service was not restarted"), "{text}");
     assert!(text.contains("restart-pending"), "{text}");
+    // The next `install` will not notice, so the operator is told to restart it by hand.
+    assert!(
+        text.contains("`reverse-tunnel stop`") && text.contains("`reverse-tunnel start`"),
+        "{text}"
+    );
 }

@@ -201,7 +201,20 @@ impl Machine {
 impl Drop for Machine {
     fn drop(&mut self) {
         let _ = Command::new(BIN).args(["uninstall", "--finish"]).status();
-        let _ = account::remove(PROBE);
+        #[cfg(target_os = "linux")]
+        {
+            // `su -l` starts the account's user manager, user@<uid>.service, which outlives the session, and `userdel`
+            // refuses while anything of the account runs. (`pgrep` fails for an account that is gone.)
+            let _ = Command::new("loginctl").args(["terminate-user", PROBE]).status();
+            wait_until("the probe account has no processes", || {
+                !Command::new("pgrep").args(["-u", PROBE]).status().unwrap().success()
+            });
+        }
+        let removed = account::remove(PROBE);
+        // A panicking test may have left the account in any state.
+        if !thread::panicking() {
+            removed.unwrap();
+        }
     }
 }
 
@@ -443,9 +456,11 @@ fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) 
         );
     }
     // The removal may cut the session before anything after "Removing." is read.
+    let log = Paths::system().unwrap().uninstall_log;
     assert!(
-        printed.contains("Its log will be ") && printed.contains("uninstall.log"),
-        "the log path was not printed before the removal started: {printed}"
+        printed.contains(&format!("Its log will be {}.", log.display())),
+        "{} was not printed as the log before the removal started: {printed}",
+        log.display()
     );
     end(&mut session, &printed);
     session.wait().unwrap();
@@ -472,65 +487,64 @@ fn uninstall_survives_session_end() {
     });
 }
 
-/// `KillUserProcesses=yes`: logind kills what a session leaves in its scope when it ends. Not for root, whom logind
-/// leaves alone however `KillExcludeUsers=` is set.
+/// A file the test puts under `/etc`, removed when it drops. `restart` names a service to restart after each change.
 #[cfg(target_os = "linux")]
-struct KillUserProcesses;
+struct EtcFile {
+    path: &'static str,
+    restart: Option<&'static str>,
+}
 
 #[cfg(target_os = "linux")]
-impl KillUserProcesses {
-    const DROP_IN: &'static str = "/etc/systemd/logind.conf.d/zz-reverse-tunnel-test.conf";
+impl EtcFile {
+    fn write(path: &'static str, mode: u32, content: &str, restart: Option<&'static str>) -> EtcFile {
+        use std::os::unix::fs::PermissionsExt;
 
-    fn set() -> KillUserProcesses {
-        fs::create_dir_all(Path::new(Self::DROP_IN).parent().unwrap()).unwrap();
-        fs::write(
-            Self::DROP_IN,
+        fs::create_dir_all(Path::new(path).parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        let file = EtcFile { path, restart };
+        file.restart();
+        file
+    }
+
+    fn restart(&self) {
+        if let Some(service) = self.restart {
+            output_of("systemctl", &["restart", service]);
+        }
+    }
+
+    /// `KillUserProcesses=yes`: logind kills what a session leaves in its scope when it ends. Not for root, whom logind
+    /// leaves alone however `KillExcludeUsers=` is set.
+    fn kill_user_processes() -> EtcFile {
+        Self::write(
+            "/etc/systemd/logind.conf.d/zz-reverse-tunnel-test.conf",
+            0o644,
             "[Login]
 KillUserProcesses=yes
 ",
+            Some("systemd-logind"),
         )
-        .unwrap();
-        output_of("systemctl", &["restart", "systemd-logind"]);
-        KillUserProcesses
     }
-}
 
-#[cfg(target_os = "linux")]
-impl Drop for KillUserProcesses {
-    fn drop(&mut self) {
-        fs::remove_file(Self::DROP_IN).unwrap();
-        output_of("systemctl", &["restart", "systemd-logind"]);
-    }
-}
-
-/// `PROBE` may run anything as root without a password.
-#[cfg(target_os = "linux")]
-struct ProbeSudoers;
-
-#[cfg(target_os = "linux")]
-impl ProbeSudoers {
-    const FILE: &'static str = "/etc/sudoers.d/zz-reverse-tunnel-test";
-
-    fn allow() -> ProbeSudoers {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::write(
-            Self::FILE,
-            format!(
+    /// `PROBE` may run anything as root without a password.
+    fn probe_sudoers() -> EtcFile {
+        Self::write(
+            "/etc/sudoers.d/zz-reverse-tunnel-test",
+            0o440,
+            &format!(
                 "{PROBE} ALL=(root) NOPASSWD: ALL
 "
             ),
+            None,
         )
-        .unwrap();
-        fs::set_permissions(Self::FILE, fs::Permissions::from_mode(0o440)).unwrap();
-        ProbeSudoers
     }
 }
 
 #[cfg(target_os = "linux")]
-impl Drop for ProbeSudoers {
+impl Drop for EtcFile {
     fn drop(&mut self) {
-        fs::remove_file(Self::FILE).unwrap();
+        fs::remove_file(self.path).unwrap();
+        self.restart();
     }
 }
 
@@ -540,9 +554,9 @@ impl Drop for ProbeSudoers {
 fn uninstall_survives_logind_session_end() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let _kill = KillUserProcesses::set();
+    let _kill = EtcFile::kill_user_processes();
     account::ensure(PROBE).unwrap();
-    let _sudoers = ProbeSudoers::allow();
+    let _sudoers = EtcFile::probe_sudoers();
     // A real logind session of an ordinary user, who runs `uninstall` as root with sudo, as an administrator logged in
     // over ssh does.
     let mut session = Command::new("su");
@@ -576,15 +590,15 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    // What the service account, which owns logs/ and runs frpc, can plant for root to follow.
+    // What a failed uninstall by an earlier version, or by hand, can leave where root writes the log: root follows no link.
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
-    symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
+    symlink(&victim, &machine.paths.uninstall_log).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
 
-    assert!(!victim.exists(), "uninstall wrote through a link in logs/");
+    assert!(!victim.exists(), "uninstall wrote through a link at its log");
     let after = snapshot(&machine);
     assert_eq!(
         after.difference(&before).collect::<Vec<_>>(),
@@ -597,30 +611,6 @@ fn uninstall_leaves_nothing() {
         "removed besides ours"
     );
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
-}
-
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-fn finish_logs_to_a_file_it_creates_itself() {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-    // What the service account, which owns logs/, can plant for root to follow, after `uninstall` has started.
-    let victim = env::temp_dir().join("rt-finish-log-victim");
-    symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
-    // The removal reports a link it leaves; that line is the output to look for.
-    let link = machine.paths.link.as_ref().unwrap();
-    fs::remove_file(link).unwrap();
-    symlink("/rt-elsewhere", link).unwrap();
-
-    let finish = Command::new(BIN).args(["uninstall", "--finish"]).output().unwrap();
-
-    fs::remove_file(link).unwrap();
-    assert!(finish.status.success(), "{finish:?}");
-    assert!(!victim.exists(), "--finish wrote through a link in logs/");
-    assert!(
-        finish.stdout.is_empty() && finish.stderr.is_empty(),
-        "--finish wrote to what it inherited, not to its log: {finish:?}"
-    );
 }
 
 #[test]
