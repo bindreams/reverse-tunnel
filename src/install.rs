@@ -109,10 +109,17 @@ fn apply(
     mut changed: bool,
 ) -> Result<()> {
     let spec = service::spec(paths);
+    // Settings that are all there and stay as they are can be checked before anything is changed: a failure leaves the
+    // installation as it was. Otherwise the check can only see what `write_settings` wrote.
+    let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
+    let mut fetched = if settled { verify_tools(paths)? } else { false };
     // The binary and the settings may not exist yet; the manager does not look.
     changed |= register(manager, &spec, paths)?;
     changed |= write_settings(paths, account, host, join)?;
-    changed |= place_binaries(paths)?;
+    if !settled {
+        fetched = verify_tools(paths)?;
+    }
+    changed |= place_binaries(paths, fetched)?;
 
     println!(
         "Register this host on the bridge by running:
@@ -557,9 +564,9 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Puts this binary, the pinned frpc and the symlink in place, after `run --check` accepts the settings with them.
-/// Whether the binary or frpc changed.
-fn place_binaries(paths: &Paths) -> Result<bool> {
+/// Makes the bin dir, fetches the pinned frpc (a new file, which nothing runs yet), and has this binary, the new one,
+/// check the settings with it. Whether frpc was fetched.
+fn verify_tools(paths: &Paths) -> Result<bool> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
@@ -567,14 +574,20 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
     make_dir(&paths.bin_dir, PUBLIC_DIR)?;
 
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
-    let mut changed = false;
-    if !download::tools(paths).frpc.try_exists()? {
-        mark_pending(paths)?;
+    let fetched = !download::tools(paths).frpc.try_exists()?;
+    if fetched {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
-        changed = true;
     }
-    // This binary is the new one: what the service will run is checked before anything it runs is replaced.
     supervisor::run(paths, &download::tools(paths), true)?;
+    Ok(fetched)
+}
+
+/// Puts this binary and the symlink in place; `fetched` is `verify_tools`' answer. Whether the binary or frpc changed.
+fn place_binaries(paths: &Paths, fetched: bool) -> Result<bool> {
+    let mut changed = fetched;
+    if fetched {
+        mark_pending(paths)?;
+    }
     let exe = service::exe(paths);
     let me = env::current_exe().context("finding this binary")?;
     let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
