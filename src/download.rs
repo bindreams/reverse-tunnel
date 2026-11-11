@@ -151,7 +151,7 @@ pub(crate) fn resolve(url: &str, stall: Duration) -> Result<String> {
 }
 
 /// Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps progressing is never cut off. A
-/// reader thread feeds the pieces, so the wait covers connecting too. `head`: a HEAD request, which has no body.
+/// reader thread feeds the pieces, so the wait covers connecting too. `head`: a HEAD request, which returns once the request has ended.
 fn transfer(url: &str, stall: Duration, head: bool) -> Result<Transfer> {
     let (send, recv) = mpsc::channel();
     let owned = url.to_string();
@@ -159,6 +159,9 @@ fn transfer(url: &str, stall: Duration, head: bool) -> Result<Transfer> {
         let read = || -> Result<()> {
             let response = if head { ureq::head(&owned) } else { ureq::get(&owned) }.call()?;
             send.send(Ok(Piece::Url(response.get_uri().to_string()))).ok();
+            if head {
+                return Ok(());
+            }
             let mut body = response.into_body().into_reader();
             loop {
                 let mut chunk = vec![0; 1 << 16];
@@ -181,7 +184,12 @@ fn transfer(url: &str, stall: Duration, head: bool) -> Result<Transfer> {
     loop {
         match recv.recv_timeout(stall) {
             Ok(piece) => match piece.with_context(|| format!("downloading {url}"))? {
-                Piece::Url(ended) => got.url = ended,
+                Piece::Url(ended) => {
+                    got.url = ended;
+                    if head {
+                        return Ok(got);
+                    }
+                }
                 Piece::Chunk(chunk) if chunk.is_empty() => return Ok(got),
                 Piece::Chunk(chunk) => got.body.extend(chunk),
             },

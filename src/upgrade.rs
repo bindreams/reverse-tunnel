@@ -16,24 +16,32 @@ const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
 /// What the file name of a downloaded binary starts with in the bin dir.
 const STAGED: &str = "upgrade-";
 
+/// The environment variable by which `upgrade` tells the `install` it runs which file is its staged copy, to remove.
+pub const STAGED_ENV: &str = "REVERSE_TUNNEL_STAGED";
+
 /// Writes `binary` to a new executable file of its own in the bin dir, `upgrade-<random>`, and returns its path, to
 /// run it. `clean_bin_dir` leaves such files alone, so that an `install` running meanwhile cannot take one away; the
-/// `install` that runs it is told to remove it (`--staged`). What an interrupted upgrade leaves is in `upgrade --help`.
+/// `install` that runs it is told to remove it (`STAGED_ENV`). What an interrupted upgrade leaves is in `upgrade
+/// --help`.
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
-    let write = || -> Result<PathBuf> {
-        let mut file = tempfile::Builder::new().prefix(STAGED).tempfile_in(&paths.bin_dir)?;
+    let mut file = tempfile::Builder::new()
+        .prefix(STAGED)
+        .tempfile_in(&paths.bin_dir)
+        .with_context(|| {
+            format!(
+                "creating a file in {} for the download: is reverse-tunnel installed?",
+                paths.bin_dir.display()
+            )
+        })?;
+    let path = file.path().to_path_buf();
+    let write = move || -> Result<PathBuf> {
         apply(file.as_file(), Perm::EXECUTABLE)?;
         file.write_all(binary)?;
         file.as_file().sync_all()?;
         // Closed before it is kept, which is before it runs.
         Ok(file.into_temp_path().keep()?)
     };
-    write().with_context(|| {
-        format!(
-            "staging the download in {}: is reverse-tunnel installed?",
-            paths.bin_dir.display()
-        )
-    })
+    write().with_context(|| format!("writing {}", path.display()))
 }
 
 /// Runs `install` of the binary at `from`, or of the latest release's for this platform, checked against the
@@ -57,7 +65,8 @@ pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
 /// Runs `exe install` with this terminal: its warnings and the registration line are for the operator.
 fn install_with(exe: &Path, staged: bool) -> Result<()> {
     let status = cosca::run([exe.as_os_str(), "install".as_ref()])
-        .args(staged.then_some("--staged"))
+        .env_remove(STAGED_ENV)
+        .envs(staged.then_some((STAGED_ENV, exe)))
         .status()
         .with_context(|| format!("running {} install", exe.display()))?;
     ensure!(status.success(), "{} install ended with {status}", exe.display());

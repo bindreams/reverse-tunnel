@@ -21,7 +21,7 @@ use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
-use crate::{download, ops, service, supervisor};
+use crate::{download, ops, service, supervisor, upgrade};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -35,8 +35,6 @@ pub struct InstallOpts {
     pub host: Option<String>,
     /// Without it the join code is asked for, unless a previous install left the bridge files.
     pub join: Option<String>,
-    /// This binary is a copy `upgrade` made for this run: remove it once it has been read.
-    pub staged: bool,
     pub paths: Paths,
 }
 
@@ -98,7 +96,6 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         host.as_deref(),
         join.as_ref(),
         changed,
-        opts.staged,
     )
 }
 
@@ -110,21 +107,19 @@ fn apply(
     host: Option<&str>,
     join: Option<&JoinInfo>,
     mut changed: bool,
-    staged: bool,
 ) -> Result<()> {
     let spec = service::spec(paths);
     // Settings that are all there and stay as they are can be checked before anything is changed: a failure leaves the
     // installation as it was. Otherwise the check can only see what `write_settings` wrote.
     let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
-    let fetched = if settled {
-        let fetched = verify_tools(paths)?;
+    if settled {
+        verify_tools(paths)?;
         changed |= settle(manager, &spec, account, paths, host, join)?;
-        fetched
     } else {
         changed |= settle(manager, &spec, account, paths, host, join)?;
-        verify_tools(paths)?
-    };
-    changed |= place_binaries(paths, fetched, staged)?;
+        verify_tools(paths)?;
+    }
+    changed |= place_binaries(paths)?;
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -567,9 +562,10 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc (a new file, which nothing runs yet), and has this binary, the new one,
-/// check the settings with it. Whether frpc was fetched.
-fn verify_tools(paths: &Paths) -> Result<bool> {
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has this binary, the new one, check the settings
+/// with it. A fetch is no change that needs a restart: frpc of another version arrives only with another binary, which
+/// `place_binaries` marks, and the version the service runs is the same bytes again.
+fn verify_tools(paths: &Paths) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
@@ -577,34 +573,45 @@ fn verify_tools(paths: &Paths) -> Result<bool> {
     make_dir(&paths.bin_dir, PUBLIC_DIR)?;
 
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
-    let fetched = !download::tools(paths).frpc.try_exists()?;
-    if fetched {
+    if !download::tools(paths).frpc.try_exists()? {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
     supervisor::run(paths, &download::tools(paths), true)?;
-    // Only a settings check that passed leaves a marker: the service is restarted onto what was checked.
-    if fetched {
-        mark_pending(paths)?;
-    }
-    Ok(fetched)
+    Ok(())
 }
 
-/// Puts this binary and the symlink in place; `fetched` is `verify_tools`' answer. With `staged` it removes this
-/// binary's own file once it has read it. Whether the binary or frpc changed.
-fn place_binaries(paths: &Paths, fetched: bool, staged: bool) -> Result<bool> {
-    let mut changed = fetched;
+/// Puts this binary and the symlink in place; removes this binary's own file once it has read it, if `upgrade` staged
+/// it. Whether the binary changed.
+fn place_binaries(paths: &Paths) -> Result<bool> {
     let exe = service::exe(paths);
     let me = env::current_exe().context("finding this binary")?;
     let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
-    if staged {
+    if is_staged_copy(paths, env::var_os(upgrade::STAGED_ENV).as_deref().map(Path::new), &me)? {
         remove_entry(&me)?;
     }
-    changed |= replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
+    let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     if let Some(link) = &paths.link {
         point_link(link, &exe)?;
     }
     Ok(changed)
+}
+
+/// Whether `me`, this binary, is the copy an `upgrade` made for this run: `named` (what `upgrade` put in
+/// `STAGED_ENV`; a release that does not know it ignores it) is the same file as `me`, and that is not the installed
+/// binary. Fails if either file cannot be resolved.
+fn is_staged_copy(paths: &Paths, named: Option<&Path>, me: &Path) -> Result<bool> {
+    let canonical = |path: &Path| fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()));
+    let Some(named) = named else { return Ok(false) };
+    let me = canonical(me)?;
+    if canonical(named)? != me {
+        return Ok(false);
+    }
+    match fs::canonicalize(service::exe(paths)) {
+        Ok(installed) => Ok(installed != me),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(err).context("resolving the installed binary"),
+    }
 }
 
 /// Removes the frpc versions that are not the current one, and temp files a crashed write left, from the bin dir.
