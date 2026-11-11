@@ -70,12 +70,12 @@ fn fetch_release(releases: &str, asset: &str) -> Result<Vec<u8>> {
     let url = |name: &str| format!("{releases}/download/{tag}/{name}");
     let sums = String::from_utf8(download(&url("SHA256SUMS"), STALL)?).context("SHA256SUMS is not text")?;
     let want = expected_digest(&sums, asset)?;
-    let binary = download(&url(&asset), STALL)?;
+    let binary = download(&url(asset), STALL)?;
     let have = hex::encode(Sha256::digest(&binary));
     ensure!(
         have.eq_ignore_ascii_case(want),
         "{} has SHA-256 {have}, but SHA256SUMS says {want}",
-        url(&asset)
+        url(asset)
     );
     Ok(binary)
 }
