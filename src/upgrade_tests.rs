@@ -84,7 +84,7 @@ fn fetch_release_resolves_the_tag_once() {
         ),
     ]);
 
-    let got = fetch_release(&base, "x86_64-unknown-linux-gnu").unwrap();
+    let got = fetch_release(&base, ASSET).unwrap();
 
     assert_eq!(got, BINARY);
     let seen = seen.lock().unwrap();
@@ -111,7 +111,7 @@ fn upgrade_rejects_bad_release_digest() {
         ),
     ]);
 
-    let err = fetch_release(&base, "x86_64-unknown-linux-gnu").unwrap_err();
+    let err = fetch_release(&base, ASSET).unwrap_err();
 
     assert!(
         err.to_string().contains(&hex::encode(Sha256::digest(BINARY))),
@@ -127,7 +127,7 @@ fn upgrade_http_error() {
         ("/download/v7/SHA256SUMS", 404, None, vec![]),
     ]);
 
-    let err = fetch_release(&base, "x86_64-unknown-linux-gnu").unwrap_err();
+    let err = fetch_release(&base, ASSET).unwrap_err();
 
     assert!(
         format!("{err:#}").contains(&format!("{base}/download/v7/SHA256SUMS")),

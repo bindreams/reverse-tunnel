@@ -18,7 +18,7 @@ const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
 /// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service.
 pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     let Some(from) = from else {
-        let binary = fetch_release(RELEASES, host_target()?)?;
+        let binary = fetch_release(RELEASES, &format!("reverse-tunnel-{}{EXE_SUFFIX}", host_target()?))?;
         // A `.tmp` name, which `install` removes (itself too, which Unix allows), so that a killed upgrade leaves nothing.
         let staged = paths
             .bin_dir
@@ -42,9 +42,9 @@ fn install_with(exe: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The latest release's binary for `target`. The tag is resolved once, so that the binary and its `SHA256SUMS` are
+/// The latest release's `asset`. The tag is resolved once, so that the binary and its `SHA256SUMS` are
 /// of the same release even if one is published meanwhile.
-fn fetch_release(releases: &str, target: &str) -> Result<Vec<u8>> {
+fn fetch_release(releases: &str, asset: &str) -> Result<Vec<u8>> {
     let latest = format!("{releases}/latest");
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(STALL))
@@ -67,10 +67,9 @@ fn fetch_release(releases: &str, target: &str) -> Result<Vec<u8>> {
         tag_page.get_uri()
     );
 
-    let asset = format!("reverse-tunnel-{target}{EXE_SUFFIX}");
     let url = |name: &str| format!("{releases}/download/{tag}/{name}");
     let sums = String::from_utf8(download(&url("SHA256SUMS"), STALL)?).context("SHA256SUMS is not text")?;
-    let want = expected_digest(&sums, &asset)?;
+    let want = expected_digest(&sums, asset)?;
     let binary = download(&url(&asset), STALL)?;
     let have = hex::encode(Sha256::digest(&binary));
     ensure!(
