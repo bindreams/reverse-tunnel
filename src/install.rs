@@ -594,16 +594,16 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
 }
 
 /// Removes from the bin dir the frpc versions that are not the current one, temp files a crashed write left, and the
-/// copies `upgrade` ran from (`upgrade-*`), except the one this process runs from.
+/// copies `upgrade` ran from (`upgrade-*`), this process's own among them. The bin dir is reverse-tunnel's own, and so
+/// are these names.
 fn clean_bin_dir(paths: &Paths) -> Result<()> {
     let current = download::tools(paths).frpc;
-    let me = env::current_exe().context("finding this binary")?;
     for entry in fs::read_dir(&paths.bin_dir)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
         let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
-        if stale || (name.starts_with(upgrade::STAGED) && path != me) {
-            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        if stale || name.starts_with(upgrade::STAGED) {
+            remove_entry(&path)?;
         }
     }
     Ok(())

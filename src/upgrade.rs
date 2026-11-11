@@ -17,8 +17,7 @@ const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
 pub const STAGED: &str = "upgrade-";
 
 /// Writes `binary` to a new executable file of its own in the bin dir, `upgrade-<random>`, and returns its path, to
-/// run it. `clean_bin_dir` removes such files, the next `install` or `upgrade` removing the one this ran from; see
-/// `upgrade --help`.
+/// run it. The `install` it runs removes it, through `clean_bin_dir`, which removes every such file.
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     let mut file = tempfile::Builder::new()
         .prefix(STAGED)
@@ -45,7 +44,7 @@ pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
         let binary = fetch_release(RELEASES, &format!("reverse-tunnel-{}{EXE_SUFFIX}", host_target()?))?;
         let staged = stage(paths, &binary)?;
         let installed = install_with(&staged);
-        // After a success the next `install` or `upgrade` removes it; it is a copy of what runs now.
+        // After a success the `install` it ran has removed it.
         if installed.is_err()
             && let Err(err) = remove_entry(&staged)
         {

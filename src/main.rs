@@ -39,8 +39,8 @@ enum Command {
     },
     /// Replaces this host's binary with the latest release's, or with `--from`, and restarts the service. Needs root.
     ///
-    /// A downloaded release that `upgrade` ran from stays in reverse-tunnel's bin directory as `upgrade-<...>` until
-    /// the next `install` or `upgrade` removes it.
+    /// The downloaded release is kept in reverse-tunnel's bin directory as `upgrade-<...>`; the `install` it runs
+    /// removes it, and any later `install` does if that one was interrupted.
     Upgrade {
         /// Install this binary instead of downloading one.
         #[arg(long)]
