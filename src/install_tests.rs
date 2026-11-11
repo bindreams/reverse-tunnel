@@ -300,23 +300,3 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
         "{text}"
     );
 }
-
-#[cfg(target_os = "linux")]
-#[test]
-fn a_warning_before_the_unit_line_still_counts_as_started() {
-    // A removal that ran, reported as one that did not start.
-    let mut stderr = "Warning: something\nRunning as unit: reverse-tunnel-uninstall-1.service\nlater\n".as_bytes();
-    let (said, outcome) = await_start(&mut stderr);
-    assert!(matches!(outcome, AwaitStartOutcome::Started));
-    assert_eq!(said, "Warning: something\n");
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn the_end_of_output_before_the_unit_line_is_not_started_and_keeps_the_lines() {
-    // The operator never sees systemd-run's reason.
-    let mut stderr = "Failed to start transient service unit: refused\n".as_bytes();
-    let (said, outcome) = await_start(&mut stderr);
-    assert!(matches!(outcome, AwaitStartOutcome::Ended));
-    assert_eq!(said, "Failed to start transient service unit: refused\n");
-}

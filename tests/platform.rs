@@ -44,15 +44,15 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
-/// The removal's systemd units that are loaded, whatever their state: a unit that is queued reads as inactive, with no
-/// process, and a failed one stays until it is reset.
+/// The removal's systemd units that are loaded in `state` (`--all` for any: a unit that is queued reads as inactive,
+/// with no process).
 #[cfg(target_os = "linux")]
-fn removal_units() -> String {
+fn removal_units(state: &str) -> String {
     output_of(
         "systemctl",
         &[
             "list-units",
-            "--all",
+            state,
             "--plain",
             "--no-legend",
             "reverse-tunnel-uninstall-*",
@@ -65,7 +65,7 @@ fn removal_units() -> String {
 fn wait_until_removed() {
     wait_until("the removal ends", || {
         #[cfg(target_os = "linux")]
-        let unit_present = !removal_units().trim().is_empty();
+        let unit_present = !removal_units("--all").trim().is_empty();
         #[cfg(not(target_os = "linux"))]
         let unit_present = false;
         !unit_present
@@ -682,7 +682,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
     );
     // A failed unit stays loaded until it is reset.
     #[cfg(target_os = "linux")]
-    assert_eq!(removal_units().trim(), "", "the failed unit was not reset");
+    assert_eq!(removal_units("--failed").trim(), "", "the failed unit was not reset");
     #[cfg(target_os = "linux")]
     let logged = {
         output_of("journalctl", &["--sync"]);

@@ -166,57 +166,61 @@ enum WaitOutcome {
     Failed(String),
 }
 
-/// A started `uninstall --finish`.
+/// A started `uninstall --finish`: the transient unit it runs in.
 #[cfg(target_os = "linux")]
 struct Removal {
-    client: std::process::Child,
-    /// What is left to read.
-    stderr: io::BufReader<std::process::ChildStderr>,
-    /// What `systemd-run` printed before the unit started.
-    said: String,
-    /// The read error that ended that reading, if one did.
-    unread: Option<io::Error>,
+    unit: String,
 }
 
-/// What `systemd-run` did, for the operator: its status, what it printed, and the errors from reading it.
+/// Runs `systemctl`; its output is the result.
 #[cfg(target_os = "linux")]
-fn client_report(status: std::process::ExitStatus, said: &str, read_errors: &[io::Error]) -> String {
-    use std::fmt::Write as _;
+fn systemctl(args: &[&str]) -> Result<String> {
+    let out = Command::new("systemctl")
+        .args(args)
+        .output()
+        .context("running systemctl")?;
+    ensure!(
+        out.status.success(),
+        "`systemctl {}` ended with {}: {}",
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim_end()
+    );
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
 
-    let mut report = format!("systemd-run ended with {status}");
-    if !said.trim().is_empty() {
-        let _ = write!(report, ". It said: {}", said.trim_end());
-    }
-    for err in read_errors {
-        let _ = write!(report, ". Reading its output failed: {err}");
-    }
-    report
+/// The value of `key` in `systemctl show` output.
+#[cfg(target_os = "linux")]
+fn property<'a>(shown: &'a str, key: &str) -> Result<&'a str> {
+    shown
+        .lines()
+        .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
+        .ok_or_else(|| anyhow!("`systemctl show` printed no {key}"))
 }
 
 #[cfg(target_os = "linux")]
 impl Removal {
-    /// Waits for the removal to end. A failure carries everything `systemd-run` printed, including the result lines it
-    /// prints when the unit ends; a failure to read them is added to it, and does not fail a removal that succeeded.
+    /// Waits for the removal's unit to end, then resets the failed units of removals, this one's among them.
     fn wait(self) -> Result<WaitOutcome> {
-        let Removal {
-            mut client,
-            mut stderr,
-            said,
-            unread,
-        } = self;
-        let mut read_errors: Vec<io::Error> = unread.into_iter().collect();
-        let mut rest = Vec::new();
-        if let Err(err) = io::Read::read_to_end(&mut stderr, &mut rest) {
-            read_errors.push(err);
+        let outcome = loop {
+            let shown = systemctl(&["show", "-p", "LoadState,ActiveState,Result,ExecMainStatus", &self.unit])?;
+            let (load, active) = (property(&shown, "LoadState")?, property(&shown, "ActiveState")?);
+            if load == "not-found" || active == "inactive" {
+                break WaitOutcome::Ended;
+            }
+            if active == "failed" {
+                break WaitOutcome::Failed(format!(
+                    "the removal's unit failed: Result={}, exit status {}",
+                    property(&shown, "Result")?,
+                    property(&shown, "ExecMainStatus")?
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        };
+        if let Err(err) = systemctl(&["reset-failed", "reverse-tunnel-uninstall-*"]) {
+            eprintln!("could not clear the removal's failed unit: {err:#}");
         }
-        // Unread, a full pipe would block the client for good.
-        drop(stderr);
-        let status = client.wait().context("waiting for systemd-run")?;
-        if status.success() {
-            return Ok(WaitOutcome::Ended);
-        }
-        let said = format!("{said}{}", String::from_utf8_lossy(&rest));
-        Ok(WaitOutcome::Failed(client_report(status, &said, &read_errors)))
+        Ok(outcome)
     }
 }
 
@@ -241,92 +245,37 @@ impl Removal {
 /// started.
 ///
 /// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
-/// a process of its own does not escape that. A service's output goes to the journal. Each run's unit has a name of its
-/// own, under a prefix that selects them all: a unit that has just ended can still be loaded, and a second one of that
-/// name is refused. `systemd-run` says "Running as unit" once the unit is started; until then, the end of the session
-/// could end the removal before it began.
+/// a process of its own does not escape that. With `Type=exec`, `systemd-run` returns once the binary was exec'd, so
+/// its exit status says the removal has started, and from then on it outlives the session; this needs systemd 240, and
+/// goetia's floor is 242. A service's output goes to the journal. Each run's unit has a name of its own, under a
+/// prefix that selects them all.
 #[cfg(target_os = "linux")]
 fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
-    // Random, from the kernel: a pid is reused.
-    let run = fs::read_to_string("/proc/sys/kernel/random/uuid").context("making the removal's unit name")?;
-    let mut client = Command::new("systemd-run")
-        .arg("--wait")
-        .arg("--collect")
-        .arg(format!("--unit=reverse-tunnel-uninstall-{}", run.trim()))
-        .arg("--")
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
+    let unit = format!("reverse-tunnel-uninstall-{}", hex::encode(random));
+    let started = Command::new("systemd-run")
+        .arg(format!("--unit={unit}"))
+        .args(["-p", "Type=exec", "--"])
         .arg(exe)
         .args(["uninstall", "--finish"])
-        // "Running as unit" is a log message: these undo what the environment or the kernel command line would do to
-        // hide or prefix it.
-        .envs([
-            ("SYSTEMD_LOG_LEVEL", "info"),
-            ("SYSTEMD_LOG_TARGET", "console"),
-            ("SYSTEMD_LOG_COLOR", "0"),
-            ("SYSTEMD_LOG_TIME", "0"),
-            ("SYSTEMD_LOG_LOCATION", "0"),
-            ("SYSTEMD_LOG_TID", "0"),
-        ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
+        .output()
         .context("running systemd-run")?;
-    // Kept open for `wait`: the client's later lines would otherwise kill it with SIGPIPE, and the removal would look
-    // failed.
-    let mut stderr = io::BufReader::new(client.stderr.take().expect("stderr is piped"));
-    let (said, outcome) = await_start(&mut stderr);
-    match outcome {
-        AwaitStartOutcome::Started => Ok(Removal {
-            client,
-            stderr,
-            said,
-            unread: None,
-        }),
-        AwaitStartOutcome::Ended => {
-            let status = client
-                .wait()
-                .with_context(|| format!("waiting for systemd-run, which said: {}", said.trim_end()))?;
-            bail!("the removal did not start: {}", client_report(status, &said, &[]))
-        }
-        // No sign that the unit did not start: its end tells.
-        AwaitStartOutcome::Unreadable(unread) => Ok(Removal {
-            client,
-            stderr,
-            said,
-            unread: Some(unread),
-        }),
+    if !started.status.success() {
+        let said = String::from_utf8_lossy(&started.stderr);
+        let said = said.trim();
+        let said = if said.is_empty() {
+            String::new()
+        } else {
+            format!(". It said: {said}")
+        };
+        bail!(
+            "the removal did not start: systemd-run ended with {}{said}",
+            started.status
+        );
     }
-}
-
-/// How `await_start` ended.
-#[cfg(target_os = "linux")]
-enum AwaitStartOutcome {
-    Started,
-    /// The output ended without the unit having started.
-    Ended,
-    /// Reading failed: nothing says whether the unit started.
-    Unreadable(io::Error),
-}
-
-/// Reads `systemd-run`'s output up to the line that says the unit started, which is not included. Returns what was
-/// said before it.
-#[cfg(target_os = "linux")]
-fn await_start(stderr: &mut impl BufRead) -> (String, AwaitStartOutcome) {
-    let mut said = String::new();
-    loop {
-        let mut line = Vec::new();
-        let read = stderr.read_until(b'\n', &mut line);
-        let text = String::from_utf8_lossy(&line);
-        match read {
-            Ok(0) => return (said, AwaitStartOutcome::Ended),
-            Ok(_) if text.starts_with("Running as unit:") => return (said, AwaitStartOutcome::Started),
-            Ok(_) => said.push_str(&text),
-            Err(err) => {
-                said.push_str(&text);
-                return (said, AwaitStartOutcome::Unreadable(err));
-            }
-        }
-    }
+    Ok(Removal { unit })
 }
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
