@@ -46,8 +46,9 @@ def plugin(tmp_path):
     server.server_close()
 
 
-def test_login_accepts_registered_token(plugin):
+def test_login_accepts_registered_token(plugin, capsys):
     assert plugin[1](*captured("login")) == ACCEPT
+    assert "login host='alice'\n" in capsys.readouterr().err
 
 
 def test_login_rejects_unknown_host(plugin, capsys):
