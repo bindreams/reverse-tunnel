@@ -44,24 +44,30 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
+/// The removal's systemd units that are loaded, whatever their state: a unit that is queued reads as inactive, with no
+/// process, and a failed one stays until it is reset.
+#[cfg(target_os = "linux")]
+fn removal_units() -> String {
+    output_of(
+        "systemctl",
+        &[
+            "list-units",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "reverse-tunnel-uninstall-*",
+        ],
+    )
+}
+
 /// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit named for the run,
-/// and is over when it is gone: a unit that is queued reads as inactive, with no process. Call it once the removal has
-/// started, as the unit exists from then on.
+/// and is over when it is gone. Call it once the removal has started, as the unit exists from then on.
 fn wait_until_removed() {
     wait_until("the removal ends", || {
-        let unit_present = cfg!(target_os = "linux")
-            && !output_of(
-                "systemctl",
-                &[
-                    "list-units",
-                    "--all",
-                    "--plain",
-                    "--no-legend",
-                    "reverse-tunnel-uninstall-*",
-                ],
-            )
-            .trim()
-            .is_empty();
+        #[cfg(target_os = "linux")]
+        let unit_present = !removal_units().trim().is_empty();
+        #[cfg(not(target_os = "linux"))]
+        let unit_present = false;
         !unit_present
             && !processes()
                 .iter()
@@ -668,11 +674,15 @@ fn a_failed_removal_logs_where_uninstall_says() {
     assert!(!failed.status.success(), "the removal should fail: {stderr}");
     let log = install::removal_log(&machine.paths);
     assert!(stderr.contains(&log), "{log} was not named as the log: {stderr}");
+    // The unit's own result, not systemd-run's text.
     #[cfg(target_os = "linux")]
     assert!(
-        stderr.contains("It said:"),
-        "what systemd-run said is not in the failure: {stderr}"
+        stderr.contains("Result=exit-code"),
+        "the unit's result is not in the failure: {stderr}"
     );
+    // A failed unit stays loaded until it is reset.
+    #[cfg(target_os = "linux")]
+    assert_eq!(removal_units().trim(), "", "the failed unit was not reset");
     #[cfg(target_os = "linux")]
     let logged = {
         output_of("journalctl", &["--sync"]);
