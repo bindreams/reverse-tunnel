@@ -104,8 +104,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     pick_up(&*manager, &spec.id, paths, changed)
 }
 
-/// Prepares the removal, hands it to `uninstall --finish`, detached (see `spawn_finish`; stopping the service cuts the
-/// tunnel, and with it the session this runs in) and waits for it. If the session ends, the removal carries on.
+/// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.
 pub fn uninstall(paths: &Paths) -> Result<()> {
     let lock = lock(paths)?;
     match revoke_line(paths) {
@@ -120,7 +119,6 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
     println!("Its log will be {}.", removal_log(paths));
     let removal = spawn_finish(&exe, paths).context("starting the removal")?;
-    // The removal may already have cut the session.
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
@@ -145,7 +143,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
 /// come first, and which a host without persistent storage loses at a reboot.
 #[cfg(target_os = "linux")]
 pub fn removal_log(_paths: &Paths) -> String {
-    "the journal (`journalctl -u reverse-tunnel-uninstall -e`; this run's lines are the last, and without a persistent \
+    "the journal (`journalctl -t reverse-tunnel-uninstall -e`; this run's lines are the last, and without a persistent \
      journal they are gone after a reboot)"
         .to_string()
 }
@@ -165,7 +163,6 @@ pub fn removal_log_file(paths: &Paths) -> PathBuf {
 /// How a waited-for removal ended, when it could be waited for.
 enum WaitOutcome {
     Ended,
-    /// Why it failed.
     Failed(String),
 }
 
@@ -173,7 +170,9 @@ enum WaitOutcome {
 #[cfg(target_os = "linux")]
 struct Removal {
     client: std::process::Child,
-    stderr: io::BufReader<std::process::ChildStderr>,
+    /// What is left to read; `None` after a read error, when it was dropped so that a full pipe cannot block the
+    /// client.
+    stderr: Option<io::BufReader<std::process::ChildStderr>>,
     /// What `systemd-run` printed before the unit started.
     said: String,
     /// The read error that ended that reading, if one did.
@@ -202,10 +201,9 @@ impl Removal {
     fn wait(mut self) -> Result<WaitOutcome> {
         let mut read_errors: Vec<io::Error> = self.unread.take().into_iter().collect();
         let mut rest = Vec::new();
-        // To the end, since the client's output is complete when it exits; not again after an error, which is already
-        // reported.
-        if read_errors.is_empty()
-            && let Err(err) = io::Read::read_to_end(&mut self.stderr, &mut rest)
+        // Not again after an error, which is already reported.
+        if let Some(stderr) = &mut self.stderr
+            && let Err(err) = io::Read::read_to_end(stderr, &mut rest)
         {
             read_errors.push(err);
         }
@@ -218,7 +216,6 @@ impl Removal {
     }
 }
 
-/// A started `uninstall --finish`.
 #[cfg(not(target_os = "linux"))]
 struct Removal(std::process::Child);
 
@@ -240,14 +237,22 @@ impl Removal {
 /// started.
 ///
 /// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
-/// a process of its own does not escape that. A service's output goes to the journal. `systemd-run` says "Running as
-/// unit" once the unit is started; until then, the end of the session could end the removal before it began.
+/// a process of its own does not escape that. A service's output goes to the journal, under an identifier that is the
+/// same for every run, while the unit's name is this run's: a unit that has just ended can still be loaded, and a
+/// second one of that name is refused. `systemd-run` says "Running as unit" once the unit is started; until then, the
+/// end of the session could end the removal before it began.
 #[cfg(target_os = "linux")]
 fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
     let mut client = Command::new("systemd-run")
-        .args(["--wait", "--collect", "--unit=reverse-tunnel-uninstall", "--"])
+        .arg("--wait")
+        .arg("--collect")
+        .arg(format!("--unit=reverse-tunnel-uninstall-{}", std::process::id()))
+        .args(["-p", "SyslogIdentifier=reverse-tunnel-uninstall", "--"])
         .arg(exe)
         .args(["uninstall", "--finish"])
+        // "Running as unit" is a log message, which these would hide.
+        .env_remove("SYSTEMD_LOG_LEVEL")
+        .env_remove("SYSTEMD_LOG_TARGET")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -256,33 +261,60 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
     // Kept open for `wait`: the client's later lines would otherwise kill it with SIGPIPE, and the removal would look
     // failed.
     let mut stderr = io::BufReader::new(client.stderr.take().expect("stderr is piped"));
+    let (said, outcome) = await_start(&mut stderr);
+    match outcome {
+        AwaitStartOutcome::Started => Ok(Removal {
+            client,
+            stderr: Some(stderr),
+            said,
+            unread: None,
+        }),
+        AwaitStartOutcome::Ended => {
+            let status = client
+                .wait()
+                .with_context(|| format!("waiting for systemd-run, which said: {}", said.trim_end()))?;
+            bail!("the removal did not start: {}", client_report(status, &said, &[]))
+        }
+        // No sign that the unit did not start: its end tells. The reader is dropped: kept open and unread, a full pipe
+        // would block the client for good. If it dies of SIGPIPE, its status and this error are what is reported.
+        AwaitStartOutcome::Unreadable(unread) => Ok(Removal {
+            client,
+            stderr: None,
+            said,
+            unread: Some(unread),
+        }),
+    }
+}
+
+/// How `await_start` ended.
+#[cfg(target_os = "linux")]
+enum AwaitStartOutcome {
+    Started,
+    /// The output ended without the unit having started.
+    Ended,
+    /// Reading failed: nothing says whether the unit started.
+    Unreadable(io::Error),
+}
+
+/// Reads `systemd-run`'s output up to the line that says the unit started, which is not included. Returns what was
+/// said before it.
+#[cfg(target_os = "linux")]
+fn await_start(stderr: &mut impl BufRead) -> (String, AwaitStartOutcome) {
     let mut said = String::new();
-    let mut unread = None;
     loop {
         let mut line = Vec::new();
         let read = stderr.read_until(b'\n', &mut line);
         let text = String::from_utf8_lossy(&line);
         match read {
-            Ok(0) => {
-                let status = client.wait().context("waiting for systemd-run")?;
-                bail!("the removal did not start: {}", client_report(status, &said, &[]));
-            }
-            Ok(_) if text.starts_with("Running as unit:") => break,
+            Ok(0) => return (said, AwaitStartOutcome::Ended),
+            Ok(_) if text.starts_with("Running as unit:") => return (said, AwaitStartOutcome::Started),
             Ok(_) => said.push_str(&text),
-            // No sign that the unit did not start: carry on as if it had, and its end tells.
             Err(err) => {
                 said.push_str(&text);
-                unread = Some(err);
-                break;
+                return (said, AwaitStartOutcome::Unreadable(err));
             }
         }
     }
-    Ok(Removal {
-        client,
-        stderr,
-        said,
-        unread,
-    })
 }
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
@@ -327,7 +359,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
     // until the rest is gone, since `install` is refused while it exists; and `logs/` is last, so that a failure above
-    // is written to `uninstall.log` on macOS.
+    // is still in the log.
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
     remove_link(paths)?;
@@ -643,8 +675,7 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     let restart_failed = "the new files are in place, but the service was not restarted";
     match mark_pending(paths) {
         Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
-        // `install` would not notice that the service is behind, so the remedy is by hand, and from a console: stopping
-        // the service over the tunnel cuts the session before `start`.
+        // From a console: stopping the service over the tunnel cuts the session before `start`.
         Err(write) => Err(write.context(format!(
             "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will \
              not notice, so from a console run `reverse-tunnel stop` and then `reverse-tunnel start`"

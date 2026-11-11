@@ -44,26 +44,25 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
-/// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit, which is running
-/// from when `systemd-run` says so, before the process has exec'd, and is not over while it activates or deactivates.
+/// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit named for the run,
+/// and is over when it is gone: a unit that is queued reads as inactive, with no process. Call it once the removal has
+/// started, as the unit exists from then on.
 fn wait_until_removed() {
     wait_until("the removal ends", || {
-        let unit_in_transition = cfg!(target_os = "linux")
-            && !matches!(
-                output_of(
-                    "systemctl",
-                    &[
-                        "show",
-                        "-p",
-                        "ActiveState",
-                        "--value",
-                        "reverse-tunnel-uninstall.service"
-                    ]
-                )
-                .trim(),
-                "inactive" | "failed"
-            );
-        !unit_in_transition
+        let unit_present = cfg!(target_os = "linux")
+            && !output_of(
+                "systemctl",
+                &[
+                    "list-units",
+                    "--all",
+                    "--plain",
+                    "--no-legend",
+                    "reverse-tunnel-uninstall-*",
+                ],
+            )
+            .trim()
+            .is_empty();
+        !unit_present
             && !processes()
                 .iter()
                 .any(|process| process.args.ends_with("uninstall --finish"))
@@ -212,7 +211,6 @@ impl Drop for Machine {
             });
         }
         let removed = account::remove(PROBE);
-        // A panicking test may have left the account in any state.
         if !thread::panicking() {
             removed.unwrap();
         }
@@ -543,7 +541,10 @@ KillUserProcesses=yes
 #[cfg(target_os = "linux")]
 impl Drop for EtcFile {
     fn drop(&mut self) {
-        fs::remove_file(self.path).unwrap();
+        let removed = fs::remove_file(self.path);
+        if !thread::panicking() {
+            removed.unwrap();
+        }
         self.restart();
     }
 }
@@ -673,7 +674,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
     let logged = {
         output_of("journalctl", &["--sync"]);
         let after = format!("--after-cursor={cursor}");
-        output_of("journalctl", &["-u", "reverse-tunnel-uninstall", "--no-pager", &after])
+        output_of("journalctl", &["-t", "reverse-tunnel-uninstall", "--no-pager", &after])
     };
     #[cfg(not(target_os = "linux"))]
     let logged = fs::read_to_string(install::removal_log_file(&machine.paths)).unwrap();
