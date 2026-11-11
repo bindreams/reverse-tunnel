@@ -21,9 +21,7 @@ const STAGED: &str = "upgrade-";
 /// `install` that runs it is told to remove it (`--staged`). What an interrupted upgrade leaves is in `upgrade --help`.
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     let write = || -> Result<PathBuf> {
-        let mut file = tempfile::Builder::new()
-            .prefix("upgrade-")
-            .tempfile_in(&paths.bin_dir)?;
+        let mut file = tempfile::Builder::new().prefix(STAGED).tempfile_in(&paths.bin_dir)?;
         apply(file.as_file(), Perm::EXECUTABLE)?;
         file.write_all(binary)?;
         file.as_file().sync_all()?;

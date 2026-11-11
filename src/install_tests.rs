@@ -229,7 +229,7 @@ fn bin_dir_loses_old_versions_and_temp_files() {
     fs::create_dir(bin).unwrap();
     let (current, exe) = (download::tools(&machine.paths).frpc, service::exe(&machine.paths));
     // An upgrade's download, which an install running meanwhile must not take away.
-    let staged = upgrade::stage(&machine.paths, b"x").unwrap();
+    let staged = crate::upgrade::stage(&machine.paths, b"x").unwrap();
     for path in [&current, &exe, &bin.join("frpc-0.0.1"), &bin.join(".tmpAb12")] {
         fs::write(path, b"x").unwrap();
     }
@@ -317,7 +317,7 @@ fn upgrade_aborts_when_check_fails() {
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
     let id = service::spec(&machine.paths).id;
 
-    let err = apply(&manager, &machine.account, &machine.paths, None, None, false).unwrap_err();
+    let err = apply(&manager, &machine.account, &machine.paths, None, None, false, false).unwrap_err();
 
     assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
     assert_eq!(fs::read(&exe).unwrap(), b"the outgoing binary");
