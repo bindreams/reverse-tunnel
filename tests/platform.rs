@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -590,14 +590,17 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    // What the service account, which owns logs/ and runs frpc, can plant for root to follow.
+    // macOS only (Linux opens no file): what the service account, which owns logs/, can plant for root to follow.
+    #[cfg(target_os = "macos")]
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
-    symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
+    #[cfg(target_os = "macos")]
+    std::os::unix::fs::symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
 
+    #[cfg(target_os = "macos")]
     assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
     assert_eq!(
@@ -645,18 +648,26 @@ fn a_failed_removal_logs_where_uninstall_says() {
     let stuck = Unremovable(&stuck);
     stuck.set(true);
 
+    // The unit's earlier runs are in the journal too: read from here on.
+    #[cfg(target_os = "linux")]
+    let cursor = output_of("journalctl", &["-n", "1", "-o", "cat", "--show-cursor"])
+        .lines()
+        .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_string))
+        .expect("journalctl prints a cursor");
     let failed = Command::new(BIN).arg("uninstall").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(!failed.status.success(), "the removal should fail: {stderr}");
     let log = install::removal_log(&machine.paths);
     assert!(stderr.contains(&log), "{log} was not named as the log: {stderr}");
-    let logged = if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    let logged = {
         output_of("journalctl", &["--sync"]);
-        output_of("journalctl", &["-u", "reverse-tunnel-uninstall", "--no-pager"])
-    } else {
-        fs::read_to_string(&log).unwrap()
+        let after = format!("--after-cursor={cursor}");
+        output_of("journalctl", &["-u", "reverse-tunnel-uninstall", "--no-pager", &after])
     };
+    #[cfg(not(target_os = "linux"))]
+    let logged = fs::read_to_string(install::removal_log_file(&machine.paths)).unwrap();
     let removing = format!("removing {}", machine.paths.bin_dir.display());
     assert!(logged.contains(&removing), "the log has no `{removing}`: {logged}");
 }
