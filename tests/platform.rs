@@ -544,8 +544,11 @@ impl Drop for EtcFile {
         let removed = fs::remove_file(self.path);
         if !thread::panicking() {
             removed.unwrap();
+            self.restart();
+        } else if let Some(service) = self.restart {
+            // A second panic would abort, and the cleanups after this one would not run.
+            let _ = Command::new("systemctl").args(["restart", service]).status();
         }
-        self.restart();
     }
 }
 
@@ -674,7 +677,10 @@ fn a_failed_removal_logs_where_uninstall_says() {
     let logged = {
         output_of("journalctl", &["--sync"]);
         let after = format!("--after-cursor={cursor}");
-        output_of("journalctl", &["-t", "reverse-tunnel-uninstall", "--no-pager", &after])
+        output_of(
+            "journalctl",
+            &["-u", "reverse-tunnel-uninstall-*", "--no-pager", &after],
+        )
     };
     #[cfg(not(target_os = "linux"))]
     let logged = fs::read_to_string(install::removal_log_file(&machine.paths)).unwrap();

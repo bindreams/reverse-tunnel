@@ -143,8 +143,8 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
 /// come first, and which a host without persistent storage loses at a reboot.
 #[cfg(target_os = "linux")]
 pub fn removal_log(_paths: &Paths) -> String {
-    "the journal (`journalctl -t reverse-tunnel-uninstall -e`; this run's lines are the last, and without a persistent \
-     journal they are gone after a reboot)"
+    "the journal (`journalctl -u 'reverse-tunnel-uninstall-*' -e`; this run's lines are the last, and without a \
+     persistent journal they are gone after a reboot)"
         .to_string()
 }
 
@@ -170,9 +170,8 @@ enum WaitOutcome {
 #[cfg(target_os = "linux")]
 struct Removal {
     client: std::process::Child,
-    /// What is left to read; `None` after a read error, when it was dropped so that a full pipe cannot block the
-    /// client.
-    stderr: Option<io::BufReader<std::process::ChildStderr>>,
+    /// What is left to read.
+    stderr: io::BufReader<std::process::ChildStderr>,
     /// What `systemd-run` printed before the unit started.
     said: String,
     /// The read error that ended that reading, if one did.
@@ -198,20 +197,25 @@ fn client_report(status: std::process::ExitStatus, said: &str, read_errors: &[io
 impl Removal {
     /// Waits for the removal to end. A failure carries everything `systemd-run` printed, including the result lines it
     /// prints when the unit ends; a failure to read them is added to it, and does not fail a removal that succeeded.
-    fn wait(mut self) -> Result<WaitOutcome> {
-        let mut read_errors: Vec<io::Error> = self.unread.take().into_iter().collect();
+    fn wait(self) -> Result<WaitOutcome> {
+        let Removal {
+            mut client,
+            mut stderr,
+            said,
+            unread,
+        } = self;
+        let mut read_errors: Vec<io::Error> = unread.into_iter().collect();
         let mut rest = Vec::new();
-        // Not again after an error, which is already reported.
-        if let Some(stderr) = &mut self.stderr
-            && let Err(err) = io::Read::read_to_end(stderr, &mut rest)
-        {
+        if let Err(err) = io::Read::read_to_end(&mut stderr, &mut rest) {
             read_errors.push(err);
         }
-        let status = self.client.wait().context("waiting for systemd-run")?;
+        // Unread, a full pipe would block the client for good.
+        drop(stderr);
+        let status = client.wait().context("waiting for systemd-run")?;
         if status.success() {
             return Ok(WaitOutcome::Ended);
         }
-        let said = format!("{}{}", self.said, String::from_utf8_lossy(&rest));
+        let said = format!("{said}{}", String::from_utf8_lossy(&rest));
         Ok(WaitOutcome::Failed(client_report(status, &said, &read_errors)))
     }
 }
@@ -237,22 +241,31 @@ impl Removal {
 /// started.
 ///
 /// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
-/// a process of its own does not escape that. A service's output goes to the journal, under an identifier that is the
-/// same for every run, while the unit's name is this run's: a unit that has just ended can still be loaded, and a
-/// second one of that name is refused. `systemd-run` says "Running as unit" once the unit is started; until then, the
-/// end of the session could end the removal before it began.
+/// a process of its own does not escape that. A service's output goes to the journal. Each run's unit has a name of its
+/// own, under a prefix that selects them all: a unit that has just ended can still be loaded, and a second one of that
+/// name is refused. `systemd-run` says "Running as unit" once the unit is started; until then, the end of the session
+/// could end the removal before it began.
 #[cfg(target_os = "linux")]
 fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
+    // Random, from the kernel: a pid is reused.
+    let run = fs::read_to_string("/proc/sys/kernel/random/uuid").context("making the removal's unit name")?;
     let mut client = Command::new("systemd-run")
         .arg("--wait")
         .arg("--collect")
-        .arg(format!("--unit=reverse-tunnel-uninstall-{}", std::process::id()))
-        .args(["-p", "SyslogIdentifier=reverse-tunnel-uninstall", "--"])
+        .arg(format!("--unit=reverse-tunnel-uninstall-{}", run.trim()))
+        .arg("--")
         .arg(exe)
         .args(["uninstall", "--finish"])
-        // "Running as unit" is a log message, which these would hide.
-        .env_remove("SYSTEMD_LOG_LEVEL")
-        .env_remove("SYSTEMD_LOG_TARGET")
+        // "Running as unit" is a log message: these undo what the environment or the kernel command line would do to
+        // hide or prefix it.
+        .envs([
+            ("SYSTEMD_LOG_LEVEL", "info"),
+            ("SYSTEMD_LOG_TARGET", "console"),
+            ("SYSTEMD_LOG_COLOR", "0"),
+            ("SYSTEMD_LOG_TIME", "0"),
+            ("SYSTEMD_LOG_LOCATION", "0"),
+            ("SYSTEMD_LOG_TID", "0"),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -265,7 +278,7 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
     match outcome {
         AwaitStartOutcome::Started => Ok(Removal {
             client,
-            stderr: Some(stderr),
+            stderr,
             said,
             unread: None,
         }),
@@ -275,11 +288,10 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
                 .with_context(|| format!("waiting for systemd-run, which said: {}", said.trim_end()))?;
             bail!("the removal did not start: {}", client_report(status, &said, &[]))
         }
-        // No sign that the unit did not start: its end tells. The reader is dropped: kept open and unread, a full pipe
-        // would block the client for good. If it dies of SIGPIPE, its status and this error are what is reported.
+        // No sign that the unit did not start: its end tells.
         AwaitStartOutcome::Unreadable(unread) => Ok(Removal {
             client,
-            stderr: None,
+            stderr,
             said,
             unread: Some(unread),
         }),
