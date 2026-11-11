@@ -169,7 +169,7 @@ Content-Length: {}
         }
     });
     // The gaps are shorter than the stall bound and the whole body is longer than it.
-    assert_eq!(download(&url, Duration::from_millis(500)).unwrap(), body);
+    assert_eq!(download(&url, Duration::from_millis(500)).unwrap().body, body);
 }
 
 #[test]

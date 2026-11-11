@@ -19,7 +19,7 @@ type Route = (&'static str, u16, Option<&'static str>, Vec<u8>);
 /// (`METHOD path`).
 fn serve(routes: Vec<Route>) -> (String, Arc<Mutex<Vec<String>>>) {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", server.local_addr().unwrap());
+    let base = format!("http://{}/releases", server.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = seen.clone();
     thread::spawn(move || {
@@ -27,6 +27,8 @@ fn serve(routes: Vec<Route>) -> (String, Arc<Mutex<Vec<String>>>) {
             let mut conn = conn.unwrap();
             let mut lines = BufReader::new(&conn).lines();
             let request = lines.next().unwrap().unwrap();
+            // The whole request, so that closing after the reply does not reset the connection.
+            while !lines.next().unwrap().unwrap().is_empty() {}
             let mut words = request.split(' ');
             let (method, path) = (words.next().unwrap().to_string(), words.next().unwrap().to_string());
             log.lock().unwrap().push(format!("{method} {path}"));
@@ -66,18 +68,18 @@ fn sha256sums_parsing() {
 
 #[test]
 fn fetch_release_resolves_the_tag_once() {
-    let download = "/download/v7";
+    let download = "/releases/download/v7";
     let (base, seen) = serve(vec![
-        ("/latest", 302, Some("/tag/v7"), vec![]),
-        ("/tag/v7", 200, None, vec![]),
+        ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
+        ("/releases/tag/v7", 200, None, vec![]),
         (
-            "/download/v7/SHA256SUMS",
+            "/releases/download/v7/SHA256SUMS",
             200,
             None,
             sums_line(BINARY, "  ").into_bytes(),
         ),
         (
-            "/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
+            "/releases/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
             200,
             None,
             BINARY.to_vec(),
@@ -88,23 +90,23 @@ fn fetch_release_resolves_the_tag_once() {
 
     assert_eq!(got, BINARY);
     let seen = seen.lock().unwrap();
-    assert_eq!(seen[..2], ["HEAD /latest", "HEAD /tag/v7"]);
+    assert_eq!(seen[..2], ["GET /releases/latest", "GET /releases/tag/v7"]);
     assert!(seen[2..].iter().all(|request| request.contains(download)), "{seen:?}");
 }
 
 #[test]
 fn upgrade_rejects_bad_release_digest() {
     let (base, _) = serve(vec![
-        ("/latest", 302, Some("/tag/v7"), vec![]),
-        ("/tag/v7", 200, None, vec![]),
+        ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
+        ("/releases/tag/v7", 200, None, vec![]),
         (
-            "/download/v7/SHA256SUMS",
+            "/releases/download/v7/SHA256SUMS",
             200,
             None,
             sums_line(BINARY, "  ").into_bytes(),
         ),
         (
-            "/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
+            "/releases/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
             200,
             None,
             b"a tampered build".to_vec(),
@@ -122,9 +124,9 @@ fn upgrade_rejects_bad_release_digest() {
 #[test]
 fn upgrade_http_error() {
     let (base, _) = serve(vec![
-        ("/latest", 302, Some("/tag/v7"), vec![]),
-        ("/tag/v7", 200, None, vec![]),
-        ("/download/v7/SHA256SUMS", 404, None, vec![]),
+        ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
+        ("/releases/tag/v7", 200, None, vec![]),
+        ("/releases/download/v7/SHA256SUMS", 404, None, vec![]),
     ]);
 
     let err = fetch_release(&base, ASSET).unwrap_err();
@@ -133,4 +135,17 @@ fn upgrade_http_error() {
         format!("{err:#}").contains(&format!("{base}/download/v7/SHA256SUMS")),
         "{err:#}"
     );
+}
+
+#[test]
+fn upgrade_needs_a_published_release() {
+    // With no release, GitHub sends `releases/latest` to the list of releases.
+    let (base, _) = serve(vec![
+        ("/releases/latest", 302, Some("/releases"), vec![]),
+        ("/releases", 200, None, vec![]),
+    ]);
+
+    let err = fetch_release(&base, ASSET).unwrap_err();
+
+    assert!(err.to_string().contains("no release is published"), "{err:#}");
 }
