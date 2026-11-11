@@ -8,7 +8,7 @@ use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use goetia::decide::Outcome;
@@ -166,27 +166,11 @@ enum WaitOutcome {
     Failed(String),
 }
 
-/// A started `uninstall --finish`: the transient unit it runs in.
+/// A started `uninstall --finish`: the transient unit it runs in, and the marker it removes once the rest is gone.
 #[cfg(target_os = "linux")]
 struct Removal {
     unit: String,
-}
-
-/// Runs `systemctl`; its output is the result.
-#[cfg(target_os = "linux")]
-fn systemctl(args: &[&str]) -> Result<String> {
-    let out = Command::new("systemctl")
-        .args(args)
-        .output()
-        .context("running systemctl")?;
-    ensure!(
-        out.status.success(),
-        "`systemctl {}` ended with {}: {}",
-        args.join(" "),
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim_end()
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    marker: PathBuf,
 }
 
 /// The value of `key` in `systemctl show` output.
@@ -200,24 +184,37 @@ fn property<'a>(shown: &'a str, key: &str) -> Result<&'a str> {
 
 #[cfg(target_os = "linux")]
 impl Removal {
-    /// Waits for the removal's unit to end, then resets the failed units of removals, this one's among them.
+    /// Waits for the removal's unit to end, then resets the failed units of removals, this one's among them. The
+    /// removal finished if its marker is gone: a unit that ended cleanly may have been stopped part-way, and one that is
+    /// gone may have failed and been reset.
     fn wait(self) -> Result<WaitOutcome> {
+        let show = [
+            "systemctl",
+            "show",
+            "-p",
+            "LoadState,ActiveState,Result,ExecMainStatus",
+            self.unit.as_str(),
+        ];
         let outcome = loop {
-            let shown = systemctl(&["show", "-p", "LoadState,ActiveState,Result,ExecMainStatus", &self.unit])?;
+            let shown = account::run(&show)?;
             let (load, active) = (property(&shown, "LoadState")?, property(&shown, "ActiveState")?);
-            if load == "not-found" || active == "inactive" {
-                break WaitOutcome::Ended;
-            }
             if active == "failed" {
                 break WaitOutcome::Failed(format!(
-                    "the removal's unit failed: Result={}, exit status {}",
+                    "the removal's unit failed: Result={}, ExecMainStatus={}",
                     property(&shown, "Result")?,
                     property(&shown, "ExecMainStatus")?
                 ));
             }
+            if load == "not-found" || active == "inactive" {
+                break if self.marker.try_exists()? {
+                    WaitOutcome::Failed("the removal's unit ended before the removal finished".to_string())
+                } else {
+                    WaitOutcome::Ended
+                };
+            }
             std::thread::sleep(std::time::Duration::from_millis(500));
         };
-        if let Err(err) = systemctl(&["reset-failed", "reverse-tunnel-uninstall-*"]) {
+        if let Err(err) = account::run(&["systemctl", "reset-failed", "reverse-tunnel-uninstall-*"]) {
             eprintln!("could not clear the removal's failed unit: {err:#}");
         }
         Ok(outcome)
@@ -250,7 +247,7 @@ impl Removal {
 /// goetia's floor is 242. A service's output goes to the journal. Each run's unit has a name of its own, under a
 /// prefix that selects them all.
 #[cfg(target_os = "linux")]
-fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
+fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).context("reading random bytes from the OS")?;
     let unit = format!("reverse-tunnel-uninstall-{}", hex::encode(random));
@@ -259,23 +256,18 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
         .args(["-p", "Type=exec", "--"])
         .arg(exe)
         .args(["uninstall", "--finish"])
-        .stdin(Stdio::null())
         .output()
         .context("running systemd-run")?;
-    if !started.status.success() {
-        let said = String::from_utf8_lossy(&started.stderr);
-        let said = said.trim();
-        let said = if said.is_empty() {
-            String::new()
-        } else {
-            format!(". It said: {said}")
-        };
-        bail!(
-            "the removal did not start: systemd-run ended with {}{said}",
-            started.status
-        );
-    }
-    Ok(Removal { unit })
+    ensure!(
+        started.status.success(),
+        "the removal did not start: systemd-run ended with {}: {}",
+        started.status,
+        String::from_utf8_lossy(&started.stderr).trim()
+    );
+    Ok(Removal {
+        unit,
+        marker: uninstalling_file(paths),
+    })
 }
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
@@ -284,6 +276,7 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
 #[cfg(not(target_os = "linux"))]
 fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
 
     make_dir(&paths.log_dir, PUBLIC_DIR)?;
     let path = removal_log_file(paths);

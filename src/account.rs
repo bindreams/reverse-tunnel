@@ -23,7 +23,7 @@ pub fn ensure(name: &str) -> Result<Account> {
 }
 
 /// Runs `args[0]` with the rest, and returns its output.
-fn run(args: &[&str]) -> Result<String> {
+pub(crate) fn run(args: &[&str]) -> Result<String> {
     let out = cosca::run(args.iter().copied())
         .output()
         .with_context(|| format!("running {}", args[0]))?;
