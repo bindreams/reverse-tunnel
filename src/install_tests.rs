@@ -305,6 +305,8 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
 fn upgrade_aborts_when_check_fails() {
     let machine = Machine::new();
     machine.settings(Some("mothership"), Some(CODE));
+    // The settings are as an earlier install left them, picked up.
+    fs::remove_file(pending_file(&machine.paths)).unwrap();
     fs::create_dir(&machine.paths.bin_dir).unwrap();
     let (exe, frpc) = (service::exe(&machine.paths), download::tools(&machine.paths).frpc);
     fs::write(&exe, b"the outgoing binary").unwrap();
