@@ -21,7 +21,7 @@ use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
-use crate::{download, ops, service};
+use crate::{download, ops, service, supervisor};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -538,7 +538,8 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Puts this binary, the pinned frpc and the symlink in place. Whether the binary or frpc changed.
+/// Puts this binary, the pinned frpc and the symlink in place, after `run --check` accepts the settings with them.
+/// Whether the binary or frpc changed.
 fn place_binaries(paths: &Paths) -> Result<bool> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
@@ -553,6 +554,8 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
         changed = true;
     }
+    // This binary is the new one: what the service will run is checked before anything it runs is replaced.
+    supervisor::run(paths, &download::tools(paths), true)?;
     let exe = service::exe(paths);
     let me = env::current_exe().context("finding this binary")?;
     let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
