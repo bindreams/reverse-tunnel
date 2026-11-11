@@ -590,17 +590,17 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    // macOS only (Linux opens no file): what the service account, which owns logs/, can plant for root to follow.
-    #[cfg(target_os = "macos")]
+    // Not Linux (it opens no file): what the service account, which owns logs/, can plant for root to follow.
+    #[cfg(not(target_os = "linux"))]
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     std::os::unix::fs::symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
     assert_eq!(
@@ -650,10 +650,13 @@ fn a_failed_removal_logs_where_uninstall_says() {
 
     // The unit's earlier runs are in the journal too: read from here on.
     #[cfg(target_os = "linux")]
-    let cursor = output_of("journalctl", &["-n", "1", "-o", "cat", "--show-cursor"])
-        .lines()
-        .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_string))
-        .expect("journalctl prints a cursor");
+    let cursor = {
+        output_of("journalctl", &["--sync"]);
+        output_of("journalctl", &["-n", "1", "-o", "cat", "--show-cursor"])
+            .lines()
+            .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_string))
+            .expect("journalctl prints a cursor")
+    };
     let failed = Command::new(BIN).arg("uninstall").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
