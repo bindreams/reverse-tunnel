@@ -228,7 +228,7 @@ fn bin_dir_loses_old_versions_and_temp_files() {
     let bin = &machine.paths.bin_dir;
     fs::create_dir(bin).unwrap();
     let (current, exe) = (download::tools(&machine.paths).frpc, service::exe(&machine.paths));
-    // An upgrade's download, which an install running meanwhile must not take away.
+    // What an upgrade ran from, which nothing else removes.
     let staged = crate::upgrade::stage(&machine.paths, b"x").unwrap();
     for path in [&current, &exe, &bin.join("frpc-0.0.1"), &bin.join(".tmpAb12")] {
         fs::write(path, b"x").unwrap();
@@ -236,30 +236,10 @@ fn bin_dir_loses_old_versions_and_temp_files() {
 
     clean_bin_dir(&machine.paths).unwrap();
 
-    let mut kept = vec![current, exe, staged];
+    assert!(!staged.exists());
+    let mut kept = vec![current, exe];
     kept.sort();
     assert_eq!(files_under(bin), kept);
-}
-
-#[test]
-fn only_the_copy_an_upgrade_staged_is_removed() {
-    let machine = Machine::new();
-    let bin = &machine.paths.bin_dir;
-    fs::create_dir(bin).unwrap();
-    let exe = service::exe(&machine.paths);
-    let staged = crate::upgrade::stage(&machine.paths, b"x").unwrap();
-    let other = bin.join("upgrade-by-hand");
-    for path in [&exe, &other] {
-        fs::write(path, b"x").unwrap();
-    }
-    let decide = |named: Option<&Path>, me: &Path| is_staged_copy(&machine.paths, named, me);
-
-    assert!(decide(Some(&staged), &staged).unwrap());
-    // Each of these would delete a file nobody staged: the operator's, or the installed binary.
-    assert!(!decide(None, &staged).unwrap());
-    assert!(!decide(Some(&other), &staged).unwrap());
-    assert!(!decide(Some(&exe), &exe).unwrap());
-    assert!(decide(Some(&bin.join("gone")), &staged).is_err());
 }
 
 #[test]
