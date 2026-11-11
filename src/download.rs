@@ -23,7 +23,7 @@ pub const RELEASE_TARGETS: [&str; 5] = [
 const VERSION: &str = "0.71.1";
 
 /// How long a download may deliver nothing before `fetch` gives up on it.
-const STALL: Duration = Duration::from_secs(60);
+pub(crate) const STALL: Duration = Duration::from_secs(60);
 
 /// A tool release archive, and the one file of it that gets installed. `url` ends in `.zip` or `.tar.gz`.
 pub struct Pin {
@@ -94,16 +94,21 @@ fn file_name(name: &str, version: &str) -> String {
     format!("{name}-{version}{EXE_SUFFIX}")
 }
 
-/// The pin for the OS and architecture this binary runs on.
-pub fn host_pin() -> Result<&'static Pin> {
-    let target = match (OS, ARCH) {
+/// The release target for the OS and architecture this binary runs on.
+pub fn host_target() -> Result<&'static str> {
+    Ok(match (OS, ARCH) {
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         ("macos", "x86_64") => "x86_64-apple-darwin",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        _ => bail!("no pinned frpc for {OS} on {ARCH}"),
-    };
+        _ => bail!("no release for {OS} on {ARCH}"),
+    })
+}
+
+/// The pin for the OS and architecture this binary runs on.
+pub fn host_pin() -> Result<&'static Pin> {
+    let target = host_target()?;
     Ok(PINS
         .iter()
         .find(|pin| pin.target == target)
@@ -123,7 +128,7 @@ pub fn fetch(pin: &Pin, dest_dir: &Path) -> Result<PathBuf> {
 
 /// Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps progressing is never cut off. A
 /// reader thread feeds the chunks, so the wait covers connecting too.
-fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
+pub(crate) fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
     let (send, recv) = mpsc::channel();
     let owned = url.to_string();
     thread::spawn(move || {

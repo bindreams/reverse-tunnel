@@ -32,7 +32,12 @@ fn serve(routes: Vec<Route>) -> (String, Arc<Mutex<Vec<String>>>) {
             log.lock().unwrap().push(format!("{method} {path}"));
             let (_, status, location, body) = routes.iter().find(|route| route.0 == path).expect("a known path");
             let location = location.map(|to| format!("Location: {to}\r\n")).unwrap_or_default();
-            write!(conn, "HTTP/1.1 {status} X\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            write!(
+                conn,
+                "HTTP/1.1 {status} X\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
             if method == "GET" {
                 conn.write_all(body).unwrap();
             }
@@ -48,7 +53,10 @@ fn sha256sums_parsing() {
     let rows = [
         (format!("{digest}  {ASSET}\n"), Some(digest.as_str())),
         (format!("{digest} *{ASSET}\n"), Some(digest.as_str())),
-        (format!("{other}  reverse-tunnel-other\n{digest}  {ASSET}\n{other}  x\n"), Some(digest.as_str())),
+        (
+            format!("{other}  reverse-tunnel-other\n{digest}  {ASSET}\n{other}  x\n"),
+            Some(digest.as_str()),
+        ),
         (format!("{other}  {ASSET}.sig\n{other}  reverse-tunnel-other\n"), None),
     ];
     for (text, want) in rows {
@@ -62,8 +70,18 @@ fn fetch_release_resolves_the_tag_once() {
     let (base, seen) = serve(vec![
         ("/latest", 302, Some("/tag/v7"), vec![]),
         ("/tag/v7", 200, None, vec![]),
-        ("/download/v7/SHA256SUMS", 200, None, sums_line(BINARY, "  ").into_bytes()),
-        ("/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu", 200, None, BINARY.to_vec()),
+        (
+            "/download/v7/SHA256SUMS",
+            200,
+            None,
+            sums_line(BINARY, "  ").into_bytes(),
+        ),
+        (
+            "/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
+            200,
+            None,
+            BINARY.to_vec(),
+        ),
     ]);
 
     let got = fetch_release(&base, "x86_64-unknown-linux-gnu").unwrap();
@@ -79,13 +97,26 @@ fn upgrade_rejects_bad_release_digest() {
     let (base, _) = serve(vec![
         ("/latest", 302, Some("/tag/v7"), vec![]),
         ("/tag/v7", 200, None, vec![]),
-        ("/download/v7/SHA256SUMS", 200, None, sums_line(BINARY, "  ").into_bytes()),
-        ("/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu", 200, None, b"a tampered build".to_vec()),
+        (
+            "/download/v7/SHA256SUMS",
+            200,
+            None,
+            sums_line(BINARY, "  ").into_bytes(),
+        ),
+        (
+            "/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
+            200,
+            None,
+            b"a tampered build".to_vec(),
+        ),
     ]);
 
     let err = fetch_release(&base, "x86_64-unknown-linux-gnu").unwrap_err();
 
-    assert!(err.to_string().contains(&hex::encode(Sha256::digest(BINARY))), "{err:#}");
+    assert!(
+        err.to_string().contains(&hex::encode(Sha256::digest(BINARY))),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -98,5 +129,8 @@ fn upgrade_http_error() {
 
     let err = fetch_release(&base, "x86_64-unknown-linux-gnu").unwrap_err();
 
-    assert!(format!("{err:#}").contains(&format!("{base}/download/v7/SHA256SUMS")), "{err:#}");
+    assert!(
+        format!("{err:#}").contains(&format!("{base}/download/v7/SHA256SUMS")),
+        "{err:#}"
+    );
 }
