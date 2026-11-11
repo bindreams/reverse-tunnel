@@ -73,7 +73,7 @@ fn fetch_release_resolves_the_tag_once() {
     let download = "/releases/download/v7";
     let (base, seen) = serve(vec![
         ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
-        ("/releases/tag/v7", 200, None, vec![]),
+        ("/releases/tag/v7", 200, None, b"the release page".to_vec()),
         (
             "/releases/download/v7/SHA256SUMS",
             200,
@@ -100,7 +100,7 @@ fn fetch_release_resolves_the_tag_once() {
 fn upgrade_rejects_bad_release_digest() {
     let (base, _) = serve(vec![
         ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
-        ("/releases/tag/v7", 200, None, vec![]),
+        ("/releases/tag/v7", 200, None, b"the release page".to_vec()),
         (
             "/releases/download/v7/SHA256SUMS",
             200,
@@ -127,7 +127,7 @@ fn upgrade_rejects_bad_release_digest() {
 fn upgrade_http_error() {
     let (base, _) = serve(vec![
         ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
-        ("/releases/tag/v7", 200, None, vec![]),
+        ("/releases/tag/v7", 200, None, b"the release page".to_vec()),
         ("/releases/download/v7/SHA256SUMS", 404, None, vec![]),
     ]);
 

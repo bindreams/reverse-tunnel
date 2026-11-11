@@ -242,6 +242,27 @@ fn bin_dir_loses_old_versions_and_temp_files() {
 }
 
 #[test]
+fn only_the_copy_an_upgrade_staged_is_removed() {
+    let machine = Machine::new();
+    let bin = &machine.paths.bin_dir;
+    fs::create_dir(bin).unwrap();
+    let exe = service::exe(&machine.paths);
+    let staged = crate::upgrade::stage(&machine.paths, b"x").unwrap();
+    let other = bin.join("upgrade-by-hand");
+    for path in [&exe, &other] {
+        fs::write(path, b"x").unwrap();
+    }
+    let decide = |named: Option<&Path>, me: &Path| is_staged_copy(&machine.paths, named, me);
+
+    assert!(decide(Some(&staged), &staged).unwrap());
+    // Each of these would delete a file nobody staged: the operator's, or the installed binary.
+    assert!(!decide(None, &staged).unwrap());
+    assert!(!decide(Some(&other), &staged).unwrap());
+    assert!(!decide(Some(&exe), &exe).unwrap());
+    assert!(decide(Some(&bin.join("gone")), &staged).is_err());
+}
+
+#[test]
 fn unchanged_install_leaves_a_running_service_alone() {
     let machine = Machine::new();
     let spec = service::spec(&machine.paths);
@@ -317,7 +338,7 @@ fn upgrade_aborts_when_check_fails() {
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
     let id = service::spec(&machine.paths).id;
 
-    let err = apply(&manager, &machine.account, &machine.paths, None, None, false, false).unwrap_err();
+    let err = apply(&manager, &machine.account, &machine.paths, None, None, false).unwrap_err();
 
     assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
     assert_eq!(fs::read(&exe).unwrap(), b"the outgoing binary");
