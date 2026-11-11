@@ -20,6 +20,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use goetia::manager::{self, Installed, ServiceManager, State, Status};
 use goetia::spec::Id;
 use reverse_tunnel::account::{self, Account};
+use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::service;
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -456,11 +457,10 @@ fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) 
         );
     }
     // The removal may cut the session before anything after "Removing." is read.
-    let log = Paths::system().unwrap().uninstall_log;
+    let log = install::removal_log(&Paths::system().unwrap());
     assert!(
-        printed.contains(&format!("Its log will be {}.", log.display())),
-        "{} was not printed as the log before the removal started: {printed}",
-        log.display()
+        printed.contains(&format!("Its log will be {log}.")),
+        "{log} was not printed as the log before the removal started: {printed}"
     );
     end(&mut session, &printed);
     session.wait().unwrap();
@@ -611,6 +611,54 @@ fn uninstall_leaves_nothing() {
         "removed besides ours"
     );
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
+}
+
+/// Makes `path` impossible to remove, even by root, until it drops.
+struct Unremovable<'a>(&'a Path);
+
+impl Unremovable<'_> {
+    fn set(&self, on: bool) {
+        let (program, flag) = match (cfg!(target_os = "macos"), on) {
+            (true, true) => ("chflags", "uchg"),
+            (true, false) => ("chflags", "nouchg"),
+            (false, true) => ("chattr", "+i"),
+            (false, false) => ("chattr", "-i"),
+        };
+        output_of(program, &[flag, self.0.to_str().unwrap()]);
+    }
+}
+
+impl Drop for Unremovable<'_> {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn a_failed_removal_logs_where_uninstall_says() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    // The removal starts, then cannot remove the binary directory.
+    let stuck = machine.paths.bin_dir.join("stuck");
+    fs::write(&stuck, "").unwrap();
+    let stuck = Unremovable(&stuck);
+    stuck.set(true);
+
+    let failed = Command::new(BIN).arg("uninstall").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success(), "the removal should fail: {stderr}");
+    let log = install::removal_log(&machine.paths);
+    assert!(stderr.contains(&log), "{log} was not named as the log: {stderr}");
+    let logged = if cfg!(target_os = "linux") {
+        output_of("journalctl", &["--sync"]);
+        output_of("journalctl", &["-u", "reverse-tunnel-uninstall", "--no-pager"])
+    } else {
+        fs::read_to_string(&log).unwrap()
+    };
+    let removing = format!("removing {}", machine.paths.bin_dir.display());
+    assert!(logged.contains(&removing), "the log has no `{removing}`: {logged}");
 }
 
 #[test]

@@ -73,7 +73,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     ensure!(
         !uninstalling_file(paths).try_exists()?,
         "an uninstall is in progress or failed: see {}, and run `reverse-tunnel uninstall` to finish it",
-        paths.uninstall_log.display()
+        removal_log(paths)
     );
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let mut changed = pending_file(paths).try_exists()?;
@@ -121,7 +121,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     // `--finish` takes the lock itself; an `install` in between is refused by the marker.
     drop(lock);
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
-    println!("Its log will be {}.", paths.uninstall_log.display());
+    println!("Its log will be {}.", removal_log(paths));
     let mut finish = spawn_finish(&env::current_exe()?, &paths.uninstall_log, log).context("starting the removal")?;
     // The removal may already have cut the session.
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
@@ -129,11 +129,16 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     ensure!(
         status.success(),
         "the removal failed ({status}): see {}, and {} to finish it",
-        paths.uninstall_log.display(),
+        removal_log(paths),
         rerun_uninstall(paths)
     );
     ops::println_best_effort("Removed.");
     Ok(())
+}
+
+/// Where the removal's output is, for the operator.
+pub fn removal_log(paths: &Paths) -> String {
+    paths.uninstall_log.display().to_string()
 }
 
 /// Starts `uninstall --finish` with its output in `log`, which is open at `log_path`, so that it outlives the session
