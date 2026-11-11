@@ -10,7 +10,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use goetia::decide::Outcome;
 use goetia::manager::{Budget, ServiceManager};
 use goetia::spec::{DaemonSpec, Id};
@@ -122,13 +122,21 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     let removal = spawn_finish(&exe, paths).context("starting the removal")?;
     // The removal may already have cut the session.
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
-    removal.wait().with_context(|| {
+    let outcome = removal.wait().with_context(|| {
         format!(
-            "the removal failed: see {}, and {} to finish it",
-            removal_log(paths),
-            rerun_uninstall(paths)
+            "could not tell how the removal ended; its log is {}, and `uninstall` can be run again",
+            removal_log(paths)
         )
     })?;
+    if let WaitOutcome::Failed(why) = outcome {
+        return Err(anyhow!(why)).with_context(|| {
+            format!(
+                "the removal failed: see {}, and {} to finish it",
+                removal_log(paths),
+                rerun_uninstall(paths)
+            )
+        });
+    }
     ops::println_best_effort("Removed.");
     Ok(())
 }
@@ -154,6 +162,13 @@ pub fn removal_log_file(paths: &Paths) -> PathBuf {
     paths.log_dir.join("uninstall.log")
 }
 
+/// How a waited-for removal ended, when it could be waited for.
+enum WaitOutcome {
+    Ended,
+    /// Why it failed.
+    Failed(String),
+}
+
 /// A started `uninstall --finish`.
 #[cfg(target_os = "linux")]
 struct Removal {
@@ -165,27 +180,41 @@ struct Removal {
     unread: Option<io::Error>,
 }
 
+/// What `systemd-run` did, for the operator: its status, what it printed, and the errors from reading it.
+#[cfg(target_os = "linux")]
+fn client_report(status: std::process::ExitStatus, said: &str, read_errors: &[io::Error]) -> String {
+    use std::fmt::Write as _;
+
+    let mut report = format!("systemd-run ended with {status}");
+    if !said.trim().is_empty() {
+        let _ = write!(report, ". It said: {}", said.trim_end());
+    }
+    for err in read_errors {
+        let _ = write!(report, ". Reading its output failed: {err}");
+    }
+    report
+}
+
 #[cfg(target_os = "linux")]
 impl Removal {
     /// Waits for the removal to end. A failure carries everything `systemd-run` printed, including the result lines it
     /// prints when the unit ends; a failure to read them is added to it, and does not fail a removal that succeeded.
-    fn wait(mut self) -> Result<()> {
+    fn wait(mut self) -> Result<WaitOutcome> {
+        let mut read_errors: Vec<io::Error> = self.unread.take().into_iter().collect();
         let mut rest = Vec::new();
-        // To the end: the client's output is complete when it exits.
-        let read = io::Read::read_to_end(&mut self.stderr, &mut rest);
+        // To the end, since the client's output is complete when it exits; not again after an error, which is already
+        // reported.
+        if read_errors.is_empty()
+            && let Err(err) = io::Read::read_to_end(&mut self.stderr, &mut rest)
+        {
+            read_errors.push(err);
+        }
         let status = self.client.wait().context("waiting for systemd-run")?;
         if status.success() {
-            return Ok(());
+            return Ok(WaitOutcome::Ended);
         }
-        self.said.push_str(&String::from_utf8_lossy(&rest));
-        let mut failure = format!("systemd-run ended with {status}");
-        if !self.said.trim().is_empty() {
-            failure += &format!(". It said: {}", self.said.trim_end());
-        }
-        for err in self.unread.into_iter().chain(read.err()) {
-            failure += &format!(". Reading its output failed: {err}");
-        }
-        bail!("{failure}")
+        let said = format!("{}{}", self.said, String::from_utf8_lossy(&rest));
+        Ok(WaitOutcome::Failed(client_report(status, &said, &read_errors)))
     }
 }
 
@@ -196,10 +225,13 @@ struct Removal(std::process::Child);
 #[cfg(not(target_os = "linux"))]
 impl Removal {
     /// Waits for the removal to end.
-    fn wait(mut self) -> Result<()> {
+    fn wait(mut self) -> Result<WaitOutcome> {
         let status = self.0.wait().context("waiting for the removal")?;
-        ensure!(status.success(), "the removal ended with {status}");
-        Ok(())
+        Ok(if status.success() {
+            WaitOutcome::Ended
+        } else {
+            WaitOutcome::Failed(format!("the removal ended with {status}"))
+        })
     }
 }
 
@@ -233,10 +265,7 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
         match read {
             Ok(0) => {
                 let status = client.wait().context("waiting for systemd-run")?;
-                bail!(
-                    "systemd-run ended ({status}) without starting the removal: {}",
-                    said.trim_end()
-                );
+                bail!("the removal did not start: {}", client_report(status, &said, &[]));
             }
             Ok(_) if text.starts_with("Running as unit:") => break,
             Ok(_) => said.push_str(&text),

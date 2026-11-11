@@ -642,8 +642,9 @@ impl Drop for Unremovable<'_> {
 fn a_failed_removal_logs_where_uninstall_says() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    // The removal starts, then cannot remove the binary directory.
-    let stuck = machine.paths.bin_dir.join("stuck");
+    // The removal starts, then cannot remove this file, and its failure names it: the name is this run's, so no line
+    // of an earlier removal can stand in for it.
+    let stuck = machine.paths.config_dir.join(format!("stuck-{}", std::process::id()));
     fs::write(&stuck, "").unwrap();
     let stuck = Unremovable(&stuck);
     stuck.set(true);
@@ -664,6 +665,11 @@ fn a_failed_removal_logs_where_uninstall_says() {
     let log = install::removal_log(&machine.paths);
     assert!(stderr.contains(&log), "{log} was not named as the log: {stderr}");
     #[cfg(target_os = "linux")]
+    assert!(
+        stderr.contains("It said:"),
+        "what systemd-run said is not in the failure: {stderr}"
+    );
+    #[cfg(target_os = "linux")]
     let logged = {
         output_of("journalctl", &["--sync"]);
         let after = format!("--after-cursor={cursor}");
@@ -671,7 +677,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
     };
     #[cfg(not(target_os = "linux"))]
     let logged = fs::read_to_string(install::removal_log_file(&machine.paths)).unwrap();
-    let removing = format!("removing {}", machine.paths.bin_dir.display());
+    let removing = format!("removing {}", stuck.0.display());
     assert!(logged.contains(&removing), "the log has no `{removing}`: {logged}");
 }
 
