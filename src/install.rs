@@ -185,9 +185,9 @@ fn property<'a>(shown: &'a str, key: &str) -> Result<&'a str> {
 impl Removal {
     /// Waits for the removal's unit to end, then resets the failed units of removals, this one's among them.
     ///
-    /// systemd counts an exit by SIGTERM as clean, so a removal stopped from outside (`systemctl stop` on its unit, or
-    /// a shutdown) also ends `inactive` and reads as ended. This is a stated limit: running `uninstall` again finishes
-    /// the removal.
+    /// A removal that the operator stops (`systemctl stop` on its unit: systemd counts an exit by SIGTERM as clean) or
+    /// resets (`systemctl reset-failed`) while this waits reads as ended. This is a stated limit: running `uninstall`
+    /// again finishes the removal.
     fn wait(self) -> Result<WaitOutcome> {
         let show = [
             "systemctl",
