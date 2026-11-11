@@ -166,11 +166,10 @@ enum WaitOutcome {
     Failed(String),
 }
 
-/// A started `uninstall --finish`: the transient unit it runs in, and what it removes last.
+/// A started `uninstall --finish`: the transient unit it runs in.
 #[cfg(target_os = "linux")]
 struct Removal {
     unit: String,
-    last: [PathBuf; 2],
 }
 
 /// The value of `key` in `systemctl show` output.
@@ -184,8 +183,11 @@ fn property<'a>(shown: &'a str, key: &str) -> Result<&'a str> {
 
 #[cfg(target_os = "linux")]
 impl Removal {
-    /// Waits for the removal's unit to end, then resets the failed units of removals, this one's among them. The
-    /// removal finished if what it removes last is gone: a unit that ended cleanly may have been stopped part-way.
+    /// Waits for the removal's unit to end, then resets the failed units of removals, this one's among them.
+    ///
+    /// systemd counts an exit by SIGTERM as clean, so a removal stopped from outside (`systemctl stop` on its unit, or
+    /// a shutdown) also ends `inactive` and reads as ended. This is a stated limit: running `uninstall` again finishes
+    /// the removal.
     fn wait(self) -> Result<WaitOutcome> {
         let show = [
             "systemctl",
@@ -205,16 +207,7 @@ impl Removal {
                 ));
             }
             if load == "not-found" || active == "inactive" {
-                let left = self
-                    .last
-                    .iter()
-                    .map(|path| path.try_exists())
-                    .collect::<io::Result<Vec<_>>>()?;
-                break if left.contains(&true) {
-                    WaitOutcome::Failed("the removal's unit ended before the removal finished".to_string())
-                } else {
-                    WaitOutcome::Ended
-                };
+                break WaitOutcome::Ended;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         };
@@ -242,8 +235,8 @@ impl Removal {
 }
 
 /// Starts `uninstall --finish` so that it outlives the session that runs `uninstall`, with its output where
-/// `removal_log` says. Returns once the removal has started; `Removal::wait` ends with it. An error means nothing
-/// started.
+/// `removal_log` says. Returns once the removal has started; `Removal::wait` ends with it. After an error it may
+/// not have started; `uninstall` can be run again either way.
 ///
 /// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
 /// a process of its own does not escape that. With `Type=exec`, `systemd-run` returns once the binary was exec'd, so
@@ -251,28 +244,25 @@ impl Removal {
 /// goetia's floor is 242. A service's output goes to the journal. Each run's unit has a name of its own, under a
 /// prefix that selects them all.
 #[cfg(target_os = "linux")]
-fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
+fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
+    use std::ffi::OsStr;
+
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).context("reading random bytes from the OS")?;
     let unit = format!("reverse-tunnel-uninstall-{}", hex::encode(random));
-    use std::ffi::OsStr;
-
     let unit_arg = format!("--unit={unit}");
-    let args: [&OsStr; 8] = [
-        "systemd-run".as_ref(),
-        unit_arg.as_ref(),
-        "-p".as_ref(),
-        "Type=exec".as_ref(),
-        "--".as_ref(),
+    command::run(&[
+        OsStr::new("systemd-run"),
+        OsStr::new(&unit_arg),
+        OsStr::new("-p"),
+        OsStr::new("Type=exec"),
+        OsStr::new("--"),
         exe.as_os_str(),
-        "uninstall".as_ref(),
-        "--finish".as_ref(),
-    ];
-    command::run(&args).context("the removal did not start")?;
-    Ok(Removal {
-        unit,
-        last: [paths.config_dir.clone(), paths.log_dir.clone()],
-    })
+        OsStr::new("uninstall"),
+        OsStr::new("--finish"),
+    ])
+    .context("the removal may not have started")?;
+    Ok(Removal { unit })
 }
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
@@ -317,7 +307,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     }
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
-    // until the rest is gone, since `install` is refused while it exists; and `logs/` is last, so that a failure above
+    // until the rest of `config_dir` is gone, since `install` is refused while it exists; and `logs/` is last, so that a failure above
     // is still in the log.
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;

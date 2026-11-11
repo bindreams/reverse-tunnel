@@ -20,6 +20,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use goetia::manager::{self, Installed, ServiceManager, State, Status};
 use goetia::spec::Id;
 use reverse_tunnel::account::{self, Account};
+use reverse_tunnel::command;
 use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::service;
@@ -76,13 +77,7 @@ fn wait_until_removed() {
 }
 
 fn output_of(program: &str, args: &[&str]) -> String {
-    let out = Command::new(program).args(args).output().unwrap();
-    assert!(
-        out.status.success(),
-        "{program} {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
+    command::run(&[&[program], args].concat()).unwrap()
 }
 
 struct Process {
