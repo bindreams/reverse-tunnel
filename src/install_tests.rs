@@ -228,13 +228,15 @@ fn bin_dir_loses_old_versions_and_temp_files() {
     let bin = &machine.paths.bin_dir;
     fs::create_dir(bin).unwrap();
     let (current, exe) = (download::tools(&machine.paths).frpc, service::exe(&machine.paths));
-    for path in [&current, &exe, &bin.join("frpc-0.0.1"), &bin.join(".tmpAb12")] {
+    // An upgrade's download, which an install running meanwhile must not take away.
+    let staged = upgrade::staged(&machine.paths, "ab12");
+    for path in [&current, &exe, &staged, &bin.join("frpc-0.0.1"), &bin.join(".tmpAb12")] {
         fs::write(path, b"x").unwrap();
     }
 
     clean_bin_dir(&machine.paths).unwrap();
 
-    let mut kept = vec![current, exe];
+    let mut kept = vec![current, exe, staged];
     kept.sort();
     assert_eq!(files_under(bin), kept);
 }

@@ -2,35 +2,50 @@
 
 use std::env::consts::EXE_SUFFIX;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
-use ureq::ResponseExt;
 
-use crate::download::{STALL, download, host_target};
+use crate::download::{STALL, download, host_target, verify_digest};
 use crate::files::{Perm, Replace, write_atomic};
 use crate::paths::Paths;
 
 const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
+
+/// What the downloaded binary's file name starts with in the bin dir.
+const STAGED: &str = "upgrade-";
+
+/// Where an upgrade puts a downloaded binary with SHA-256 `digest` to run it. `clean_bin_dir` leaves it alone, so that
+/// an `install` running meanwhile cannot take it away; the `install` it runs removes it (`is_staged`).
+pub fn staged(paths: &Paths, digest: &str) -> PathBuf {
+    paths.bin_dir.join(format!("{STAGED}{digest}"))
+}
+
+/// Whether `exe` is a file `staged` named. `install` removes its own once it has read it: the upgrade that staged it
+/// may be gone with its session by the time the service is killed, which is `install`'s last act.
+pub fn is_staged(exe: &Path) -> bool {
+    exe.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(STAGED))
+}
 
 /// Runs `install` of the binary at `from`, or of the latest release's for this platform, checked against the
 /// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service.
 pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     let Some(from) = from else {
         let binary = fetch_release(RELEASES, &format!("reverse-tunnel-{}{EXE_SUFFIX}", host_target()?))?;
-        // A `.tmp` name, which `install` removes (itself too, which Unix allows), so that a killed upgrade leaves nothing.
-        let staged = paths
-            .bin_dir
-            .join(format!(".tmp-upgrade-{}", hex::encode(Sha256::digest(&binary))));
+        let staged = staged(paths, &hex::encode(Sha256::digest(&binary)));
         write_atomic(&staged, &binary, Perm::EXECUTABLE, Replace::Always)
             .context("staging the download in the bin dir: is reverse-tunnel installed?")?;
         let installed = install_with(&staged);
-        // `install` removes it itself, unless it failed first.
+        // `install` removes it itself, unless it failed before.
         let _ = fs::remove_file(&staged);
         return installed;
     };
-    install_with(from)
+    // By path: a bare name would be looked up on `PATH`, and could run the installed binary instead.
+    let from = fs::canonicalize(from).with_context(|| format!("finding {}", from.display()))?;
+    install_with(&from)
 }
 
 /// Runs `exe install` with this terminal: its warnings and the registration line are for the operator.
@@ -46,37 +61,19 @@ fn install_with(exe: &Path) -> Result<()> {
 /// of the same release even if one is published meanwhile.
 fn fetch_release(releases: &str, asset: &str) -> Result<Vec<u8>> {
     let latest = format!("{releases}/latest");
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(STALL))
-        .build()
-        .new_agent();
-    let tag_page = agent
-        .head(&latest)
-        .call()
-        .with_context(|| format!("resolving {latest}"))?;
-    let tag = tag_page
-        .get_uri()
-        .path()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    ensure!(
-        !tag.is_empty(),
-        "{latest} led to {}, which names no release",
-        tag_page.get_uri()
-    );
+    let ended = download(&latest, STALL)?.url;
+    // GitHub sends `releases/latest` to the page of the latest release, or to the list of releases when there is none.
+    let tag = ended
+        .split_once("/releases/tag/")
+        .map(|(_, tag)| tag)
+        .filter(|tag| !tag.is_empty() && !tag.contains(['/', '?', '#']))
+        .with_context(|| format!("no release is published: {latest} led to {ended}"))?;
 
     let url = |name: &str| format!("{releases}/download/{tag}/{name}");
-    let sums = String::from_utf8(download(&url("SHA256SUMS"), STALL)?).context("SHA256SUMS is not text")?;
+    let sums = String::from_utf8(download(&url("SHA256SUMS"), STALL)?.body).context("SHA256SUMS is not text")?;
     let want = expected_digest(&sums, asset)?;
-    let binary = download(&url(asset), STALL)?;
-    let have = hex::encode(Sha256::digest(&binary));
-    ensure!(
-        have.eq_ignore_ascii_case(want),
-        "{} has SHA-256 {have}, but SHA256SUMS says {want}",
-        url(asset)
-    );
+    let binary = download(&url(asset), STALL)?.body;
+    verify_digest(&url(asset), &binary, want, "SHA256SUMS")?;
     Ok(binary)
 }
 
