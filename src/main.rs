@@ -38,6 +38,9 @@ enum Command {
         join: Option<String>,
     },
     /// Replaces this host's binary with the latest release's, or with `--from`, and restarts the service. Needs root.
+    ///
+    /// If `upgrade` is interrupted before it finishes, the downloaded release may remain in reverse-tunnel's bin
+    /// directory as `upgrade-<...>`; nothing runs it, it is safe to delete, and `uninstall` removes it.
     Upgrade {
         /// Install this binary instead of downloading one.
         #[arg(long)]

@@ -124,26 +124,36 @@ pub fn fetch(pin: &Pin, dest_dir: &Path) -> Result<PathBuf> {
     if dest.try_exists()? {
         return Ok(dest);
     }
-    install(pin, &download(pin.url, STALL)?.body, dest_dir)
+    install(pin, &download(pin.url, STALL)?, dest_dir)
 }
 
-/// What `download` got.
-#[derive(Debug)]
-pub(crate) struct Downloaded {
+/// What `transfer` got.
+struct Transfer {
     /// Where the request ended, after redirects.
-    pub url: String,
-    pub body: Vec<u8>,
+    url: String,
+    body: Vec<u8>,
 }
 
-/// What the reader thread of `download` sends: where the request ended, then the body in chunks, the last empty.
+/// What the reader thread of `transfer` sends: where the request ended, then the body in chunks, the last empty.
 enum Piece {
     Url(String),
     Chunk(Vec<u8>),
 }
 
+/// The body at `url`. Fails, naming `url`, when nothing arrives for `stall`; see `transfer`.
+pub(crate) fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
+    Ok(transfer(url, stall, true)?.body)
+}
+
+/// Where `url` ends up after redirects, without taking the body. Fails like `download`.
+pub(crate) fn resolve(url: &str, stall: Duration) -> Result<String> {
+    Ok(transfer(url, stall, false)?.url)
+}
+
 /// Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps progressing is never cut off. A
-/// reader thread feeds the pieces, so the wait covers connecting too.
-pub(crate) fn download(url: &str, stall: Duration) -> Result<Downloaded> {
+/// reader thread feeds the pieces, so the wait covers connecting too. Without `keep_body` it returns once the request
+/// has ended, and the reader stops at its next chunk.
+fn transfer(url: &str, stall: Duration, keep_body: bool) -> Result<Transfer> {
     let (send, recv) = mpsc::channel();
     let owned = url.to_string();
     thread::spawn(move || {
@@ -165,13 +175,14 @@ pub(crate) fn download(url: &str, stall: Duration) -> Result<Downloaded> {
             let _ = send.send(Err(err));
         }
     });
-    let mut got = Downloaded {
+    let mut got = Transfer {
         url: url.to_string(),
         body: Vec::new(),
     };
     loop {
         match recv.recv_timeout(stall) {
             Ok(piece) => match piece.with_context(|| format!("downloading {url}"))? {
+                Piece::Url(ended) if !keep_body => return Ok(Transfer { url: ended, ..got }),
                 Piece::Url(ended) => got.url = ended,
                 Piece::Chunk(chunk) if chunk.is_empty() => return Ok(got),
                 Piece::Chunk(chunk) => got.body.extend(chunk),

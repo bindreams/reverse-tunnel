@@ -3,6 +3,8 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use sha2::{Digest, Sha256};
+
 use super::*;
 
 const ASSET: &str = "reverse-tunnel-x86_64-unknown-linux-gnu";

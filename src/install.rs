@@ -112,22 +112,35 @@ fn apply(
     // Settings that are all there and stay as they are can be checked before anything is changed: a failure leaves the
     // installation as it was. Otherwise the check can only see what `write_settings` wrote.
     let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
-    let mut fetched = if settled { verify_tools(paths)? } else { false };
-    // The binary and the settings may not exist yet; the manager does not look.
-    changed |= register(manager, &spec, paths)?;
-    changed |= write_settings(paths, account, host, join)?;
     if !settled {
-        fetched = verify_tools(paths)?;
+        changed |= settle(manager, &spec, account, paths, host, join)?;
+    }
+    let fetched = verify_tools(paths)?;
+    if settled {
+        changed |= settle(manager, &spec, account, paths, host, join)?;
     }
     changed |= place_binaries(paths, fetched)?;
 
     println!(
-        "Register this host on the bridge by running:
-    {}",
+        "Register this host on the bridge by running:\n    {}",
         registration(paths)?
     );
     manager.enable(&spec.id)?;
     pick_up(manager, &spec.id, paths, changed)
+}
+
+/// Registers the service and writes the settings. Whether either changed.
+fn settle(
+    manager: &dyn ServiceManager,
+    spec: &DaemonSpec,
+    account: &Account,
+    paths: &Paths,
+    host: Option<&str>,
+    join: Option<&JoinInfo>,
+) -> Result<bool> {
+    // The binary and the settings may not exist yet; the manager does not look.
+    let registered = register(manager, spec, paths)?;
+    Ok(write_settings(paths, account, host, join)? | registered)
 }
 
 /// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.
@@ -576,22 +589,22 @@ fn verify_tools(paths: &Paths) -> Result<bool> {
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
     let fetched = !download::tools(paths).frpc.try_exists()?;
     if fetched {
+        // Before the file the service will run is written, so that a failure after it is made up for by the next run.
+        mark_pending(paths)?;
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
     supervisor::run(paths, &download::tools(paths), true)?;
     Ok(fetched)
 }
 
-/// Puts this binary and the symlink in place; `fetched` is `verify_tools`' answer. Whether the binary or frpc changed.
+/// Puts this binary and the symlink in place; `fetched` is `verify_tools`' answer. It also removes this binary's own
+/// file if an `upgrade` staged it. Whether the binary or frpc changed.
 fn place_binaries(paths: &Paths, fetched: bool) -> Result<bool> {
     let mut changed = fetched;
-    if fetched {
-        mark_pending(paths)?;
-    }
     let exe = service::exe(paths);
     let me = env::current_exe().context("finding this binary")?;
     let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
-    if upgrade::is_staged(&me) {
+    if upgrade::is_staged(paths, &me) {
         remove_entry(&me)?;
     }
     changed |= replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
