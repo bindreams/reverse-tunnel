@@ -76,7 +76,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         removal_log(paths)
     );
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
-    let mut changed = pending_file(paths).try_exists()?;
+    let changed = pending_file(paths).try_exists()?;
     let join = match opts.join.as_deref() {
         Some(code) => Some(join::decode(code)?),
         None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
