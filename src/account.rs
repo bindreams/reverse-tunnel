@@ -1,6 +1,8 @@
 //! The service account of a Linux or macOS install: a system account with a group of its own.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
+
+use crate::command::run;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Account {
@@ -20,20 +22,6 @@ pub fn lookup(name: &str) -> Option<Account> {
 pub fn ensure(name: &str) -> Result<Account> {
     complete(name)?;
     lookup(name).with_context(|| format!("created {name}, but the system does not list it"))
-}
-
-/// Runs `args[0]` with the rest, and returns its output.
-pub(crate) fn run(args: &[&str]) -> Result<String> {
-    let out = cosca::run(args.iter().copied())
-        .output()
-        .with_context(|| format!("running {}", args[0]))?;
-    ensure!(
-        out.status.success(),
-        "`{}` failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 // Commands are named by absolute path: root's `PATH` may lack `sbin` (`su` without `-`).

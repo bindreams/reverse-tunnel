@@ -8,7 +8,6 @@ use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use goetia::decide::Outcome;
@@ -17,6 +16,7 @@ use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
 use crate::account::{self, Account};
+use crate::command;
 use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
 use crate::join::{self, JoinInfo};
@@ -166,11 +166,11 @@ enum WaitOutcome {
     Failed(String),
 }
 
-/// A started `uninstall --finish`: the transient unit it runs in, and the marker it removes once the rest is gone.
+/// A started `uninstall --finish`: the transient unit it runs in, and what it removes last.
 #[cfg(target_os = "linux")]
 struct Removal {
     unit: String,
-    marker: PathBuf,
+    last: [PathBuf; 2],
 }
 
 /// The value of `key` in `systemctl show` output.
@@ -185,8 +185,7 @@ fn property<'a>(shown: &'a str, key: &str) -> Result<&'a str> {
 #[cfg(target_os = "linux")]
 impl Removal {
     /// Waits for the removal's unit to end, then resets the failed units of removals, this one's among them. The
-    /// removal finished if its marker is gone: a unit that ended cleanly may have been stopped part-way, and one that is
-    /// gone may have failed and been reset.
+    /// removal finished if what it removes last is gone: a unit that ended cleanly may have been stopped part-way.
     fn wait(self) -> Result<WaitOutcome> {
         let show = [
             "systemctl",
@@ -196,7 +195,7 @@ impl Removal {
             self.unit.as_str(),
         ];
         let outcome = loop {
-            let shown = account::run(&show)?;
+            let shown = command::run(&show)?;
             let (load, active) = (property(&shown, "LoadState")?, property(&shown, "ActiveState")?);
             if active == "failed" {
                 break WaitOutcome::Failed(format!(
@@ -206,7 +205,12 @@ impl Removal {
                 ));
             }
             if load == "not-found" || active == "inactive" {
-                break if self.marker.try_exists()? {
+                let left = self
+                    .last
+                    .iter()
+                    .map(|path| path.try_exists())
+                    .collect::<io::Result<Vec<_>>>()?;
+                break if left.contains(&true) {
                     WaitOutcome::Failed("the removal's unit ended before the removal finished".to_string())
                 } else {
                     WaitOutcome::Ended
@@ -214,7 +218,7 @@ impl Removal {
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         };
-        if let Err(err) = account::run(&["systemctl", "reset-failed", "reverse-tunnel-uninstall-*"]) {
+        if let Err(err) = command::run(&["systemctl", "reset-failed", "reverse-tunnel-uninstall-*"]) {
             eprintln!("could not clear the removal's failed unit: {err:#}");
         }
         Ok(outcome)
@@ -251,22 +255,23 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).context("reading random bytes from the OS")?;
     let unit = format!("reverse-tunnel-uninstall-{}", hex::encode(random));
-    let started = Command::new("systemd-run")
-        .arg(format!("--unit={unit}"))
-        .args(["-p", "Type=exec", "--"])
-        .arg(exe)
-        .args(["uninstall", "--finish"])
-        .output()
-        .context("running systemd-run")?;
-    ensure!(
-        started.status.success(),
-        "the removal did not start: systemd-run ended with {}: {}",
-        started.status,
-        String::from_utf8_lossy(&started.stderr).trim()
-    );
+    use std::ffi::OsStr;
+
+    let unit_arg = format!("--unit={unit}");
+    let args: [&OsStr; 8] = [
+        "systemd-run".as_ref(),
+        unit_arg.as_ref(),
+        "-p".as_ref(),
+        "Type=exec".as_ref(),
+        "--".as_ref(),
+        exe.as_os_str(),
+        "uninstall".as_ref(),
+        "--finish".as_ref(),
+    ];
+    command::run(&args).context("the removal did not start")?;
     Ok(Removal {
         unit,
-        marker: uninstalling_file(paths),
+        last: [paths.config_dir.clone(), paths.log_dir.clone()],
     })
 }
 
@@ -276,7 +281,7 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
 #[cfg(not(target_os = "linux"))]
 fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
+    use std::process::{Command, Stdio};
 
     make_dir(&paths.log_dir, PUBLIC_DIR)?;
     let path = removal_log_file(paths);

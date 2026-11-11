@@ -91,6 +91,6 @@ nobody is locked out.
    `mv tls/new.key tls/frps.key && mv tls/new.crt tls/frps.crt && chmod 644 tls/frps.crt`, then
    `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check that each host has a `login` line since the
    restart:
-   `frps=$(docker compose ps -aq reverse-tunnel-frps) && test -n "$frps" && docker compose logs --no-log-prefix --since "$(docker inspect -f '{{.State.StartedAt}}' "$frps")" reverse-tunnel-plugin | grep '^login '`
-   (it stops if no frps container exists) prints `login host='<name>'` for each one.
+   `frps=$(docker compose ps -aq reverse-tunnel-frps) && : "${frps:?no reverse-tunnel-frps container}" && docker compose logs --no-log-prefix --since "$(docker inspect -f '{{.State.StartedAt}}' "$frps")" reverse-tunnel-plugin | grep '^login '`
+   prints `login host='<name>'` for each one.
 4. Delete the old certificate from `tls/trust.pem`, leaving the new one. New join codes carry only that.
