@@ -580,15 +580,11 @@ fn verify_tools(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Puts this binary and the symlink in place; removes this binary's own file once it has read it, if `upgrade` staged
-/// it. Whether the binary changed.
+/// Puts this binary and the symlink in place. Whether the binary changed.
 fn place_binaries(paths: &Paths) -> Result<bool> {
     let exe = service::exe(paths);
     let me = env::current_exe().context("finding this binary")?;
     let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
-    if is_staged_copy(paths, env::var_os(upgrade::STAGED_ENV).as_deref().map(Path::new), &me)? {
-        remove_entry(&me)?;
-    }
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     if let Some(link) = &paths.link {
@@ -597,30 +593,16 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
     Ok(changed)
 }
 
-/// Whether `me`, this binary, is the copy an `upgrade` made for this run: `named` (what `upgrade` put in
-/// `STAGED_ENV`; a release that does not know it ignores it) is the same file as `me`, and that is not the installed
-/// binary. Fails if either file cannot be resolved.
-fn is_staged_copy(paths: &Paths, named: Option<&Path>, me: &Path) -> Result<bool> {
-    let canonical = |path: &Path| fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()));
-    let Some(named) = named else { return Ok(false) };
-    let me = canonical(me)?;
-    if canonical(named)? != me {
-        return Ok(false);
-    }
-    match fs::canonicalize(service::exe(paths)) {
-        Ok(installed) => Ok(installed != me),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(true),
-        Err(err) => Err(err).context("resolving the installed binary"),
-    }
-}
-
-/// Removes the frpc versions that are not the current one, and temp files a crashed write left, from the bin dir.
+/// Removes from the bin dir the frpc versions that are not the current one, temp files a crashed write left, and the
+/// copies `upgrade` ran from (`upgrade-*`), except the one this process runs from.
 fn clean_bin_dir(paths: &Paths) -> Result<()> {
     let current = download::tools(paths).frpc;
+    let me = env::current_exe().context("finding this binary")?;
     for entry in fs::read_dir(&paths.bin_dir)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if path != current && (name.starts_with("frpc-") || name.starts_with(".tmp")) {
+        let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
+        if stale || (name.starts_with(upgrade::STAGED) && path != me) {
             fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
         }
     }

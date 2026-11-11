@@ -14,15 +14,11 @@ use crate::paths::Paths;
 const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
 
 /// What the file name of a downloaded binary starts with in the bin dir.
-const STAGED: &str = "upgrade-";
-
-/// The environment variable by which `upgrade` tells the `install` it runs which file is its staged copy, to remove.
-pub const STAGED_ENV: &str = "REVERSE_TUNNEL_STAGED";
+pub const STAGED: &str = "upgrade-";
 
 /// Writes `binary` to a new executable file of its own in the bin dir, `upgrade-<random>`, and returns its path, to
-/// run it. `clean_bin_dir` leaves such files alone, so that an `install` running meanwhile cannot take one away; the
-/// `install` that runs it is told to remove it (`STAGED_ENV`). What an interrupted upgrade leaves is in `upgrade
-/// --help`.
+/// run it. `clean_bin_dir` removes such files, the next `install` or `upgrade` removing the one this ran from; see
+/// `upgrade --help`.
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     let mut file = tempfile::Builder::new()
         .prefix(STAGED)
@@ -34,14 +30,12 @@ pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
             )
         })?;
     let path = file.path().to_path_buf();
-    let write = move || -> Result<PathBuf> {
-        apply(file.as_file(), Perm::EXECUTABLE)?;
-        file.write_all(binary)?;
-        file.as_file().sync_all()?;
-        // Closed before it is kept, which is before it runs.
-        Ok(file.into_temp_path().keep()?)
-    };
-    write().with_context(|| format!("writing {}", path.display()))
+    let writing = || format!("writing {}", path.display());
+    apply(file.as_file(), Perm::EXECUTABLE).with_context(writing)?;
+    file.write_all(binary).with_context(writing)?;
+    file.as_file().sync_all().with_context(writing)?;
+    // Closed before it is kept, which is before it runs.
+    file.into_temp_path().keep().with_context(writing)
 }
 
 /// Runs `install` of the binary at `from`, or of the latest release's for this platform, checked against the
@@ -50,23 +44,23 @@ pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     let Some(from) = from else {
         let binary = fetch_release(RELEASES, &format!("reverse-tunnel-{}{EXE_SUFFIX}", host_target()?))?;
         let staged = stage(paths, &binary)?;
-        let installed = install_with(&staged, true);
-        // `install` removes it itself, unless it failed before.
-        if let Err(err) = remove_entry(&staged) {
+        let installed = install_with(&staged);
+        // After a success the next `install` or `upgrade` removes it; it is a copy of what runs now.
+        if installed.is_err()
+            && let Err(err) = remove_entry(&staged)
+        {
             eprintln!("{err:#}; it is safe to delete");
         }
         return installed;
     };
     // By path: a bare name would be looked up on `PATH`, and could run the installed binary instead.
     let from = fs::canonicalize(from).with_context(|| format!("finding {}", from.display()))?;
-    install_with(&from, false)
+    install_with(&from)
 }
 
 /// Runs `exe install` with this terminal: its warnings and the registration line are for the operator.
-fn install_with(exe: &Path, staged: bool) -> Result<()> {
+fn install_with(exe: &Path) -> Result<()> {
     let status = cosca::run([exe.as_os_str(), "install".as_ref()])
-        .env_remove(STAGED_ENV)
-        .envs(staged.then_some((STAGED_ENV, exe)))
         .status()
         .with_context(|| format!("running {} install", exe.display()))?;
     ensure!(status.success(), "{} install ended with {status}", exe.display());
