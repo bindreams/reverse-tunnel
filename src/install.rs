@@ -89,19 +89,38 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     };
 
     let account = account::ensure(service::ACCOUNT)?;
+    apply(
+        &*goetia::manager::native()?,
+        &account,
+        paths,
+        host.as_deref(),
+        join.as_ref(),
+        changed,
+    )
+}
+
+/// What `install` does once it holds the lock and knows its inputs. `changed`: an earlier run left work unpicked-up.
+fn apply(
+    manager: &dyn ServiceManager,
+    account: &Account,
+    paths: &Paths,
+    host: Option<&str>,
+    join: Option<&JoinInfo>,
+    mut changed: bool,
+) -> Result<()> {
     let spec = service::spec(paths);
-    let manager = goetia::manager::native()?;
     // The binary and the settings may not exist yet; the manager does not look.
-    changed |= register(&*manager, &spec, paths)?;
-    changed |= write_settings(paths, &account, host.as_deref(), join.as_ref())?;
+    changed |= register(manager, &spec, paths)?;
+    changed |= write_settings(paths, account, host, join)?;
     changed |= place_binaries(paths)?;
 
     println!(
-        "Register this host on the bridge by running:\n    {}",
+        "Register this host on the bridge by running:
+    {}",
         registration(paths)?
     );
     manager.enable(&spec.id)?;
-    pick_up(&*manager, &spec.id, paths, changed)
+    pick_up(manager, &spec.id, paths, changed)
 }
 
 /// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.

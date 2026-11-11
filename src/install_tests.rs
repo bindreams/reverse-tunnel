@@ -303,19 +303,21 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
 
 #[test]
 fn upgrade_aborts_when_check_fails() {
-    use std::os::unix::fs::PermissionsExt;
-
     let machine = Machine::new();
     machine.settings(Some("mothership"), Some(CODE));
     fs::create_dir(&machine.paths.bin_dir).unwrap();
     let (exe, frpc) = (service::exe(&machine.paths), download::tools(&machine.paths).frpc);
     fs::write(&exe, b"the outgoing binary").unwrap();
-    // An frpc that rejects whatever it is asked to verify.
-    fs::write(&frpc, "#!/bin/sh\nexit 1\n").unwrap();
-    fs::set_permissions(&frpc, fs::Permissions::from_mode(0o755)).unwrap();
+    // An frpc that rejects whatever it is asked to verify. A link: writing a program and running it races a fork.
+    symlink("/bin/false", &frpc).unwrap();
+    let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
+    let id = service::spec(&machine.paths).id;
 
-    let err = place_binaries(&machine.paths).unwrap_err();
+    let err = apply(&manager, &machine.account, &machine.paths, None, None, false).unwrap_err();
 
     assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
     assert_eq!(fs::read(&exe).unwrap(), b"the outgoing binary");
+    assert_eq!(fs::read(machine.config()).unwrap(), config);
+    assert!(matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })));
+    assert!(!pending_file(&machine.paths).exists());
 }
