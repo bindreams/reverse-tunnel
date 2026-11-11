@@ -590,15 +590,15 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    // What a failed uninstall by an earlier version, or by hand, can leave where root writes the log: root follows no link.
+    // What the service account, which owns logs/ and runs frpc, can plant for root to follow.
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
-    symlink(&victim, &machine.paths.uninstall_log).unwrap();
+    symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
 
-    assert!(!victim.exists(), "uninstall wrote through a link at its log");
+    assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
     assert_eq!(
         after.difference(&before).collect::<Vec<_>>(),

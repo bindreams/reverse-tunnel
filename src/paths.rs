@@ -14,8 +14,6 @@ pub struct Paths {
     /// `bridge.token` and `host.token`, readable by administrators and the service account.
     pub secrets_dir: PathBuf,
     pub log_dir: PathBuf,
-    /// Where `uninstall` logs the removal, in a directory only root can write: `log_dir` belongs to the service account.
-    pub uninstall_log: PathBuf,
     /// Held by `install` and `uninstall` for their whole run. No removal touches it. On Windows, the name of the
     /// global mutex.
     pub lock: PathBuf,
@@ -32,7 +30,6 @@ impl Paths {
             config_dir: root.join("config"),
             secrets_dir: root.join("config/secrets"),
             log_dir: root.join("logs"),
-            uninstall_log: root.join("reverse-tunnel-uninstall.log"),
             lock: root.join("lock"),
             link: None,
         }
@@ -45,7 +42,6 @@ impl Paths {
             ensure!(dir.to_str().is_some(), "{} is not valid Unicode", dir.display());
         }
         Ok(Paths {
-            uninstall_log: log_dir.with_file_name("reverse-tunnel-uninstall.log"),
             secrets_dir: config_dir.join("secrets"),
             bin_dir,
             config_dir,

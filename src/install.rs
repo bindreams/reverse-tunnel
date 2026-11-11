@@ -4,7 +4,7 @@
 //! and each step can be repeated, so an install that failed midway is finished by running it again.
 
 use std::env;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -112,17 +112,19 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
         Err(err) => eprintln!("{err:#}\nRevoke this host on the bridge by running: uv run ctl revoke <host>"),
     }
+    let exe = env::current_exe()?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     open_file(&uninstalling_file(paths), Perm::new(0o600), false)?;
-    // `paths.uninstall_log` is where only root writes, so no one can have planted a link there; an earlier run's log is
-    // replaced.
-    remove_entry(&paths.uninstall_log)?;
-    let log = open_file(&paths.uninstall_log, PUBLIC_FILE, true)?;
     // `--finish` takes the lock itself; an `install` in between is refused by the marker.
     drop(lock);
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
     println!("Its log will be {}.", removal_log(paths));
-    let mut finish = spawn_finish(&env::current_exe()?, &paths.uninstall_log, log).context("starting the removal")?;
+    let mut finish = spawn_finish(&exe, paths)
+        .context("starting the removal")
+        .inspect_err(|_| {
+            // Nothing started, so there is nothing for `install` to wait out or to be pointed at.
+            let _ = remove_entry(&uninstalling_file(paths));
+        })?;
     // The removal may already have cut the session.
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let status = finish.wait().context("waiting for the removal")?;
@@ -136,27 +138,32 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Where the removal's output is, for the operator.
-pub fn removal_log(paths: &Paths) -> String {
-    paths.uninstall_log.display().to_string()
+/// Where the removal's output is, for the operator: the journal, where the lines of earlier failed runs of the unit
+/// come first, and which a host without persistent storage loses at a reboot.
+#[cfg(target_os = "linux")]
+pub fn removal_log(_paths: &Paths) -> String {
+    "the journal (`journalctl -u reverse-tunnel-uninstall -e`; this run's lines are the last, and without a persistent \
+     journal they are gone after a reboot)"
+        .to_string()
 }
 
-/// Starts `uninstall --finish` with its output in `log`, which is open at `log_path`, so that it outlives the session
-/// that runs `uninstall`. Returns once the removal has started; the child is waited on, and ends with the removal.
+/// Where the removal's output is, for the operator: a file in `logs/`, which the removal deletes when it succeeds.
+#[cfg(not(target_os = "linux"))]
+pub fn removal_log(paths: &Paths) -> String {
+    paths.log_dir.join("uninstall.log").display().to_string()
+}
+
+/// Starts `uninstall --finish` so that it outlives the session that runs `uninstall`, with its output where
+/// `removal_log` says. Returns once the removal has started; the child is waited on, and ends with the removal. An
+/// error means nothing started.
 ///
 /// Linux: a transient systemd unit, since logind kills what a session leaves behind under `KillUserProcesses=yes`, and
-/// a process of its own does not escape that. systemd opens `log_path` itself before it runs `--finish`, so every line
-/// lands there. `systemd-run` says "Running as unit" once the unit is started; until then, the end of the session could
-/// end the removal before it began.
+/// a process of its own does not escape that. A service's output goes to the journal. `systemd-run` says "Running as
+/// unit" once the unit is started; until then, the end of the session could end the removal before it began.
 #[cfg(target_os = "linux")]
-fn spawn_finish(exe: &Path, log_path: &Path, _log: File) -> Result<std::process::Child> {
+fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<std::process::Child> {
     let mut client = Command::new("systemd-run")
-        .args(["--wait", "--collect", "--unit=reverse-tunnel-uninstall"])
-        .args(
-            ["StandardOutput", "StandardError"]
-                .map(|stream| format!("--property={stream}=append:{}", log_path.display())),
-        )
-        .arg("--")
+        .args(["--wait", "--collect", "--unit=reverse-tunnel-uninstall", "--"])
         .arg(exe)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
@@ -177,15 +184,8 @@ fn spawn_finish(exe: &Path, log_path: &Path, _log: File) -> Result<std::process:
                 );
             }
             Ok(_) => {}
-            Err(err) => {
-                // Not waited on, the client would outlive this error as a zombie. The unit, if it started, goes on.
-                let _ = client.kill();
-                let _ = client.wait();
-                return Err(err).context(format!(
-                    "reading systemd-run's output; the removal may be running, its log is {}",
-                    log_path.display()
-                ));
-            }
+            // No sign that the unit did not start: carry on as if it had, and its end tells.
+            Err(_) => break,
         }
         let line = String::from_utf8_lossy(&line);
         if line.starts_with("Running as unit:") {
@@ -198,12 +198,17 @@ fn spawn_finish(exe: &Path, log_path: &Path, _log: File) -> Result<std::process:
     Ok(client)
 }
 
-/// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone; it
-/// inherits `log`.
+/// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
+/// inherits the log, which is opened here, by root without following a link: `logs/` belongs to the service account,
+/// which may have left anything in it.
 #[cfg(not(target_os = "linux"))]
-fn spawn_finish(exe: &Path, _log_path: &Path, log: File) -> Result<std::process::Child> {
+fn spawn_finish(exe: &Path, paths: &Paths) -> Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
+    make_dir(&paths.log_dir, PUBLIC_DIR)?;
+    let path = PathBuf::from(removal_log(paths));
+    remove_entry(&path)?;
+    let log = open_file(&path, PUBLIC_FILE, true)?;
     Ok(Command::new(exe)
         .args(["uninstall", "--finish"])
         .stdin(Stdio::null())
@@ -223,8 +228,7 @@ fn rerun_uninstall(paths: &Paths) -> String {
     }
 }
 
-/// Removes the service, then the files and the account, with its output in `paths.uninstall_log`, which `uninstall`
-/// made. Repeating it finishes what a failed run left.
+/// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
     let spec = service::spec(paths);
@@ -234,14 +238,13 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     }
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
-    // until the rest is gone, since `install` is refused while it exists; and the log, which is in no directory this
-    // removes, goes last and only if everything else went, so that a failure above is written to it and stays.
+    // until the rest is gone, since `install` is refused while it exists; and `logs/` is last, so that a failure above
+    // is written to `uninstall.log` on macOS.
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
     remove_link(paths)?;
     remove_files(paths)
-        .context("the binary may be gone, but any `reverse-tunnel` binary can run `reverse-tunnel uninstall` again")?;
-    remove_entry(&paths.uninstall_log)
+        .context("the binary may be gone, but any `reverse-tunnel` binary can run `reverse-tunnel uninstall` again")
 }
 
 /// Removes the link to the binary, unless it points elsewhere.
