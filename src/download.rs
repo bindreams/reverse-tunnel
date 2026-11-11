@@ -142,23 +142,22 @@ enum Piece {
 
 /// The body at `url`. Fails, naming `url`, when nothing arrives for `stall`; see `transfer`.
 pub(crate) fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
-    Ok(transfer(url, stall, true)?.body)
+    Ok(transfer(url, stall, false)?.body)
 }
 
-/// Where `url` ends up after redirects, without taking the body. Fails like `download`.
+/// Where `url` ends up after redirects, from a HEAD request. Fails like `download`.
 pub(crate) fn resolve(url: &str, stall: Duration) -> Result<String> {
-    Ok(transfer(url, stall, false)?.url)
+    Ok(transfer(url, stall, true)?.url)
 }
 
 /// Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps progressing is never cut off. A
-/// reader thread feeds the pieces, so the wait covers connecting too. Without `keep_body` it returns once the request
-/// has ended, and the reader stops at its next chunk.
-fn transfer(url: &str, stall: Duration, keep_body: bool) -> Result<Transfer> {
+/// reader thread feeds the pieces, so the wait covers connecting too. `head`: a HEAD request, which has no body.
+fn transfer(url: &str, stall: Duration, head: bool) -> Result<Transfer> {
     let (send, recv) = mpsc::channel();
     let owned = url.to_string();
     thread::spawn(move || {
         let read = || -> Result<()> {
-            let response = ureq::get(&owned).call()?;
+            let response = if head { ureq::head(&owned) } else { ureq::get(&owned) }.call()?;
             send.send(Ok(Piece::Url(response.get_uri().to_string()))).ok();
             let mut body = response.into_body().into_reader();
             loop {
@@ -182,7 +181,6 @@ fn transfer(url: &str, stall: Duration, keep_body: bool) -> Result<Transfer> {
     loop {
         match recv.recv_timeout(stall) {
             Ok(piece) => match piece.with_context(|| format!("downloading {url}"))? {
-                Piece::Url(ended) if !keep_body => return Ok(Transfer { url: ended, ..got }),
                 Piece::Url(ended) => got.url = ended,
                 Piece::Chunk(chunk) if chunk.is_empty() => return Ok(got),
                 Piece::Chunk(chunk) => got.body.extend(chunk),

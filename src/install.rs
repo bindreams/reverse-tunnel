@@ -18,10 +18,10 @@ use named_lock::{NamedLock, NamedLockGuard};
 use crate::account::{self, Account};
 use crate::command;
 use crate::config::{Config, valid_label};
-use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
+use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
-use crate::{download, ops, service, supervisor, upgrade};
+use crate::{download, ops, service, supervisor};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -35,6 +35,8 @@ pub struct InstallOpts {
     pub host: Option<String>,
     /// Without it the join code is asked for, unless a previous install left the bridge files.
     pub join: Option<String>,
+    /// This binary is a copy `upgrade` made for this run: remove it once it has been read.
+    pub staged: bool,
     pub paths: Paths,
 }
 
@@ -96,6 +98,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         host.as_deref(),
         join.as_ref(),
         changed,
+        opts.staged,
     )
 }
 
@@ -107,19 +110,21 @@ fn apply(
     host: Option<&str>,
     join: Option<&JoinInfo>,
     mut changed: bool,
+    staged: bool,
 ) -> Result<()> {
     let spec = service::spec(paths);
     // Settings that are all there and stay as they are can be checked before anything is changed: a failure leaves the
     // installation as it was. Otherwise the check can only see what `write_settings` wrote.
     let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
-    if !settled {
+    let fetched = if settled {
+        let fetched = verify_tools(paths)?;
         changed |= settle(manager, &spec, account, paths, host, join)?;
-    }
-    let fetched = verify_tools(paths)?;
-    if settled {
+        fetched
+    } else {
         changed |= settle(manager, &spec, account, paths, host, join)?;
-    }
-    changed |= place_binaries(paths, fetched)?;
+        verify_tools(paths)?
+    };
+    changed |= place_binaries(paths, fetched, staged)?;
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -392,21 +397,6 @@ fn remove_files(paths: &Paths) -> Result<()> {
     remove_entry(&paths.log_dir)
 }
 
-/// Removes `path`, a directory with its contents, unless it is already gone. A link is removed, not followed.
-fn remove_entry(path: &Path) -> Result<()> {
-    let removed = match fs::symlink_metadata(path) {
-        Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(err) => Err(err),
-    };
-    match removed {
-        Err(err) if err.kind() != ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("removing {}", path.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
 fn config_file(paths: &Paths) -> PathBuf {
     paths.config_dir.join("config.yaml")
 }
@@ -589,22 +579,24 @@ fn verify_tools(paths: &Paths) -> Result<bool> {
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
     let fetched = !download::tools(paths).frpc.try_exists()?;
     if fetched {
-        // Before the file the service will run is written, so that a failure after it is made up for by the next run.
-        mark_pending(paths)?;
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
     supervisor::run(paths, &download::tools(paths), true)?;
+    // Only a settings check that passed leaves a marker: the service is restarted onto what was checked.
+    if fetched {
+        mark_pending(paths)?;
+    }
     Ok(fetched)
 }
 
-/// Puts this binary and the symlink in place; `fetched` is `verify_tools`' answer. It also removes this binary's own
-/// file if an `upgrade` staged it. Whether the binary or frpc changed.
-fn place_binaries(paths: &Paths, fetched: bool) -> Result<bool> {
+/// Puts this binary and the symlink in place; `fetched` is `verify_tools`' answer. With `staged` it removes this
+/// binary's own file once it has read it. Whether the binary or frpc changed.
+fn place_binaries(paths: &Paths, fetched: bool, staged: bool) -> Result<bool> {
     let mut changed = fetched;
     let exe = service::exe(paths);
     let me = env::current_exe().context("finding this binary")?;
     let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
-    if upgrade::is_staged(paths, &me) {
+    if staged {
         remove_entry(&me)?;
     }
     changed |= replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;

@@ -36,6 +36,9 @@ enum Command {
         /// The bridge's join code; asked for if missing and needed.
         #[arg(long)]
         join: Option<String>,
+        /// What `upgrade` runs a download with: remove this binary once it has been read.
+        #[arg(long, hide = true)]
+        staged: bool,
     },
     /// Replaces this host's binary with the latest release's, or with `--from`, and restarts the service. Needs root.
     ///
@@ -67,11 +70,12 @@ fn main() -> Result<ExitCode> {
             supervisor::run(&paths, &tools(&paths), check)
         }
         #[cfg(unix)]
-        Command::Install { host, join } => {
+        Command::Install { host, join, staged } => {
             require_root()?;
             install::install(InstallOpts {
                 host,
                 join,
+                staged,
                 paths: Paths::system()?,
             })?;
             Ok(ExitCode::SUCCESS)
