@@ -127,14 +127,13 @@ pub fn fetch(pin: &Pin, dest_dir: &Path) -> Result<PathBuf> {
     install(pin, &download(pin.url, STALL)?, dest_dir)
 }
 
-/// What `transfer` got.
 struct Transfer {
     /// Where the request ended, after redirects.
     url: String,
     body: Vec<u8>,
 }
 
-/// What the reader thread of `transfer` sends: where the request ended, then the body in chunks, the last empty.
+/// Reader-thread messages of `transfer`; an empty `Chunk` ends the body.
 enum Piece {
     Url(String),
     Chunk(Vec<u8>),
@@ -160,7 +159,6 @@ fn transfer(url: &str, stall: Duration, head: bool) -> Result<Transfer> {
             let response = if head { ureq::head(&owned) } else { ureq::get(&owned) }.call()?;
             send.send(Ok(Piece::Url(response.get_uri().to_string()))).ok();
             if head {
-                // No body: its end follows the URL.
                 send.send(Ok(Piece::Chunk(Vec::new()))).ok();
                 return Ok(());
             }
@@ -196,7 +194,7 @@ fn transfer(url: &str, stall: Duration, head: bool) -> Result<Transfer> {
     }
 }
 
-/// Fails unless `data` has the SHA-256 `want` (hex), which `said_by` gave for `what`.
+/// Fails unless `data` has SHA-256 `want` (hex). `what` and `said_by` only label the error.
 pub(crate) fn verify_digest(what: &str, data: &[u8], want: &str, said_by: &str) -> Result<()> {
     let digest = hex::encode(Sha256::digest(data));
     ensure!(

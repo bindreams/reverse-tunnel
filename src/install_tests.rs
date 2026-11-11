@@ -326,3 +326,25 @@ fn upgrade_aborts_when_check_fails() {
     assert!(matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })));
     assert!(!pending_file(&machine.paths).exists());
 }
+
+#[test]
+fn first_install_aborts_when_check_fails() {
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.bin_dir).unwrap();
+    // An frpc that rejects whatever it is asked to verify; see `upgrade_aborts_when_check_fails`.
+    symlink("/bin/false", download::tools(&machine.paths).frpc).unwrap();
+    let join = join::decode(CODE).unwrap();
+
+    let err = apply(
+        &Fake::default(),
+        &machine.account,
+        &machine.paths,
+        Some("mothership"),
+        Some(&join),
+        false,
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
+    assert!(!service::exe(&machine.paths).exists());
+}

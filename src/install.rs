@@ -99,7 +99,8 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     )
 }
 
-/// What `install` does once it holds the lock and knows its inputs. `changed`: an earlier run left work unpicked-up.
+/// What `install` does once it holds the lock and knows its inputs. `changed`: an earlier run changed something that
+/// has not been restarted yet.
 fn apply(
     manager: &dyn ServiceManager,
     account: &Account,
@@ -110,7 +111,7 @@ fn apply(
 ) -> Result<()> {
     let spec = service::spec(paths);
     // Settings that are all there and stay as they are can be checked before anything is changed: a failure leaves the
-    // installation as it was. Otherwise the check can only see what `write_settings` wrote.
+    // installation as it was.
     let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
     if settled {
         verify_tools(paths)?;
@@ -563,8 +564,7 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
 }
 
 /// Makes the bin dir, fetches the pinned frpc if it is missing, and has this binary, the new one, check the settings
-/// with it. A fetch is no change that needs a restart: frpc of another version arrives only with another binary, which
-/// `place_binaries` marks, and the version the service runs is the same bytes again.
+/// with it. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries` marks.
 fn verify_tools(paths: &Paths) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
@@ -594,8 +594,7 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
 }
 
 /// Removes from the bin dir the frpc versions that are not the current one, temp files a crashed write left, and the
-/// copies `upgrade` ran from (`upgrade-*`), this process's own among them. The bin dir is reverse-tunnel's own, and so
-/// are these names.
+/// copies `upgrade` ran from (`upgrade-*`), this process's own among them.
 fn clean_bin_dir(paths: &Paths) -> Result<()> {
     let current = download::tools(paths).frpc;
     for entry in fs::read_dir(&paths.bin_dir)? {

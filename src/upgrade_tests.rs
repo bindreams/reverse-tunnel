@@ -29,7 +29,7 @@ fn serve(routes: Vec<Route>) -> (String, Arc<Mutex<Vec<String>>>) {
             let mut conn = conn.unwrap();
             let mut lines = BufReader::new(&conn).lines();
             let request = lines.next().unwrap().unwrap();
-            // The whole request, so that closing after the reply does not reset the connection.
+            // Read the whole request first: closing with unread input resets the connection.
             while !lines.next().unwrap().unwrap().is_empty() {}
             let mut words = request.split(' ');
             let (method, path) = (words.next().unwrap().to_string(), words.next().unwrap().to_string());
@@ -117,10 +117,12 @@ fn upgrade_rejects_bad_release_digest() {
 
     let err = fetch_release(&base, ASSET).unwrap_err();
 
-    assert!(
-        err.to_string().contains(&hex::encode(Sha256::digest(BINARY))),
-        "{err:#}"
+    let (listed, served) = (
+        hex::encode(Sha256::digest(BINARY)),
+        hex::encode(Sha256::digest(b"a tampered build")),
     );
+    let err = err.to_string();
+    assert!(err.contains(&listed) && err.contains(&served), "{err}");
 }
 
 #[test]
@@ -133,23 +135,26 @@ fn upgrade_http_error() {
 
     let err = fetch_release(&base, ASSET).unwrap_err();
 
+    let err = format!("{err:#}");
     assert!(
-        format!("{err:#}").contains(&format!("{base}/download/v7/SHA256SUMS")),
-        "{err:#}"
+        err.contains(&format!("{base}/download/v7/SHA256SUMS")) && err.contains("404"),
+        "{err}"
     );
 }
 
 #[test]
 fn upgrade_needs_a_published_release() {
-    // With no release, GitHub sends `releases/latest` to the list of releases.
-    let (base, _) = serve(vec![
-        ("/releases/latest", 302, Some("/releases"), vec![]),
-        ("/releases", 200, None, vec![]),
-    ]);
+    // With no release, GitHub sends `releases/latest` to the list of releases. A tag page ends the URL at the tag.
+    for ended in ["/releases", "/releases/tag/", "/releases/tag/v7/assets"] {
+        let (base, _) = serve(vec![
+            ("/releases/latest", 302, Some(ended), vec![]),
+            (ended, 200, None, vec![]),
+        ]);
 
-    let err = fetch_release(&base, ASSET).unwrap_err();
+        let err = fetch_release(&base, ASSET).unwrap_err();
 
-    assert!(err.to_string().contains("not a release page"), "{err:#}");
+        assert!(err.to_string().contains("not a release page"), "{ended}: {err:#}");
+    }
 }
 
 #[test]
