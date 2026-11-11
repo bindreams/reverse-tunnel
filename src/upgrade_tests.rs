@@ -147,5 +147,40 @@ fn upgrade_needs_a_published_release() {
 
     let err = fetch_release(&base, ASSET).unwrap_err();
 
-    assert!(err.to_string().contains("no release is published"), "{err:#}");
+    assert!(err.to_string().contains("not a release page"), "{err:#}");
+}
+
+#[test]
+fn a_staged_binary_is_one_in_the_bin_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::testing(dir.path());
+    fs::create_dir(&paths.bin_dir).unwrap();
+    let inside = stage(&paths, b"the download").unwrap();
+    // An operator's own download, named alike but kept elsewhere, is not ours to delete.
+    let outside = dir.path().join("upgrade-rt");
+    let installed = paths.bin_dir.join("reverse-tunnel");
+    for path in [&outside, &installed] {
+        fs::write(path, b"x").unwrap();
+    }
+
+    assert!(is_staged(&paths, &inside));
+    assert!(!is_staged(&paths, &outside));
+    assert!(!is_staged(&paths, &installed));
+}
+
+#[test]
+fn two_upgrades_stage_separate_executables() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::testing(dir.path());
+    fs::create_dir(&paths.bin_dir).unwrap();
+
+    let (first, second) = (stage(&paths, b"same").unwrap(), stage(&paths, b"same").unwrap());
+
+    assert_ne!(first, second);
+    assert_eq!(fs::read(&first).unwrap(), b"same");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(first.metadata().unwrap().permissions().mode() & 0o777, 0o755);
+    }
 }
