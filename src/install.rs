@@ -307,8 +307,8 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     }
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
-    // until the rest of `config_dir` is gone, since `install` is refused while it exists; and `logs/` is last, so that a failure above
-    // is still in the log.
+    // until the rest of `config_dir` is gone, since `install` is refused while it exists; and `logs/` is last, so that
+    // a failure above is still in the log.
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
     remove_link(paths)?;
