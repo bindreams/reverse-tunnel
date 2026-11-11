@@ -9,6 +9,7 @@ use reverse_tunnel::install::{self, InstallOpts};
 use reverse_tunnel::ops;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::supervisor;
+#[cfg(unix)]
 use reverse_tunnel::upgrade;
 
 /// Publishes this machine's services through the reverse-tunnel bridge.
