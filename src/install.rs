@@ -653,10 +653,9 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     let restart_failed = "the new files are in place, but the service was not restarted";
     match failed.marker {
         Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
-        Err(write) => Err(write.context(format!(
-            "{restart_failed} ({}), and the marker for retrying it could not be written; the next `install` will \
-            not notice, so run `reverse-tunnel restart`",
-            crate::report::report(&err)
+        Err(write) => Err(err.context(format!(
+            "{restart_failed}, and the marker for retrying it could not be written ({write:#}); the next `install` \
+            will not notice, so run `reverse-tunnel restart`"
         ))),
     }
 }

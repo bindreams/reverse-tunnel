@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -69,7 +69,8 @@ enum Command {
 
 fn main() -> ExitCode {
     run().unwrap_or_else(|err| {
-        eprintln!("Error: {}", report(&err));
+        // Not `eprintln!`, which panics once a restart over the tunnel has closed stderr.
+        let _ = writeln!(io::stderr(), "Error: {}", report(&err));
         ExitCode::FAILURE
     })
 }
