@@ -112,30 +112,27 @@ const EVERYONE: &str = "*S-1-1-0";
 /// Windows: `make_dir`'s ACL for `dir`, replacing the one it inherited and any grant to these three.
 #[cfg(windows)]
 fn protect_dir(dir: &Path, everyone_reads: bool) -> Result<()> {
-    let mut grants = vec![format!("{SYSTEM}:(OI)(CI)F"), format!("{ADMINISTRATORS}:(OI)(CI)F")];
-    if everyone_reads {
-        grants.push(format!("{EVERYONE}:(OI)(CI)RX"));
+    // One operation per run: `icacls` refuses a switch that follows `/setowner`.
+    icacls(dir, &["/setowner", ADMINISTRATORS])?;
+    icacls(dir, &["/inheritance:r"])?;
+    let everyone = everyone_reads.then_some((EVERYONE, "RX"));
+    for (who, rights) in [(SYSTEM, "F"), (ADMINISTRATORS, "F")].into_iter().chain(everyone) {
+        icacls(dir, &["/grant:r", &format!("{who}:(OI)(CI){rights}")])?;
     }
-    let mut args: Vec<&OsStr> = vec![
-        "icacls".as_ref(),
-        dir.as_ref(),
-        "/setowner".as_ref(),
-        ADMINISTRATORS.as_ref(),
-        "/inheritance:r".as_ref(),
-    ];
-    for grant in &grants {
-        args.extend([OsStr::new("/grant:r"), OsStr::new(grant)]);
-    }
-    crate::command::run(&args).with_context(|| format!("setting the ACL of {}", dir.display()))?;
     Ok(())
 }
 
 /// Windows: gives `account` (a name `icacls` resolves) `rights` (`icacls`'s letters) on `dir` and what it holds.
 #[cfg(windows)]
 pub fn grant(dir: &Path, account: &str, rights: &str) -> Result<()> {
-    let who = format!("{account}:(OI)(CI){rights}");
-    crate::command::run(&["icacls".as_ref(), dir.as_os_str(), "/grant".as_ref(), who.as_ref()])
-        .with_context(|| format!("giving {account} access to {}", dir.display()))?;
+    icacls(dir, &["/grant", &format!("{account}:(OI)(CI){rights}")])
+}
+
+#[cfg(windows)]
+fn icacls(path: &Path, operation: &[&str]) -> Result<()> {
+    let mut args: Vec<&OsStr> = vec!["icacls".as_ref(), path.as_ref()];
+    args.extend(operation.iter().map(|arg| OsStr::new(*arg)));
+    crate::command::run(&args).with_context(|| format!("setting the ACL of {}", path.display()))?;
     Ok(())
 }
 
