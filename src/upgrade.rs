@@ -1,13 +1,12 @@
 //! `reverse-tunnel upgrade`: gets a newer binary, which then installs itself (see `install`).
 
-use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use crate::download::{STALL, download, host_target, resolve, verify_digest};
+use crate::download::{STALL, SUMS_FILE, asset_name, download, host_target, resolve, verify_digest};
 use crate::files::{Perm, apply, remove_entry};
 use crate::paths::Paths;
 
@@ -41,7 +40,7 @@ pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
 /// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service.
 pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     let Some(from) = from else {
-        let binary = fetch_release(RELEASES, &format!("reverse-tunnel-{}{EXE_SUFFIX}", host_target()?))?;
+        let binary = fetch_release(RELEASES, &asset_name(host_target()?))?;
         let staged = stage(paths, &binary)?;
         let installed = install_with(&staged);
         if installed.is_err()
@@ -77,10 +76,11 @@ fn fetch_release(releases: &str, asset: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("{latest} led to {ended}, not a release page: is a release published?"))?;
 
     let url = |name: &str| format!("{releases}/download/{tag}/{name}");
-    let sums = String::from_utf8(download(&url("SHA256SUMS"), STALL)?).context("SHA256SUMS is not text")?;
+    let sums =
+        String::from_utf8(download(&url(SUMS_FILE), STALL)?).with_context(|| format!("{SUMS_FILE} is not text"))?;
     let want = expected_digest(&sums, asset)?;
     let binary = download(&url(asset), STALL)?;
-    verify_digest(&url(asset), &binary, want, "SHA256SUMS")?;
+    verify_digest(&url(asset), &binary, want, SUMS_FILE)?;
     Ok(binary)
 }
 
@@ -91,7 +91,7 @@ fn expected_digest<'a>(sums: &'a str, asset: &str) -> Result<&'a str> {
             let (digest, name) = line.split_once(' ')?;
             (name.trim_start_matches([' ', '*']) == asset).then_some(digest)
         })
-        .with_context(|| format!("SHA256SUMS lists no {asset}"))
+        .with_context(|| format!("{SUMS_FILE} lists no {asset}"))
 }
 
 #[cfg(test)]
