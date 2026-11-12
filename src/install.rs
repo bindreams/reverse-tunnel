@@ -21,6 +21,7 @@ use crate::command;
 use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
 use crate::join::{self, JoinInfo};
+use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
 use crate::{download, ops, service, supervisor, upgrade};
 
@@ -50,33 +51,28 @@ pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
 }
 
 /// Exists from the moment `uninstall` commits to removing everything until the removal is done. While it does,
-/// `install` refuses, so that it cannot install what the removal is about to delete.
+/// `install` and `restart` refuse, so that they cannot install or restart what the removal is about to delete.
 fn uninstalling_file(paths: &Paths) -> PathBuf {
     paths.config_dir.join("uninstalling")
 }
 
-/// Exists from the first change to what the service runs until the service has picked it up, so that a run that fails
-/// in between is made up for by the next.
-fn pending_file(paths: &Paths) -> PathBuf {
-    paths.config_dir.join("restart-pending")
-}
-
-fn mark_pending(paths: &Paths) -> Result<()> {
-    open_file(&pending_file(paths), Perm::new(0o600), false)?;
-    Ok(())
-}
-
-/// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything it reads
-/// changed. Prints the line that registers the host on the bridge.
-pub fn install(opts: InstallOpts) -> Result<()> {
-    let paths = &opts.paths;
-    let _lock = lock(paths)?;
+/// Fails while the uninstalling marker exists, saying how to finish the removal.
+pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
     ensure!(
         !uninstalling_file(paths).try_exists()?,
         "an uninstall is in progress or failed: see {}, and {} to finish it",
         removal_log(paths),
         rerun_uninstall(paths)
     );
+    Ok(())
+}
+
+/// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything `install`
+/// writes changed. Prints the line that registers the host on the bridge.
+pub fn install(opts: InstallOpts) -> Result<()> {
+    let paths = &opts.paths;
+    let _lock = lock(paths)?;
+    refuse_while_uninstalling(paths)?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
     let host = configured_host(paths, opts.host.as_deref())?;
@@ -655,37 +651,24 @@ fn revoke_line(paths: &Paths) -> Result<String> {
     Ok(format!("uv run ctl revoke {}", Config::load(&config_file(paths))?.host))
 }
 
-/// Has the service run what is now in place. After a change it is killed, and the manager restarts it; it is never
-/// stopped first, because run over the tunnel the stop cuts this session and the start never comes. Without one, it
-/// is started, which leaves a running service alone.
-///
-/// The restart marker is removed just before, since nothing that runs after the kill is sure to run; it is put back
-/// if the service was not picked up.
+/// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is
+/// started, which leaves a running service alone.
 fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
     if !changed {
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }
-    remove_entry(&pending_file(paths))?;
-    let Err(err) = restart(manager, id) else {
+    let Err(failed) = ops::restart_pending(manager, id, paths) else {
         return Ok(());
     };
+    let err = failed.error;
     let restart_failed = "the new files are in place, but the service was not restarted";
-    match mark_pending(paths) {
+    match failed.marker {
         Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
-        // From a console: stopping the service over the tunnel cuts the session before `start`.
         Err(write) => Err(write.context(format!(
             "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will \
-             not notice, so from a console run `reverse-tunnel stop` and then `reverse-tunnel start`"
+            not notice, so run `reverse-tunnel restart`"
         ))),
-    }
-}
-
-fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {
-    match manager.kill(id) {
-        Ok(()) => Ok(()),
-        Err(goetia::Error::NotRunning { .. }) => Ok(manager.start(id, Budget::Unbounded)?),
-        Err(err) => Err(err.into()),
     }
 }
 

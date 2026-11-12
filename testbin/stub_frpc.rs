@@ -1,4 +1,5 @@
-//! Stands in for frpc in `tests/`. What it does is the text of `<this exe>.mode`:
+//! Stands in for frpc in `tests/`, and for the installed binary's `run --check` in `src/ops_tests.rs`. What it does is
+//! the text of `<this exe>.mode`:
 //!
 //! - `exit <code>`: print a line to stderr and exit.
 //! - `record <code> <file>`: write `ARG <argument>` and `ENV <name>=<value>` lines, then `TOML` and the `-c` file's
@@ -6,6 +7,9 @@
 //! - `hold <addr>`: connect to `<addr>`, send the port the `-c` file gives the `tcp` services and a newline, then
 //!   obey one byte at a time until the peer closes: `f` opens `FLOOD` connections to that port and answers `flooded`,
 //!   anything else closes them again.
+//! - `check <pass|fail> <file>`: exit 1 unless the arguments are exactly `run --check` and the environment is exactly
+//!   the `NAME=value` lines of `<file>`, in any order. Then `pass` exits 0; `fail` prints a line to each stream and
+//!   exits 1.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -52,6 +56,25 @@ fn main() {
                     );
                     writeln!(peer, "flooded").unwrap();
                 }
+            }
+        }
+        ["check", outcome, file] => {
+            let mut want: Vec<String> = fs::read_to_string(file).unwrap().lines().map(String::from).collect();
+            let mut have: Vec<String> = env::vars().map(|(name, value)| format!("{name}={value}")).collect();
+            want.sort();
+            have.sort();
+            if args != ["run", "--check"] || want != have {
+                eprintln!("stub frpc: wrong arguments {args:?} or environment {have:?}, wanted {want:?}");
+                exit(1);
+            }
+            match outcome {
+                "pass" => {}
+                "fail" => {
+                    println!("stub stdout line");
+                    eprintln!("stub stderr line");
+                    exit(1);
+                }
+                _ => panic!("unknown check outcome {outcome:?}"),
             }
         }
         _ => panic!("unknown mode {mode:?}"),

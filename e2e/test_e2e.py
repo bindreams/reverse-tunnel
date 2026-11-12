@@ -49,15 +49,21 @@ HOST = "e2ehost"  # the real host
 OTHER = "e2eother"  # a registered host that frpc, run by hand, stands in for
 OTHER_NAME = f"{OTHER}.{T}"
 BACKEND = f"web.{HOST}.{T}"
+ADDED = f"blog.{HOST}.{T}"  # a second HTTP service, added to config.yaml after the host is running
 ALIAS = "movies.binarydreams.me"
 LOOKALIKE = "x.tunnelXbinarydreams.me"  # T with one character for its dot: the frps router must not match it
 NOBODY = f"nobody.{T}"  # matches the frps router, and no host publishes it
 TOO_DEEP = f"a.b.{HOST}.{T}"
 # /etc/hosts has no wildcards: every name the tests connect to.
-NAMES = [T, f"rt-dns-check.rt-dns-check.{T}", f"{HOST}.{T}", f"ssh.{HOST}.{T}", BACKEND, ALIAS, LOOKALIKE, TOO_DEEP,
-         NOBODY, OTHER_NAME, "certs.invalid"]  # fmt: skip
+NAMES = [T, f"rt-dns-check.rt-dns-check.{T}", f"{HOST}.{T}", f"ssh.{HOST}.{T}", BACKEND, ADDED, ALIAS, LOOKALIKE,
+         TOO_DEEP, NOBODY, OTHER_NAME, "certs.invalid"]  # fmt: skip
 MARK = "e2e-stub"
 FRPS_404 = "The page you requested was not found"  # frps's answer for a name no tunnel publishes
+
+
+def http_service(name: str, port: int) -> str:
+    """The `services:` entry of config.yaml for an HTTP service named `name`."""
+    return f"  {name}:\n    port: {port}\n    type: http\n"
 
 
 def client_template() -> str:
@@ -192,6 +198,34 @@ class Stack:
             return None
         return done.si_status if done.si_code == os.CLD_EXITED else -done.si_status
 
+    def pid_after_cut(self, command: str, old_pid: int, log: str) -> int:
+        """The service's pid once `command`, run over SSH as the host's user, has restarted it.
+
+        The restart cuts the session, and ssh may then wait for a connection that nothing closes: the session is
+        ended here, and its output is kept in `log` under the test's temp directory.
+        """
+        output = self.tmp / log
+        with open(output, "w") as out:
+            session = self.ssh_popen(command, out)
+
+            shown = False
+
+            def restarted():
+                nonlocal shown
+                if (pid := self.pid()) not in (None, old_pid):
+                    return pid
+                # 255 is ssh losing the connection the restart cut; any other exit is the command failing before it.
+                if (code := self.session_exit(session)) not in (None, 0, 255):
+                    raise AssertionError(f"{command!r} ended with {code}, service not restarted:\n{output.read_text()}")
+                if code == 255 and not shown:
+                    shown = True
+                    print(f"session ended with 255, service not restarted yet:\n{output.read_text()}", flush=True)
+
+            try:
+                return wait_until(restarted)
+            finally:
+                self.end_session(session)
+
     def ssh(self, command: str) -> subprocess.CompletedProcess:
         cmd, env = self.ssh_command(command)
         done = run(*cmd, env=env, check=False)
@@ -307,8 +341,8 @@ def stack(tmp_path_factory):
     registration = re.search(r"uv run ctl add (\S+) (sha256:[0-9a-f]{64})", installed)
     assert registration, f"no `ctl add` line in the install output:\n{installed}"
     stack.registration = registration.groups()
-    port = server.server_address[1]
-    run("sudo", "tee", "-a", "/etc/reverse-tunnel/config.yaml", input=f"  web:\n    port: {port}\n    type: http\n")
+    stack.stub_port = server.server_address[1]
+    run("sudo", "tee", "-a", "/etc/reverse-tunnel/config.yaml", input=http_service("web", stack.stub_port))
     run("sudo", INSTALLED, "stop")
     stack.started_at = len(frpc_log())
     run("sudo", INSTALLED, "start")
@@ -450,30 +484,24 @@ def test_upgrade_through_tunnel_keeps_access(stack, registered):
     new.write_bytes(BUILT.read_bytes() + b"\ne2e upgrade\n")  # ELF ignores trailing bytes
     new.chmod(0o755)
     want = hashlib.sha256(new.read_bytes()).hexdigest()
-    # The restart cuts this session, and ssh may then wait for a connection that nothing closes.
-    output = stack.tmp / "upgrade-session.log"
-    with open(output, "w") as out:
-        session = stack.ssh_popen(f"sudo {INSTALLED} upgrade --from {new}", out)
-
-        shown = False
-
-        def restarted():
-            nonlocal shown
-            if (pid := stack.pid()) not in (None, old_pid):
-                return pid
-            # 255 is ssh losing the connection the restart cut; any other exit is `upgrade` failing before it.
-            if (code := stack.session_exit(session)) not in (None, 0, 255):
-                raise AssertionError(f"upgrade ended with {code}, service not restarted:\n{output.read_text()}")
-            if code == 255 and not shown:
-                shown = True
-                print(f"session ended with 255, service not restarted yet:\n{output.read_text()}", flush=True)
-
-        try:
-            pid = wait_until(restarted)
-        finally:
-            stack.end_session(session)
+    pid = stack.pid_after_cut(f"sudo {INSTALLED} upgrade --from {new}", old_pid, "upgrade-session.log")
     assert hashlib.sha256(INSTALLED.read_bytes()).hexdigest() == want
     assert run("sudo", "sha256sum", f"/proc/{pid}/exe").stdout.split()[0] == want
+    wait_until(stack.ssh_works)
+
+
+def test_restart_applies_an_edited_config_through_the_tunnel(stack, registered):
+    """`restart` run over SSH through the tunnel: a service added to config.yaml by hand is published afterwards."""
+    wait_until(stack.pid)
+    old_pid = stack.pid()
+    entry = http_service("blog", stack.stub_port)
+    edit = f"sudo tee -a /etc/reverse-tunnel/config.yaml > /dev/null <<'EOF'\n{entry}EOF"
+    assert stack.ssh(edit).returncode == 0
+    assert stack.frps_404(ADDED)  # the edit alone changes nothing: the service reads its config at start
+
+    stack.pid_after_cut(f"sudo {INSTALLED} restart", old_pid, "restart-session.log")
+
+    assert stack.wait_served(ADDED) == {"marker": MARK, "host": ADDED}
     wait_until(stack.ssh_works)
 
 
