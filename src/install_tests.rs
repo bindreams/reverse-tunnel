@@ -160,8 +160,15 @@ fn host_that_differs_from_the_config_is_refused() {
     machine.settings(Some("mothership"), Some(CODE));
 
     let err = format!("{:#}", configured_host(&machine.paths, Some("flagship")).unwrap_err());
-    assert!(err.contains("mothership") && err.contains("flagship"), "{err}");
-    assert!(err.contains("uninstall") && err.contains("install"), "{err}");
+    let config = config_file(&machine.paths).display().to_string();
+    assert_eq!(
+        err,
+        format!(
+            "--host \"flagship\" differs from this host's name \"mothership\" in {config}: `install` does not rename              a host. To rename it, uninstall it and install it again with --host flagship"
+        )
+    );
+    let err = format!("{:#}", configured_host(&machine.paths, Some("Not_Valid")).unwrap_err());
+    assert!(err.contains("not a valid name"), "{err}");
     for same in [Some("mothership"), None] {
         assert_eq!(configured_host(&machine.paths, same).unwrap(), None);
     }
@@ -178,6 +185,28 @@ fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
     };
     let err = format!("{:#}", install(opts).unwrap_err());
     assert!(err.contains(&rerun_uninstall(&machine.paths)), "{err}");
+    assert!(err.contains("`uninstall` with `sudo` and any"), "{err}");
+
+    fs::create_dir_all(&machine.paths.bin_dir).unwrap();
+    fs::write(service::exe(&machine.paths), "").unwrap();
+    assert_eq!(
+        rerun_uninstall(&machine.paths),
+        format!("run `sudo {} uninstall`", service::exe(&machine.paths).display())
+    );
+}
+
+#[test]
+fn host_is_checked_before_the_join_code_is_asked_for() {
+    let machine = Machine::new();
+    machine.settings(Some("mothership"), Some(CODE));
+    fs::remove_file(machine.paths.config_dir.join("bridge.pem")).unwrap();
+    let opts = InstallOpts {
+        host: Some("flagship".to_string()),
+        join: None,
+        paths: machine.paths.clone(),
+    };
+    let err = format!("{:#}", install(opts).unwrap_err());
+    assert!(err.contains("differs from this host's name"), "{err}");
 }
 
 #[test]

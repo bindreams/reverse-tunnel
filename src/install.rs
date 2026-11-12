@@ -78,12 +78,12 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     );
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
+    let host = configured_host(paths, opts.host.as_deref())?;
     let join = match opts.join.as_deref() {
         Some(code) => Some(join::decode(code)?),
         None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
         None => None,
     };
-    let host = configured_host(paths, opts.host.as_deref())?;
 
     let account = account::ensure(service::ACCOUNT)?;
     apply(
@@ -328,9 +328,9 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
 fn rerun_uninstall(paths: &Paths) -> String {
     let exe = service::exe(paths);
     if exe.exists() {
-        format!("run `{} uninstall`", exe.display())
+        format!("run `sudo {} uninstall`", exe.display())
     } else {
-        "run `uninstall` with any `reverse-tunnel` binary (the installed one is gone)".to_string()
+        "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
     }
 }
 
@@ -417,6 +417,7 @@ fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<Strin
         return host_name(explicit).map(Some);
     }
     if let Some(asked) = explicit {
+        let asked = host_name(Some(asked))?;
         let current = Config::load(&config)?.host;
         ensure!(
             asked == current,

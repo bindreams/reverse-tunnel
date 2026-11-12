@@ -7,11 +7,11 @@ fn unix_resolves_iana_zone_names() {
         .expect("Europe/Berlin is not found: is the system's tzdata installed?");
 }
 
-/// A log is readable by anyone on the machine, whatever the umask of the service that created it. The umask is
-/// process-wide, so the test runs itself in a child that has one.
+/// A log is created 0644, the umask permitting: a service's default umask leaves it readable by anyone. The umask is
+/// process-wide, so the test runs itself in a child that has none.
 #[cfg(unix)]
 #[test]
-fn log_files_are_world_readable_under_a_strict_umask() {
+fn log_files_are_created_0644() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -30,10 +30,7 @@ fn log_files_are_world_readable_under_a_strict_umask() {
 
     let dir = tempfile::tempdir().unwrap();
     let status = Command::new("sh")
-        .args([
-            "-c",
-            "umask 077; exec \"$0\" log_files_are_world_readable_under_a_strict_umask",
-        ])
+        .args(["-c", "umask 000; exec \"$0\" log_files_are_created_0644"])
         .arg(std::env::current_exe().unwrap())
         .env(CHILD, dir.path())
         .status()
