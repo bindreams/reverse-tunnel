@@ -136,3 +136,29 @@ jobs:
         run: docker inspect -f '{{index .Config.Labels "traefik.http.routers.reverse-tunnel-frps.rule"}}' reverse-tunnel-frps | grep -E 'tunnel\.binarydreams\.me\$`\)$'
       - name: plugin runs as non-root and reads state/
         run: docker compose run --rm --no-deps reverse-tunnel-plugin python -c "import ctl.plugin as p, pathlib; p.read_hosts(pathlib.Path('/state/hosts.yaml'))"
+
+  # The bridge behind Traefik and Pebble in Docker, and a real host installed as a service on the runner.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: cargo build --locked --release --bin reverse-tunnel
+      - name: Install sshd and websocat
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server
+          sudo systemctl enable --now ssh
+          curl -fsSL -X GET -o websocat https://github.com/vi/websocat/releases/download/v1.14.1/websocat.x86_64-unknown-linux-musl
+          echo '66f8dd3a0394761556339117f8bb5123bddefd44e087af2a72ec22b0bd08d514  websocat' | sha256sum -c -
+          sudo install -m 755 websocat /usr/local/bin/websocat
+      - run: docker network create gateway
+      - run: RT_E2E=1 uv run --project server --locked pytest e2e/test_e2e.py -v --tb=short
+      - name: Logs
+        if: failure()
+        run: |
+          docker ps -a
+          for c in pebble traefik reverse-tunnel-frps reverse-tunnel-plugin; do echo "=== $c"; docker logs "$c" 2>&1 | tail -n 100; done
+          sudo tail -n 100 /var/log/reverse-tunnel/frpc.log /var/log/reverse-tunnel/supervisor.log
