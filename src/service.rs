@@ -3,7 +3,7 @@ use std::env::consts::EXE_SUFFIX;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use goetia::spec::{DaemonFields, DaemonSpec, Kind, Restart, User};
+use goetia::spec::{DaemonFields, DaemonSpec, Id, Kind, Restart, User};
 
 use crate::paths::Paths;
 
@@ -21,12 +21,17 @@ pub fn exe(paths: &Paths) -> PathBuf {
     paths.bin_dir.join(format!("{ID}{EXE_SUFFIX}"))
 }
 
+/// The one daemon's id.
+pub fn id() -> Id {
+    ID.parse().expect("a valid id")
+}
+
 /// The one daemon this tool installs. It names a fixed path, so an upgrade never changes the spec. Fails if goetia
 /// refuses the spec, as it does for a `bin_dir` that is not absolute.
 pub fn spec(paths: &Paths) -> Result<DaemonSpec, goetia::Error> {
     let exe = exe(paths);
     DaemonSpec::new(DaemonFields {
-        id: ID.parse().expect("a valid id"),
+        id: id(),
         name: ID.into(),
         command: vec![
             exe.to_str().expect("Paths::system() guarantees Unicode").into(),

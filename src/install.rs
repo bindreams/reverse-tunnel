@@ -321,10 +321,10 @@ fn rerun_uninstall(paths: &Paths) -> String {
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
-    let spec = service::spec(paths)?;
-    match goetia::manager::native()?.uninstall(&spec.id) {
-        Ok(()) | Err(goetia::Error::NotInstalled { .. }) => {}
-        Err(err) => return Err(err).context("removing the service"),
+    if let Err(err) = goetia::manager::native()?.uninstall(&service::id())
+        && !matches!(err.cause(), goetia::Error::NotInstalled { .. })
+    {
+        return Err(err).context("removing the service");
     }
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays

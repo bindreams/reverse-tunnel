@@ -118,7 +118,7 @@ impl Machine {
         );
         assert_eq!(rustix::process::getuid().as_raw(), 0, "these tests need root");
         let paths = Paths::system().unwrap();
-        let id = service::spec(&paths).unwrap().id.clone();
+        let id = service::id();
         let manager = manager::native().unwrap();
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());
@@ -128,7 +128,7 @@ impl Machine {
             assert!(!accounts.contains(account), "{account} is left from before");
         }
         assert!(
-            matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })),
+            matches!(manager.status(&id), Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })),
             "the service is left from before"
         );
         if let Some(link) = &paths.link {

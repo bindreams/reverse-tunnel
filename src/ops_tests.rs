@@ -71,9 +71,9 @@ fn host_checked_by_stub(outcome: &str) -> (TempDir, Paths, Fake) {
     )
     .unwrap();
     let manager = Fake::default();
-    let id = service::spec(&paths).unwrap().id.clone();
-    manager.install(&service::spec(&paths).unwrap(), false).unwrap();
-    manager.seed_state(id.as_str(), State::Running);
+    let spec = service::spec(&paths).unwrap();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
     fs::write(pending_file(&paths), "").unwrap();
     (dir, paths, manager)
 }
@@ -110,7 +110,7 @@ fn restart_with_a_failing_check_leaves_the_service_alone() {
 #[test]
 fn restart_with_a_passing_check_kills_the_service() {
     let (_dir, paths, manager) = host_checked_by_stub("pass");
-    let id = service::spec(&paths).unwrap().id.clone();
+    let id = service::id();
 
     check_and_restart_as(&manager, &paths, as_current_user()).unwrap();
 
@@ -147,12 +147,14 @@ fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
 #[test]
 fn restart_says_whether_it_killed_or_started_the_service() {
     let (_dir, paths) = host();
-    let (manager, id) = (Fake::default(), service::spec(&paths).unwrap().id.clone());
-    manager.install(&service::spec(&paths).unwrap(), false).unwrap();
+    let manager = Fake::default();
+    let spec = service::spec(&paths).unwrap();
+    manager.install(&spec, false).unwrap();
+    let id = &spec.id;
 
-    assert_eq!(restart(&manager, &id).unwrap(), RestartOutcome::Started);
+    assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Started);
     manager.seed_state(id.as_str(), State::Running);
-    assert_eq!(restart(&manager, &id).unwrap(), RestartOutcome::Killed);
+    assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Killed);
 }
 
 #[test]

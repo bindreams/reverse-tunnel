@@ -11,6 +11,7 @@ pub mod join;
 pub mod logfile;
 pub mod ops;
 pub mod paths;
+pub mod report;
 pub mod service;
 pub mod supervisor;
 #[cfg(all(test, unix))]

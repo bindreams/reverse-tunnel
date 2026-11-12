@@ -333,9 +333,8 @@ fn kill_not_running_starts() {
 #[test]
 fn restart_failure_is_retried_by_install() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths).unwrap();
     // Never installed: the kill fails with something other than NotRunning.
-    let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
+    let err = pick_up(&Fake::default(), &service::id(), &machine.paths, true).unwrap_err();
 
     assert!(
         format!("{err:#}").contains("run `reverse-tunnel install` again"),
@@ -347,16 +346,16 @@ fn restart_failure_is_retried_by_install() {
 #[test]
 fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths).unwrap();
+    let id = service::id();
     // The marker cannot be written without its directory; the kill fails, as the service was never installed.
     fs::remove_dir_all(&machine.paths.config_dir).unwrap();
-    let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
+    let err = pick_up(&Fake::default(), &id, &machine.paths, true).unwrap_err();
 
     let text = format!("{err:#}");
     assert!(text.contains("the service was not restarted"), "{text}");
     assert!(text.contains("restart-pending"), "{text}");
     // The failure of the restart itself is there too: without it the operator is not told why.
-    let restart_error = ops::restart(&Fake::default(), &spec.id).unwrap_err();
+    let restart_error = ops::restart(&Fake::default(), &id).unwrap_err();
     assert!(text.contains(&format!("{restart_error:#}")), "{text}");
     assert!(!text.contains("`reverse-tunnel install` again"), "{text}");
     assert!(
