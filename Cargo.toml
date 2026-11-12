@@ -15,7 +15,7 @@ flate2 = "1.1.10"
 futures-util = "0.3.34"
 gethostname = "1.1.0"
 getrandom = "0.4.3"
-goetia = { version = "0.2.0", default-features = false }
+goetia = { version = "0.3.0", default-features = false }
 hex = "0.4.3"
 # tz-system: the system zone (/etc/localtime on Unix, the Win32 API on Windows).
 # tzdb-bundle-platform: Windows has no zoneinfo to resolve the zone's name against; a no-op elsewhere.

@@ -5,8 +5,9 @@ use super::*;
 
 #[test]
 fn spec_runs_the_installed_binary_as_the_service_account() {
-    let paths = Paths::testing("/opt/reverse-tunnel");
-    let spec = spec(&paths);
+    let root = tempfile::tempdir().unwrap();
+    let paths = Paths::testing(root.path());
+    let spec = spec(&paths).unwrap();
 
     assert_eq!(spec.id.as_str(), "reverse-tunnel");
     let exe = paths
@@ -25,4 +26,9 @@ fn spec_runs_the_installed_binary_as_the_service_account() {
     assert_eq!(spec.user, User::Name(account.into()));
     // goetia's blob round-trip rejects specs its injection gate refuses.
     assert_eq!(blob::decode(&blob::encode(&spec)).unwrap().spec, spec);
+}
+
+#[test]
+fn spec_refuses_a_relative_bin_dir() {
+    assert!(spec(&Paths::testing("relative/root")).is_err());
 }
