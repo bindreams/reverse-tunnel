@@ -729,6 +729,32 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+fn upgrade_from_local_build() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+    // A newer build: this one with a byte appended, which differs and which the loader ignores.
+    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("reverse-tunnel");
+    fs::write(&path, &newer).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut upgrade = Command::new(BIN);
+    upgrade.arg("upgrade").arg("--from").arg(&path);
+    machine.run_ok(upgrade);
+
+    wait_until("the manager runs a new supervisor", || {
+        let status = machine.status();
+        status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
+    });
+    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
 fn install_is_refused_while_an_uninstall_is_unfinished() {
     let machine = Machine::begin();
     machine.install(&join_code("old.example.test"));

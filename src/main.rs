@@ -9,6 +9,8 @@ use reverse_tunnel::install::{self, InstallOpts};
 use reverse_tunnel::ops;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::supervisor;
+#[cfg(unix)]
+use reverse_tunnel::upgrade;
 
 /// Publishes this machine's services through the reverse-tunnel bridge.
 #[derive(Parser)]
@@ -34,6 +36,14 @@ enum Command {
         /// The bridge's join code; asked for if missing and needed.
         #[arg(long)]
         join: Option<String>,
+    },
+    /// Replaces this host's binary with the latest release's, or with `--from`, and restarts the service. Needs root.
+    ///
+    /// The release is staged in the bin directory as `upgrade-<...>` until an `install` finishes, which removes it.
+    Upgrade {
+        /// Install this binary instead of downloading one.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
     },
     /// Stops the service and removes it, its files and its account. Needs root.
     Uninstall {
@@ -76,6 +86,12 @@ fn main() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(unix)]
+        Command::Upgrade { from } => {
+            require_root()?;
+            upgrade::upgrade(&Paths::system()?, from.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Start => {
             require_root()?;
             ops::start(&*goetia::manager::native()?, &Paths::system()?)?;
@@ -95,8 +111,8 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         #[cfg(windows)]
-        Command::Install { .. } | Command::Uninstall { .. } => {
-            anyhow::bail!("install and uninstall are not available on Windows yet")
+        Command::Install { .. } | Command::Upgrade { .. } | Command::Uninstall { .. } => {
+            anyhow::bail!("install, upgrade and uninstall are not available on Windows yet")
         }
     }
 }
