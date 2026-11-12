@@ -17,7 +17,7 @@ const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
 pub const STAGED: &str = "upgrade-";
 
 /// Writes `binary` to a new executable `upgrade-<random>` in the bin dir and returns its path. The caller removes it
-/// (`discard`).
+/// (`discard`), or leaves it to the next `install`'s sweep, as a successful `upgrade` does.
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     let mut file = tempfile::Builder::new()
         .prefix(STAGED)
@@ -43,8 +43,13 @@ pub fn discard(staged: &Path) {
 /// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service.
 pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     let Some(from) = from else {
+        ensure!(
+            paths.bin_dir.try_exists()?,
+            "{} does not exist: is reverse-tunnel installed?",
+            paths.bin_dir.display()
+        );
         let binary = fetch_release(RELEASES, &asset_name(host_target()?))?;
-        let staged = stage(paths, &binary).context("staging the release: is reverse-tunnel installed?")?;
+        let staged = stage(paths, &binary).context("staging the release")?;
         let installed = install_with(&staged);
         if installed.is_err() {
             discard(&staged);

@@ -3,8 +3,8 @@
 use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::process::{self, ExitStatus};
+use std::thread;
 use std::time::Duration;
-use std::{mem, thread};
 
 use anyhow::{Context, Result, ensure};
 
@@ -27,10 +27,12 @@ pub fn run_built(what: &str, command: &mut process::Command) -> Result<String> {
     let mut said = false;
     let out = loop {
         match command.output() {
-            // Refused while anything holds the binary open for writing.
+            // Refused while anything holds the binary open for writing: in the unit tests, a child that another
+            // thread forked while this process wrote the binary, until it execs or exits.
             Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => {
-                if !mem::replace(&mut said, true) {
-                    eprintln!("{what} is open for writing elsewhere; waiting for it to be closed");
+                if !said {
+                    said = true;
+                    eprintln!("waiting to start {what}: its binary is still open for writing");
                 }
                 thread::sleep(Duration::from_millis(10));
             }

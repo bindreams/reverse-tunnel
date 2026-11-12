@@ -108,8 +108,8 @@ fn apply(
 ) -> Result<()> {
     let spec = service::spec(paths);
     let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
-    // The check reads the settings as the account, so they come first; the unit comes after it, so a rejected binary
-    // leaves the unit as it was.
+    // The check reads the settings as the account, so they are written first (a new join code's or host's settings
+    // stay even if the binary is rejected); the unit comes after it, so a rejected binary leaves the unit as it was.
     changed |= write_settings(paths, account, host, join)?;
     verify_tools(paths, &binary, account)?;
     // The binary is not in place yet; the manager does not look.
