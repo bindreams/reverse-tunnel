@@ -30,7 +30,10 @@ fn log_files_are_world_readable_under_a_strict_umask() {
 
     let dir = tempfile::tempdir().unwrap();
     let status = Command::new("sh")
-        .args(["-c", "umask 077; exec \"$0\" log_files_are_world_readable_under_a_strict_umask"])
+        .args([
+            "-c",
+            "umask 077; exec \"$0\" log_files_are_world_readable_under_a_strict_umask",
+        ])
         .arg(std::env::current_exe().unwrap())
         .env(CHILD, dir.path())
         .status()
