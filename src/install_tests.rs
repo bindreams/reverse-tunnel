@@ -403,7 +403,8 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     // Not the unit the new binary would register.
     let mut outgoing = service::spec(&machine.paths).unwrap().into_fields();
     outgoing.command.push("--outgoing".into());
-    manager.install(&DaemonSpec::new(outgoing).unwrap(), false).unwrap();
+    let outgoing = DaemonSpec::new(outgoing).unwrap();
+    manager.install(&outgoing, false).unwrap();
 
     let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
