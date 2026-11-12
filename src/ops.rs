@@ -93,8 +93,12 @@ type RunAs = std::convert::Infallible;
 
 #[cfg(unix)]
 fn service_identity() -> Result<Option<RunAs>> {
-    let account = account::lookup(service::ACCOUNT)
-        .with_context(|| format!("the service is not installed: there is no account {}", service::ACCOUNT))?;
+    let account = account::lookup(service::ACCOUNT).with_context(|| {
+        format!(
+            "the service is not installed: there is no account `{}`",
+            service::ACCOUNT
+        )
+    })?;
     Ok(Some(account))
 }
 

@@ -81,12 +81,7 @@ fn host_checked_by_stub(outcome: &str) -> (TempDir, Paths, Fake) {
     let env: String = service::spec(&paths)
         .env
         .iter()
-        .map(|(name, value)| {
-            format!(
-                "{name}={value}
-"
-            )
-        })
+        .map(|(name, value)| format!("{name}={value}\n"))
         .collect();
     let env_file = paths.bin_dir.join("expected-env");
     fs::write(&env_file, env).unwrap();

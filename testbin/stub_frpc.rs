@@ -67,10 +67,14 @@ fn main() {
                 eprintln!("stub frpc: wrong arguments {args:?} or environment {have:?}, wanted {want:?}");
                 exit(1);
             }
-            if outcome == "fail" {
-                println!("stub stdout line");
-                eprintln!("stub stderr line");
-                exit(1);
+            match outcome {
+                "pass" => {}
+                "fail" => {
+                    println!("stub stdout line");
+                    eprintln!("stub stderr line");
+                    exit(1);
+                }
+                _ => panic!("unknown check outcome {outcome:?}"),
             }
         }
         _ => panic!("unknown mode {mode:?}"),
