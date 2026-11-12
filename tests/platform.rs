@@ -807,8 +807,8 @@ fn install_checks_the_configuration_as_the_service_account() {
     let status = machine.status();
     let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
     let config = machine.hide_config();
-    // A newer build, run from a directory of root's that the service account cannot enter: the check cannot run it
-    // from there, so it runs a copy in the bin dir.
+    let hidden = fs::read(&config).unwrap();
+    // A newer build in a directory the service account cannot enter.
     let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
     let scratch = tempfile::tempdir().unwrap();
     let path = scratch.path().join("reverse-tunnel");
@@ -827,6 +827,11 @@ fn install_checks_the_configuration_as_the_service_account() {
         config.display()
     );
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), outgoing);
+    assert_eq!(
+        fs::read(&config).unwrap(),
+        hidden,
+        "the rejected install leaves config.yaml as it was"
+    );
     let staged = fs::read_dir(&machine.paths.bin_dir)
         .unwrap()
         .filter_map(|entry| entry.unwrap().file_name().into_string().ok())

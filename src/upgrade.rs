@@ -12,23 +12,17 @@ use crate::paths::Paths;
 
 const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
 
-/// What the file name of a staged file starts with in the bin dir: a downloaded binary, which `upgrade` runs `install`
-/// from, or the copy `install` checks. A successful `upgrade`'s download is removed by the `install` it runs (`install`
-/// sweeps the bin dir), a failed one by `upgrade` (`discard`); `install` removes its check copy itself.
+/// What the name of a staged file in the bin dir starts with: a download that `upgrade` runs `install` from, or the copy
+/// `install` checks. `install` sweeps the ones left behind.
 pub const STAGED: &str = "upgrade-";
 
-/// Writes `binary` to a new executable file of its own in the bin dir, `upgrade-<random>`, and returns its path, to
-/// run it. The caller removes it (`discard`) or leaves it to the next `install`'s sweep; see `STAGED`.
+/// Writes `binary` to a new executable `upgrade-<random>` in the bin dir and returns its path. The caller removes it
+/// (`discard`).
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     let mut file = tempfile::Builder::new()
         .prefix(STAGED)
         .tempfile_in(&paths.bin_dir)
-        .with_context(|| {
-            format!(
-                "creating a file in {} for the download: is reverse-tunnel installed?",
-                paths.bin_dir.display()
-            )
-        })?;
+        .with_context(|| format!("creating a staged copy of the binary in {}", paths.bin_dir.display()))?;
     let path = file.path().to_path_buf();
     let writing = || format!("writing {}", path.display());
     apply(file.as_file(), Perm::EXECUTABLE).with_context(writing)?;
@@ -50,7 +44,7 @@ pub fn discard(staged: &Path) {
 pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     let Some(from) = from else {
         let binary = fetch_release(RELEASES, &asset_name(host_target()?))?;
-        let staged = stage(paths, &binary)?;
+        let staged = stage(paths, &binary).context("staging the release: is reverse-tunnel installed?")?;
         let installed = install_with(&staged);
         if installed.is_err() {
             discard(&staged);

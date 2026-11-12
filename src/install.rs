@@ -107,10 +107,8 @@ fn apply(
     mut changed: bool,
 ) -> Result<()> {
     let spec = service::spec(paths);
-    // Read once: the binary that is checked is the one that is placed.
     let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
-    // The settings come first because the check reads them as the account: on a settled host `write_settings` writes no
-    // content and only re-applies owners and modes. The unit is registered after the check, so that a rejected binary
+    // The check reads the settings as the account, so they come first; the unit comes after it, so a rejected binary
     // leaves the unit as it was.
     changed |= write_settings(paths, account, host, join)?;
     verify_tools(paths, &binary, account)?;
@@ -565,10 +563,10 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing, and has the new binary `binary` check the settings as
-/// the service account will read them: `binary` is written into the bin dir, where the account can run it wherever it
-/// came from, and the copy's `run --check` runs as `account` (see `ops::check`). The copy is removed whatever the
-/// outcome. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries` marks.
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
+/// bin dir where `account` can run it, check the settings as `account` (see `ops::check`). The copy is removed whatever
+/// the outcome. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries`
+/// marks.
 fn verify_tools(paths: &Paths, binary: &[u8], account: &Account) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {

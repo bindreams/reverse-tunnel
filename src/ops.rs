@@ -67,9 +67,8 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
     Ok(())
 }
 
-/// `exe`'s `run --check`, started as the service starts its binary: the arguments and environment from `service::spec`,
-/// nothing inherited, as `run_as`. `restart` checks the installed binary, `install` its staged copy of the new one;
-/// `what` names the check in a failure (a staged path would be gone by then). Fails with what the check printed.
+/// `exe`'s `run --check`, started as the service starts it: the arguments and environment from `service::spec`, nothing
+/// inherited, as `run_as`. `what` names the check in a failure. Fails with what the check printed.
 ///
 /// Runs as the service account with its primary group only (std drops supplementary groups when the caller is root, as
 /// `restart` and `install` are). The files it reads are install's and open to the account by contract; one it reads

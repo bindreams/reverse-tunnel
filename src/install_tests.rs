@@ -365,9 +365,8 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     );
 }
 
-/// The binary being installed: a copy of `stub-frpc` that stands for its `run --check` (`testbin/stub_frpc.rs`), which
-/// passes only given `--check` and the service's empty environment. `outcome` is the stub's `pass` or `fail`. The
-/// binary's staged copy, which the stub cannot name, finds its mode in `stub.mode`.
+/// The binary being installed: a copy of `stub-frpc` whose `run --check` ends in `outcome`, `pass` or `fail`. The
+/// staged copy finds its mode in `stub.mode`.
 fn new_binary(machine: &Machine, outcome: &str) -> PathBuf {
     let bin = &machine.paths.bin_dir;
     let new = machine.dir.path().join("new-reverse-tunnel");
@@ -401,14 +400,14 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     let machine = installed_machine();
     let new = new_binary(&machine, "fail");
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
-    // A unit that is not what the new binary would register: `register` after the check leaves it as it is.
+    // Not the unit the new binary would register.
     let mut outgoing = service::spec(&machine.paths);
     outgoing.command.push("--outgoing".into());
     manager.install(&outgoing, false).unwrap();
 
     let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
-    // The outgoing binary is not even executable: what failed is the new one's check.
+    // The outgoing binary is not executable: it is the new one's check that failed.
     let text = format!("{err:#}");
     assert!(
         text.contains("the service would not start with this configuration"),
@@ -443,7 +442,7 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     .unwrap_err();
 
     assert!(format!("{err:#}").contains("stub stderr line"), "{err:#}");
-    // Registered only after the check: no unit points at a binary that was never placed.
+    // Not registered: no unit points at a binary that was never placed.
     assert_eq!(
         manager.preview_install(&service::spec(&machine.paths)).unwrap(),
         Outcome::Create
@@ -461,6 +460,7 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
 
     apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
 
+    assert!(machine.dir.path().join("expected-env.ran").exists(), "the check ran");
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), fs::read(&new).unwrap());
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }

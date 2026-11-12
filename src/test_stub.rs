@@ -19,8 +19,7 @@ fn built() -> PathBuf {
     stub
 }
 
-/// Copies the stub to `to`. Running it can meet ETXTBSY while another test thread's forked child still holds the write
-/// descriptor; `command::run_built` retries on that.
+/// Copies the stub to `to`.
 pub fn copy_to(to: &Path) {
     fs::copy(built(), to).unwrap();
 }

@@ -3,7 +3,8 @@
 use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::process::{self, ExitStatus};
-use std::thread;
+use std::time::Duration;
+use std::{mem, thread};
 
 use anyhow::{Context, Result, ensure};
 
@@ -23,12 +24,16 @@ pub fn run(args: &[impl AsRef<OsStr>]) -> Result<String> {
 /// `run` for a command the caller built (cosca's cannot set a user or group), described as `what` because the command's
 /// debug form lists its environment. A failure includes stdout as well as stderr.
 pub fn run_built(what: &str, command: &mut process::Command) -> Result<String> {
+    let mut said = false;
     let out = loop {
         match command.output() {
-            // `execve` is refused while anything holds the binary open for writing: in the unit tests, a child another
-            // thread forked while this process wrote it, until that child execs or exits; otherwise, another process
-            // writing it, until it closes the file.
-            Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => thread::yield_now(),
+            // Refused while anything holds the binary open for writing.
+            Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => {
+                if !mem::replace(&mut said, true) {
+                    eprintln!("{what} is open for writing elsewhere; waiting for it to be closed");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
             out => break out.with_context(|| format!("running {what}"))?,
         }
     };
@@ -52,3 +57,7 @@ fn finish(what: &str, status: ExitStatus, stdout: &[u8], stderr: &[u8], with_std
     );
     Ok(stdout.into_owned())
 }
+
+#[cfg(all(test, unix))]
+#[path = "command_tests.rs"]
+mod tests;
