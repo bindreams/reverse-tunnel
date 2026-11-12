@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The draft release runs all of CI against the release commit.
+  workflow_call:
 
 jobs:
   python:

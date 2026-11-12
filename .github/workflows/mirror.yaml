@@ -1,0 +1,77 @@
+name: Mirror
+
+# Publishes `server/` as the root of bindreams/reverse-tunnel-server, which a bridge operator clones. A push to `main`
+# updates the mirror's `main`. A tag is mirrored on request: `publish-release` calls this workflow once the release is
+# public, because a tag created with GITHUB_TOKEN triggers no other workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to mirror (e.g. v0.1.0); empty mirrors main"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      MIRROR_DEPLOY_KEY:
+        required: true
+
+# No concurrency group: GitHub keeps one pending run per group, so a newer dispatch would cancel a pending tag run, and
+# it would have to be re-dispatched. Overlapping pushes are safe, since neither is forced and a run whose commit is
+# already in the mirror's `main` pushes nothing.
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check the tag
+        if: inputs.tag != ''
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Not a release tag: '${TAG}'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # `workflow_dispatch` accepts any ref, and the split goes to the mirror's `main` or under a release tag: either
+      # way only a commit on `main` (the checked-out commit is the tag's, when there is a tag).
+      - name: Check the commit is on main
+        shell: bash
+        run: bash .github/scripts/assert-on-main.sh "$(git rev-parse HEAD)"
+
+      # GitHub's host keys come from its API over TLS, so the first connection trusts nothing it was not told.
+      - name: Set up the deploy key
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/mirror-ssh"
+          mkdir -m 700 "$dir"
+          (umask 077; printf '%s\n' "$MIRROR_DEPLOY_KEY" > "$dir/key")
+          gh api -X GET meta --jq '.ssh_keys[] | "github.com " + .' > "$dir/known_hosts"
+          echo "GIT_SSH_COMMAND=ssh -i $dir/key -o IdentitiesOnly=yes -o UserKnownHostsFile=$dir/known_hosts -o StrictHostKeyChecking=yes" >> "$GITHUB_ENV"
+
+      - name: Push the split
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: bash .github/scripts/mirror.sh git@github.com:bindreams/reverse-tunnel-server.git "$TAG"
