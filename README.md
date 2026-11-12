@@ -30,8 +30,9 @@ sudo ./reverse-tunnel install
 ```
 
 `install` asks for the join code (paste it, press Enter), names the host after the machine (lowercased; to choose a
-name, `sudo ./reverse-tunnel install --host NAME --join CODE`; `--host` counts only the first time, since a host with a
-`config.yaml` keeps its name), installs and starts the service, and prints a line:
+name, `sudo ./reverse-tunnel install --host NAME --join CODE`; a host with a `config.yaml` keeps its name, and
+`--host` with another name fails: to rename a host, uninstall it and install it again, then register the new name and
+revoke the old), installs and starts the service, and prints a line:
 
 ```
 Register this host on the bridge by running:
@@ -96,10 +97,14 @@ published at `jellyfin.<host>.T`; the `default` service also at `<host>.T`.
 The service reads `config.yaml` when it starts: `sudo reverse-tunnel stop`, then `sudo reverse-tunnel start`. Over the
 tunnel, `stop` ends your own session before `start` can run, so restart from the machine itself.
 
+On RHEL and Fedora, `sudo` does not look in `/usr/local/bin`, so `sudo reverse-tunnel` is "command not found": there,
+write `sudo /usr/local/bin/reverse-tunnel` wherever this README says `sudo reverse-tunnel`.
+
 To give an `http` service a public name, run this in the bridge folder; the public name must not be under `T`, its DNS
-must point at the server that runs the bridge's Traefik, and the DNS provider behind Traefik's `letsencrypt` resolver
-(DNS-01; see [server/README.md](server/README.md)) must be able to write the public name's zone, to issue its
-certificate:
+must point at the server that runs the bridge's Traefik, and Traefik's `letsencrypt` resolver (DNS-01; see
+[server/README.md](server/README.md)) must be able to answer the public name's challenge, to issue its certificate:
+either it can write the public name's zone, or that zone delegates `_acme-challenge.<public name>` by CNAME to one it
+can.
 
 ```sh
 uv run ctl alias movies.binarydreams.me jellyfin.mothership.tunnel.binarydreams.me
@@ -120,10 +125,11 @@ The bridge always forwards `X-Forwarded-Proto: http`, even over HTTPS, so Jellyf
 Jellyfin also sees every viewer connect from frpc, so it counts them as local. To make it count them as remote, list
 the two proxies in `KnownProxies` (Dashboard, Networking, "Known proxies"; or `network.xml`): the address frpc
 connects to Jellyfin from (`127.0.0.1` when both run on the host directly, the Docker gateway address when Jellyfin
-is in a container), and Traefik's address on the bridge's `gateway` Docker network. Docker assigns Traefik's address
-and may change it when its container is recreated, so list the whole subnet of `gateway` (`docker network inspect
-gateway` shows it) instead. Jellyfin's source accepts addresses, CIDR subnets and hostnames in this list. Jellyfin then
-reads the viewer's address from `X-Forwarded-For`.
+is in a container), and Traefik's address on the bridge's `gateway` Docker network. Docker may change Traefik's address
+when its container is recreated, so pin it: give Traefik a static `ipv4_address` on `gateway` in the bridge host's
+Traefik compose, and list that address. List only these two addresses, not the whole subnet: Jellyfin trusts what a
+listed proxy puts in `X-Forwarded-For`, and every other container on `gateway` could set it. Jellyfin then reads the
+viewer's address from `X-Forwarded-For`.
 
 ## Operate a host
 
@@ -134,6 +140,10 @@ reads the viewer's address from `X-Forwarded-For`.
 | `sudo reverse-tunnel start` | Starts it. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
+
+A host replaces `bridge.pem` only when `install` runs with a join code, so after a rotation it keeps both
+certificates, and trusts the retired one, until it is reinstalled with a join code that has only the new one; the steps
+to run are in [server/README.md](server/README.md#rotating-the-certificate).
 
 `status` prints, for example:
 
@@ -152,10 +162,10 @@ The files:
 | Logs | `/var/log/reverse-tunnel/` | `/Library/Logs/reverse-tunnel/` |
 | Binary, frpc | `/usr/local/lib/reverse-tunnel/` | `/usr/local/lib/reverse-tunnel/` |
 
-Read the logs with `sudo`, for example `sudo less /var/log/reverse-tunnel/frpc.log`. `frpc.log` is the tunnel's:
-`login to server success` means the host is connected, and a refusal says why ("host not registered", "token
-mismatch"). `supervisor.log` is the service's own, with one local time stamp per line. Each log is rotated at 10 MB
-to `<name>.1`, replacing the previous one.
+Anyone on the machine can read the logs, for example `less /var/log/reverse-tunnel/frpc.log` on Linux or
+`less /Library/Logs/reverse-tunnel/frpc.log` on macOS. `frpc.log` is the tunnel's: `login to server success` means the
+host is connected, and a refusal says why ("host not registered", "token mismatch"). `supervisor.log` is the service's
+own, with one local time stamp per line. Each log is rotated at 10 MB to `<name>.1`, replacing the previous one.
 
 ### Upgrade
 
@@ -175,7 +185,8 @@ connection; `ctl revoke` prints the command that does.
   `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it. A partial removal may
   have deleted the `reverse-tunnel` link on the `PATH`: then run it through the installed binary,
   `sudo /usr/local/lib/reverse-tunnel/reverse-tunnel uninstall`, or with any other `reverse-tunnel` binary, such as the
-  one you downloaded, if you kept it.
+  one you downloaded, if you kept it. If neither the link, the installed binary nor the download is left, download the
+  binary again with the commands in "Set up a host", and run `sudo ./reverse-tunnel uninstall` with it.
 - On Linux a failed removal's output is in the journal (`journalctl -u 'reverse-tunnel-uninstall-*'`); on a host whose
   journal is not persistent it is lost at reboot, and rerunning `uninstall` shows it again. On macOS it is
   `/Library/Logs/reverse-tunnel/uninstall.log`.
