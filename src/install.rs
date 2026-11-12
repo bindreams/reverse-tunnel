@@ -159,8 +159,9 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
-            "could not tell how the removal ended; its log is {}, and `uninstall` can be run again",
-            removal_log(paths)
+            "could not tell how the removal ended; its log is {}, and to finish it {}",
+            removal_log(paths),
+            rerun_uninstall(paths)
         )
     })?;
     if let WaitOutcome::Failed(why) = outcome {
@@ -349,8 +350,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
     remove_link(paths)?;
-    remove_files(paths)
-        .context("the binary may be gone, but any `reverse-tunnel` binary can run `reverse-tunnel uninstall` again")
+    remove_files(paths).with_context(|| format!("the binary may be gone; {}", rerun_uninstall(paths)))
 }
 
 /// Removes the link to the binary, unless it points elsewhere.
@@ -409,8 +409,8 @@ fn needs_join(paths: &Paths) -> Result<bool> {
     Ok(false)
 }
 
-/// The host name to give a new `config.yaml`, or none when one exists. A name asked for that is not the existing
-/// config's is refused, since nothing renames a host.
+/// The name for a new `config.yaml`, or none when one exists. Refuses an explicit name that differs from the existing
+/// config's.
 fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<String>> {
     let config = config_file(paths);
     if !config.try_exists()? {

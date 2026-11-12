@@ -76,8 +76,7 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 ## Rotating the certificate
 
 Hosts verify frps against `bridge.pem`, which may hold several certificates, so a rotation stages the new one and
-nobody is locked out. On RHEL and Fedora hosts, run `reverse-tunnel` under `sudo` by its full path (see
-[the host README](../README.md#publish-another-service)).
+nobody is locked out.
 
 1. Make the new pair, and trust it first:
 
@@ -86,8 +85,8 @@ nobody is locked out. On RHEL and Fedora hosts, run `reverse-tunnel` under `sudo
    cat tls/new.crt >> tls/trust.pem
    ```
 
-2. `uv run ctl join-code`, and run `sudo reverse-tunnel install --join <code>` on every host. Do not go on until
-   every host has it.
+2. `uv run ctl join-code`, and run `sudo reverse-tunnel install --join <code>` on every host (on RHEL or Fedora, see
+   [Set up a host](../README.md#set-up-a-host)). Do not go on until every host has it.
 3. Switch frps:
    `mv tls/new.key tls/frps.key && mv tls/new.crt tls/frps.crt && chmod 644 tls/frps.crt`, then
    `docker compose restart reverse-tunnel-frps`. Hosts reconnect; check that each host has a `login` line since the

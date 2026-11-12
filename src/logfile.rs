@@ -110,7 +110,7 @@ impl Active {
     }
 }
 
-/// Opens `path` for appending, created if missing, mode 0644 less the umask.
+/// Opens `path` for appending, created if missing. A new file gets mode 0644 less the umask.
 fn open(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);

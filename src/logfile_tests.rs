@@ -7,8 +7,7 @@ fn unix_resolves_iana_zone_names() {
         .expect("Europe/Berlin is not found: is the system's tzdata installed?");
 }
 
-/// A log is created 0644, the umask permitting: a service's default umask leaves it readable by anyone. The umask is
-/// process-wide, so the test runs itself in a child that has none.
+/// The umask is process-wide, so the test re-runs itself in a child under `umask 000`.
 #[cfg(unix)]
 #[test]
 fn log_files_are_created_0644() {

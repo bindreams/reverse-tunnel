@@ -13,6 +13,9 @@ of this repository on the bridge's server.
 You need the bridge's **join code**: in the bridge folder, `uv run ctl join-code` prints it. It is the same for every
 host.
 
+On RHEL and Fedora, `sudo` does not look in `/usr/local/bin`, so `sudo reverse-tunnel` is "command not found": there,
+write `sudo /usr/local/bin/reverse-tunnel` wherever this README says `sudo reverse-tunnel`.
+
 **Linux** (with systemd) and **macOS**: download the binary for your system, then install.
 
 ```sh
@@ -29,10 +32,9 @@ chmod +x reverse-tunnel
 sudo ./reverse-tunnel install
 ```
 
-`install` asks for the join code (paste it, press Enter), names the host after the machine (lowercased; to choose a
-name, `sudo ./reverse-tunnel install --host NAME --join CODE`; a host with a `config.yaml` keeps its name, and
-`--host` with another name fails: to rename a host, uninstall it and install it again, then register the new name and
-revoke the old), installs and starts the service, and prints a line:
+`install` asks for the join code (paste it, press Enter) and names the host after the machine (lowercased); to choose a
+name, add `--host NAME`. A host with a `config.yaml` keeps its name; to rename, uninstall and install again, register
+the new name and revoke the old. It installs and starts the service, and prints a line:
 
 ```
 Register this host on the bridge by running:
@@ -97,9 +99,6 @@ published at `jellyfin.<host>.T`; the `default` service also at `<host>.T`.
 The service reads `config.yaml` when it starts: `sudo reverse-tunnel stop`, then `sudo reverse-tunnel start`. Over the
 tunnel, `stop` ends your own session before `start` can run, so restart from the machine itself.
 
-On RHEL and Fedora, `sudo` does not look in `/usr/local/bin`, so `sudo reverse-tunnel` is "command not found": there,
-write `sudo /usr/local/bin/reverse-tunnel` wherever this README says `sudo reverse-tunnel`.
-
 To give an `http` service a public name, run this in the bridge folder; the public name must not be under `T`, its DNS
 must point at the server that runs the bridge's Traefik, and Traefik's `letsencrypt` resolver (DNS-01; see
 [server/README.md](server/README.md)) must be able to answer the public name's challenge, to issue its certificate:
@@ -136,9 +135,9 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 
 | Command | What it does |
 |---|---|
-| `reverse-tunnel status` | The service's state, the host name, the tunnel domain and the bridge certificate's SHA-256 fingerprint: one `certificate:` line per certificate in `bridge.pem`, two while the bridge rotates it. No `sudo`. |
-| `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
-| `sudo reverse-tunnel start` | Starts it. |
+| `reverse-tunnel status` | What the service is doing, and which bridge it trusts (one `certificate:` line per certificate in `bridge.pem`). No `sudo`. |
+| `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. |
+| `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
 
