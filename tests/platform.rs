@@ -118,7 +118,7 @@ impl Machine {
         );
         assert_eq!(rustix::process::getuid().as_raw(), 0, "these tests need root");
         let paths = Paths::system().unwrap();
-        let id = service::spec(&paths).id;
+        let id = service::spec(&paths).unwrap().id.clone();
         let manager = manager::native().unwrap();
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());

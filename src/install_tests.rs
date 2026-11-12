@@ -306,7 +306,7 @@ fn bin_dir_loses_old_versions_and_temp_files() {
 #[test]
 fn unchanged_install_leaves_a_running_service_alone() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths);
+    let spec = service::spec(&machine.paths).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
@@ -319,7 +319,7 @@ fn unchanged_install_leaves_a_running_service_alone() {
 #[test]
 fn kill_not_running_starts() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths);
+    let spec = service::spec(&machine.paths).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
 
@@ -333,7 +333,7 @@ fn kill_not_running_starts() {
 #[test]
 fn restart_failure_is_retried_by_install() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths);
+    let spec = service::spec(&machine.paths).unwrap();
     // Never installed: the kill fails with something other than NotRunning.
     let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
 
@@ -347,7 +347,7 @@ fn restart_failure_is_retried_by_install() {
 #[test]
 fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths);
+    let spec = service::spec(&machine.paths).unwrap();
     // The marker cannot be written without its directory; the kill fails, as the service was never installed.
     fs::remove_dir_all(&machine.paths.config_dir).unwrap();
     let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
@@ -401,7 +401,7 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     let new = new_binary(&machine, "fail");
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
     // Not the unit the new binary would register.
-    let mut outgoing = service::spec(&machine.paths);
+    let mut outgoing = service::spec(&machine.paths).unwrap();
     outgoing.command.push("--outgoing".into());
     manager.install(&outgoing, false).unwrap();
 
@@ -444,7 +444,9 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     assert!(format!("{err:#}").contains("stub stderr line"), "{err:#}");
     // Not registered: no unit points at a binary that was never placed.
     assert_eq!(
-        manager.preview_install(&service::spec(&machine.paths)).unwrap(),
+        manager
+            .preview_install(&service::spec(&machine.paths).unwrap())
+            .unwrap(),
         Outcome::Create
     );
     assert!(!service::exe(&machine.paths).exists());
@@ -456,7 +458,7 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
     let machine = installed_machine();
     let new = new_binary(&machine, "pass");
     let manager = Fake::default();
-    manager.install(&service::spec(&machine.paths), false).unwrap();
+    manager.install(&service::spec(&machine.paths).unwrap(), false).unwrap();
 
     apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
 

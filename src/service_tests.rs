@@ -5,8 +5,9 @@ use super::*;
 
 #[test]
 fn spec_runs_the_installed_binary_as_the_service_account() {
-    let paths = Paths::testing("/opt/reverse-tunnel");
-    let spec = spec(&paths);
+    let root = tempfile::tempdir().unwrap();
+    let paths = Paths::testing(root.path());
+    let spec = spec(&paths).unwrap();
 
     assert_eq!(spec.id.as_str(), "reverse-tunnel");
     let exe = paths
