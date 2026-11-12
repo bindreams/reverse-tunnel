@@ -47,7 +47,12 @@ pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<
 
 /// `check_and_restart`, with the check run as `run_as` (`None`: as the caller).
 fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
-    check(paths, &service::exe(paths), run_as)?;
+    check(
+        paths,
+        &service::exe(paths),
+        run_as,
+        "the installed binary's `run --check`",
+    )?;
     let outcome = restart_pending(manager, &service::spec(paths).id, paths).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
@@ -62,13 +67,13 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 }
 
 /// `exe`'s `run --check`, started as the service starts its binary: the arguments and environment from `service::spec`,
-/// nothing inherited, as `run_as`. `restart` checks the installed binary, `install` its staged copy of the new one.
-/// Fails with what the check printed.
+/// nothing inherited, as `run_as`. `restart` checks the installed binary, `install` its staged copy of the new one;
+/// `what` names the check in a failure (a staged path would be gone by then). Fails with what the check printed.
 ///
 /// Runs as the service account with its primary group only (std drops supplementary groups when the caller is root, as
 /// `restart` and `install` are). The files it reads are install's and open to the account by contract; one it reads
 /// only through another group is refused.
-pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>) -> Result<()> {
+pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
     let spec = service::spec(paths);
     let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
@@ -81,7 +86,7 @@ pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>) -> Result<
         Some(_) => format!("as the `{}` account", service::ACCOUNT),
         None => "as the caller".to_string(),
     };
-    command::run_built(&format!("`{} run --check` {who}", exe.display()), &mut check)
+    command::run_built(&format!("{what} {who}"), &mut check)
         .context("the service would not start with this configuration")?;
     Ok(())
 }

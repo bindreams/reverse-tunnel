@@ -12,11 +12,12 @@ use crate::paths::Paths;
 
 const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
 
-/// What the file name of a downloaded binary starts with in the bin dir.
+/// What the file name of a staged file starts with in the bin dir: a downloaded binary, or the copy `install` checks.
+/// Whoever staged it removes it; the next `install` sweeps what is left.
 pub const STAGED: &str = "upgrade-";
 
 /// Writes `binary` to a new executable file of its own in the bin dir, `upgrade-<random>`, and returns its path, to
-/// run it. The `install` it runs removes it.
+/// run it. The caller removes it (`discard`); one left behind is swept by the next `install`.
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     let mut file = tempfile::Builder::new()
         .prefix(STAGED)

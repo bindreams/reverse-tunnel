@@ -455,3 +455,20 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), fs::read(&new).unwrap());
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }
+
+#[test]
+fn a_settled_host_has_its_secrets_repaired_before_the_check() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = installed_machine();
+    let token = machine.paths.secrets_dir.join("host.token");
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let new = new_binary(&machine, "pass");
+    let manager = Fake::default();
+    manager.install(&service::spec(&machine.paths), false).unwrap();
+
+    apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
+
+    assert_eq!(fs::metadata(&token).unwrap().permissions().mode() & 0o777, 0o640);
+    assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
+}

@@ -24,6 +24,7 @@ use reverse_tunnel::command;
 use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::service;
+use reverse_tunnel::upgrade;
 use rustix::process::{Pid, Signal, kill_process_group};
 
 const BIN: &str = env!("CARGO_BIN_EXE_reverse-tunnel");
@@ -818,7 +819,10 @@ fn install_checks_the_configuration_as_the_service_account() {
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success() && stderr.contains("reading") && stderr.contains("Permission denied"),
+        !failed.status.success()
+            && stderr.contains("reading")
+            && stderr.contains(&config.display().to_string())
+            && stderr.contains("Permission denied"),
         "install should fail on reading {}: {stderr}",
         config.display()
     );
@@ -826,7 +830,7 @@ fn install_checks_the_configuration_as_the_service_account() {
     let staged = fs::read_dir(&machine.paths.bin_dir)
         .unwrap()
         .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
-        .filter(|name| name.starts_with("upgrade-"))
+        .filter(|name| name.starts_with(upgrade::STAGED))
         .collect::<Vec<_>>();
     assert_eq!(staged, Vec::<String>::new(), "the staged copy is removed");
     let after = machine.status();

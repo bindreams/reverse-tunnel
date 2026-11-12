@@ -1,6 +1,7 @@
 //! Running a command to completion.
 
 use std::ffi::OsStr;
+use std::io::ErrorKind;
 use std::process::{self, ExitStatus};
 
 use anyhow::{Context, Result, ensure};
@@ -21,7 +22,14 @@ pub fn run(args: &[impl AsRef<OsStr>]) -> Result<String> {
 /// `run` for a command the caller built (cosca's cannot set a user or group), described as `what` because the command's
 /// debug form lists its environment. A failure includes stdout as well as stderr.
 pub fn run_built(what: &str, command: &mut process::Command) -> Result<String> {
-    let out = command.output().with_context(|| format!("running {what}"))?;
+    let out = loop {
+        match command.output() {
+            // A binary this process has just written can still be held open for writing by a child another thread
+            // forked; `execve` is refused until that child execs or exits.
+            Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => continue,
+            out => break out.with_context(|| format!("running {what}"))?,
+        }
+    };
     finish(what, out.status, &out.stdout, &out.stderr, true)
 }
 
