@@ -1,0 +1,127 @@
+name: Publish Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.1.0)"
+        required: true
+        type: string
+
+concurrency:
+  # Keyed on the raw input, as in cosca: `0.1.0` and `v0.1.0` form separate groups that resolve to one tag.
+  group: publish-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The real preflight (version, CI on the commit, the builds) happened in draft-release.yaml before a draft could
+    # exist; the operator dispatching this has reviewed the draft. The environment's required reviewer is the owner's
+    # approval of this release.
+    environment: Deploy
+    permissions:
+      # `write`, not `read`: the List releases API only returns drafts to a caller with push access.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Normalize and validate version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="$(bash .github/scripts/normalize-version.sh "$INPUT_VERSION")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=v${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify draft release exists and resolve commit SHA
+        id: release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! RELEASE_JSON="$(gh release view "$TAG" --json isDraft,targetCommitish)"; then
+            echo "::error::gh release view failed for $TAG. Does the draft release exist?"
+            exit 1
+          fi
+
+          IS_DRAFT="$(jq -r '.isDraft' <<<"$RELEASE_JSON")"
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::Release $TAG is already published"
+            exit 1
+          fi
+
+          TARGET="$(jq -r '.targetCommitish' <<<"$RELEASE_JSON")"
+          if ! [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Draft release target '$TARGET' is not a 40-char commit SHA. Recreate the draft via the Draft Release workflow."
+            exit 1
+          fi
+          echo "commit_sha=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.release.outputs.commit_sha }}
+
+      - name: Re-verify the manifest version matches the release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "reverse-tunnel") | .version')"
+          if [ "$MANIFEST" != "$VERSION" ]; then
+            echo "::error::Checked-out commit declares '${MANIFEST}' but this dispatch asked for $VERSION"
+            exit 1
+          fi
+
+      - name: Publish GitHub release
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ steps.release.outputs.commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Just before the action that creates the tag: a tag that appeared since the draft would capture the release.
+          bash .github/scripts/assert-tag-absent.sh "$TAG"
+
+          gh release edit "$TAG" --draft=false
+
+          # Un-drafting creates the tag, so this is the first moment the binding is observable. `targetCommitish` is
+          # only the stored input from release creation and would echo $SHA back; resolve the tag itself.
+          if ! PUBLISHED="$(gh api -X GET "repos/${GH_REPO}/commits/${TAG}" --jq '.sha')"; then
+            echo "::error::Could not resolve tag $TAG after publishing. The release is public; verify by hand that $TAG points at $SHA."
+            exit 1
+          fi
+
+          if [ "$PUBLISHED" != "$SHA" ]; then
+            echo "::error::Release $TAG points at $PUBLISHED, not at $SHA. Delete the release and its tag, then re-run Draft Release."
+            exit 1
+          fi
+
+          printf 'Release published: https://github.com/%s/releases/tag/%s\n' "$GH_REPO" "$TAG" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # A tag made with GITHUB_TOKEN triggers no workflow, so this job pushes the mirror's tag itself. If it fails, the
+  # release stays published: dispatch the Mirror workflow with the tag.
+  mirror:
+    name: Mirror the tag
+    needs: publish
+    uses: ./.github/workflows/mirror.yaml
+    with:
+      tag: ${{ needs.publish.outputs.tag }}
+    secrets:
+      MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+    permissions:
+      contents: read

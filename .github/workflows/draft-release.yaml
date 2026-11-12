@@ -1,0 +1,212 @@
+name: Draft Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.1.0)"
+        required: true
+        type: string
+
+concurrency:
+  # Keyed on the raw input, as in cosca: `0.1.0` and `v0.1.0` form separate groups that resolve to one tag. The
+  # release job re-checks that the release is absent just before creating it.
+  group: draft-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate version
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # `write`, not `read`: GitHub returns draft releases only to callers with push access, so a read-scoped token
+      # reports every existing draft as absent.
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history so the ancestry check can resolve origin/main.
+          fetch-depth: 0
+
+      - name: Normalize and validate version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="$(bash .github/scripts/normalize-version.sh "$INPUT_VERSION")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the manifest version matches
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "reverse-tunnel") | .version')"
+          if [ "$MANIFEST" != "$VERSION" ]; then
+            echo "::error::Cargo.toml declares '${MANIFEST}' but this dispatch asked for $VERSION"
+            exit 1
+          fi
+
+      - name: Fail if the release already exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: bash .github/scripts/assert-release-absent.sh "v${VERSION}"
+
+      # A tag with no release attached is the dangerous case: `gh release create --target` is silently ignored when
+      # the tag exists, binding the release to the old tag's commit.
+      - name: Fail if the tag already exists
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: bash .github/scripts/assert-tag-absent.sh "v${VERSION}"
+
+      # `workflow_dispatch` accepts --ref, so without this a draft can be pinned to unmerged code.
+      - name: Verify the release commit is on main
+        env:
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+
+          status=0
+          git merge-base --is-ancestor "$SHA" origin/main || status=$?
+
+          case "$status" in
+            0) echo "$SHA is an ancestor of origin/main" ;;
+            1)
+              echo "::error::$SHA is not an ancestor of origin/main. Release only from merged commits."
+              exit 1
+              ;;
+            *)
+              echo "::error::git merge-base failed (exit $status); cannot confirm $SHA is on main"
+              exit 1
+              ;;
+          esac
+
+  # Main's last green run does not imply that this commit is green.
+  ci:
+    name: CI
+    needs: validate
+    uses: ./.github/workflows/ci.yaml
+
+  # One binary per `download::RELEASE_TARGETS`, named as `upgrade` asks for it (`download::asset_name`).
+  # tests/release.rs checks that this matrix and those two agree.
+  #
+  # Linux builds on the oldest runner image, so the binary runs on older glibc. aarch64 Linux builds on a native arm
+  # runner: `ring` (rustls) needs a C toolchain for the target, and the runner has one. x86_64 macOS is cross-built
+  # from the arm runner with Apple's clang.
+  build:
+    name: Build (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            asset: reverse-tunnel-x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            asset: reverse-tunnel-aarch64-unknown-linux-gnu
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            asset: reverse-tunnel-x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            asset: reverse-tunnel-aarch64-apple-darwin
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: reverse-tunnel-x86_64-pc-windows-msvc.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ matrix.asset }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rustup target add "$TARGET"
+          cargo build --locked --release --bin reverse-tunnel --target "$TARGET"
+          mkdir dist
+          bin=reverse-tunnel
+          if [[ "$ASSET" == *.exe ]]; then bin=reverse-tunnel.exe; fi
+          cp "target/$TARGET/release/$bin" "dist/$ASSET"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Create draft release
+    needs: [validate, ci, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # `sha256sum` format, `<hex>  <name>`, which `upgrade` reads.
+      - name: Write SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum reverse-tunnel-* | tee SHA256SUMS
+
+      # The validate job's checks ran before the CI matrix, tens of minutes ago. Re-check right before creating the
+      # draft; a draft creates no tag, so GitHub echoes `--target` back whether or not a tag exists.
+      - name: Re-check that the tag and the release are still absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .github/scripts/assert-tag-absent.sh "v${VERSION}"
+          bash .github/scripts/assert-release-absent.sh "v${VERSION}"
+
+      - name: Create draft release pinned to commit SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          URL="$(gh release create "$TAG" dist/* \
+            --draft \
+            --generate-notes \
+            --title "$TAG" \
+            --target "$SHA")"
+          echo "Draft release created for commit $SHA:"
+          echo "  $URL"

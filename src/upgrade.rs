@@ -1,13 +1,12 @@
 //! `reverse-tunnel upgrade`: gets a newer binary, which then installs itself (see `install`).
 
-use std::env::consts::EXE_SUFFIX;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use crate::download::{STALL, download, host_target, resolve, verify_digest};
+use crate::download::{STALL, asset_name, download, host_target, resolve, verify_digest};
 use crate::files::{Perm, apply, remove_entry};
 use crate::paths::Paths;
 
@@ -41,7 +40,7 @@ pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
 /// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service.
 pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     let Some(from) = from else {
-        let binary = fetch_release(RELEASES, &format!("reverse-tunnel-{}{EXE_SUFFIX}", host_target()?))?;
+        let binary = fetch_release(RELEASES, &asset_name(host_target()?))?;
         let staged = stage(paths, &binary)?;
         let installed = install_with(&staged);
         if installed.is_err()

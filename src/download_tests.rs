@@ -215,3 +215,19 @@ fn fetch_every_pin() {
         assert!(written.is_file(), "{}", pin.url);
     }
 }
+
+#[test]
+fn asset_names_carry_the_target_and_exe_on_windows() {
+    assert_eq!(
+        asset_name("x86_64-unknown-linux-gnu"),
+        "reverse-tunnel-x86_64-unknown-linux-gnu"
+    );
+    assert_eq!(
+        asset_name("aarch64-apple-darwin"),
+        "reverse-tunnel-aarch64-apple-darwin"
+    );
+    assert_eq!(
+        asset_name("x86_64-pc-windows-msvc"),
+        "reverse-tunnel-x86_64-pc-windows-msvc.exe"
+    );
+}
