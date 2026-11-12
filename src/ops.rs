@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result, ensure};
@@ -47,7 +47,7 @@ pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<
 
 /// `check_and_restart`, with the check run as `run_as` (`None`: as the caller).
 fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
-    check(paths, run_as)?;
+    check(paths, &service::exe(paths), run_as)?;
     let outcome = restart_pending(manager, &service::spec(paths).id, paths).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
@@ -61,15 +61,16 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
     Ok(())
 }
 
-/// The installed binary's `run --check`, started as the service starts it: its command and environment from
-/// `service::spec`, nothing inherited, as `run_as`. Fails with what the check printed.
+/// `exe`'s `run --check`, started as the service starts its binary: the arguments and environment from `service::spec`,
+/// nothing inherited, as `run_as`. `restart` checks the installed binary, `install` its staged copy of the new one.
+/// Fails with what the check printed.
 ///
 /// Runs as the service account with its primary group only (std drops supplementary groups when the caller is root, as
-/// `restart` is). The files it reads are install's and open to the account by contract; one it reads only through
-/// another group is refused.
-fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
+/// `restart` and `install` are). The files it reads are install's and open to the account by contract; one it reads
+/// only through another group is refused.
+pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>) -> Result<()> {
     let spec = service::spec(paths);
-    let (exe, args) = spec.command.split_first().expect("the service has a command");
+    let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
     check.args(args).arg("--check").env_clear().envs(&spec.env);
     #[cfg(unix)]
@@ -80,16 +81,16 @@ fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
         Some(_) => format!("as the `{}` account", service::ACCOUNT),
         None => "as the caller".to_string(),
     };
-    command::run_built(&format!("the installed binary's `run --check` {who}"), &mut check)
+    command::run_built(&format!("`{} run --check` {who}", exe.display()), &mut check)
         .context("the service would not start with this configuration")?;
     Ok(())
 }
 
 /// Who the check runs as: the service's account on Linux and macOS; on Windows, the caller.
 #[cfg(unix)]
-type RunAs = account::Account;
+pub(crate) type RunAs = account::Account;
 #[cfg(not(unix))]
-type RunAs = std::convert::Infallible;
+pub(crate) type RunAs = std::convert::Infallible;
 
 #[cfg(unix)]
 fn service_identity() -> Result<Option<RunAs>> {

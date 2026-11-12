@@ -36,6 +36,13 @@ pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     file.into_temp_path().keep().with_context(writing)
 }
 
+/// Removes a staged copy. A failure is a warning: the next `install` sweeps the bin dir.
+pub fn discard(staged: &Path) {
+    if let Err(err) = remove_entry(staged) {
+        eprintln!("{err:#}; it is safe to delete");
+    }
+}
+
 /// Runs `install` of the binary at `from`, or of the latest release's for this platform, checked against the
 /// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service.
 pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
@@ -43,10 +50,8 @@ pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
         let binary = fetch_release(RELEASES, &asset_name(host_target()?))?;
         let staged = stage(paths, &binary)?;
         let installed = install_with(&staged);
-        if installed.is_err()
-            && let Err(err) = remove_entry(&staged)
-        {
-            eprintln!("{err:#}; it is safe to delete");
+        if installed.is_err() {
+            discard(&staged);
         }
         return installed;
     };

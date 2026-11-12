@@ -83,22 +83,25 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     };
 
     let account = account::ensure(service::ACCOUNT)?;
+    let new = env::current_exe().context("finding this binary")?;
     apply(
         &*goetia::manager::native()?,
         &account,
         paths,
+        &new,
         host.as_deref(),
         join.as_ref(),
         changed,
     )
 }
 
-/// What `install` does once it holds the lock and knows its inputs. `changed`: an earlier run changed something that
-/// has not been restarted yet.
+/// What `install` does once it holds the lock and knows its inputs. `new` is the binary being installed. `changed`: an
+/// earlier run changed something that has not been restarted yet.
 fn apply(
     manager: &dyn ServiceManager,
     account: &Account,
     paths: &Paths,
+    new: &Path,
     host: Option<&str>,
     join: Option<&JoinInfo>,
     mut changed: bool,
@@ -108,13 +111,13 @@ fn apply(
     // installation as it was.
     let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
     if settled {
-        verify_tools(paths)?;
+        verify_tools(paths, new, account)?;
         changed |= settle(manager, &spec, account, paths, host, join)?;
     } else {
         changed |= settle(manager, &spec, account, paths, host, join)?;
-        verify_tools(paths)?;
+        verify_tools(paths, new, account)?;
     }
-    changed |= place_binaries(paths)?;
+    changed |= place_binaries(paths, new)?;
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -577,9 +580,11 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing, and has this binary, the new one, check the settings
-/// with it. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries` marks.
-fn verify_tools(paths: &Paths) -> Result<()> {
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has the new binary `new` check the settings as the
+/// service account will read them: `new` is copied into the bin dir, where the account can run it wherever `new` is,
+/// and the copy's `run --check` runs as `account` (see `ops::check`). The copy is removed whatever the outcome. A fetch
+/// needs no restart: a new frpc version only arrives with a new binary, which `place_binaries` marks.
+fn verify_tools(paths: &Paths, new: &Path, account: &Account) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
@@ -590,15 +595,17 @@ fn verify_tools(paths: &Paths) -> Result<()> {
     if !download::tools(paths).frpc.try_exists()? {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
-    supervisor::run(paths, &download::tools(paths), true)?;
-    Ok(())
+    let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
+    let staged = upgrade::stage(paths, &binary)?;
+    let checked = ops::check(paths, &staged, Some(*account));
+    upgrade::discard(&staged);
+    checked
 }
 
-/// Puts this binary and the symlink in place. Whether the binary changed.
-fn place_binaries(paths: &Paths) -> Result<bool> {
+/// Puts the binary `new` and the symlink in place. Whether the binary changed.
+fn place_binaries(paths: &Paths, new: &Path) -> Result<bool> {
     let exe = service::exe(paths);
-    let me = env::current_exe().context("finding this binary")?;
-    let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
+    let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     if let Some(link) = &paths.link {

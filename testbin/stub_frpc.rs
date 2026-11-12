@@ -1,5 +1,6 @@
-//! Stands in for frpc in `tests/`, and for the installed binary's `run --check` in `src/ops_tests.rs`. What it does is
-//! the text of `<this exe>.mode`:
+//! Stands in for frpc in `tests/`, and for a binary's `run --check` in `src/ops_tests.rs` and `src/install_tests.rs`.
+//! What it does is the text of `<this exe>.mode`, or of `stub.mode` beside it when a copy has a name nobody chose (a
+//! staged `upgrade-<random>`):
 //!
 //! - `exit <code>`: print a line to stderr and exit.
 //! - `record <code> <file>`: write `ARG <argument>` and `ENV <name>=<value>` lines, then `TOML` and the `-c` file's
@@ -19,7 +20,10 @@ use std::{env, fs};
 const FLOOD: usize = 100;
 
 fn main() {
-    let mode = fs::read_to_string(env::current_exe().unwrap().with_extension("mode")).unwrap();
+    let exe = env::current_exe().unwrap();
+    let mode = fs::read_to_string(exe.with_extension("mode"))
+        .or_else(|_| fs::read_to_string(exe.with_file_name("stub.mode")))
+        .unwrap();
     let words: Vec<&str> = mode.trim_end().splitn(3, ' ').collect();
     let args: Vec<String> = env::args().skip(1).collect();
     let config = args

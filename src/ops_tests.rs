@@ -55,29 +55,8 @@ fn status_shows_domain_and_fingerprint_not_token() {
 fn host_checked_by_stub(outcome: &str) -> (TempDir, Paths, Fake) {
     let (dir, paths) = host();
     fs::create_dir(&paths.bin_dir).unwrap();
-    // Cargo builds the stub for `cargo test`, not for `cargo test --lib`.
-    let stub = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("stub-frpc");
-    assert!(
-        stub.exists(),
-        "{stub:?} is missing: run `cargo test`, which builds the `stub-frpc` binary"
-    );
     let exe = service::exe(&paths);
-    // A `cp` child writes it: a writable descriptor in this process would leak into the children that other test
-    // threads fork, and executing the copy would fail with ETXTBSY while one lives.
-    assert!(
-        process::Command::new("cp")
-            .arg(&stub)
-            .arg(&exe)
-            .status()
-            .unwrap()
-            .success()
-    );
+    crate::test_stub::copy_to(&exe);
     let env: String = service::spec(&paths)
         .env
         .iter()

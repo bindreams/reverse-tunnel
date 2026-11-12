@@ -164,6 +164,19 @@ impl Machine {
         self.manager.status(&self.id).unwrap()
     }
 
+    /// Has root write `config.yaml` anew, readable by root only: a check run as root would pass it, and the service
+    /// account cannot read it. Returns its path.
+    fn hide_config(&self) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = self.paths.config_dir.join("config.yaml");
+        let text = fs::read(&config).unwrap();
+        fs::remove_file(&config).unwrap();
+        fs::write(&config, text).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        config
+    }
+
     /// The service's account, which exists once installed.
     fn service_account(&self) -> Account {
         account::lookup(service::ACCOUNT).expect("install creates the service account")
@@ -756,8 +769,6 @@ fn upgrade_from_local_build() {
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn restart_checks_the_configuration_as_the_service_account() {
-    use std::os::unix::fs::PermissionsExt;
-
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let first = machine.status().pid.expect("a running service has a pid");
@@ -772,12 +783,7 @@ fn restart_checks_the_configuration_as_the_service_account() {
     });
     let running = machine.status().pid;
 
-    // Root writes a config.yaml that the service account cannot read: a check run as root would pass it.
-    let config = machine.paths.config_dir.join("config.yaml");
-    let text = fs::read(&config).unwrap();
-    fs::remove_file(&config).unwrap();
-    fs::write(&config, text).unwrap();
-    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let config = machine.hide_config();
     let failed = Command::new(BIN).arg("restart").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
@@ -788,6 +794,43 @@ fn restart_checks_the_configuration_as_the_service_account() {
     );
     let status = machine.status();
     assert_eq!((status.state, status.pid), (State::Running, running));
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn install_checks_the_configuration_as_the_service_account() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let status = machine.status();
+    let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
+    let config = machine.hide_config();
+    // A newer build, run from a directory of root's that the service account cannot enter: the check cannot run it
+    // from there, so it runs a copy in the bin dir.
+    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("reverse-tunnel");
+    fs::write(&path, newer).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let failed = Command::new(&path).arg("install").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        !failed.status.success() && stderr.contains("reading") && stderr.contains("Permission denied"),
+        "install should fail on reading {}: {stderr}",
+        config.display()
+    );
+    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), outgoing);
+    let staged = fs::read_dir(&machine.paths.bin_dir)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with("upgrade-"))
+        .collect::<Vec<_>>();
+    assert_eq!(staged, Vec::<String>::new(), "the staged copy is removed");
+    let after = machine.status();
+    assert_eq!((after.state, after.pid), (State::Running, status.pid));
 }
 
 #[test]
