@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
@@ -108,10 +110,13 @@ impl Active {
     }
 }
 
+/// Opens `path` for appending, created if missing. A new file gets mode 0644 less the umask.
 fn open(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o644);
+    options
         .open(path)
         .with_context(|| format!("opening {}", path.display()))
 }
