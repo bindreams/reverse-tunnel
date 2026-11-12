@@ -1,5 +1,172 @@
 # reverse-tunnel
 
-Reach machines behind NAT through a bridge you run. Each host keeps one outbound connection to the bridge; SSH and
-HTTP services on it become reachable at `<service>.<host>.<tunnel domain>`, with no inbound ports on the host. Under
-construction: see the issues for progress.
+Reach machines behind NAT through a bridge you run. Each host keeps one outbound connection to the bridge, with no
+inbound ports on the host. Its SSH and HTTP services become reachable at `<service>.<host>.<tunnel domain>`: SSH
+through a WebSocket proxy, HTTP in a browser. The bridge is a server running frps, Traefik and a small plugin that
+lets in only registered hosts; see [server/README.md](server/README.md) to run one.
+
+Below, `T` is the bridge's tunnel domain (for example `tunnel.binarydreams.me`), and the bridge folder is `server/`
+of this repository on the bridge's server.
+
+## Set up a host
+
+You need the bridge's **join code**: in the bridge folder, `uv run ctl join-code` prints it. It is the same for every
+host.
+
+**Linux** (with systemd) and **macOS**: download the binary for your system, then install.
+
+```sh
+# Linux, x86_64 or aarch64
+curl -fL -o reverse-tunnel "https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-$(uname -m)-unknown-linux-gnu"
+# macOS, Apple silicon
+curl -fL -o reverse-tunnel https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-aarch64-apple-darwin
+# macOS, Intel
+curl -fL -o reverse-tunnel https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-apple-darwin
+```
+
+```sh
+chmod +x reverse-tunnel
+sudo ./reverse-tunnel install
+```
+
+`install` asks for the join code (paste it, press Enter), names the host after the machine (lowercased; to choose a
+name, `sudo ./reverse-tunnel install --host NAME --join CODE`), installs and starts the service, and prints a line:
+
+```
+Register this host on the bridge by running:
+    uv run ctl add mothership sha256:...
+```
+
+Run that line in the bridge folder. Until you do, the host is refused ("host not registered" in its `frpc.log`) and
+retries on its own; once you have, it connects with no restart. You may delete the downloaded file; `install` put a
+copy in place and linked it as `reverse-tunnel` on the `PATH`.
+
+By default the host publishes SSH (port 22): the host is reachable at `<host>.T`. `install` is safe to run again; it
+changes only what differs.
+
+**Windows**: `install`, `upgrade` and `uninstall` are not available on Windows yet
+([goetia#104](https://github.com/bindreams/goetia/issues/104)), so a Windows host cannot be set up. The binary is
+released:
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe
+```
+
+## Set up a client
+
+Clients need [websocat](https://github.com/vi/websocat) on their `PATH`: a binary from its
+[releases](https://github.com/vi/websocat/releases), `brew install websocat`, or `cargo install websocat`. Then add
+this to `~/.ssh/config`, with the host's name in place of `mothership` and the tunnel domain in place of
+`tunnel.binarydreams.me`:
+
+```ssh-config
+Host mothership
+    HostName mothership.tunnel.binarydreams.me
+    ProxyCommand websocat --binary wss://%h/
+```
+
+`ssh mothership` now reaches the host's sshd. Any other TCP service the host publishes (`type: tcp`, below) is
+reached the same way, at its own `<service>.<host>.T`.
+
+## Publish another service
+
+Services are listed in the host's `config.yaml`. `install` writes it with SSH:
+
+```yaml
+host: mothership
+bridge: tunnel.binarydreams.me
+default: ssh
+services:
+  ssh:
+    port: 22
+    type: tcp
+```
+
+Add a service under `services:`, with its local port and a `type`: `http` for a web service, which a browser reaches,
+or `tcp` for anything else, which needs websocat on the connecting side. A service `jellyfin` on this host is
+published at `jellyfin.<host>.T`; the `default` service also at `<host>.T`.
+
+```yaml
+  jellyfin:
+    port: 8096
+    type: http
+```
+
+The service reads `config.yaml` when it starts: `sudo reverse-tunnel stop`, then `sudo reverse-tunnel start`. Over the
+tunnel, `stop` ends your own session before `start` can run, so restart from the machine itself.
+
+To give an `http` service a public name, run this in the bridge folder; the public name must not be under `T`, and
+its DNS must point at the server that runs the bridge's Traefik:
+
+```sh
+uv run ctl alias movies.binarydreams.me jellyfin.mothership.tunnel.binarydreams.me
+```
+
+`uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts and aliases.
+
+### Jellyfin
+
+Jellyfin builds absolute links from the request, and behind the tunnel it sees the wrong address. In Jellyfin's
+environment set the address people use:
+
+```
+JELLYFIN_PublishedServerUrl=https://movies.binarydreams.me
+```
+
+The bridge always forwards `X-Forwarded-Proto: http`, even over HTTPS, so Jellyfin does not take its scheme from it.
+Jellyfin also sees every viewer connect from frpc, so it counts them as local. To make it count them as remote, list
+the two proxies in `KnownProxies` (Dashboard, Networking, "Known proxies"; or `network.xml`): the address frpc
+connects to Jellyfin from (`127.0.0.1` when both run on the host directly, the Docker gateway address when Jellyfin
+is in a container), and Traefik's address on the bridge's `gateway` Docker network. Jellyfin then reads the viewer's
+address from `X-Forwarded-For`.
+
+## Operate a host
+
+| Command | What it does |
+|---|---|
+| `reverse-tunnel status` | The service's state, the host name, the tunnel domain and the bridge certificate's SHA-256 fingerprint. No `sudo`. |
+| `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
+| `sudo reverse-tunnel start` | Starts it. |
+| `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
+| `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
+
+`status` prints, for example:
+
+```
+service: running (pid 1234), enabled at boot
+host: mothership
+bridge: tunnel.binarydreams.me
+certificate: SHA-256 AB:CD:...
+```
+
+The files:
+
+| | Linux | macOS |
+|---|---|---|
+| `config.yaml`, `bridge.pem` | `/etc/reverse-tunnel/` | `/Library/Application Support/reverse-tunnel/` |
+| Logs | `/var/log/reverse-tunnel/` | `/Library/Logs/reverse-tunnel/` |
+| Binary, frpc | `/usr/local/lib/reverse-tunnel/` | `/usr/local/lib/reverse-tunnel/` |
+
+Anyone on the machine can read the logs. `frpc.log` is the tunnel's: `login to server success` means the host is
+connected, and a refusal says why ("host not registered", "token mismatch"). `supervisor.log` is the service's own,
+with one local time stamp per line. Each log is rotated at 10 MB to `<name>.1`, replacing the previous one.
+
+### Upgrade
+
+`sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: your session
+ends when the service restarts, and the host reconnects on the new version. Before it replaces anything it checks the
+new version against this host's settings, and a failure leaves the old version running. It prints the registration
+line again; the host is already registered, so ignore it. A version that passes the check and cannot carry SSH locks a
+tunnel-only host out until someone is at the machine.
+
+### Uninstall
+
+`sudo reverse-tunnel uninstall` prints the line to run in the bridge folder, `uv run ctl revoke <host>`, then removes
+everything, and prints "Removed." The removal continues if your session ends. Revoking does not cut the host's current
+connection; `ctl revoke` prints the command that does.
+
+- If the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*` unit, or a shutdown),
+  `uninstall` may still print "Removed."; run `reverse-tunnel uninstall` again to finish it.
+- On Linux a failed removal's output is in the journal (`journalctl -u 'reverse-tunnel-uninstall-*'`); on a host whose
+  journal is not persistent it is lost at reboot, and rerunning `uninstall` shows it again. On macOS it is
+  `/Library/Logs/reverse-tunnel/uninstall.log`.
