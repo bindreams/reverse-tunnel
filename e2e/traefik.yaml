@@ -13,8 +13,8 @@ entryPoints:
   websecure:
     address: ":443"
 
-# What voyager's Traefik is, as far as the bridge needs: containers selected by `traefik.expose=true`, the
-# entrypoint `websecure`, and a DNS-01 resolver called `letsencrypt`, here against Pebble.
+# Containers selected by `traefik.expose=true`, the entrypoint `websecure`, and a DNS-01 resolver called
+# `letsencrypt`, here against Pebble.
 providers:
   docker:
     endpoint: unix:///var/run/docker.sock
