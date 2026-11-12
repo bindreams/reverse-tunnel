@@ -78,6 +78,13 @@ pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str
     let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
     check.args(args).arg("--check").env_clear().envs(&spec.env);
+    // Windows cannot find its known folders (`Paths::system()`) without these, which every service has.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "SystemDrive"] {
+        if let Some(value) = std::env::var_os(name) {
+            check.env(name, value);
+        }
+    }
     #[cfg(unix)]
     {
         debug_assert!(spec.cwd.is_none(), "the service starts in /, and so does the check");
