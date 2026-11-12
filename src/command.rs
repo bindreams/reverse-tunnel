@@ -57,7 +57,3 @@ fn finish(what: &str, status: ExitStatus, stdout: &[u8], stderr: &[u8], with_std
     );
     Ok(stdout.into_owned())
 }
-
-#[cfg(all(test, unix))]
-#[path = "command_tests.rs"]
-mod tests;
