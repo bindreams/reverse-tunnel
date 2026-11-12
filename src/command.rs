@@ -24,8 +24,9 @@ pub fn run(args: &[impl AsRef<OsStr>]) -> Result<String> {
 pub fn run_built(what: &str, command: &mut process::Command) -> Result<String> {
     let out = loop {
         match command.output() {
-            // A binary this process has just written can still be held open for writing by a child another thread
-            // forked; `execve` is refused until that child execs or exits.
+            // Only a multithreaded process (the unit tests) meets this: a binary it has just written can still be held
+            // open for writing by a child another thread forked, and `execve` is refused until that child execs or
+            // exits. The product forks from one thread.
             Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => continue,
             out => break out.with_context(|| format!("running {what}"))?,
         }

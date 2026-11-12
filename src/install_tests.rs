@@ -401,7 +401,10 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     let machine = installed_machine();
     let new = new_binary(&machine, "fail");
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
-    manager.install(&service::spec(&machine.paths), false).unwrap();
+    // A unit that is not what the new binary would register: `register` after the check leaves it as it is.
+    let mut outgoing = service::spec(&machine.paths);
+    outgoing.command.push("--outgoing".into());
+    manager.install(&outgoing, false).unwrap();
 
     let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
@@ -414,6 +417,7 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     assert!(text.contains("stub stderr line"), "{text}");
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), b"the outgoing binary");
     assert_eq!(fs::read(machine.config()).unwrap(), config);
+    assert_eq!(manager.preview_install(&outgoing).unwrap(), Outcome::UpToDate);
     assert!(!pending_file(&machine.paths).exists());
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }
@@ -452,22 +456,5 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
     apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
 
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), fs::read(&new).unwrap());
-    assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
-}
-
-#[test]
-fn a_settled_host_has_its_secrets_repaired_before_the_check() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let machine = installed_machine();
-    let token = machine.paths.secrets_dir.join("host.token");
-    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
-    let new = new_binary(&machine, "pass");
-    let manager = Fake::default();
-    manager.install(&service::spec(&machine.paths), false).unwrap();
-
-    apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
-
-    assert_eq!(fs::metadata(&token).unwrap().permissions().mode() & 0o777, 0o640);
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }

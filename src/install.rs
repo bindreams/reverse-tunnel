@@ -109,10 +109,13 @@ fn apply(
     let spec = service::spec(paths);
     // Read once: the binary that is checked is the one that is placed.
     let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
-    // Settled before the check, which runs as the service account: `settle` re-applies the owners and modes the account
-    // reads through. With no join code and no host it changes nothing else.
-    changed |= settle(manager, &spec, account, paths, host, join)?;
+    // The settings come first because the check reads them as the account: on a settled host `write_settings` writes no
+    // content and only re-applies owners and modes. The unit is registered after the check, so that a rejected binary
+    // leaves the unit as it was.
+    changed |= write_settings(paths, account, host, join)?;
     verify_tools(paths, &binary, account)?;
+    // The binary is not in place yet; the manager does not look.
+    changed |= register(manager, &spec, paths)?;
     changed |= place_binaries(paths, &binary)?;
 
     println!(
@@ -121,20 +124,6 @@ fn apply(
     );
     manager.enable(&spec.id)?;
     pick_up(manager, &spec.id, paths, changed)
-}
-
-/// Registers the service and writes the settings. Whether either changed.
-fn settle(
-    manager: &dyn ServiceManager,
-    spec: &DaemonSpec,
-    account: &Account,
-    paths: &Paths,
-    host: Option<&str>,
-    join: Option<&JoinInfo>,
-) -> Result<bool> {
-    // The binary and the settings may not exist yet; the manager does not look.
-    let registered = register(manager, spec, paths)?;
-    Ok(write_settings(paths, account, host, join)? | registered)
 }
 
 /// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.

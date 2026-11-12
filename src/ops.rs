@@ -47,11 +47,12 @@ pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<
 
 /// `check_and_restart`, with the check run as `run_as` (`None`: as the caller).
 fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
+    let exe = service::exe(paths);
     check(
         paths,
-        &service::exe(paths),
+        &exe,
         run_as,
-        "the installed binary's `run --check`",
+        &format!("the installed binary `{}`'s `run --check`", exe.display()),
     )?;
     let outcome = restart_pending(manager, &service::spec(paths).id, paths).map_err(|failed| {
         failed.error.context(match failed.marker {
