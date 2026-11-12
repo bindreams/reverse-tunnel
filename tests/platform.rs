@@ -1006,6 +1006,7 @@ fn restart_checks_the_configuration_as_the_service_account() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let first = machine.status().pid.expect("a running service has a pid");
+    let old_frpc: Vec<u32> = machine.wait_for_frpc().iter().map(|p| p.pid).collect();
 
     // The check runs with nothing inherited (on Windows as the caller): it must pass, and the service run again.
     let mut restart = Command::new(BIN);
@@ -1014,6 +1015,10 @@ fn restart_checks_the_configuration_as_the_service_account() {
     wait_until("the manager runs a new supervisor", || {
         let status = machine.status();
         status.state == State::Running && status.pid.is_some_and(|pid| pid != first)
+    });
+    // The new supervisor has read config.yaml once its frpc runs; a file broken before that stops the service itself.
+    wait_until("the new supervisor's frpc runs", || {
+        machine.frpc().iter().any(|process| !old_frpc.contains(&process.pid))
     });
     let running = machine.status().pid;
 
