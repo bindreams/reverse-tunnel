@@ -18,10 +18,10 @@ use named_lock::{NamedLock, NamedLockGuard};
 use crate::account::{self, Account};
 use crate::command;
 use crate::config::{Config, valid_label};
-use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
+use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
-use crate::{download, ops, service};
+use crate::{download, ops, service, supervisor, upgrade};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -76,7 +76,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         removal_log(paths)
     );
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
-    let mut changed = pending_file(paths).try_exists()?;
+    let changed = pending_file(paths).try_exists()?;
     let join = match opts.join.as_deref() {
         Some(code) => Some(join::decode(code)?),
         None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
@@ -89,11 +89,37 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     };
 
     let account = account::ensure(service::ACCOUNT)?;
+    apply(
+        &*goetia::manager::native()?,
+        &account,
+        paths,
+        host.as_deref(),
+        join.as_ref(),
+        changed,
+    )
+}
+
+/// What `install` does once it holds the lock and knows its inputs. `changed`: an earlier run changed something that
+/// has not been restarted yet.
+fn apply(
+    manager: &dyn ServiceManager,
+    account: &Account,
+    paths: &Paths,
+    host: Option<&str>,
+    join: Option<&JoinInfo>,
+    mut changed: bool,
+) -> Result<()> {
     let spec = service::spec(paths);
-    let manager = goetia::manager::native()?;
-    // The binary and the settings may not exist yet; the manager does not look.
-    changed |= register(&*manager, &spec, paths)?;
-    changed |= write_settings(paths, &account, host.as_deref(), join.as_ref())?;
+    // Settings that are all there and stay as they are can be checked before anything is changed: a failure leaves the
+    // installation as it was.
+    let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
+    if settled {
+        verify_tools(paths)?;
+        changed |= settle(manager, &spec, account, paths, host, join)?;
+    } else {
+        changed |= settle(manager, &spec, account, paths, host, join)?;
+        verify_tools(paths)?;
+    }
     changed |= place_binaries(paths)?;
 
     println!(
@@ -101,7 +127,21 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         registration(paths)?
     );
     manager.enable(&spec.id)?;
-    pick_up(&*manager, &spec.id, paths, changed)
+    pick_up(manager, &spec.id, paths, changed)
+}
+
+/// Registers the service and writes the settings. Whether either changed.
+fn settle(
+    manager: &dyn ServiceManager,
+    spec: &DaemonSpec,
+    account: &Account,
+    paths: &Paths,
+    host: Option<&str>,
+    join: Option<&JoinInfo>,
+) -> Result<bool> {
+    // The binary and the settings may not exist yet; the manager does not look.
+    let registered = register(manager, spec, paths)?;
+    Ok(write_settings(paths, account, host, join)? | registered)
 }
 
 /// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.
@@ -353,21 +393,6 @@ fn remove_files(paths: &Paths) -> Result<()> {
     remove_entry(&paths.log_dir)
 }
 
-/// Removes `path`, a directory with its contents, unless it is already gone. A link is removed, not followed.
-fn remove_entry(path: &Path) -> Result<()> {
-    let removed = match fs::symlink_metadata(path) {
-        Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(err) => Err(err),
-    };
-    match removed {
-        Err(err) if err.kind() != ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("removing {}", path.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
 fn config_file(paths: &Paths) -> PathBuf {
     paths.config_dir.join("config.yaml")
 }
@@ -538,8 +563,9 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Puts this binary, the pinned frpc and the symlink in place. Whether the binary or frpc changed.
-fn place_binaries(paths: &Paths) -> Result<bool> {
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has this binary, the new one, check the settings
+/// with it. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries` marks.
+fn verify_tools(paths: &Paths) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
@@ -547,16 +573,19 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
     make_dir(&paths.bin_dir, PUBLIC_DIR)?;
 
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
-    let mut changed = false;
     if !download::tools(paths).frpc.try_exists()? {
-        mark_pending(paths)?;
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
-        changed = true;
     }
+    supervisor::run(paths, &download::tools(paths), true)?;
+    Ok(())
+}
+
+/// Puts this binary and the symlink in place. Whether the binary changed.
+fn place_binaries(paths: &Paths) -> Result<bool> {
     let exe = service::exe(paths);
     let me = env::current_exe().context("finding this binary")?;
     let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
-    changed |= replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
+    let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     if let Some(link) = &paths.link {
         point_link(link, &exe)?;
@@ -564,14 +593,16 @@ fn place_binaries(paths: &Paths) -> Result<bool> {
     Ok(changed)
 }
 
-/// Removes the frpc versions that are not the current one, and temp files a crashed write left, from the bin dir.
+/// Removes from the bin dir the frpc versions that are not the current one, temp files a crashed write left, and the
+/// copies `upgrade` ran from (`upgrade-*`), this process's own among them.
 fn clean_bin_dir(paths: &Paths) -> Result<()> {
     let current = download::tools(paths).frpc;
     for entry in fs::read_dir(&paths.bin_dir)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if path != current && (name.starts_with("frpc-") || name.starts_with(".tmp")) {
-            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
+        if stale || name.starts_with(upgrade::STAGED) {
+            remove_entry(&path)?;
         }
     }
     Ok(())

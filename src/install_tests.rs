@@ -228,12 +228,15 @@ fn bin_dir_loses_old_versions_and_temp_files() {
     let bin = &machine.paths.bin_dir;
     fs::create_dir(bin).unwrap();
     let (current, exe) = (download::tools(&machine.paths).frpc, service::exe(&machine.paths));
+    // What an upgrade ran from, which nothing else removes.
+    let staged = crate::upgrade::stage(&machine.paths, b"x").unwrap();
     for path in [&current, &exe, &bin.join("frpc-0.0.1"), &bin.join(".tmpAb12")] {
         fs::write(path, b"x").unwrap();
     }
 
     clean_bin_dir(&machine.paths).unwrap();
 
+    assert!(!staged.exists());
     let mut kept = vec![current, exe];
     kept.sort();
     assert_eq!(files_under(bin), kept);
@@ -299,4 +302,49 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
         text.contains("`reverse-tunnel stop`") && text.contains("`reverse-tunnel start`"),
         "{text}"
     );
+}
+
+#[test]
+fn upgrade_aborts_when_check_fails() {
+    let machine = Machine::new();
+    machine.settings(Some("mothership"), Some(CODE));
+    // The settings are as an earlier install left them, picked up.
+    fs::remove_file(pending_file(&machine.paths)).unwrap();
+    fs::create_dir(&machine.paths.bin_dir).unwrap();
+    let (exe, frpc) = (service::exe(&machine.paths), download::tools(&machine.paths).frpc);
+    fs::write(&exe, b"the outgoing binary").unwrap();
+    // An frpc that rejects whatever it is asked to verify. A link: writing a program and running it races a fork.
+    symlink("/bin/false", &frpc).unwrap();
+    let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
+    let id = service::spec(&machine.paths).id;
+
+    let err = apply(&manager, &machine.account, &machine.paths, None, None, false).unwrap_err();
+
+    assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
+    assert_eq!(fs::read(&exe).unwrap(), b"the outgoing binary");
+    assert_eq!(fs::read(machine.config()).unwrap(), config);
+    assert!(matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })));
+    assert!(!pending_file(&machine.paths).exists());
+}
+
+#[test]
+fn first_install_aborts_when_check_fails() {
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.bin_dir).unwrap();
+    // An frpc that rejects whatever it is asked to verify; see `upgrade_aborts_when_check_fails`.
+    symlink("/bin/false", download::tools(&machine.paths).frpc).unwrap();
+    let join = join::decode(CODE).unwrap();
+
+    let err = apply(
+        &Fake::default(),
+        &machine.account,
+        &machine.paths,
+        Some("mothership"),
+        Some(&join),
+        false,
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
+    assert!(!service::exe(&machine.paths).exists());
 }

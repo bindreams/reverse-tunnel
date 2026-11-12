@@ -124,6 +124,21 @@ pub fn make_missing_dirs(path: &Path, perm: Perm) -> Result<()> {
     make_dir(path, perm)
 }
 
+/// Removes `path`, a directory with its contents, unless it is already gone. A link is removed, not followed.
+pub fn remove_entry(path: &Path) -> Result<()> {
+    let removed = match fs::symlink_metadata(path) {
+        Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(err) => Err(err),
+    };
+    match removed {
+        Err(err) if err.kind() != ErrorKind::NotFound => {
+            Err(err).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Writes `data` to `dest` through a temp file in the same directory, which has `perm` before it gets any data, so
 /// `dest` is never partial and never briefly readable by others. The data and then the directory are synced.
 pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> Result<WriteOutcome> {

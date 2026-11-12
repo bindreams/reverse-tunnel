@@ -14,3 +14,4 @@ pub mod ops;
 pub mod paths;
 pub mod service;
 pub mod supervisor;
+pub mod upgrade;
