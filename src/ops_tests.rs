@@ -117,3 +117,20 @@ fn restart_without_the_installed_binary_says_the_service_is_not_installed() {
     assert_eq!(err.to_string(), "the service is not installed");
     assert_eq!(manager.calls(), []);
 }
+
+/// A restart during a removal would restart, or write the restart marker into, what the removal is deleting.
+#[cfg(unix)]
+#[test]
+fn restart_refuses_while_an_uninstall_has_not_finished() {
+    let (_dir, paths) = host();
+    fs::write(paths.config_dir.join("uninstalling"), "").unwrap();
+    let manager = Fake::default();
+
+    let err = check_and_restart(&manager, &paths).unwrap_err();
+
+    assert!(
+        err.to_string().starts_with("an uninstall is in progress or failed"),
+        "{err:#}"
+    );
+    assert_eq!(manager.calls(), []);
+}

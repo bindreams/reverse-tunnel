@@ -39,8 +39,10 @@ pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
 /// Has the service read its configuration again, after the installed binary has checked it as the service account: a
 /// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
 pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
+    #[cfg(unix)]
+    crate::install::refuse_while_uninstalling(paths)?;
     // Decided from the binary: the account database can answer for an account that has just been removed.
-    ensure!(service::exe(paths).exists(), "the service is not installed");
+    ensure!(service::exe(paths).try_exists()?, "the service is not installed");
     check_and_restart_as(manager, paths, service_identity()?)
 }
 
@@ -63,7 +65,8 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// The installed binary's `run --check`, started as the service starts it: its command and environment from
 /// `service::spec`, nothing inherited, as `run_as`. Fails with what the check printed.
 ///
-/// Runs as the service account with its primary group only (std drops supplementary groups); the files it reads are
+/// Runs as the service account with its primary group only (std drops supplementary groups when the caller is root, as
+/// `restart` is; the unit tests, run as themselves, keep theirs); the files it reads are
 /// install's, owner or primary-group readable by contract. A file the account reads only through another group is
 /// refused.
 fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
@@ -79,7 +82,7 @@ fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
         Some(_) => format!("as the `{}` account", service::ACCOUNT),
         None => "as the caller".to_string(),
     };
-    command::run_built(&format!("the installed binary's `run --check`, {who},"), &mut check)
+    command::run_built(&format!("the installed binary's `run --check` {who}"), &mut check)
         .context("the service would not start with this configuration")?;
     Ok(())
 }

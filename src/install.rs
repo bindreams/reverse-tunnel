@@ -50,9 +50,20 @@ pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
 }
 
 /// Exists from the moment `uninstall` commits to removing everything until the removal is done. While it does,
-/// `install` refuses, so that it cannot install what the removal is about to delete.
+/// `install` and `restart` refuse, so that they cannot install or restart what the removal is about to delete.
 fn uninstalling_file(paths: &Paths) -> PathBuf {
     paths.config_dir.join("uninstalling")
+}
+
+/// Fails while the uninstalling marker exists, saying how to finish the removal.
+pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
+    ensure!(
+        !uninstalling_file(paths).try_exists()?,
+        "an uninstall is in progress or failed: see {}, and {} to finish it",
+        removal_log(paths),
+        rerun_uninstall(paths)
+    );
+    Ok(())
 }
 
 /// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything `install`
@@ -60,12 +71,7 @@ fn uninstalling_file(paths: &Paths) -> PathBuf {
 pub fn install(opts: InstallOpts) -> Result<()> {
     let paths = &opts.paths;
     let _lock = lock(paths)?;
-    ensure!(
-        !uninstalling_file(paths).try_exists()?,
-        "an uninstall is in progress or failed: see {}, and {} to finish it",
-        removal_log(paths),
-        rerun_uninstall(paths)
-    );
+    refuse_while_uninstalling(paths)?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
     let host = configured_host(paths, opts.host.as_deref())?;
