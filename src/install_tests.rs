@@ -356,13 +356,10 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     assert!(text.contains("the service was not restarted"), "{text}");
     assert!(text.contains("restart-pending"), "{text}");
     // The failure of the restart itself is there too: without it the operator is not told why.
-    let restart_error = restart(&Fake::default(), &spec.id).unwrap_err();
+    let restart_error = ops::restart(&Fake::default(), &spec.id).unwrap_err();
     assert!(text.contains(&format!("{restart_error:#}")), "{text}");
     assert!(!text.contains("`reverse-tunnel install` again"), "{text}");
-    assert!(
-        text.contains("`reverse-tunnel stop`") && text.contains("`reverse-tunnel start`"),
-        "{text}"
-    );
+    assert!(text.contains("`reverse-tunnel restart`"), "{text}");
 }
 
 #[test]

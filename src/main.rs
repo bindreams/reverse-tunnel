@@ -28,7 +28,9 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Installs the service and starts it, or restarts it if anything it reads changed. Needs root.
+    /// Installs the service and starts it, or restarts it if anything `install` writes changed. Needs root.
+    ///
+    /// A hand edit of config.yaml is not noticed; apply it with `restart`.
     Install {
         /// The name for a new config.yaml (default: this machine's name). With an existing one, a different name is an
         /// error.
@@ -56,6 +58,8 @@ enum Command {
     Start,
     /// Stops the service. It starts again at boot if it is enabled. Needs root.
     Stop,
+    /// Checks config.yaml, then restarts the service to apply it; works over the tunnel. Needs root.
+    Restart,
     /// Shows the service's state and the bridge.
     Status,
 }
@@ -101,6 +105,12 @@ fn main() -> Result<ExitCode> {
         Command::Stop => {
             require_root()?;
             ops::stop(&*goetia::manager::native()?, &Paths::system()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Restart => {
+            require_root()?;
+            let paths = Paths::system()?;
+            ops::check_and_restart(&*goetia::manager::native()?, &paths, &tools(&paths))?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {

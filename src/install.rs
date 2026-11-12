@@ -666,25 +666,16 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
         return Ok(());
     }
     remove_entry(&pending_file(paths))?;
-    let Err(err) = restart(manager, id) else {
+    let Err(err) = ops::restart(manager, id) else {
         return Ok(());
     };
     let restart_failed = "the new files are in place, but the service was not restarted";
     match mark_pending(paths) {
         Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
-        // From a console: stopping the service over the tunnel cuts the session before `start`.
         Err(write) => Err(write.context(format!(
             "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will \
-             not notice, so from a console run `reverse-tunnel stop` and then `reverse-tunnel start`"
+             not notice, so run `reverse-tunnel restart`"
         ))),
-    }
-}
-
-fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {
-    match manager.kill(id) {
-        Ok(()) => Ok(()),
-        Err(goetia::Error::NotRunning { .. }) => Ok(manager.start(id, Budget::Unbounded)?),
-        Err(err) => Err(err.into()),
     }
 }
 

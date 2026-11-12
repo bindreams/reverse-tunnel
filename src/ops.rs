@@ -1,5 +1,5 @@
-//! `start`, `stop` and `status`: the service through goetia, and the files in `config_dir`, which every local user
-//! may read. Nothing here reads `secrets_dir`.
+//! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
+//! user may read. Only `check_and_restart` reads `secrets_dir`, as root, through the configuration check.
 
 use std::fs;
 use std::io::Write;
@@ -8,11 +8,13 @@ use anyhow::{Context, Result, ensure};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use goetia::manager::{Budget, ServiceManager, State};
+use goetia::spec::Id;
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
+use crate::download::Tools;
 use crate::paths::Paths;
-use crate::service;
+use crate::{service, supervisor};
 
 pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.start(&service::spec(paths).id, Budget::Unbounded)?;
@@ -24,6 +26,25 @@ pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.stop(&service::spec(paths).id, Budget::Unbounded)?;
     println_best_effort("The service is stopped. It starts again at boot if it is enabled.");
     Ok(())
+}
+
+/// Has the service read its configuration again, after checking it. The check is `run --check`, in this process; when
+/// it fails the service is left as it is.
+pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths, tools: &Tools) -> Result<()> {
+    supervisor::run(paths, tools, true)?;
+    restart(manager, &service::spec(paths).id)?;
+    println_best_effort("The service is restarting.");
+    Ok(())
+}
+
+/// Has the service run again. It is killed, and the manager starts it again; it is never stopped first, because run
+/// over the tunnel the stop cuts this session and the start never comes. A service that is not running is started.
+pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {
+    match manager.kill(id) {
+        Ok(()) => Ok(()),
+        Err(goetia::Error::NotRunning { .. }) => Ok(manager.start(id, Budget::Unbounded)?),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Prints a line reporting what is already done, and ignores a closed stdout rather than panicking: a command that
