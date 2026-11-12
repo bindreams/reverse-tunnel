@@ -31,6 +31,12 @@ ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 yaml_serde = "0.10.7"
 zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[build-dependencies]
+libsearch-guard = "0.1.1"
+
+[dev-dependencies]
+libsearch-guard = "0.1.1"
+
 [target."cfg(unix)".dependencies]
 libc = "0.2"
 named-lock = "0.4.1"
