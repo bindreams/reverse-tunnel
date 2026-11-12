@@ -1,0 +1,34 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+# The tests read the routers and services here.
+api:
+  insecure: true
+
+log:
+  level: DEBUG
+
+entryPoints:
+  websecure:
+    address: ":443"
+
+# What voyager's Traefik is, as far as the bridge needs: containers selected by `traefik.expose=true`, the
+# entrypoint `websecure`, and a DNS-01 resolver called `letsencrypt`, here against Pebble.
+providers:
+  docker:
+    endpoint: unix:///var/run/docker.sock
+    exposedByDefault: false
+    constraints: "Label(`traefik.expose`,`true`)"
+    network: gateway
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: e2e@tunnel.binarydreams.me
+      storage: /acme/acme.json
+      caServer: https://pebble:14000/dir
+      dnsChallenge:
+        provider: exec
+        propagation:
+          disableChecks: true
