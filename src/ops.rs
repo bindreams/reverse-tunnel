@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use anyhow::{Context, Result, ensure};
@@ -47,7 +47,13 @@ pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<
 
 /// `check_and_restart`, with the check run as `run_as` (`None`: as the caller).
 fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
-    check(paths, run_as)?;
+    let exe = service::exe(paths);
+    check(
+        paths,
+        &exe,
+        run_as,
+        &format!("the installed binary `{}`'s `run --check`", exe.display()),
+    )?;
     let outcome = restart_pending(manager, &service::spec(paths).id, paths).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
@@ -61,16 +67,16 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
     Ok(())
 }
 
-/// The installed binary's `run --check`, started as the service starts it: its command and environment from
-/// `service::spec`, nothing inherited, as `run_as`. Fails with what the check printed.
+/// `exe`'s `run --check`, started as the service starts it: the arguments and environment from `service::spec`, nothing
+/// inherited, as `run_as`. `what` names the check in a failure. Fails with what the check printed.
 ///
-/// On Unix it starts in `/`, as the service does (the spec names no working directory). Run by root, as `restart` is,
-/// it has the account's primary group as its gid and only group (std's `.uid()/.gid()` would leave macOS's effective
-/// gid 0), so a file it reads only through another group is refused. The files it reads are install's and open to the
-/// account by contract.
-fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
+/// On Unix it starts in `/`, as the service does (the spec names no working directory). Run by root, as `restart` and
+/// `install` are, it has the account's primary group as its gid and only group (std's `.uid()/.gid()` would leave
+/// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
+/// install's and open to the account by contract.
+pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
     let spec = service::spec(paths);
-    let (exe, args) = spec.command.split_first().expect("the service has a command");
+    let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
     check.args(args).arg("--check").env_clear().envs(&spec.env);
     #[cfg(unix)]
@@ -87,7 +93,7 @@ fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
         Some(_) => format!("as the `{}` account", service::ACCOUNT),
         None => "as the caller".to_string(),
     };
-    command::run_built(&format!("the installed binary's `run --check` {who}"), &mut check)
+    command::run_built(&format!("{what} {who}"), &mut check)
         .context("the service would not start with this configuration")?;
     Ok(())
 }
@@ -108,9 +114,9 @@ fn drop_to(root: bool, uid: u32, gid: u32) -> std::io::Result<()> {
 
 /// Who the check runs as: the service's account on Linux and macOS; on Windows, the caller.
 #[cfg(unix)]
-type RunAs = account::Account;
+pub(crate) type RunAs = account::Account;
 #[cfg(not(unix))]
-type RunAs = std::convert::Infallible;
+pub(crate) type RunAs = std::convert::Infallible;
 
 #[cfg(unix)]
 fn service_identity() -> Result<Option<RunAs>> {

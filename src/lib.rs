@@ -13,4 +13,6 @@ pub mod ops;
 pub mod paths;
 pub mod service;
 pub mod supervisor;
+#[cfg(all(test, unix))]
+mod test_stub;
 pub mod upgrade;
