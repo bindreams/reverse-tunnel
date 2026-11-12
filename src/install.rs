@@ -685,6 +685,8 @@ fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
+    #[cfg(windows)]
+    crate::files::own_tree(&paths.bin_dir)?;
     if let Some(link) = &paths.link {
         point_link(link, &exe)?;
     }

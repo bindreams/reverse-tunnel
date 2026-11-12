@@ -128,6 +128,13 @@ pub fn grant(dir: &Path, account: &str, rights: &str) -> Result<()> {
     icacls(dir, &["/grant", &format!("{account}:(OI)(CI){rights}")])
 }
 
+/// Windows: Administrators own `dir` and all it holds. What an Administrator creates is owned by that user, who could
+/// then change its ACL, and goetia refuses a host that anyone but Administrators or SYSTEM owns.
+#[cfg(windows)]
+pub fn own_tree(dir: &Path) -> Result<()> {
+    icacls(dir, &["/setowner", ADMINISTRATORS, "/T"])
+}
+
 #[cfg(windows)]
 fn icacls(path: &Path, operation: &[&str]) -> Result<()> {
     let mut args: Vec<&OsStr> = vec!["icacls".as_ref(), path.as_ref()];
