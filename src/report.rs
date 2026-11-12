@@ -1,8 +1,5 @@
-//! Error text for people.
-
-/// `err` as anyhow's `{:#}` writes it (`context: cause: cause`), except that a `goetia::Error` in the chain is written
-/// by `goetia::Error::report` in place of itself and its causes: goetia's `Display` is only its outermost context, and
-/// only `report` writes a failed tool's stderr and the remedies.
+/// `err` as anyhow's `{:#}` writes it, but a `goetia::Error` in the chain is written by its `report()`: goetia's
+/// `Display` is only the outermost context, and only `report` includes a failed tool's stderr and remedies.
 pub fn report(err: &anyhow::Error) -> String {
     let mut messages = Vec::new();
     for link in err.chain() {

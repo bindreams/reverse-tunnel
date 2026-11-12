@@ -651,7 +651,7 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     };
     let err = failed.error;
     let restart_failed = "the new files are in place, but the service was not restarted";
-    // The remedy comes first: the restart's own error follows the last words, "was not restarted".
+    // The remedy leads because the restart's own error is appended after the last words.
     match failed.marker {
         Ok(()) => Err(err.context(format!("run `reverse-tunnel install` again to retry; {restart_failed}"))),
         Err(write) => Err(err.context(format!(

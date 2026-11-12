@@ -27,3 +27,8 @@ fn spec_runs_the_installed_binary_as_the_service_account() {
     // goetia's blob round-trip rejects specs its injection gate refuses.
     assert_eq!(blob::decode(&blob::encode(&spec)).unwrap().spec, spec);
 }
+
+#[test]
+fn spec_refuses_a_relative_bin_dir() {
+    assert!(spec(&Paths::testing("relative/root")).is_err());
+}

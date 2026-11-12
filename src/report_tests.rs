@@ -37,3 +37,17 @@ fn an_error_without_goetia_in_its_chain_prints_as_anyhow_does() {
 
     assert_eq!(report(&err), format!("{err:#}"));
 }
+
+#[test]
+fn a_goetia_error_wrapped_in_a_step_is_reported_with_its_stderr() {
+    let step = goetia::Error::Step {
+        what: "removing the service".into(),
+        source: Box::new(failed_tool("boom")),
+    };
+    let err = Err::<(), _>(step).context("uninstalling").unwrap_err();
+
+    let text = report(&err);
+
+    assert!(text.starts_with("uninstalling: removing the service"), "{text}");
+    assert!(text.contains("boom"), "{text}");
+}

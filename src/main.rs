@@ -67,11 +67,9 @@ enum Command {
     Status,
 }
 
-fn main() -> ExitCode {
-    run().unwrap_or_else(|err| {
-        eprintln!("Error: {}", report(&err));
-        ExitCode::FAILURE
-    })
+/// std prints the error, ignoring a closed stderr; it is handed the report, as std alone would drop goetia's details.
+fn main() -> Result<ExitCode> {
+    run().map_err(|err| anyhow::anyhow!(report(&err)))
 }
 
 fn run() -> Result<ExitCode> {
