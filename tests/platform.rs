@@ -1035,6 +1035,8 @@ fn restart_checks_the_configuration_as_the_service_account() {
 fn install_checks_the_configuration_as_the_service_account() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
+    // The supervisor has read config.yaml once frpc runs; a file broken before that stops the service itself.
+    machine.wait_for_frpc();
     let status = machine.status();
     let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
     let config = machine.break_config();
