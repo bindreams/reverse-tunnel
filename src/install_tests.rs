@@ -164,7 +164,8 @@ fn host_that_differs_from_the_config_is_refused() {
     assert_eq!(
         err,
         format!(
-            "--host \"flagship\" differs from this host's name \"mothership\" in {config}: `install` does not rename              a host. To rename it, uninstall it and install it again with --host flagship"
+            "--host \"flagship\" differs from this host's name \"mothership\" in {config}: `install` does not rename \
+             a host. To rename it, uninstall it and install it again with --host flagship"
         )
     );
     let err = format!("{:#}", configured_host(&machine.paths, Some("Not_Valid")).unwrap_err());

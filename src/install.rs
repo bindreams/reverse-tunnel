@@ -421,7 +421,8 @@ fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<Strin
         let current = Config::load(&config)?.host;
         ensure!(
             asked == current,
-            "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a host.              To rename it, uninstall it and install it again with --host {asked}",
+            "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a host. \
+             To rename it, uninstall it and install it again with --host {asked}",
             config.display()
         );
     }
