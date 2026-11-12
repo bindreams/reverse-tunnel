@@ -16,6 +16,7 @@ use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
 use crate::account::{self, Account};
+#[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, write_atomic};
