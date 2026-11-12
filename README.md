@@ -96,8 +96,10 @@ published at `jellyfin.<host>.T`; the `default` service also at `<host>.T`.
     type: http
 ```
 
-The service reads `config.yaml` when it starts: `sudo reverse-tunnel stop`, then `sudo reverse-tunnel start`. Over the
-tunnel, `stop` ends your own session before `start` can run, so restart from the machine itself.
+Edit `config.yaml`, then `sudo reverse-tunnel restart`: it checks the file first, as the service's account, and works
+over the tunnel. A file the service reads must be readable by the `reverse-tunnel` account as its owner, through its
+primary group, or by everyone; one it can read only through another group makes `restart` refuse a configuration that
+works.
 
 To give an `http` service a public name, run this in the bridge folder; the public name must not be under `T`, its DNS
 must point at the server that runs the bridge's Traefik, and Traefik's `letsencrypt` resolver (DNS-01; see
@@ -138,6 +140,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 | `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain, and which bridge it trusts: one `certificate:` line per certificate in `bridge.pem`, two during a rotation. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
+| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then restarts the service so it reads it again. Works over the tunnel. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
 
