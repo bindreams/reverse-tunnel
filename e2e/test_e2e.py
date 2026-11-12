@@ -5,7 +5,7 @@ Runs only on CI's `e2e` job (`RT_E2E=1`), which installs a service, edits /etc/h
 on a developer's machine. The tests are one scenario and run in file order: the host is registered by the second
 test, and the last ones break it.
 
-Waits re-check the real condition and have no cap; the job's own timeout bounds them.
+Waits re-check the real condition and have no cap; the pytest step's 20-minute timeout ends a wait that never does.
 """
 
 import getpass
@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -161,7 +162,17 @@ class Stack:
 
     def ssh_popen(self, command: str, output) -> subprocess.Popen:
         cmd, env = self.ssh_command(command)
-        return subprocess.Popen(cmd, env=env, stdout=output, stderr=subprocess.STDOUT)
+        # Its own process group, so that `end_session` takes the ProxyCommand's websocat with it.
+        return subprocess.Popen(cmd, env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+
+    @staticmethod
+    def end_session(session: subprocess.Popen):
+        """Kill the session and its children, and reap it."""
+        try:
+            os.killpg(session.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # the whole group is gone
+        session.wait()
 
     def ssh(self, command: str) -> subprocess.CompletedProcess:
         cmd, env = self.ssh_command(command)
@@ -277,7 +288,19 @@ def before_add(stack):
     """What the host and the bridge do before the bridge knows the host."""
     wait_log(0, r"host not registered")
     wait_until(lambda: _router(stack, "reverse-tunnel-frps"))  # until then Traefik's own 404 would answer
-    return SimpleNamespace(published=not stack.frps_404(f"{HOST}.{T}"), pid=stack.pid(), log=len(frpc_log()))
+
+    def decided():
+        """The host's name answered: frps's 404, or something that is neither a 404 nor Traefik failing to reach frps.
+
+        A Traefik 404 or a 502 while the router starts is not an answer. A tunnel to sshd would also read as a 502, and
+        then this never ends and the step's timeout fails the run.
+        """
+        answer = _try(stack.https, f"{HOST}.{T}", verified=False)
+        if answer and (answer[0] not in (404, 502, 503, 504) or (answer[0] == 404 and FRPS_404 in answer[1])):
+            return answer
+
+    status, body = wait_until(decided)
+    return SimpleNamespace(published=status != 404, pid=stack.pid(), log=len(frpc_log()))
 
 
 @pytest.fixture(scope="session")
@@ -376,7 +399,7 @@ def test_wrong_bridge_cert_refused(stack, registered, other):
     """frpc logs in with the bridge's certificate and not with another for the same name."""
     wrong = stack.tmp / "wrong.pem"
     wrong.write_text(make_cert(T)[0])
-    wait_until(lambda: stack.frps_404(OTHER_NAME))  # an earlier test's proxy may not be gone yet
+    wait_until(lambda: _try(stack.frps_404, OTHER_NAME))  # an earlier test's proxy may not be gone yet
     with Frpc(stack, OTHER, other, wrong, {"own": OTHER_NAME}) as frpc:
         frpc.wait(r"x509")
         assert stack.frps_404(OTHER_NAME)  # no login: frps has no proxy for the name
@@ -415,8 +438,10 @@ def test_upgrade_through_tunnel_keeps_access(stack, registered):
             if (code := session.poll()) not in (None, 0, 255):
                 raise AssertionError(f"upgrade ended with {code}, service not restarted:\n{output.read_text()}")
 
-        pid = wait_until(restarted)
-        session.kill()
+        try:
+            pid = wait_until(restarted)
+        finally:
+            stack.end_session(session)
     assert hashlib.sha256(INSTALLED.read_bytes()).hexdigest() == want
     assert run("sudo", "sha256sum", f"/proc/{pid}/exe").stdout.split()[0] == want
     wait_until(stack.ssh_works)
@@ -424,7 +449,7 @@ def test_upgrade_through_tunnel_keeps_access(stack, registered):
 
 def test_plugin_down_refuses_login_keeps_tunnel(stack, registered, other):
     """With the plugin down a tunnel keeps carrying SSH and no new login is let in; back up, it is."""
-    wait_until(lambda: stack.frps_404(OTHER_NAME))  # an earlier test's proxy may not be gone yet
+    wait_until(lambda: _try(stack.frps_404, OTHER_NAME))  # an earlier test's proxy may not be gone yet
     stack.compose("stop", "reverse-tunnel-plugin")
     try:
         assert stack.ssh_works()

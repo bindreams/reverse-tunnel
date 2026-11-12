@@ -121,7 +121,7 @@ jobs:
           docker network create gateway
       - name: frps router rule ends in the domain and an escaped $$
         run: |
-          docker compose config | grep -E 'reverse-tunnel-frps\.rule: .*tunnel\.binarydreams\.me\$\$`\)$'
+          docker compose config | grep -E 'reverse-tunnel-frps\.rule: .*tunnel\.binarydreams\.me\\E\$\$`\)$'
       - run: docker compose build
       - run: docker compose up -d
       - name: frps loads its certificate and starts
@@ -133,7 +133,7 @@ jobs:
             fi
           done
       - name: Container label has a single $
-        run: docker inspect -f '{{index .Config.Labels "traefik.http.routers.reverse-tunnel-frps.rule"}}' reverse-tunnel-frps | grep -E 'tunnel\.binarydreams\.me\$`\)$'
+        run: docker inspect -f '{{index .Config.Labels "traefik.http.routers.reverse-tunnel-frps.rule"}}' reverse-tunnel-frps | grep -E 'tunnel\.binarydreams\.me\\E\$`\)$'
       - name: plugin runs as non-root and reads state/
         run: docker compose run --rm --no-deps reverse-tunnel-plugin python -c "import ctl.plugin as p, pathlib; p.read_hosts(pathlib.Path('/state/hosts.yaml'))"
 
