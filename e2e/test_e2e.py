@@ -211,6 +211,10 @@ class Stack:
         status, body = wait_until(lambda: _try(self.https, name, verified=False))
         return status == 404 and FRPS_404 in body
 
+    def wait_unpublished(self, name):
+        """Waits until frps has no proxy for `name`: an earlier test's may not be gone yet."""
+        wait_until(lambda: self.frps_404(name))
+
     def peer_cert(self, name) -> dict:
         """The certificate Traefik serves for `name`, verified against Pebble's root; raises if it is not."""
         context = ssl.create_default_context(cafile=self.root)
@@ -288,6 +292,7 @@ def stack(tmp_path_factory):
     port = server.server_address[1]
     run("sudo", "tee", "-a", "/etc/reverse-tunnel/config.yaml", input=f"  web:\n    port: {port}\n    type: http\n")
     run("sudo", INSTALLED, "stop")
+    stack.started_at = len(frpc_log())  # the log is appended to: what this run logs starts here
     run("sudo", INSTALLED, "start")
     return stack
 
@@ -295,7 +300,7 @@ def stack(tmp_path_factory):
 @pytest.fixture(scope="session")
 def before_add(stack):
     """What the host and the bridge do before the bridge knows the host."""
-    wait_log(0, r"host not registered")
+    wait_log(stack.started_at, r"host not registered")
     return SimpleNamespace(pid=stack.pid(), log=len(frpc_log()))
 
 
@@ -394,7 +399,7 @@ def test_wrong_bridge_cert_refused(stack, registered, other):
     """frpc logs in with the bridge's certificate and not with another for the same name."""
     wrong = stack.tmp / "wrong.pem"
     wrong.write_text(make_cert(T)[0])
-    wait_until(lambda: stack.frps_404(OTHER_NAME))  # an earlier test's proxy may not be gone yet
+    stack.wait_unpublished(OTHER_NAME)
     with Frpc(stack, OTHER, other, wrong, {"own": OTHER_NAME}) as frpc:
         frpc.wait(r"x509")
         assert stack.frps_404(OTHER_NAME)  # no login: frps has no proxy for the name
@@ -444,7 +449,7 @@ def test_upgrade_through_tunnel_keeps_access(stack, registered):
 
 def test_plugin_down_refuses_login_keeps_tunnel(stack, registered, other):
     """With the plugin down a tunnel keeps carrying SSH and no new login is let in; back up, it is."""
-    wait_until(lambda: stack.frps_404(OTHER_NAME))  # an earlier test's proxy may not be gone yet
+    stack.wait_unpublished(OTHER_NAME)
     stack.compose("stop", "reverse-tunnel-plugin")
     try:
         assert stack.ssh_works()
