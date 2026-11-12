@@ -150,6 +150,37 @@ fn uninstall_prints_revoke_line() {
 }
 
 #[test]
+fn host_that_differs_from_the_config_is_refused() {
+    let machine = Machine::new();
+    assert_eq!(
+        configured_host(&machine.paths, Some("mothership")).unwrap().as_deref(),
+        Some("mothership"),
+        "a first install takes the name"
+    );
+    machine.settings(Some("mothership"), Some(CODE));
+
+    let err = format!("{:#}", configured_host(&machine.paths, Some("flagship")).unwrap_err());
+    assert!(err.contains("mothership") && err.contains("flagship"), "{err}");
+    assert!(err.contains("uninstall") && err.contains("install"), "{err}");
+    for same in [Some("mothership"), None] {
+        assert_eq!(configured_host(&machine.paths, same).unwrap(), None);
+    }
+}
+
+#[test]
+fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
+    let machine = Machine::new();
+    fs::write(uninstalling_file(&machine.paths), "").unwrap();
+    let opts = InstallOpts {
+        host: None,
+        join: None,
+        paths: machine.paths.clone(),
+    };
+    let err = format!("{:#}", install(opts).unwrap_err());
+    assert!(err.contains(&rerun_uninstall(&machine.paths)), "{err}");
+}
+
+#[test]
 fn join_code_never_stored() {
     let machine = Machine::new();
     let code = code_for("tunnel.example.test", "shared-token", CERT);

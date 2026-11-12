@@ -31,7 +31,7 @@ const PUBLIC_FILE: Perm = Perm::new(0o644);
 const SECRETS_DIR_MODE: u32 = if cfg!(target_os = "linux") { 0o2750 } else { 0o750 };
 
 pub struct InstallOpts {
-    /// Names a new `config.yaml`; without it, the machine's name. Ignored when `config.yaml` exists.
+    /// Names a new `config.yaml`; without it, the machine's name. When `config.yaml` exists it must be that name.
     pub host: Option<String>,
     /// Without it the join code is asked for, unless a previous install left the bridge files.
     pub join: Option<String>,
@@ -72,8 +72,9 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     let _lock = lock(paths)?;
     ensure!(
         !uninstalling_file(paths).try_exists()?,
-        "an uninstall is in progress or failed: see {}, and run `reverse-tunnel uninstall` to finish it",
-        removal_log(paths)
+        "an uninstall is in progress or failed: see {}, and {} to finish it",
+        removal_log(paths),
+        rerun_uninstall(paths)
     );
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
@@ -82,11 +83,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
         None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
         None => None,
     };
-    let host = if config_file(paths).try_exists()? {
-        None
-    } else {
-        Some(host_name(opts.host.as_deref())?)
-    };
+    let host = configured_host(paths, opts.host.as_deref())?;
 
     let account = account::ensure(service::ACCOUNT)?;
     apply(
@@ -410,6 +407,24 @@ fn needs_join(paths: &Paths) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// The host name to give a new `config.yaml`, or none when one exists. A name asked for that is not the existing
+/// config's is refused, since nothing renames a host.
+fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<String>> {
+    let config = config_file(paths);
+    if !config.try_exists()? {
+        return host_name(explicit).map(Some);
+    }
+    if let Some(asked) = explicit {
+        let current = Config::load(&config)?.host;
+        ensure!(
+            asked == current,
+            "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a host.              To rename it, uninstall it and install it again with --host {asked}",
+            config.display()
+        );
+    }
+    Ok(None)
 }
 
 /// The host name for a new `config.yaml`.
