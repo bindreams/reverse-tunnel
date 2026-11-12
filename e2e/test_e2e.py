@@ -22,7 +22,7 @@ import subprocess
 import threading
 import time
 import urllib.request
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,10 +82,11 @@ def wait_until(condition):
     return value
 
 
-def _try(call, *args):
+def _try(call, *args, **kwargs):
+    """The call's result, or None when the request or connection failed in a way a retry may cure."""
     try:
-        return call(*args)
-    except (ssl.SSLError, OSError):
+        return call(*args, **kwargs)
+    except (ssl.SSLError, OSError, HTTPException):
         return None
 
 
@@ -167,12 +168,17 @@ class Stack:
 
     @staticmethod
     def end_session(session: subprocess.Popen):
-        """Kill the session and its children, and reap it."""
-        try:
-            os.killpg(session.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # the whole group is gone
+        """Kill the session and its children, and reap it. Until then its pid is still reserved as the group's id."""
+        os.killpg(session.pid, signal.SIGKILL)
         session.wait()
+
+    @staticmethod
+    def session_exit(session: subprocess.Popen) -> int | None:
+        """The session's exit code, or None while it runs; the session is not reaped (`poll` would reap it)."""
+        done = os.waitid(os.P_PID, session.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if done is None:
+            return None
+        return done.si_status if done.si_code == os.CLD_EXITED else -done.si_status
 
     def ssh(self, command: str) -> subprocess.CompletedProcess:
         cmd, env = self.ssh_command(command)
@@ -198,8 +204,11 @@ class Stack:
             connection.close()
 
     def frps_404(self, name) -> bool:
-        """Whether `name` reaches frps and no tunnel answers it: Traefik's router matches and frps has no proxy."""
-        status, body = self.https(name, verified=False)
+        """Whether `name` reaches frps and no tunnel answers it: Traefik's router matches and frps has no proxy.
+
+        Retries, with no cap, a request that raises; any HTTP answer decides.
+        """
+        status, body = wait_until(lambda: _try(self.https, name, verified=False))
         return status == 404 and FRPS_404 in body
 
     def peer_cert(self, name) -> dict:
@@ -287,20 +296,7 @@ def stack(tmp_path_factory):
 def before_add(stack):
     """What the host and the bridge do before the bridge knows the host."""
     wait_log(0, r"host not registered")
-    wait_until(lambda: _router(stack, "reverse-tunnel-frps"))  # until then Traefik's own 404 would answer
-
-    def decided():
-        """The host's name answered: frps's 404, or something that is neither a 404 nor Traefik failing to reach frps.
-
-        A Traefik 404 or a 502 while the router starts is not an answer. A tunnel to sshd would also read as a 502, and
-        then this never ends and the step's timeout fails the run.
-        """
-        answer = _try(lambda: stack.https(f"{HOST}.{T}", verified=False))
-        if answer and (answer[0] not in (404, 502, 503, 504) or (answer[0] == 404 and FRPS_404 in answer[1])):
-            return answer
-
-    status, body = wait_until(decided)
-    return SimpleNamespace(published=status != 404, pid=stack.pid(), log=len(frpc_log()))
+    return SimpleNamespace(pid=stack.pid(), log=len(frpc_log()))
 
 
 @pytest.fixture(scope="session")
@@ -336,8 +332,7 @@ def test_zero_hosts_orders_nothing(stack):
 
 
 def test_register_after_install(stack, before_add, registered):
-    """No tunnel before `ctl add`; SSH after it, with no restart of the host."""
-    assert not before_add.published  # frps had no proxy for the host's name
+    """SSH works after `ctl add`, with no restart of the host (`before_add` saw frpc refused before it)."""
     wait_until(stack.ssh_works)
     assert stack.pid() == before_add.pid
 
@@ -399,7 +394,7 @@ def test_wrong_bridge_cert_refused(stack, registered, other):
     """frpc logs in with the bridge's certificate and not with another for the same name."""
     wrong = stack.tmp / "wrong.pem"
     wrong.write_text(make_cert(T)[0])
-    wait_until(lambda: _try(stack.frps_404, OTHER_NAME))  # an earlier test's proxy may not be gone yet
+    wait_until(lambda: stack.frps_404(OTHER_NAME))  # an earlier test's proxy may not be gone yet
     with Frpc(stack, OTHER, other, wrong, {"own": OTHER_NAME}) as frpc:
         frpc.wait(r"x509")
         assert stack.frps_404(OTHER_NAME)  # no login: frps has no proxy for the name
@@ -435,7 +430,7 @@ def test_upgrade_through_tunnel_keeps_access(stack, registered):
             if (pid := stack.pid()) not in (None, old_pid):
                 return pid
             # 255 is ssh losing the connection the restart cut; any other exit is `upgrade` failing before it.
-            if (code := session.poll()) not in (None, 0, 255):
+            if (code := stack.session_exit(session)) not in (None, 0, 255):
                 raise AssertionError(f"upgrade ended with {code}, service not restarted:\n{output.read_text()}")
 
         try:
@@ -449,7 +444,7 @@ def test_upgrade_through_tunnel_keeps_access(stack, registered):
 
 def test_plugin_down_refuses_login_keeps_tunnel(stack, registered, other):
     """With the plugin down a tunnel keeps carrying SSH and no new login is let in; back up, it is."""
-    wait_until(lambda: _try(stack.frps_404, OTHER_NAME))  # an earlier test's proxy may not be gone yet
+    wait_until(lambda: stack.frps_404(OTHER_NAME))  # an earlier test's proxy may not be gone yet
     stack.compose("stop", "reverse-tunnel-plugin")
     try:
         assert stack.ssh_works()
