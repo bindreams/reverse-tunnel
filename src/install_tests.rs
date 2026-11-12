@@ -401,9 +401,9 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     let new = new_binary(&machine, "fail");
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
     // Not the unit the new binary would register.
-    let mut outgoing = service::spec(&machine.paths).unwrap();
+    let mut outgoing = service::spec(&machine.paths).unwrap().into_fields();
     outgoing.command.push("--outgoing".into());
-    manager.install(&outgoing, false).unwrap();
+    manager.install(&DaemonSpec::new(outgoing).unwrap(), false).unwrap();
 
     let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
