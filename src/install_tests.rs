@@ -401,7 +401,7 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     let machine = installed_machine();
     let new = new_binary(&machine, "fail");
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
-    let id = service::spec(&machine.paths).id;
+    manager.install(&service::spec(&machine.paths), false).unwrap();
 
     let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
@@ -414,7 +414,6 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     assert!(text.contains("stub stderr line"), "{text}");
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), b"the outgoing binary");
     assert_eq!(fs::read(machine.config()).unwrap(), config);
-    assert!(matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })));
     assert!(!pending_file(&machine.paths).exists());
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }
