@@ -76,7 +76,8 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 ## Rotating the certificate
 
 Hosts verify frps against `bridge.pem`, which may hold several certificates, so a rotation stages the new one and
-nobody is locked out.
+nobody is locked out. On RHEL and Fedora hosts, run `reverse-tunnel` under `sudo` by its full path (see
+[the host README](../README.md#publish-another-service)).
 
 1. Make the new pair, and trust it first:
 
@@ -96,5 +97,3 @@ nobody is locked out.
 4. Delete the old certificate from `tls/trust.pem`, leaving the new one. New join codes carry only that.
 5. `uv run ctl join-code` again, and run `sudo reverse-tunnel install --join <code>` on every host again. Until a host
    has, it still trusts the old certificate. Only after step 4: a code made earlier still carries the old one.
-
-On RHEL and Fedora, `sudo` does not search `/usr/local/bin`: run `sudo /usr/local/bin/reverse-tunnel` there.
