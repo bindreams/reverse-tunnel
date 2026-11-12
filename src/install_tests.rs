@@ -429,9 +429,10 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     fs::write(download::tools(&machine.paths).frpc, b"frpc").unwrap();
     let new = new_binary(&machine, "fail");
     let join = join::decode(CODE).unwrap();
+    let manager = Fake::default();
 
     let err = apply(
-        &Fake::default(),
+        &manager,
         &machine.account,
         &machine.paths,
         &new,
@@ -442,6 +443,11 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     .unwrap_err();
 
     assert!(format!("{err:#}").contains("stub stderr line"), "{err:#}");
+    // Registered only after the check: no unit points at a binary that was never placed.
+    assert_eq!(
+        manager.preview_install(&service::spec(&machine.paths)).unwrap(),
+        Outcome::Create
+    );
     assert!(!service::exe(&machine.paths).exists());
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }

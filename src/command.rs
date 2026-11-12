@@ -3,6 +3,7 @@
 use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::process::{self, ExitStatus};
+use std::thread;
 
 use anyhow::{Context, Result, ensure};
 
@@ -24,10 +25,10 @@ pub fn run(args: &[impl AsRef<OsStr>]) -> Result<String> {
 pub fn run_built(what: &str, command: &mut process::Command) -> Result<String> {
     let out = loop {
         match command.output() {
-            // Only a multithreaded process (the unit tests) meets this: a binary it has just written can still be held
-            // open for writing by a child another thread forked, and `execve` is refused until that child execs or
-            // exits. The product forks from one thread.
-            Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => continue,
+            // `execve` is refused while anything holds the binary open for writing: in the unit tests, a child another
+            // thread forked while this process wrote it, until that child execs or exits; otherwise, another process
+            // writing it, until it closes the file.
+            Err(err) if err.kind() == ErrorKind::ExecutableFileBusy => thread::yield_now(),
             out => break out.with_context(|| format!("running {what}"))?,
         }
     };
