@@ -1,6 +1,5 @@
 //! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
-//! user may read. Nothing here reads `secrets_dir`: the check that `restart` runs is the installed binary's, as the
-//! service account.
+//! user may read. Nothing here reads `secrets_dir`.
 
 use std::fs;
 use std::io::Write;
@@ -66,8 +65,8 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// `service::spec`, nothing inherited, as `run_as`. Fails with what the check printed.
 ///
 /// Runs as the service account with its primary group only (std drops supplementary groups when the caller is root, as
-/// `restart` is; the unit tests, run as themselves, keep theirs). The files it reads are install's and open to the
-/// account by contract; one it reads only through another group is refused.
+/// `restart` is). The files it reads are install's and open to the account by contract; one it reads only through
+/// another group is refused.
 fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
     let spec = service::spec(paths);
     let (exe, args) = spec.command.split_first().expect("the service has a command");
@@ -94,8 +93,7 @@ type RunAs = std::convert::Infallible;
 
 #[cfg(unix)]
 fn service_identity() -> Result<Option<RunAs>> {
-    let account = account::lookup(service::ACCOUNT)
-        .with_context(|| format!("the service is not installed: there is no account {}", service::ACCOUNT))?;
+    let account = account::lookup(service::ACCOUNT).context("the service is not installed")?;
     Ok(Some(account))
 }
 
@@ -108,7 +106,6 @@ fn service_identity() -> Result<Option<RunAs>> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
     Killed,
-    /// It was not running.
     Started,
 }
 

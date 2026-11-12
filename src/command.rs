@@ -18,8 +18,8 @@ pub fn run(args: &[impl AsRef<OsStr>]) -> Result<String> {
     finish(&what, out.status, &out.stdout, &out.stderr, false)
 }
 
-/// `run` for a command that is already built, because cosca's does not set a user or group, and that is shown as
-/// `what`, since its debug form lists its environment. A failure carries what the command printed to stdout as well.
+/// `run` for a command the caller built (cosca's cannot set a user or group), described as `what` because the command's
+/// debug form lists its environment. A failure includes stdout as well as stderr.
 pub fn run_built(what: &str, command: &mut process::Command) -> Result<String> {
     let out = command.output().with_context(|| format!("running {what}"))?;
     finish(what, out.status, &out.stdout, &out.stderr, true)
