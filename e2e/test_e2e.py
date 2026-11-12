@@ -61,8 +61,11 @@ FRPS_404 = "The page you requested was not found"  # frps's answer for a name no
 
 
 def client_template() -> str:
-    """The README's `~/.ssh/config` block, for a host named `mothership`."""
-    return "Host mothership\n    HostName mothership.tunnel.binarydreams.me\n    ProxyCommand websocat --binary wss://%h/\n"
+    """The README's `~/.ssh/config` block, for a host named `mothership`: its only `ssh-config` fenced block."""
+    blocks = re.findall(r"^```ssh-config\n(.*?)^```$", (ROOT / "README.md").read_text(), re.DOTALL | re.MULTILINE)
+    assert len(blocks) == 1, f"README.md must have exactly one ssh-config block, has {len(blocks)}"
+    assert "mothership" in blocks[0], "README's ssh-config block lacks `mothership`: the template changed shape"
+    return blocks[0]
 
 
 def run(*args, cwd=None, env=None, check=True, input=None) -> subprocess.CompletedProcess:

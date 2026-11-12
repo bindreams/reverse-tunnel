@@ -150,6 +150,67 @@ fn uninstall_prints_revoke_line() {
 }
 
 #[test]
+fn host_that_differs_from_the_config_is_refused() {
+    let machine = Machine::new();
+    assert_eq!(
+        configured_host(&machine.paths, Some("mothership")).unwrap().as_deref(),
+        Some("mothership"),
+        "a first install takes the name"
+    );
+    machine.settings(Some("mothership"), Some(CODE));
+
+    let err = format!("{:#}", configured_host(&machine.paths, Some("flagship")).unwrap_err());
+    let config = config_file(&machine.paths).display().to_string();
+    assert_eq!(
+        err,
+        format!(
+            "--host \"flagship\" differs from this host's name \"mothership\" in {config}: `install` does not rename \
+             a host. To rename it, uninstall it and install it again with --host flagship"
+        )
+    );
+    let err = format!("{:#}", configured_host(&machine.paths, Some("Not_Valid")).unwrap_err());
+    assert!(err.contains("not a valid name"), "{err}");
+    for same in [Some("mothership"), None] {
+        assert_eq!(configured_host(&machine.paths, same).unwrap(), None);
+    }
+}
+
+#[test]
+fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
+    let machine = Machine::new();
+    fs::write(uninstalling_file(&machine.paths), "").unwrap();
+    let opts = InstallOpts {
+        host: None,
+        join: None,
+        paths: machine.paths.clone(),
+    };
+    let err = format!("{:#}", install(opts).unwrap_err());
+    assert!(err.contains(&rerun_uninstall(&machine.paths)), "{err}");
+    assert!(err.contains("`uninstall` with `sudo` and any"), "{err}");
+
+    fs::create_dir_all(&machine.paths.bin_dir).unwrap();
+    fs::write(service::exe(&machine.paths), "").unwrap();
+    assert_eq!(
+        rerun_uninstall(&machine.paths),
+        format!("run `sudo {} uninstall`", service::exe(&machine.paths).display())
+    );
+}
+
+#[test]
+fn host_is_checked_before_the_join_code_is_asked_for() {
+    let machine = Machine::new();
+    machine.settings(Some("mothership"), Some(CODE));
+    fs::remove_file(machine.paths.config_dir.join("bridge.pem")).unwrap();
+    let opts = InstallOpts {
+        host: Some("flagship".to_string()),
+        join: None,
+        paths: machine.paths.clone(),
+    };
+    let err = format!("{:#}", install(opts).unwrap_err());
+    assert!(err.contains("differs from this host's name"), "{err}");
+}
+
+#[test]
 fn join_code_never_stored() {
     let machine = Machine::new();
     let code = code_for("tunnel.example.test", "shared-token", CERT);
