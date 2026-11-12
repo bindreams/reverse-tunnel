@@ -1,16 +1,25 @@
-//! `start`, `stop` and `status`: the service through goetia, and the files in `config_dir`, which every local user
-//! may read. Nothing here reads `secrets_dir`.
+//! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
+//! user may read. Nothing here reads `secrets_dir`.
 
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use goetia::manager::{Budget, ServiceManager, State};
+use goetia::spec::Id;
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
+use crate::account;
+use crate::command;
 use crate::config::Config;
+use crate::files::{Perm, open_file, remove_entry};
 use crate::paths::Paths;
 use crate::service;
 
@@ -24,6 +33,149 @@ pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.stop(&service::spec(paths).id, Budget::Unbounded)?;
     println_best_effort("The service is stopped. It starts again at boot if it is enabled.");
     Ok(())
+}
+
+/// Has the service read its configuration again, after the installed binary has checked it as the service account: a
+/// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
+pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
+    #[cfg(unix)]
+    crate::install::refuse_while_uninstalling(paths)?;
+    // Decided from the binary: the account database can answer for an account that has just been removed.
+    ensure!(service::exe(paths).try_exists()?, "the service is not installed");
+    check_and_restart_as(manager, paths, service_identity()?)
+}
+
+/// `check_and_restart`, with the check run as `run_as` (`None`: as the caller).
+fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
+    check(paths, run_as)?;
+    let outcome = restart_pending(manager, &service::spec(paths).id, paths).map_err(|failed| {
+        failed.error.context(match failed.marker {
+            Ok(()) => "the service was not restarted".to_string(),
+            Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
+        })
+    })?;
+    println_best_effort(match outcome {
+        RestartOutcome::Killed => "The service is restarting.",
+        RestartOutcome::Started => "The service was not running; it is started.",
+    });
+    Ok(())
+}
+
+/// The installed binary's `run --check`, started as the service starts it: its command and environment from
+/// `service::spec`, nothing inherited, as `run_as`. Fails with what the check printed.
+///
+/// On Unix it starts in `/`, as the service does (the spec names no working directory). Run by root, as `restart` is,
+/// it has the account's primary group as its gid and only group (std's `.uid()/.gid()` would leave macOS's effective
+/// gid 0), so a file it reads only through another group is refused. The files it reads are install's and open to the
+/// account by contract.
+fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
+    let spec = service::spec(paths);
+    let (exe, args) = spec.command.split_first().expect("the service has a command");
+    let mut check = process::Command::new(exe);
+    check.args(args).arg("--check").env_clear().envs(&spec.env);
+    #[cfg(unix)]
+    {
+        debug_assert!(spec.cwd.is_none(), "the service starts in /, and so does the check");
+        check.current_dir("/");
+        if let Some(account::Account { uid, gid }) = run_as {
+            let root = cosca::elevation::is_elevated();
+            // SAFETY: the closure allocates nothing and makes only the syscalls setgroups, setgid and setuid.
+            unsafe { check.pre_exec(move || drop_to(root, uid, gid)) };
+        }
+    }
+    let who = match run_as {
+        Some(_) => format!("as the `{}` account", service::ACCOUNT),
+        None => "as the caller".to_string(),
+    };
+    command::run_built(&format!("the installed binary's `run --check` {who}"), &mut check)
+        .context("the service would not start with this configuration")?;
+    Ok(())
+}
+
+/// In the forked child: for `root`, the group list `[gid]`; then the gid, then the uid. A caller that is not root cannot
+/// change its groups, and keeps them.
+#[cfg(unix)]
+fn drop_to(root: bool, uid: u32, gid: u32) -> std::io::Result<()> {
+    // SAFETY: plain syscalls; `gid` is a live `gid_t` and the count is 1.
+    if (root && unsafe { libc::setgroups(1 as _, &gid) } != 0)
+        || unsafe { libc::setgid(gid) } != 0
+        || unsafe { libc::setuid(uid) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Who the check runs as: the service's account on Linux and macOS; on Windows, the caller.
+#[cfg(unix)]
+type RunAs = account::Account;
+#[cfg(not(unix))]
+type RunAs = std::convert::Infallible;
+
+#[cfg(unix)]
+fn service_identity() -> Result<Option<RunAs>> {
+    let account = account::lookup(service::ACCOUNT).with_context(|| {
+        format!(
+            "the service is not installed: there is no account `{}`",
+            service::ACCOUNT
+        )
+    })?;
+    Ok(Some(account))
+}
+
+#[cfg(not(unix))]
+fn service_identity() -> Result<Option<RunAs>> {
+    Ok(None)
+}
+
+/// How `restart` had the service run again.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestartOutcome {
+    Killed,
+    /// It was not running: the kill found nothing, and it was started.
+    Started,
+}
+
+/// Why `restart_pending` did not restart the service, and whether the marker is back.
+pub struct NotRestarted {
+    pub error: anyhow::Error,
+    pub marker: Result<()>,
+}
+
+/// Exists from the first change to what the service runs until the service has picked it up, so that a run that fails
+/// in between is made up for by the next.
+pub fn pending_file(paths: &Paths) -> PathBuf {
+    paths.config_dir.join("restart-pending")
+}
+
+pub fn mark_pending(paths: &Paths) -> Result<()> {
+    open_file(&pending_file(paths), Perm::new(0o600), false)?;
+    Ok(())
+}
+
+/// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
+/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up.
+pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> Result<RestartOutcome, NotRestarted> {
+    if let Err(error) = remove_entry(&pending_file(paths)) {
+        return Err(NotRestarted { error, marker: Ok(()) });
+    }
+    restart(manager, id).map_err(|error| NotRestarted {
+        error,
+        marker: mark_pending(paths),
+    })
+}
+
+/// Has the service run again. It is killed, and the manager starts it again; it is never stopped first, because run
+/// over the tunnel the stop cuts this session and the start never comes. A service that is not running is started.
+pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
+    match manager.kill(id) {
+        Ok(()) => Ok(RestartOutcome::Killed),
+        Err(goetia::Error::NotRunning { .. }) => {
+            manager.start(id, Budget::Unbounded)?;
+            Ok(RestartOutcome::Started)
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Prints a line reporting what is already done, and ignores a closed stdout rather than panicking: a command that
