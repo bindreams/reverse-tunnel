@@ -30,7 +30,8 @@ sudo ./reverse-tunnel install
 ```
 
 `install` asks for the join code (paste it, press Enter), names the host after the machine (lowercased; to choose a
-name, `sudo ./reverse-tunnel install --host NAME --join CODE`), installs and starts the service, and prints a line:
+name, `sudo ./reverse-tunnel install --host NAME --join CODE`; `--host` counts only the first time, since a host with a
+`config.yaml` keeps its name), installs and starts the service, and prints a line:
 
 ```
 Register this host on the bridge by running:
@@ -95,8 +96,10 @@ published at `jellyfin.<host>.T`; the `default` service also at `<host>.T`.
 The service reads `config.yaml` when it starts: `sudo reverse-tunnel stop`, then `sudo reverse-tunnel start`. Over the
 tunnel, `stop` ends your own session before `start` can run, so restart from the machine itself.
 
-To give an `http` service a public name, run this in the bridge folder; the public name must not be under `T`, and
-its DNS must point at the server that runs the bridge's Traefik:
+To give an `http` service a public name, run this in the bridge folder; the public name must not be under `T`, its DNS
+must point at the server that runs the bridge's Traefik, and the DNS provider behind Traefik's `letsencrypt` resolver
+(DNS-01; see [server/README.md](server/README.md)) must be able to write the public name's zone, to issue its
+certificate:
 
 ```sh
 uv run ctl alias movies.binarydreams.me jellyfin.mothership.tunnel.binarydreams.me
@@ -117,14 +120,16 @@ The bridge always forwards `X-Forwarded-Proto: http`, even over HTTPS, so Jellyf
 Jellyfin also sees every viewer connect from frpc, so it counts them as local. To make it count them as remote, list
 the two proxies in `KnownProxies` (Dashboard, Networking, "Known proxies"; or `network.xml`): the address frpc
 connects to Jellyfin from (`127.0.0.1` when both run on the host directly, the Docker gateway address when Jellyfin
-is in a container), and Traefik's address on the bridge's `gateway` Docker network. Jellyfin then reads the viewer's
-address from `X-Forwarded-For`.
+is in a container), and Traefik's address on the bridge's `gateway` Docker network. Docker assigns Traefik's address
+and may change it when its container is recreated, so list the whole subnet of `gateway` (`docker network inspect
+gateway` shows it) instead. Jellyfin's source accepts addresses, CIDR subnets and hostnames in this list. Jellyfin then
+reads the viewer's address from `X-Forwarded-For`.
 
 ## Operate a host
 
 | Command | What it does |
 |---|---|
-| `reverse-tunnel status` | The service's state, the host name, the tunnel domain and the bridge certificate's SHA-256 fingerprint. No `sudo`. |
+| `reverse-tunnel status` | The service's state, the host name, the tunnel domain and the bridge certificate's SHA-256 fingerprint: one `certificate:` line per certificate in `bridge.pem`, two while the bridge rotates it. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts it. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
@@ -147,9 +152,10 @@ The files:
 | Logs | `/var/log/reverse-tunnel/` | `/Library/Logs/reverse-tunnel/` |
 | Binary, frpc | `/usr/local/lib/reverse-tunnel/` | `/usr/local/lib/reverse-tunnel/` |
 
-Anyone on the machine can read the logs. `frpc.log` is the tunnel's: `login to server success` means the host is
-connected, and a refusal says why ("host not registered", "token mismatch"). `supervisor.log` is the service's own,
-with one local time stamp per line. Each log is rotated at 10 MB to `<name>.1`, replacing the previous one.
+Read the logs with `sudo`, for example `sudo less /var/log/reverse-tunnel/frpc.log`. `frpc.log` is the tunnel's:
+`login to server success` means the host is connected, and a refusal says why ("host not registered", "token
+mismatch"). `supervisor.log` is the service's own, with one local time stamp per line. Each log is rotated at 10 MB
+to `<name>.1`, replacing the previous one.
 
 ### Upgrade
 
@@ -166,7 +172,10 @@ everything, and prints "Removed." The removal continues if your session ends. Re
 connection; `ctl revoke` prints the command that does.
 
 - If the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*` unit, or a shutdown),
-  `uninstall` may still print "Removed."; run `reverse-tunnel uninstall` again to finish it.
+  `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it. A partial removal may
+  have deleted the `reverse-tunnel` link on the `PATH`: then run it through the installed binary,
+  `sudo /usr/local/lib/reverse-tunnel/reverse-tunnel uninstall`, or with any other `reverse-tunnel` binary, such as the
+  one you downloaded, if you kept it.
 - On Linux a failed removal's output is in the journal (`journalctl -u 'reverse-tunnel-uninstall-*'`); on a host whose
   journal is not persistent it is lost at reboot, and rerunning `uninstall` shows it again. On macOS it is
   `/Library/Logs/reverse-tunnel/uninstall.log`.
