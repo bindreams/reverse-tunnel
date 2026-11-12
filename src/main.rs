@@ -30,7 +30,7 @@ enum Command {
     },
     /// Installs the service and starts it, or restarts it if anything it reads changed. Needs root.
     Install {
-        /// The name for a new config.yaml (default: this machine's name); with an existing one, that host's name.
+        /// The name for a new config.yaml (default: this machine's name). With an existing one, a different name is an error.
         #[arg(long)]
         host: Option<String>,
         /// The bridge's join code; asked for if missing and needed.

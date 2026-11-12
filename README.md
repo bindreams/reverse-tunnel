@@ -125,10 +125,9 @@ The bridge always forwards `X-Forwarded-Proto: http`, even over HTTPS, so Jellyf
 Jellyfin also sees every viewer connect from frpc, so it counts them as local. To make it count them as remote, list
 the two proxies in `KnownProxies` (Dashboard, Networking, "Known proxies"; or `network.xml`): the address frpc
 connects to Jellyfin from (`127.0.0.1` when both run on the host directly, the Docker gateway address when Jellyfin
-is in a container), and Traefik's address on the bridge's `gateway` Docker network. Docker may change Traefik's
-address when its container is recreated, so pin it: give Traefik a static `ipv4_address` on `gateway` in the bridge
-host's Traefik compose (this needs `gateway` to have a configured subnet: `docker network create --subnet
-172.30.0.0/24 gateway`), and list that address. List only these two addresses, not the whole subnet: Jellyfin trusts
+is in a container), and Traefik's address on the bridge's `gateway` Docker network
+(`docker inspect -f '{{(index .NetworkSettings.Networks "gateway").IPAddress}}' traefik`). Docker may give Traefik a new
+address when its container is recreated; update the entry then. List only these two addresses, not the whole subnet: Jellyfin trusts
 what a listed proxy puts in `X-Forwarded-For`, and every other container on `gateway` could set it. Jellyfin then reads
 the viewer's address from `X-Forwarded-For`.
 
@@ -163,8 +162,9 @@ The files:
 | Logs | `/var/log/reverse-tunnel/` | `/Library/Logs/reverse-tunnel/` |
 | Binary, frpc | `/usr/local/lib/reverse-tunnel/` | `/usr/local/lib/reverse-tunnel/` |
 
-Anyone on the machine can read the logs under the service manager's default umask (systemd and launchd: 022), for
-example `less /var/log/reverse-tunnel/frpc.log` on Linux or `less /Library/Logs/reverse-tunnel/frpc.log` on macOS.
+Under the service manager's default umask (022) anyone on the machine can read the logs, for example
+`less /var/log/reverse-tunnel/frpc.log` on Linux or `less /Library/Logs/reverse-tunnel/frpc.log` on macOS; on a host
+with a stricter umask, read them with `sudo`.
 `frpc.log` is the tunnel's: `login to server success` means the host is connected, and a refusal says why ("host not
 registered", "token mismatch"). `supervisor.log` is the service's own, with one local time stamp per line. Each log is
 rotated at 10 MB to `<name>.1`, replacing the previous one.
