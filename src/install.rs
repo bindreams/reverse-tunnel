@@ -32,7 +32,7 @@ const PUBLIC_FILE: Perm = Perm::new(0o644);
 const SECRETS_DIR_MODE: u32 = if cfg!(target_os = "linux") { 0o2750 } else { 0o750 };
 
 pub struct InstallOpts {
-    /// Names a new `config.yaml`; without it, the machine's name. Ignored when `config.yaml` exists.
+    /// Names a new `config.yaml`; without it, the machine's name. When `config.yaml` exists it must be that name.
     pub host: Option<String>,
     /// Without it the join code is asked for, unless a previous install left the bridge files.
     pub join: Option<String>,
@@ -73,20 +73,17 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     let _lock = lock(paths)?;
     ensure!(
         !uninstalling_file(paths).try_exists()?,
-        "an uninstall is in progress or failed: see {}, and run `reverse-tunnel uninstall` to finish it",
-        removal_log(paths)
+        "an uninstall is in progress or failed: see {}, and {} to finish it",
+        removal_log(paths),
+        rerun_uninstall(paths)
     );
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
+    let host = configured_host(paths, opts.host.as_deref())?;
     let join = match opts.join.as_deref() {
         Some(code) => Some(join::decode(code)?),
         None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
         None => None,
-    };
-    let host = if config_file(paths).try_exists()? {
-        None
-    } else {
-        Some(host_name(opts.host.as_deref())?)
     };
 
     let account = account::ensure(service::ACCOUNT)?;
@@ -163,8 +160,9 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
-            "could not tell how the removal ended; its log is {}, and `uninstall` can be run again",
-            removal_log(paths)
+            "could not tell how the removal ended; its log is {}, and to finish it {}",
+            removal_log(paths),
+            rerun_uninstall(paths)
         )
     })?;
     if let WaitOutcome::Failed(why) = outcome {
@@ -332,9 +330,9 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
 fn rerun_uninstall(paths: &Paths) -> String {
     let exe = service::exe(paths);
     if exe.exists() {
-        format!("run `{} uninstall`", exe.display())
+        format!("run `sudo {} uninstall`", exe.display())
     } else {
-        "run `uninstall` with any `reverse-tunnel` binary (the installed one is gone)".to_string()
+        "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
     }
 }
 
@@ -353,8 +351,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
     remove_link(paths)?;
-    remove_files(paths)
-        .context("the binary may be gone, but any `reverse-tunnel` binary can run `reverse-tunnel uninstall` again")
+    remove_files(paths).with_context(|| rerun_uninstall(paths))
 }
 
 /// Removes the link to the binary, unless it points elsewhere.
@@ -411,6 +408,26 @@ fn needs_join(paths: &Paths) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// The name for a new `config.yaml`, or none when one exists. Refuses an explicit name that differs from the existing
+/// config's.
+fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<String>> {
+    let config = config_file(paths);
+    if !config.try_exists()? {
+        return host_name(explicit).map(Some);
+    }
+    if let Some(asked) = explicit {
+        let asked = host_name(Some(asked))?;
+        let current = Config::load(&config)?.host;
+        ensure!(
+            asked == current,
+            "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a host. \
+             To rename it, uninstall it and install it again with --host {asked}",
+            config.display()
+        );
+    }
+    Ok(None)
 }
 
 /// The host name for a new `config.yaml`.
