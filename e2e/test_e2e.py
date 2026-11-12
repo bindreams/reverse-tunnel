@@ -295,7 +295,7 @@ def before_add(stack):
         A Traefik 404 or a 502 while the router starts is not an answer. A tunnel to sshd would also read as a 502, and
         then this never ends and the step's timeout fails the run.
         """
-        answer = _try(stack.https, f"{HOST}.{T}", verified=False)
+        answer = _try(lambda: stack.https(f"{HOST}.{T}", verified=False))
         if answer and (answer[0] not in (404, 502, 503, 504) or (answer[0] == 404 and FRPS_404 in answer[1])):
             return answer
 
