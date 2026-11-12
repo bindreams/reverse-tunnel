@@ -23,7 +23,7 @@ use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, ope
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
-use crate::{download, ops, service, supervisor, upgrade};
+use crate::{download, ops, service, upgrade};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
