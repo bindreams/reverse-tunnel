@@ -119,7 +119,7 @@ class Frpc:
             if found.search(line):
                 return line
         for line in self.proc.stdout:
-            print("frpc:", line, end="")  # pytest -s: a hung wait leaves the log
+            print("frpc:", line, end="", flush=True)  # pytest -s: a hung wait leaves the log
             self.lines.append(line)
             if found.search(line):
                 return line
@@ -164,7 +164,7 @@ class Stack:
         cmd, env = self.ssh_command(command)
         done = run(*cmd, env=env, check=False)
         if done.returncode:
-            print(f"ssh {command!r} ended with {done.returncode}: {done.stderr.strip()}")
+            print(f"ssh {command!r} ended with {done.returncode}: {done.stderr.strip()}", flush=True)
         return done
 
     def ssh_works(self) -> bool:
@@ -407,7 +407,7 @@ def test_plugin_down_refuses_login_keeps_tunnel(stack, registered, other):
     try:
         assert stack.ssh_works()
         with Frpc(stack, OTHER, other, "/etc/reverse-tunnel/bridge.pem", {"own": f"{OTHER}.{T}"}) as frpc:
-            frpc.wait(r"login to the server failed")
+            frpc.wait(r"send Login request to plugin error")
             assert not any("login to server success" in line for line in frpc.lines)
             stack.compose("up", "-d", "reverse-tunnel-plugin")
             frpc.wait(r"login to server success")
