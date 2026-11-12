@@ -1,18 +1,25 @@
 //! The service account of an install: on Linux and macOS a system account with a group of its own; on Windows the
 //! virtual account `NT SERVICE\reverse-tunnel`, which SCM makes with the service and removes with it.
 
-#[cfg(unix)]
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 #[cfg(unix)]
 use crate::command::run;
 
-/// The ids of the account. Windows has none: they are zero there, and `Perm` ignores them.
+/// The ids of the account.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Account {
     pub uid: u32,
     pub gid: u32,
+}
+
+/// The account's SID, which names it in an ACL before SCM has made it.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Account {
+    /// The five sub-authorities that follow `S-1-5-80`.
+    hash: [u32; 5],
 }
 
 #[cfg(unix)]
@@ -31,10 +38,37 @@ pub fn ensure(name: &str) -> Result<Account> {
     lookup(name).with_context(|| format!("created {name}, but the system does not list it"))
 }
 
-/// Nothing to create: SCM makes the account when the service is registered.
 #[cfg(windows)]
-pub fn ensure(_name: &str) -> Result<Account> {
-    Ok(Account { uid: 0, gid: 0 })
+impl Account {
+    /// The virtual account of the service `service`: its SID is `S-1-5-80-` and the SHA-1 of the upper-cased name, in
+    /// UTF-16, as five little-endian numbers (what `sc showsid` prints).
+    pub fn of_service(service: &str) -> Account {
+        use sha1::{Digest, Sha1};
+
+        let name: Vec<u8> = service
+            .to_uppercase()
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let digest = Sha1::digest(name);
+        Account {
+            hash: std::array::from_fn(|at| u32::from_le_bytes(digest[at * 4..at * 4 + 4].try_into().unwrap())),
+        }
+    }
+
+    pub fn sid(&self) -> String {
+        let [a, b, c, d, e] = self.hash;
+        format!("S-1-5-80-{a}-{b}-{c}-{d}-{e}")
+    }
+}
+
+/// The virtual account `NT SERVICE\<service>`. SCM makes it with the service, but it is named by its SID.
+#[cfg(windows)]
+pub fn ensure(name: &str) -> Result<Account> {
+    let service = name
+        .strip_prefix("NT SERVICE\\")
+        .with_context(|| format!("{name} is not a virtual service account"))?;
+    Ok(Account::of_service(service))
 }
 
 /// Nothing to remove: SCM removes the account with the service.
@@ -161,3 +195,7 @@ fn free_id() -> Result<u32> {
         .find(|id| !used.contains(id))
         .context("every system id from 200 to 399 is taken")
 }
+
+#[cfg(all(test, windows))]
+#[path = "account_tests.rs"]
+mod tests;

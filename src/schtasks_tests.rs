@@ -9,6 +9,13 @@ fn a_task_that_runs_or_has_not_run_has_no_exit_code() {
 }
 
 #[test]
+fn a_task_that_is_ready_or_queued_has_not_ended() {
+    // SCHED_S_TASK_READY and SCHED_S_TASK_QUEUED.
+    assert_eq!(last_result(&RUNNING_LINE.replace("267009", "267008")).unwrap(), None);
+    assert_eq!(last_result(&RUNNING_LINE.replace("267009", "267045")).unwrap(), None);
+}
+
+#[test]
 fn a_task_that_ended_has_its_exit_code() {
     assert_eq!(last_result(&RUNNING_LINE.replace("267009", "0")).unwrap(), Some(0));
     assert_eq!(
@@ -29,5 +36,21 @@ fn the_script_reaches_cmd_whole() {
     assert!(
         xml.contains(r#"<Arguments>/s /c ""C:\a b\x.exe" uninstall --finish &gt; "C:\a b\log" 2&gt;&amp;1 &amp;&amp; rmdir /s /q "C:\a b""</Arguments>"#),
         "{xml}"
+    );
+}
+
+#[test]
+fn a_copy_that_cannot_be_deleted_fails_inside_the_log() {
+    let script = removal_script(
+        Path::new(r"C:\d\x.exe"),
+        Path::new(r"C:\d\log"),
+        Path::new(r"C:\d"),
+        "task",
+    );
+    let (logged, after) = script.split_once(" > ").unwrap();
+    assert!(logged.contains(r#"del /q "C:\d\x.exe""#), "{script}");
+    assert!(
+        after.starts_with(r#""C:\d\log" 2>&1 && rmdir /s /q "C:\d" && schtasks /Delete /F /TN task"#),
+        "{script}"
     );
 }

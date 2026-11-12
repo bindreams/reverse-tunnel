@@ -28,12 +28,6 @@ use crate::paths::Paths;
 use crate::schtasks;
 use crate::{download, ops, service, upgrade};
 
-/// There is no link on Windows (`Paths::link` is `None`).
-#[cfg(not(unix))]
-fn symlink(_target: &Path, _link: &Path) -> io::Result<()> {
-    unreachable!("Windows installs no link")
-}
-
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
 const PUBLIC_FILE: Perm = Perm::new(0o644);
@@ -52,16 +46,9 @@ pub struct InstallOpts {
 /// Holds the exclusive lock until the guard is dropped. `install` and `uninstall --finish` take it for their whole
 /// run; a second one waits.
 pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
-    // On Windows `paths.lock` names a global mutex, which only administrators and SYSTEM can open; named-lock adds the
-    // `Global\` itself.
+    // On Windows `paths.lock` names a global mutex, which only administrators and SYSTEM can open.
     #[cfg(windows)]
-    let lock = NamedLock::create(
-        paths
-            .lock
-            .to_str()
-            .and_then(|name| name.strip_prefix("Global\\"))
-            .expect("Paths::system() names a global mutex"),
-    );
+    let lock = NamedLock::create(paths.lock.to_str().context("the lock's name is not Unicode")?);
     // Made here, owner-only: named-lock would use the umask's mode, and whoever can open the file can hold the lock.
     #[cfg(unix)]
     let lock = {
@@ -135,12 +122,9 @@ fn apply(
     // binary leaves both as they were. The binary is in place before the unit: on Windows it is the unit's host, which
     // the manager looks at.
     changed |= write_settings(paths, account, host, join)?;
-    verify_tools(paths, &binary, cfg!(unix).then_some(*account))?;
+    verify_tools(paths, &binary, Some(*account))?;
     changed |= place_binaries(paths, &binary)?;
     changed |= register(manager, &spec, paths)?;
-    // The account of a Windows service exists once the service does.
-    #[cfg(windows)]
-    grant_service(paths)?;
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -278,26 +262,27 @@ impl Removal {
     }
 }
 
+/// The directory of a started removal, which the removal deletes when it has succeeded.
 #[cfg(windows)]
-struct Removal;
+struct Removal(PathBuf);
 
 #[cfg(windows)]
 impl Removal {
-    /// Waits for the removal's task to end, then deletes it. A removal that succeeded ended with 0.
+    /// Waits for the removal's task to end or be gone (it deletes itself when it has succeeded), then judges the
+    /// removal by what it leaves: a removal that succeeded ended with 0, or no longer has a task, and its directory
+    /// is gone. A task that cannot be asked about reads as gone: then the directory is the judge.
     fn wait(self) -> Result<WaitOutcome> {
         let code = loop {
-            if let Some(code) = schtasks::exit_code(schtasks::REMOVAL)? {
-                break code;
+            match schtasks::exit_code(schtasks::REMOVAL) {
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                Ok(Some(code)) => break Some(code),
+                Err(_) => break None,
             }
-            std::thread::sleep(std::time::Duration::from_millis(500));
         };
-        if let Err(err) = schtasks::delete(schtasks::REMOVAL) {
-            eprintln!("could not delete the removal's task: {err:#}");
-        }
-        Ok(if code == 0 {
-            WaitOutcome::Ended
-        } else {
-            WaitOutcome::Failed(format!("the removal's task ended with {code}"))
+        Ok(match (code, self.0.try_exists()?) {
+            (None | Some(0), false) => WaitOutcome::Ended,
+            (Some(code), _) if code != 0 => WaitOutcome::Failed(format!("the removal's task ended with {code}")),
+            _ => WaitOutcome::Failed(format!("the removal's task is gone, but {} is not", self.0.display())),
         })
     }
 }
@@ -350,8 +335,8 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
 }
 
 /// Windows: a one-time scheduled task run by SYSTEM, since an OpenSSH session ends everything it started, and no job
-/// object can be left. It runs a copy of this binary from `removal_dir`, with the output in the log, and deletes the
-/// directory if the removal succeeded.
+/// object can be left. It runs a copy of this binary from `removal_dir`, with the output in the log, and if the
+/// removal succeeded deletes the directory and then itself (see `schtasks::removal_script`).
 #[cfg(windows)]
 fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let dir = removal_dir(paths);
@@ -360,14 +345,9 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     make_dir(&dir, Perm::new(0o700))?;
     let copy = dir.join(exe.file_name().context("this binary has no file name")?);
     fs::copy(exe, &copy).with_context(|| format!("copying {}", copy.display()))?;
-    let script = format!(
-        r#""{}" uninstall --finish > "{}" 2>&1 && rmdir /s /q "{}""#,
-        copy.display(),
-        removal_log_file(paths).display(),
-        dir.display()
-    );
+    let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL);
     schtasks::start(schtasks::REMOVAL, &dir.join("task.xml"), &script)?;
-    Ok(Removal)
+    Ok(Removal(dir))
 }
 
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
@@ -423,11 +403,13 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     // a failure above is still in the log.
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
+    #[cfg(unix)]
     remove_link(paths)?;
     remove_files(paths).with_context(|| rerun_uninstall(paths))
 }
 
 /// Removes the link to the binary, unless it points elsewhere.
+#[cfg(unix)]
 fn remove_link(paths: &Paths) -> Result<()> {
     let Some(link) = &paths.link else { return Ok(()) };
     match fs::read_link(link) {
@@ -564,9 +546,9 @@ fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> R
 /// owner. A first run writes `config.yaml` and `secrets/host.token`, both create-new; with `join`, every run
 /// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
-    let secret = Perm::new(0o640).gid(account.gid);
-    make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).gid(account.gid))?;
-    make_dir(&paths.log_dir, Perm::new(0o755).uid(account.uid).gid(account.gid))?;
+    let secret = Perm::new(0o640).group(*account);
+    make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
+    make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))?;
 
     let config = config_file(paths);
     let created = !config.try_exists()? && create_config(paths, host, join)?;
@@ -675,20 +657,16 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     checked
 }
 
-/// Windows: the service's account reads `secrets/` and writes `logs/`.
-#[cfg(windows)]
-fn grant_service(paths: &Paths) -> Result<()> {
-    crate::files::grant(&paths.secrets_dir, service::ACCOUNT, "RX")?;
-    crate::files::grant(&paths.log_dir, service::ACCOUNT, "M")
-}
-
 /// Puts the binary `binary` and the symlink in place. Whether the binary changed.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     #[cfg(windows)]
-    crate::files::own_tree(&paths.bin_dir)?;
+    for entry in fs::read_dir(&paths.bin_dir)? {
+        crate::files::own_by_administrators(&entry?.path())?;
+    }
+    #[cfg(unix)]
     if let Some(link) = &paths.link {
         point_link(link, &exe)?;
     }
@@ -711,6 +689,7 @@ fn clean_bin_dir(paths: &Paths) -> Result<()> {
 }
 
 /// Makes `link` a symlink to `target`.
+#[cfg(unix)]
 fn point_link(link: &Path, target: &Path) -> Result<()> {
     match fs::read_link(link) {
         Ok(current) if current == target => return Ok(()),

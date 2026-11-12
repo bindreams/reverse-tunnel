@@ -31,6 +31,12 @@ use reverse_tunnel::upgrade;
 #[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group};
 
+#[cfg(windows)]
+#[path = "platform/windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::assert_installed_as_specified;
+
 const BIN: &str = env!("CARGO_BIN_EXE_reverse-tunnel");
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
@@ -289,7 +295,7 @@ impl Drop for Machine {
         // What a removal that was cut short, or that failed, leaves.
         #[cfg(windows)]
         {
-            let _ = schtasks::delete(schtasks::REMOVAL);
+            windows::delete_removal_task();
             let _ = fs::remove_dir_all(self.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"));
         }
         #[cfg(target_os = "linux")]
@@ -457,74 +463,6 @@ fn assert_installed_as_specified(machine: &Machine) {
     assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
 }
 
-/// What `icacls` says `who` may do with `path`: the rights of its ACE, such as `(OI)(CI)(RX)`, or none.
-#[cfg(windows)]
-fn rights_of(path: &Path, who: &str) -> Option<String> {
-    let acl = output_of("icacls", &[path.to_str().unwrap()]);
-    let (_, rest) = acl.split_once(&format!("{who}:"))?;
-    Some(rest.split_whitespace().next().unwrap().to_string())
-}
-
-/// The ACLs the installation is specified to give; the service account's own access is shown by frpc running, which
-/// needs both tokens, and by the supervisor's files in `logs/`.
-#[cfg(windows)]
-fn assert_installed_as_specified(machine: &Machine) {
-    let paths = &machine.paths;
-    let (system, admins, everyone) = ("NT AUTHORITY\\SYSTEM", "BUILTIN\\Administrators", "Everyone");
-    let readers = [everyone, "BUILTIN\\Users", "NT AUTHORITY\\Authenticated Users"];
-    let rights =
-        |path: &Path, who| rights_of(path, who).unwrap_or_else(|| panic!("{who} has no ACE on {}", path.display()));
-    let all = |path: &Path| {
-        assert!(
-            rights(path, system).ends_with("(F)") && rights(path, admins).ends_with("(F)"),
-            "{}",
-            path.display()
-        )
-    };
-    let reads = |path: &Path, who| assert!(rights(path, who).ends_with("(RX)"), "{who} on {}", path.display());
-    let no_write = |path: &Path, who: &str| {
-        let granted = rights_of(path, who).unwrap_or_default();
-        let write = ["(F)", "(M)", "(W)", "(WD)", "(AD)", "(D)", "(DC)", "(WDAC)", "(WO)"];
-        assert!(
-            !write.iter().any(|right| granted.contains(right)),
-            "{who} may write {}: {granted}",
-            path.display()
-        );
-    };
-
-    for public in [
-        &paths.config_dir,
-        &paths.config_dir.join("config.yaml"),
-        &paths.config_dir.join("bridge.pem"),
-    ] {
-        all(public);
-        reads(public, everyone);
-    }
-    reads(&paths.log_dir, everyone);
-    assert!(
-        rights(&paths.log_dir, service::ACCOUNT).ends_with("(M)"),
-        "the service account does not write logs/"
-    );
-    for secret in [
-        &paths.secrets_dir,
-        &machine.secrets().join("bridge.token"),
-        &machine.secrets().join("host.token"),
-    ] {
-        all(secret);
-        reads(secret, service::ACCOUNT);
-        for who in readers {
-            assert_eq!(rights_of(secret, who), None, "{who} has an ACE on {}", secret.display());
-        }
-    }
-    for binary in [&paths.bin_dir, &service::exe(paths)] {
-        for who in readers.into_iter().chain([service::ACCOUNT]) {
-            no_write(binary, who);
-        }
-    }
-    // frpc runs only after the supervisor read both tokens, which it does as the service account.
-    assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
-}
-
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn install_then_service_running() {
@@ -616,10 +554,12 @@ fn rejoin_takes_effect() {
     assert_ne!(machine.status().pid, supervisor);
 }
 
-/// Runs `session` (which must run `uninstall`, on an installed machine) until the removal has started, ends the
-/// session with `end`, which is given the session and what it printed, and returns once the removal is over.
-fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) {
+/// Runs `session` (which must run `uninstall`, on an installed machine), after `begin` has been given it, until the
+/// removal has started, ends the session with `end`, which is given the session and what it printed, and returns once
+/// the removal is over.
+fn uninstall_survives(mut session: Command, begin: impl FnOnce(&mut Child), end: impl FnOnce(&mut Child, &str)) {
     let mut session = session.stdout(Stdio::piped()).spawn().unwrap();
+    begin(&mut session);
     let mut output = BufReader::new(session.stdout.take().unwrap());
     let mut printed = String::new();
     while !printed.lines().last().is_some_and(|line| line.starts_with("Removing.")) {
@@ -647,6 +587,19 @@ fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) 
         Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
     );
     assert!(removed, "the removal died with the session");
+    // The removal deletes its own task and directory, last.
+    #[cfg(windows)]
+    {
+        let paths = Paths::system().unwrap();
+        assert!(
+            schtasks::exit_code(schtasks::REMOVAL).is_err(),
+            "the removal's task is left"
+        );
+        assert!(
+            !install::removal_log_file(&paths).parent().unwrap().exists(),
+            "the removal's directory is left"
+        );
+    }
 }
 
 #[test]
@@ -656,19 +609,40 @@ fn uninstall_survives_session_end() {
     // the service.
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let mut session = Command::new(BIN);
-    session.arg("uninstall");
     #[cfg(unix)]
-    session.process_group(0);
-    uninstall_survives(session, |session, _| {
-        #[cfg(unix)]
-        {
-            let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
-            kill_process_group(group, Signal::KILL).unwrap();
-        }
-        #[cfg(windows)]
-        session.kill().unwrap();
-    });
+    {
+        let mut session = Command::new(BIN);
+        session.arg("uninstall").process_group(0);
+        uninstall_survives(
+            session,
+            |_| {},
+            |session, _| {
+                let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
+                kill_process_group(group, Signal::KILL).unwrap();
+            },
+        );
+    }
+    // The session is a job object that kills all it holds when it closes, as OpenSSH's does. `cmd` waits for a line
+    // before it runs `uninstall`, so that everything `uninstall` starts is in the job too.
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::os::windows::process::CommandExt;
+
+        let job = windows::Job::kill_on_close();
+        let mut session = Command::new("cmd");
+        session
+            .raw_arg(format!(r#"/s /c "set /p go=& "{BIN}" uninstall""#))
+            .stdin(Stdio::piped());
+        uninstall_survives(
+            session,
+            |session| {
+                job.add(session);
+                session.stdin.take().unwrap().write_all(b"\r\n").unwrap();
+            },
+            |_, _| job.close(),
+        );
+    }
 }
 
 /// A file the test puts under `/etc`, removed when it drops. `restart` names a service to restart after each change.
@@ -753,24 +727,28 @@ fn uninstall_survives_logind_session_end() {
     session
         .args(["-s", "/bin/sh", "-l", PROBE, "-c"])
         .arg(format!("echo session=$XDG_SESSION_ID; exec sudo -n '{BIN}' uninstall"));
-    uninstall_survives(session, |session, printed| {
-        let id = printed
-            .lines()
-            .find_map(|line| line.strip_prefix("session="))
-            .expect("su -l opens a logind session");
-        // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the scope
-        // because of the drop-in. (A `su` killed outright leaves the scope alone.)
-        output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
-        session.wait().unwrap();
-        wait_until("logind has ended the session", || {
-            !Command::new("loginctl")
-                .args(["show-session", id])
-                .output()
-                .unwrap()
-                .status
-                .success()
-        });
-    });
+    uninstall_survives(
+        session,
+        |_| {},
+        |session, printed| {
+            let id = printed
+                .lines()
+                .find_map(|line| line.strip_prefix("session="))
+                .expect("su -l opens a logind session");
+            // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the scope
+            // because of the drop-in. (A `su` killed outright leaves the scope alone.)
+            output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
+            session.wait().unwrap();
+            wait_until("logind has ended the session", || {
+                !Command::new("loginctl")
+                    .args(["show-session", id])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            });
+        },
+    );
 }
 
 #[test]
@@ -901,6 +879,18 @@ fn a_failed_removal_logs_where_uninstall_says() {
     let logged = fs::read_to_string(install::removal_log_file(&machine.paths)).unwrap();
     let removing = format!("removing {}", stuck.0.display());
     assert!(logged.contains(&removing), "the log has no `{removing}`: {logged}");
+    // A removal that failed leaves its task, its directory and its log for the rerun.
+    #[cfg(windows)]
+    {
+        assert!(
+            schtasks::exit_code(schtasks::REMOVAL).is_ok(),
+            "the failed removal's task is gone"
+        );
+        assert!(
+            install::removal_log_file(&machine.paths).exists(),
+            "the failed removal's log is gone"
+        );
+    }
 }
 
 /// A newer build in a directory of its own: this one with a byte appended, which differs and which the loader ignores.
@@ -1110,6 +1100,88 @@ fn install_is_refused_while_an_uninstall_is_unfinished() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn status_needs_no_elevation() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let probe = windows::Probe::create();
+
+    // The installed binary: the test binary's own directory is in the runner's profile.
+    let out = probe.run(&service::exe(&machine.paths), "status");
+
+    let (status, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "status as an unelevated user: {status}{stderr}");
+    assert!(status.contains("service: running"), "{status}");
+    assert!(status.contains("bridge: tunnel.example.test"), "{status}");
+    assert!(status.contains("certificate: SHA-256 "), "{status}");
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn install_refuses_a_data_directory_someone_else_made() {
+    let machine = Machine::begin();
+    let probe = windows::Probe::create();
+    // What a standard user can do in %ProgramData% before the install: make the directory, owned by itself.
+    let squat = probe.run(
+        Path::new("cmd.exe"),
+        &format!("/c mkdir {}", machine.paths.config_dir.display()),
+    );
+    assert!(squat.status.success(), "the probe user could not make the directory");
+
+    let refused = machine
+        .install_command(&join_code("tunnel.example.test"))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success()
+            && stderr.contains(&machine.paths.config_dir.display().to_string())
+            && stderr.contains("delete it"),
+        "install should refuse {}: {stderr}",
+        machine.paths.config_dir.display()
+    );
+    assert_eq!(
+        fs::read_dir(&machine.paths.config_dir).unwrap().count(),
+        0,
+        "install wrote into it"
+    );
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn install_removes_a_stray_ace_from_secrets() {
+    let machine = Machine::begin();
+    let code = join_code("tunnel.example.test");
+    machine.install(&code);
+    // An Administrator's hand edit: Everyone may read the tokens.
+    let secrets = machine.paths.secrets_dir.display().to_string();
+    output_of("icacls", &[&secrets, "/grant", "*S-1-1-0:(OI)(CI)R"]);
+    let token = machine.secrets().join("host.token");
+    assert_ne!(
+        windows::effective_rights(&token, "S-1-1-0"),
+        0,
+        "the stray ACE did not reach the token"
+    );
+
+    machine.install(&code);
+
+    assert_eq!(
+        windows::effective_rights(&machine.paths.secrets_dir, "S-1-1-0"),
+        0,
+        "Everyone has secrets/"
+    );
+    assert_eq!(windows::effective_rights(&token, "S-1-1-0"), 0, "Everyone has a token");
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(unix)]
 fn status_needs_no_elevation() {
     let machine = Machine::begin();
@@ -1137,4 +1209,33 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
+}
+
+/// Measurement, not a test: whether a running task that deletes its own registration is ended by it.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn probe_a_running_task_deletes_itself() {
+    let _machine = Machine::begin();
+    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let (deleted, after) = (dir.path().join("deleted.txt"), dir.path().join("after.txt"));
+    let name = "rt-probe-self-delete";
+    let script = format!(
+        r#"schtasks /Delete /F /TN {name} & echo x> "{}" & ping -n 4 127.0.0.1 > nul & echo x> "{}""#,
+        deleted.display(),
+        after.display()
+    );
+    schtasks::start(name, &dir.path().join("task.xml"), &script).unwrap();
+    wait_until("the probe task ends or is gone", || {
+        !matches!(schtasks::exit_code(name), Ok(None))
+    });
+    // A measurement, so a fixed wait for the 3 s `ping` is fine: nothing depends on it.
+    thread::sleep(Duration::from_secs(8));
+    eprintln!(
+        "PROBE: after the task deleted itself, its script ran the next command: {}, and the one 3 s later: {}; task now: {:?}",
+        deleted.exists(),
+        after.exists(),
+        schtasks::exit_code(name).map_err(|err| err.to_string())
+    );
+    windows::delete_removal_task();
 }

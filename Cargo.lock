@@ -906,6 +906,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tar",
  "tempfile",
@@ -913,6 +914,7 @@ dependencies = [
  "tokio-tungstenite",
  "ureq",
  "uzers",
+ "windows-sys 0.61.2",
  "yaml_serde",
  "zip",
 ]

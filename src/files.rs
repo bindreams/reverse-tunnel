@@ -1,44 +1,87 @@
 //! Files and directories are created the way an installation needs them: the final mode and owner are set on the open
 //! handle before any content exists, whatever the umask.
 
-#[cfg(windows)]
-use std::ffi::OsStr;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
+#[cfg(unix)]
+use std::fs::DirBuilder;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
 use anyhow::{Context, Result, ensure};
 
+use crate::account::Account;
+#[cfg(windows)]
+use crate::security::{self, Descriptor, OWNED_BY_ADMINISTRATORS};
+
 /// Mode and owner for a file or directory. `None` leaves the creator as owner or group. Windows files take their
-/// directory's ACL, and ignore this; a directory there is given an ACL by its mode (see `make_dir`).
+/// directory's ACL, and ignore this; a directory there gets a descriptor made from it (see `make_dir`).
 #[derive(Debug, Clone, Copy)]
 pub struct Perm {
     pub mode: u32,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
+    pub owner: Option<Account>,
+    pub group: Option<Account>,
 }
 
 impl Perm {
     pub const fn new(mode: u32) -> Perm {
         Perm {
             mode,
-            uid: None,
-            gid: None,
+            owner: None,
+            group: None,
         }
     }
 
-    pub const fn uid(self, uid: u32) -> Perm {
-        Perm { uid: Some(uid), ..self }
+    pub const fn owner(self, account: Account) -> Perm {
+        Perm {
+            owner: Some(account),
+            ..self
+        }
     }
 
-    pub const fn gid(self, gid: u32) -> Perm {
-        Perm { gid: Some(gid), ..self }
+    pub const fn group(self, account: Account) -> Perm {
+        Perm {
+            group: Some(account),
+            ..self
+        }
     }
 
     pub const EXECUTABLE: Perm = Perm::new(0o755);
+}
+
+/// What a directory's contents give an account on Windows, for the bits of the mode that are the account's: modify if
+/// it may write, else read and execute if it may read.
+#[cfg(windows)]
+fn rights(bits: u32) -> Option<&'static str> {
+    match bits & 0o7 {
+        bits if bits & 0o2 != 0 => Some("0x1301bf"),
+        bits if bits & 0o4 != 0 => Some("0x1200a9"),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+impl Perm {
+    /// The whole descriptor of a Windows directory with this mode: owned by Administrators, with a protected DACL that
+    /// the contents inherit. SYSTEM and Administrators have full control; Everyone reads if the mode lets others; the
+    /// owner and the group, accounts here, have what the mode's owner and group bits say.
+    pub fn sddl(&self) -> String {
+        let mut sddl = format!("{OWNED_BY_ADMINISTRATORS}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
+        let others = rights(self.mode & 0o4).map(|rights| (rights, "WD".to_string()));
+        let owner = self
+            .owner
+            .and_then(|account| Some((rights(self.mode >> 6)?, account.sid())));
+        let group = self
+            .group
+            .filter(|group| Some(*group) != self.owner)
+            .and_then(|account| Some((rights(self.mode >> 3)?, account.sid())));
+        for (rights, who) in others.into_iter().chain(owner).chain(group) {
+            sddl += &format!("(A;OICI;{rights};;;{who})");
+        }
+        sddl
+    }
 }
 
 /// What `write_atomic` does when `dest` exists.
@@ -62,7 +105,11 @@ pub fn apply(file: &File, perm: Perm) -> Result<()> {
         use std::fs::Permissions;
         use std::os::unix::fs::{PermissionsExt, fchown};
         // Before the mode: a chown can clear setuid and setgid bits.
-        fchown(file, perm.uid, perm.gid)?;
+        fchown(
+            file,
+            perm.owner.map(|account| account.uid),
+            perm.group.map(|account| account.gid),
+        )?;
         file.set_permissions(Permissions::from_mode(perm.mode))?;
     }
     #[cfg(windows)]
@@ -73,73 +120,57 @@ pub fn apply(file: &File, perm: Perm) -> Result<()> {
 /// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had. A new directory is
 /// owner-only until then, so it is never wider than its final mode, whatever the umask. Fails if something else is
 /// there, a link to a directory included.
-///
-/// Windows: the directory is owned by Administrators, and what it holds inherits an ACL of full control for SYSTEM and
-/// Administrators, and read for Everyone if `perm.mode` has the other-read bit. A new directory inherits its parent's
-/// ACL until then, and is empty.
+#[cfg(unix)]
 pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
-    #[cfg(unix)]
-    let builder = {
-        let mut builder = DirBuilder::new();
-        builder.mode(0o700);
-        builder
-    };
-    #[cfg(not(unix))]
-    let builder = DirBuilder::new();
+    let mut builder = DirBuilder::new();
+    builder.mode(0o700);
     match builder.create(path) {
         Err(err) if err.kind() == ErrorKind::AlreadyExists => ensure_directory(path)?,
         Err(err) => return Err(err).with_context(|| format!("creating {}", path.display())),
         Ok(()) => {}
     }
-    // Windows cannot open a directory as a file.
-    #[cfg(unix)]
-    {
-        let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+    let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+}
+
+/// Creates `path` if it is missing (not its parents) with the descriptor `perm.sddl()` makes, so that it is never there
+/// with another, then gives it that descriptor, whatever it had: the whole owner and DACL, which replace every ACE
+/// there. Fails if something else is there, a link to a directory included, and if a directory that is there is owned
+/// by anyone but Administrators or SYSTEM: someone else made it, and could change its ACL.
+#[cfg(windows)]
+pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
+    let descriptor = Descriptor::parse(&perm.sddl()).with_context(|| format!("describing {}", path.display()))?;
+    match descriptor.create_dir(path) {
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            ensure_directory(path)?;
+            ensure_trusted_owner(path)?;
+        }
+        Err(err) => return Err(err).with_context(|| format!("creating {}", path.display())),
+        Ok(()) => {}
     }
-    #[cfg(windows)]
-    protect_dir(path, perm.mode & 0o004 != 0)
+    descriptor
+        .apply(path)
+        .with_context(|| format!("setting the owner and ACL of {}", path.display()))
 }
 
-/// The security identifiers `icacls` is given (`*` marks one): SYSTEM, Administrators and Everyone.
+/// Windows: makes Administrators the owner of `path`, a file. What an Administrator creates is owned by that user, who
+/// could change its ACL, and goetia refuses a host that anyone but Administrators or SYSTEM owns.
 #[cfg(windows)]
-const SYSTEM: &str = "*S-1-5-18";
-#[cfg(windows)]
-const ADMINISTRATORS: &str = "*S-1-5-32-544";
-#[cfg(windows)]
-const EVERYONE: &str = "*S-1-1-0";
-
-/// Windows: `make_dir`'s ACL for `dir`, replacing the one it inherited and any grant to these three.
-#[cfg(windows)]
-fn protect_dir(dir: &Path, everyone_reads: bool) -> Result<()> {
-    // One operation per run: `icacls` refuses a switch that follows `/setowner`.
-    icacls(dir, &["/setowner", ADMINISTRATORS])?;
-    icacls(dir, &["/inheritance:r"])?;
-    let everyone = everyone_reads.then_some((EVERYONE, "RX"));
-    for (who, rights) in [(SYSTEM, "F"), (ADMINISTRATORS, "F")].into_iter().chain(everyone) {
-        icacls(dir, &["/grant:r", &format!("{who}:(OI)(CI){rights}")])?;
-    }
-    Ok(())
-}
-
-/// Windows: gives `account` (a name `icacls` resolves) `rights` (`icacls`'s letters) on `dir` and what it holds.
-#[cfg(windows)]
-pub fn grant(dir: &Path, account: &str, rights: &str) -> Result<()> {
-    icacls(dir, &["/grant", &format!("{account}:(OI)(CI){rights}")])
-}
-
-/// Windows: Administrators own `dir` and all it holds. What an Administrator creates is owned by that user, who could
-/// then change its ACL, and goetia refuses a host that anyone but Administrators or SYSTEM owns.
-#[cfg(windows)]
-pub fn own_tree(dir: &Path) -> Result<()> {
-    icacls(dir, &["/setowner", ADMINISTRATORS, "/T"])
+pub fn own_by_administrators(path: &Path) -> Result<()> {
+    Descriptor::parse(OWNED_BY_ADMINISTRATORS)
+        .and_then(|descriptor| descriptor.apply(path))
+        .with_context(|| format!("making Administrators the owner of {}", path.display()))
 }
 
 #[cfg(windows)]
-fn icacls(path: &Path, operation: &[&str]) -> Result<()> {
-    let mut args: Vec<&OsStr> = vec!["icacls".as_ref(), path.as_ref()];
-    args.extend(operation.iter().map(|arg| OsStr::new(*arg)));
-    crate::command::run(&args).with_context(|| format!("setting the ACL of {}", path.display()))?;
+fn ensure_trusted_owner(path: &Path) -> Result<()> {
+    let owner = security::owner_of(path).with_context(|| format!("finding the owner of {}", path.display()))?;
+    ensure!(
+        matches!(owner.as_str(), "S-1-5-32-544" | "S-1-5-18"),
+        "refusing to use {}: its owner is {owner}, not Administrators or SYSTEM, so it was not made by an install; \
+         delete it and run this again",
+        path.display()
+    );
     Ok(())
 }
 
@@ -219,3 +250,7 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
         .with_context(|| format!("syncing {}", dir.display()))?;
     Ok(WriteOutcome::Written)
 }
+
+#[cfg(all(test, windows))]
+#[path = "files_tests.rs"]
+mod tests;

@@ -74,6 +74,12 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
 /// install's and open to the account by contract.
 pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
+    // Windows runs the check as the caller, whoever is asked for.
+    #[cfg(windows)]
+    let run_as: Option<RunAs> = {
+        let _ = run_as;
+        None
+    };
     let spec = service::spec(paths)?;
     let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
@@ -118,7 +124,7 @@ fn drop_to(root: bool, uid: u32, gid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Who the check runs as: the service's account on Linux and macOS; on Windows, always the caller (`None`).
+/// Who the check runs as: the service's account on Linux and macOS; on Windows, always the caller.
 pub(crate) type RunAs = account::Account;
 
 #[cfg(unix)]
