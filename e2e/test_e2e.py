@@ -398,7 +398,7 @@ def test_lookalike_domain_gets_404(stack, registered):
 def test_plugin_not_reachable_through_traefik(stack, registered):
     request = json.dumps({"op": "Login", "content": {"user": "nobody", "metas": {"token": "x"}}})
     # Control: the plugin answers on the internal network.
-    # `ctl alias` recreated the plugin, which may not listen yet.
+    # `ctl add` and `ctl alias` recreate the plugin, which may not listen yet.
     internal = wait_until(lambda: (done := run("docker", "exec", "reverse-tunnel-frps", "wget", "-qO-",
                                                f"--post-data={request}", "http://reverse-tunnel-plugin:9000/handler",
                                                check=False)).returncode == 0 and done)  # fmt: skip
