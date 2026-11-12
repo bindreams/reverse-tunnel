@@ -1,6 +1,6 @@
 //! The release workflow builds what `upgrade` asks for.
 
-use reverse_tunnel::download::{RELEASE_TARGETS, asset_name};
+use reverse_tunnel::download::{RELEASE_TARGETS, SUMS_FILE, asset_name};
 use yaml_serde::Value;
 
 const DRAFT_RELEASE: &str = include_str!("../.github/workflows/draft-release.yaml");
@@ -23,8 +23,7 @@ fn draft_release_builds_every_release_target_under_the_name_upgrade_asks_for() {
         let target = entry["target"].as_str().unwrap();
         assert_eq!(entry["asset"].as_str().unwrap(), asset_name(target), "{target}");
     }
-    // The file the job copies and uploads is the one the matrix names: the copy's destination and the upload's path
-    // both come from `matrix.asset`.
+    // The file the job copies and uploads is the one the matrix names.
     let steps = build["steps"].as_sequence().expect("jobs.build.steps is a list");
     let copy = steps
         .iter()
@@ -54,5 +53,36 @@ fn draft_release_builds_every_release_target_under_the_name_upgrade_asks_for() {
         upload["with"]["path"].as_str(),
         Some("dist/${{ matrix.asset }}"),
         "the upload path"
+    );
+
+    // The release job writes the checksums over the assets and uploads them with the binaries.
+    let release = workflow["jobs"]["release"]["steps"]
+        .as_sequence()
+        .expect("jobs.release.steps is a list");
+    let step = |name: &str| {
+        release
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("a release step named {name}"))
+    };
+    let sums = step("Write SHA256SUMS");
+    assert_eq!(
+        sums["working-directory"].as_str(),
+        Some("dist"),
+        "{SUMS_FILE} is not written beside the assets"
+    );
+    assert!(
+        sums["run"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("sha256sum reverse-tunnel-* | tee {SUMS_FILE}")),
+        "the release job does not write {SUMS_FILE} over the assets"
+    );
+    assert!(
+        step("Create draft release pinned to commit SHA")["run"]
+            .as_str()
+            .unwrap()
+            .contains(r#"gh release create "$TAG" dist/*"#),
+        "the release does not upload dist/*, where {SUMS_FILE} is written"
     );
 }

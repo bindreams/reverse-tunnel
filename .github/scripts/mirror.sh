@@ -11,7 +11,7 @@ set -euo pipefail
 remote="${1:?remote required}"
 tag="${2-}"
 
-# The split is deterministic: the same history always gives the same commits.
+# The split is deterministic, so re-runs compare equal commits.
 split="$(git subtree split --prefix=server)"
 
 # Whether the mirror's `main` already holds the split commit.
@@ -45,27 +45,33 @@ push_main() {
         echo "the mirror's main holds ${split} after another run's push"
         return
     fi
-    echo "::error::the mirror's main is not an ancestor of ${split}; refusing to force" >&2
+    echo "::error::the split ${split} is not in the mirror's main; if the push's error above is not a rejection, that is the cause. Never forced." >&2
     exit 1
 }
 
 push_tag() {
-    # `ls-remote` lists an annotated tag twice, the tag object and, as `^{}`, the commit it points to.
-    local peeled
-    peeled="$(git ls-remote "$remote" "refs/tags/${tag}" "refs/tags/${tag}^{}" | awk '{ sha = $1 } END { print sha }')"
-    if [[ -n "$peeled" ]]; then
-        if [[ "$peeled" != "$split" ]]; then
-            echo "::error::the mirror's ${tag} points at ${peeled}, not at ${split}; refusing to move it" >&2
-            exit 1
-        fi
-        echo "the mirror already has ${tag} on ${split}"
+    # Not named `$tag`: this repository has its own tag of that name, on another commit. `-f`: only a local re-run has it.
+    git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+        tag -f -a -m "$tag" "mirror/${tag}" "$split"
+
+    if git push "$remote" "refs/tags/mirror/${tag}:refs/tags/${tag}"; then
         return
     fi
 
-    # Not named `$tag`: this repository has its own tag of that name, on another commit.
-    git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-        tag -a -m "$tag" "mirror/${tag}" "$split"
-    git push "$remote" "refs/tags/mirror/${tag}:refs/tags/${tag}"
+    # Refused: the mirror has the tag. That is fine if it is on this commit, as after another run's push.
+    # `ls-remote` lists an annotated tag twice, the tag object and, as `^{}`, the commit it points to.
+    local peeled
+    peeled="$(git ls-remote "$remote" "refs/tags/${tag}" "refs/tags/${tag}^{}" | awk '{ sha = $1 } END { print sha }')"
+    if [[ "$peeled" == "$split" ]]; then
+        echo "the mirror has ${tag} on ${split}"
+        return
+    fi
+    if [[ -z "$peeled" ]]; then
+        echo "::error::the mirror has no ${tag}, so the push's error above is the cause" >&2
+    else
+        echo "::error::the mirror's ${tag} points at ${peeled}, not at ${split}; refusing to move it" >&2
+    fi
+    exit 1
 }
 
 if [[ -n "$tag" ]]; then

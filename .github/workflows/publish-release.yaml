@@ -9,7 +9,8 @@ on:
         type: string
 
 # Every publish takes its turn, whatever the version: each reads the published releases and then sets `--latest`, so two
-# at once could leave a lower version marked latest. A second dispatch waits, then finds its release published.
+# at once could leave a lower version marked latest. A second dispatch waits, then finds its release published. GitHub
+# keeps one pending run per group, so a newer dispatch cancels a pending one: re-dispatch the version that was cancelled.
 concurrency:
   group: publish-release
   cancel-in-progress: false
@@ -19,9 +20,8 @@ jobs:
     name: Verify and publish
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # The real preflight (version, CI on the commit, the builds) happened in draft-release.yaml before a draft could
-    # exist; the operator dispatching this has reviewed the draft. The environment's required reviewer is the owner's
-    # approval of this release.
+    # Version, CI and builds were checked in draft-release.yaml before the draft existed; the environment's required
+    # reviewer approves this release.
     environment: Deploy
     permissions:
       # `write`, not `read`: the List releases API only returns drafts to a caller with push access.
@@ -32,7 +32,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      # The dispatch ref's checkout, for the scripts that name the release. The release commit is checked out below.
+      # The dispatch ref's checkout, for the scripts that name the release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Normalize and validate version
@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! RELEASE_JSON="$(gh release view "$TAG" --json isDraft,targetCommitish)"; then
+          if ! RELEASE_JSON="$(gh release view "$TAG" --json isDraft,isPrerelease,targetCommitish)"; then
             echo "::error::gh release view failed for $TAG. Does the draft release exist?"
             exit 1
           fi
@@ -67,6 +67,7 @@ jobs:
             exit 1
           fi
           echo "commit_sha=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$(jq -r '.isPrerelease' <<<"$RELEASE_JSON")" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -82,12 +83,10 @@ jobs:
         env:
           TAG: ${{ steps.version.outputs.tag }}
           SHA: ${{ steps.release.outputs.commit_sha }}
+          PRERELEASE: ${{ steps.release.outputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
-
-          # Just before the action that creates the tag: a tag that appeared since the draft would capture the release.
-          bash .github/scripts/assert-tag-absent.sh "$TAG"
 
           # Publishing marks the release "latest" unless told otherwise, and `upgrade` follows `releases/latest`, which
           # skips drafts and prereleases, as the list below does. An older version published late must not take the mark
@@ -95,15 +94,19 @@ jobs:
           PUBLISHED_TAGS="$(gh api -X GET --paginate "repos/${GH_REPO}/releases" --jq '.[] | select((.draft or .prerelease) | not) | .tag_name')"
           NEWEST="$({ grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' <<<"$PUBLISHED_TAGS" || true; echo "$TAG"; } | sort -V | tail -n 1)"
           LATEST=false
-          if [ "$NEWEST" = "$TAG" ] && [ "$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease')" = false ]; then
+          if [ "$NEWEST" = "$TAG" ] && [ "$PRERELEASE" = false ]; then
             LATEST=true
           fi
           echo "newest of the published releases and $TAG: $NEWEST; marking $TAG latest=$LATEST"
 
+          # This run creates the tag, which fails with 422 if the ref exists, so the release is bound to $SHA and never to
+          # a tag that appeared since the draft. If a later step fails the tag stays: delete it before publishing again.
+          gh api -X POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}"
+
           gh release edit "$TAG" --draft=false --latest="$LATEST"
 
-          # Un-drafting creates the tag, so this is the first moment the binding is observable. `targetCommitish` is
-          # only the stored input from release creation and would echo $SHA back; resolve the tag itself.
+          # Read the tag back. `targetCommitish` is only the stored input from release creation and would echo $SHA
+          # back; resolve the tag itself.
           if ! PUBLISHED="$(gh api -X GET "repos/${GH_REPO}/commits/${TAG}" --jq '.sha')"; then
             echo "::error::Could not resolve tag $TAG after publishing. The release is public; verify by hand that $TAG points at $SHA."
             exit 1

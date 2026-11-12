@@ -12,7 +12,8 @@ env:
   CARGO_TERM_COLOR: always
 
 # One draft run at a time, whatever the version. A duplicate dispatch waits, then fails fast at `validate` on the first
-# run's draft.
+# run's draft. GitHub keeps one pending run per group, so a newer dispatch cancels a pending one: re-dispatch the
+# version that was cancelled.
 concurrency:
   group: draft-release
   cancel-in-progress: false
@@ -84,8 +85,8 @@ jobs:
   #
   # Linux builds on the oldest runner image, so the binary runs on older glibc. aarch64 Linux builds on a native arm
   # runner: `ring` (rustls) needs a C toolchain for the target, and the runner has one. x86_64 macOS is cross-built
-  # from the arm runner with Apple's clang. No step installs Rust, as in ci.yaml: every runner image documents it,
-  # `ubuntu-22.04-arm` included (actions/partner-runner-images, images/arm-ubuntu-22-image.md: Cargo, Rust, Rustup).
+  # from the arm runner with Apple's clang. No step installs Rust, as in ci.yaml: every runner image,
+  # `ubuntu-22.04-arm` included, ships it.
   build:
     name: Build (${{ matrix.target }})
     needs: validate

@@ -2,8 +2,7 @@ name: Mirror
 
 # Publishes `server/` as the root of bindreams/reverse-tunnel-server, which a bridge operator clones. A push to `main`
 # updates the mirror's `main`. A tag is mirrored on request: `publish-release` calls this workflow once the release is
-# public, because a tag created with GITHUB_TOKEN triggers no other workflow. If that call fails, dispatch this
-# workflow with the tag.
+# public, because a tag created with GITHUB_TOKEN triggers no other workflow.
 on:
   push:
     branches: [main]
@@ -22,8 +21,9 @@ on:
       MIRROR_DEPLOY_KEY:
         required: true
 
-# No concurrency group: a group would cancel a pending tag run for a newer push. Overlapping pushes are safe, since
-# neither is forced and a run whose commit is already in the mirror's `main` pushes nothing.
+# No concurrency group: GitHub keeps one pending run per group, so a newer dispatch would cancel a pending tag run, and
+# it would have to be re-dispatched. Overlapping pushes are safe, since neither is forced and a run whose commit is
+# already in the mirror's `main` pushes nothing.
 
 jobs:
   mirror:

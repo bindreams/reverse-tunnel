@@ -107,6 +107,9 @@ pub fn host_target() -> Result<&'static str> {
     })
 }
 
+/// The checksums file of a release, in `sha256sum` format, covering its binaries.
+pub const SUMS_FILE: &str = "SHA256SUMS";
+
 /// The name of `target`'s binary among a release's assets: `reverse-tunnel-<target>`, plus `.exe` on Windows.
 pub fn asset_name(target: &str) -> String {
     let suffix = if target.contains("-windows-") { ".exe" } else { "" };

@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Succeed only when `origin` provably has no tag `$1`.
 #
-# The three-way branch is the point. `git ls-remote --exit-code` returns 0 when
-# the ref exists and 2 when it does not; anything else is a transport, auth or
-# protocol failure. Collapsing those into "absent" would let an outage green-light
-# a release, and an existing tag silently captures `gh release create --target`.
+# `git ls-remote --exit-code` returns 0 when the ref exists, 2 when it does not, anything else on transport/auth
+# failure. Reading a failure as "absent" would let an outage green-light a release.
 set -euo pipefail
 
 tag="${1:?tag required}"
 
 status=0
-git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1 || status=$?
+err="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1 >/dev/null)" || status=$?
 
 case "$status" in
     0)
@@ -21,7 +19,7 @@ case "$status" in
         echo "no existing tag ${tag}"
         ;;
     *)
-        echo "::error::git ls-remote failed (exit ${status}); cannot confirm ${tag} is absent"
+        echo "::error::git ls-remote failed (exit ${status}): ${err}; cannot confirm ${tag} is absent"
         exit 1
         ;;
 esac
