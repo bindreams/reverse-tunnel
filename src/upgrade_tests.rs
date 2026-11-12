@@ -36,15 +36,17 @@ fn serve(routes: Vec<Route>) -> (String, Arc<Mutex<Vec<String>>>) {
             log.lock().unwrap().push(format!("{method} {path}"));
             let (_, status, location, body) = routes.iter().find(|route| route.0 == path).expect("a known path");
             let location = location.map(|to| format!("Location: {to}\r\n")).unwrap_or_default();
-            write!(
-                conn,
+            let mut response = format!(
                 "HTTP/1.1 {status} X\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )
-            .unwrap();
+            .into_bytes();
             if method == "GET" {
-                conn.write_all(body).unwrap();
+                response.extend_from_slice(body);
             }
+            // One write: ureq follows a redirect as soon as it has the `Location` line and closes this connection, so
+            // a head sent in pieces would meet a closed socket. A failed write means the client has left.
+            let _ = conn.write_all(&response);
         }
     });
     (base, seen)
