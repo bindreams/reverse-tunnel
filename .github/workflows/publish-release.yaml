@@ -67,7 +67,7 @@ jobs:
             exit 1
           fi
           echo "commit_sha=$TARGET" >> "$GITHUB_OUTPUT"
-          PRERELEASE="$(jq -er '.isPrerelease' <<<"$RELEASE_JSON")"
+          PRERELEASE="$(jq -r '.isPrerelease | if type == "boolean" then . else error("isPrerelease is \(.)") end' <<<"$RELEASE_JSON")"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -100,10 +100,18 @@ jobs:
           fi
           echo "newest of the published releases and $TAG: $NEWEST; marking $TAG latest=$LATEST"
 
-          # This run creates the tag, so the release is bound to $SHA and never to a tag that appeared since the draft. A
-          # tag already on $SHA is this release's own, from a publish that failed after creating it.
+          # What the tag names, read as a tag: `commits/<name>` would also accept a branch of that name. An annotated
+          # tag gives its tag object, which never equals $SHA, so it is refused.
+          tag_object() { gh api -X GET "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq '.object.sha'; }
+
+          # The tag is created here, on $SHA, so the release never binds to a tag that appeared since the draft. If the
+          # tag exists, it must already be on $SHA: then it is this release's own, from a publish that failed after
+          # creating it, and re-running the publish finishes it.
           if ! gh api -X POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}" >/dev/null; then
-            EXISTING="$(gh api -X GET "repos/${GH_REPO}/commits/${TAG}" --jq '.sha')"
+            if ! EXISTING="$(tag_object)"; then
+              echo "::error::Could not create tag $TAG, and it does not exist: see the errors above."
+              exit 1
+            fi
             if [ "$EXISTING" != "$SHA" ]; then
               echo "::error::Tag $TAG exists on $EXISTING, not on the draft's $SHA. Delete the tag or recreate the draft."
               exit 1
@@ -112,9 +120,8 @@ jobs:
 
           gh release edit "$TAG" --draft=false --latest="$LATEST"
 
-          # Read the tag back. `targetCommitish` is only the stored input from release creation and would echo $SHA
-          # back; resolve the tag itself.
-          if ! PUBLISHED="$(gh api -X GET "repos/${GH_REPO}/commits/${TAG}" --jq '.sha')"; then
+          # Read the tag back: `targetCommitish` is only the stored input from release creation and would echo $SHA.
+          if ! PUBLISHED="$(tag_object)"; then
             echo "::error::Could not resolve tag $TAG after publishing. The release is public; verify by hand that $TAG points at $SHA."
             exit 1
           fi
