@@ -24,8 +24,10 @@ fn a_goetia_error_is_reported_with_its_stderr_under_our_context() {
 
     let text = report(&err);
 
-    assert!(text.starts_with("starting the service\n\nCaused by:\n    "), "{text}");
-    assert!(text.contains("`systemctl start x` failed"), "{text}");
+    assert!(
+        text.starts_with("starting the service: `systemctl start x` failed"),
+        "{text}"
+    );
     assert!(text.contains("boom"), "{text}");
 }
 
@@ -33,5 +35,5 @@ fn a_goetia_error_is_reported_with_its_stderr_under_our_context() {
 fn an_error_without_goetia_in_its_chain_prints_as_anyhow_does() {
     let err = anyhow::anyhow!("inner").context("middle").context("outer");
 
-    assert_eq!(report(&err), "outer\n\nCaused by:\n    0: middle\n    1: inner");
+    assert_eq!(report(&err), format!("{err:#}"));
 }
