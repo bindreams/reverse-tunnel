@@ -2,6 +2,8 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
@@ -10,6 +12,8 @@ use anyhow::{Context, Result};
 use jiff::fmt::strtime;
 use jiff::tz::TimeZone;
 use jiff::{Unit, Zoned};
+
+use crate::files::{self, Perm};
 
 /// The size at which a log is rotated.
 pub const ROTATE_AT: u64 = 10 * 1024 * 1024;
@@ -108,12 +112,17 @@ impl Active {
     }
 }
 
+/// Opens `path` for appending, created if missing. Anyone on the machine may read a log, whatever the umask.
 fn open(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
         .open(path)
-        .with_context(|| format!("opening {}", path.display()))
+        .with_context(|| format!("opening {}", path.display()))?;
+    files::apply(&file, Perm::new(0o644)).with_context(|| format!("setting the mode of {}", path.display()))?;
+    Ok(file)
 }
 
 /// The local time and its UTC offset in whole minutes, e.g. `2026-11-02T21:04:05+01:00`; `1970-01-01T00:00:00+00:00`
