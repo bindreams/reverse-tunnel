@@ -18,20 +18,17 @@ split="$(git subtree split --prefix=server)"
 mirror_main_has_split() {
     local status=0
     git fetch --quiet "$remote" main || exit 1
-    git merge-base --is-ancestor "$split" FETCH_HEAD || status=$?
+    bash "$(dirname "$0")/git-is-ancestor.sh" "$split" FETCH_HEAD || status=$?
     case "$status" in
         0) return 0 ;;
         1) return 1 ;;
-        *)
-            echo "::error::git merge-base failed (exit ${status})" >&2
-            exit 1
-            ;;
+        *) exit 1 ;;
     esac
 }
 
 push_main() {
     local main_sha
-    main_sha="$(git ls-remote --heads "$remote" main)"
+    main_sha="$(git ls-remote "$remote" refs/heads/main)"
 
     # A later run may have pushed already; an older one then has nothing to add, and a push would be refused.
     if [[ -n "$main_sha" ]] && mirror_main_has_split; then

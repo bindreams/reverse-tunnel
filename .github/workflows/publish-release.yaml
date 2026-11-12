@@ -8,14 +8,33 @@ on:
         required: true
         type: string
 
-concurrency:
-  # Keyed on the raw input, as in cosca: `0.1.0` and `v0.1.0` form separate groups that resolve to one tag.
-  group: publish-release-${{ inputs.version }}
-  cancel-in-progress: false
-
 jobs:
+  version:
+    name: Normalize version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Normalize and validate version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: bash .github/scripts/emit-version.sh "$INPUT_VERSION"
+
   publish:
     name: Verify and publish
+    needs: version
+    # Keyed on the normalized version, so `0.1.0` and `v0.1.0` take turns; the second finds the release published.
+    concurrency:
+      group: publish-release-${{ needs.version.outputs.version }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The real preflight (version, CI on the commit, the builds) happened in draft-release.yaml before a draft could
@@ -28,26 +47,11 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Normalize and validate version
-        id: version
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          V="$(bash .github/scripts/normalize-version.sh "$INPUT_VERSION")"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "tag=v${V}" >> "$GITHUB_OUTPUT"
-
       - name: Verify draft release exists and resolve commit SHA
         id: release
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -76,19 +80,13 @@ jobs:
 
       - name: Re-verify the manifest version matches the release
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         shell: bash
-        run: |
-          set -euo pipefail
-          MANIFEST="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "reverse-tunnel") | .version')"
-          if [ "$MANIFEST" != "$VERSION" ]; then
-            echo "::error::Checked-out commit declares '${MANIFEST}' but this dispatch asked for $VERSION"
-            exit 1
-          fi
+        run: bash .github/scripts/assert-manifest-version.sh "$VERSION"
 
       - name: Publish GitHub release
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.version.outputs.tag }}
           SHA: ${{ steps.release.outputs.commit_sha }}
         shell: bash
         run: |
@@ -97,7 +95,15 @@ jobs:
           # Just before the action that creates the tag: a tag that appeared since the draft would capture the release.
           bash .github/scripts/assert-tag-absent.sh "$TAG"
 
-          gh release edit "$TAG" --draft=false
+          # Publishing marks the release "latest" unless told otherwise, and `upgrade` follows `releases/latest`. An
+          # older version published late must not take the mark from a newer one.
+          PUBLISHED_TAGS="$(gh api -X GET --paginate "repos/${GH_REPO}/releases" --jq '.[] | select(.draft | not) | .tag_name')"
+          NEWEST="$({ grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' <<<"$PUBLISHED_TAGS" || true; echo "$TAG"; } | sort -V | tail -n 1)"
+          LATEST=false
+          if [ "$NEWEST" = "$TAG" ]; then LATEST=true; fi
+          echo "newest of the published releases and $TAG: $NEWEST; marking $TAG latest=$LATEST"
+
+          gh release edit "$TAG" --draft=false --latest="$LATEST"
 
           # Un-drafting creates the tag, so this is the first moment the binding is observable. `targetCommitish` is
           # only the stored input from release creation and would echo $SHA back; resolve the tag itself.
@@ -117,10 +123,10 @@ jobs:
   # release stays published: dispatch the Mirror workflow with the tag.
   mirror:
     name: Mirror the tag
-    needs: publish
+    needs: [version, publish]
     uses: ./.github/workflows/mirror.yaml
     with:
-      tag: ${{ needs.publish.outputs.tag }}
+      tag: ${{ needs.version.outputs.tag }}
     secrets:
       MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
     permissions:

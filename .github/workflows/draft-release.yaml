@@ -8,12 +8,6 @@ on:
         required: true
         type: string
 
-concurrency:
-  # Keyed on the raw input, as in cosca: `0.1.0` and `v0.1.0` form separate groups that resolve to one tag. The
-  # release job re-checks that the release is absent just before creating it.
-  group: draft-release-${{ inputs.version }}
-  cancel-in-progress: false
-
 env:
   CARGO_TERM_COLOR: always
 
@@ -39,22 +33,13 @@ jobs:
         env:
           INPUT_VERSION: ${{ inputs.version }}
         shell: bash
-        run: |
-          set -euo pipefail
-          V="$(bash .github/scripts/normalize-version.sh "$INPUT_VERSION")"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/emit-version.sh "$INPUT_VERSION"
 
       - name: Verify the manifest version matches
         env:
           VERSION: ${{ steps.version.outputs.version }}
         shell: bash
-        run: |
-          set -euo pipefail
-          MANIFEST="$(cargo metadata --no-deps --locked --format-version 1 | jq -r '.packages[] | select(.name == "reverse-tunnel") | .version')"
-          if [ "$MANIFEST" != "$VERSION" ]; then
-            echo "::error::Cargo.toml declares '${MANIFEST}' but this dispatch asked for $VERSION"
-            exit 1
-          fi
+        run: bash .github/scripts/assert-manifest-version.sh "$VERSION"
 
       - name: Fail if the release already exists
         env:
@@ -77,37 +62,23 @@ jobs:
         env:
           SHA: ${{ github.sha }}
         shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --quiet origin main
-
-          status=0
-          git merge-base --is-ancestor "$SHA" origin/main || status=$?
-
-          case "$status" in
-            0) echo "$SHA is an ancestor of origin/main" ;;
-            1)
-              echo "::error::$SHA is not an ancestor of origin/main. Release only from merged commits."
-              exit 1
-              ;;
-            *)
-              echo "::error::git merge-base failed (exit $status); cannot confirm $SHA is on main"
-              exit 1
-              ;;
-          esac
+        run: bash .github/scripts/assert-on-main.sh "$SHA"
 
   # Main's last green run does not imply that this commit is green.
   ci:
     name: CI
     needs: validate
     uses: ./.github/workflows/ci.yaml
+    permissions:
+      contents: read
 
   # One binary per `download::RELEASE_TARGETS`, named as `upgrade` asks for it (`download::asset_name`).
   # tests/release.rs checks that this matrix and those two agree.
   #
   # Linux builds on the oldest runner image, so the binary runs on older glibc. aarch64 Linux builds on a native arm
   # runner: `ring` (rustls) needs a C toolchain for the target, and the runner has one. x86_64 macOS is cross-built
-  # from the arm runner with Apple's clang.
+  # from the arm runner with Apple's clang. No step installs Rust, as in ci.yaml: every runner image documents it,
+  # `ubuntu-22.04-arm` included (actions/partner-runner-images, images/arm-ubuntu-22-image.md: Cargo, Rust, Rustup).
   build:
     name: Build (${{ matrix.target }})
     needs: validate
@@ -160,6 +131,11 @@ jobs:
   release:
     name: Create draft release
     needs: [validate, ci, build]
+    # Keyed on the normalized version, so `0.1.0` and `v0.1.0` take turns. The re-check below then sees the first
+    # run's draft and fails the second.
+    concurrency:
+      group: draft-release-${{ needs.validate.outputs.version }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

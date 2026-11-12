@@ -23,7 +23,36 @@ fn draft_release_builds_every_release_target_under_the_name_upgrade_asks_for() {
         let target = entry["target"].as_str().unwrap();
         assert_eq!(entry["asset"].as_str().unwrap(), asset_name(target), "{target}");
     }
-    // The name the matrix declares is the name the job copies and uploads.
-    let steps = yaml_serde::to_string(&build["steps"]).unwrap();
-    assert!(steps.contains("matrix.asset"), "the build steps never use matrix.asset");
+    // The file the job copies and uploads is the one the matrix names: the copy's destination and the upload's path
+    // both come from `matrix.asset`.
+    let steps = build["steps"].as_sequence().expect("jobs.build.steps is a list");
+    let copy = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Build"))
+        .expect("a build step named Build");
+    assert_eq!(
+        copy["env"]["ASSET"].as_str(),
+        Some("${{ matrix.asset }}"),
+        "ASSET is not matrix.asset"
+    );
+    assert!(
+        copy["run"]
+            .as_str()
+            .unwrap()
+            .contains(r#"cp "target/$TARGET/release/$bin" "dist/$ASSET""#),
+        "the build copies to something other than dist/$ASSET"
+    );
+    let upload = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+        })
+        .expect("an upload-artifact step");
+    assert_eq!(
+        upload["with"]["path"].as_str(),
+        Some("dist/${{ matrix.asset }}"),
+        "the upload path"
+    );
 }
