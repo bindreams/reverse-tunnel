@@ -29,7 +29,7 @@ services:
       - traefik.enable=true
       - traefik.expose=true
       - traefik.docker.network=gateway
-      - traefik.http.routers.reverse-tunnel-frps.rule=HostRegexp(`^([^.]+\.)?[^.]+\.${TUNNEL_DOMAIN:?set TUNNEL_DOMAIN in .env}$$`)
+      - traefik.http.routers.reverse-tunnel-frps.rule=HostRegexp(`^([^.]+\.)?[^.]+\.\Q${TUNNEL_DOMAIN:?set TUNNEL_DOMAIN in .env}\E$$`)
       - traefik.http.routers.reverse-tunnel-frps.entrypoints=websecure
       - traefik.http.routers.reverse-tunnel-frps.tls=true
       - traefik.http.routers.reverse-tunnel-frps.service=reverse-tunnel-frps-vhost
