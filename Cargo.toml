@@ -44,7 +44,7 @@ rustix = { version = "1", default-features = false, features = ["process"] }
 [target."cfg(windows)".dependencies]
 known-folders = "1.4.2"
 
-# Stands in for frpc in tests/.
+# Stands in for frpc in tests/, and for the installed binary's `run --check` in src/ops_tests.rs.
 [[bin]]
 name = "stub-frpc"
 path = "testbin/stub_frpc.rs"

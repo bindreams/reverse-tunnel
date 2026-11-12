@@ -755,6 +755,57 @@ fn upgrade_from_local_build() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+fn restart_checks_the_configuration_as_the_service_account() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let first = machine.status().pid.expect("a running service has a pid");
+
+    // The check runs as the service account, with nothing inherited: it must pass, and the service run again.
+    let mut restart = Command::new(BIN);
+    restart.arg("restart");
+    machine.run_ok(restart);
+    wait_until("the manager runs a new supervisor", || {
+        let status = machine.status();
+        status.state == State::Running && status.pid.is_some_and(|pid| pid != first)
+    });
+    let running = machine.status().pid;
+
+    // Root writes a config.yaml that the service account cannot read: a check run as root would pass it.
+    let config = machine.paths.config_dir.join("config.yaml");
+    let text = fs::read(&config).unwrap();
+    fs::remove_file(&config).unwrap();
+    fs::write(&config, text).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    let failed = Command::new(BIN).arg("restart").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        !failed.status.success() && stderr.contains("reading") && stderr.contains("Permission denied"),
+        "restart should fail on reading {}: {stderr}",
+        config.display()
+    );
+    let status = machine.status();
+    assert_eq!((status.state, status.pid), (State::Running, running));
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn restart_without_the_service_installed_says_so() {
+    let _machine = Machine::begin();
+
+    let failed = Command::new(BIN).arg("restart").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        !failed.status.success() && stderr.contains("the service is not installed"),
+        "{stderr}"
+    );
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
 fn install_is_refused_while_an_uninstall_is_unfinished() {
     let machine = Machine::begin();
     machine.install(&join_code("old.example.test"));
