@@ -42,7 +42,9 @@ enum Command {
     },
     /// Replaces this host's binary with the latest release's, or with `--from`, and restarts the service. Needs root.
     ///
-    /// The release is staged in the bin directory as `upgrade-<...>` until an `install` finishes, which removes it.
+    /// The release is staged in the bin directory as `upgrade-<...>`. A successful upgrade's download is removed by the
+    /// `install` it runs, a failed one by `upgrade`. `install` removes its own check copy, also `upgrade-<...>`, and
+    /// sweeps any left behind.
     Upgrade {
         /// Install this binary instead of downloading one.
         #[arg(long)]

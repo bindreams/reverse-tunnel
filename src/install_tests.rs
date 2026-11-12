@@ -365,47 +365,102 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     );
 }
 
-#[test]
-fn upgrade_aborts_when_check_fails() {
+/// The binary being installed: a copy of `stub-frpc` whose `run --check` ends in `outcome`, `pass` or `fail`. The
+/// staged copy finds its mode in `stub.mode`.
+fn new_binary(machine: &Machine, outcome: &str) -> PathBuf {
+    let bin = &machine.paths.bin_dir;
+    let new = machine.dir.path().join("new-reverse-tunnel");
+    crate::test_stub::copy_to(&new);
+    let env_file = machine.dir.path().join("expected-env");
+    fs::write(&env_file, "").unwrap();
+    fs::write(bin.join("stub.mode"), format!("check {outcome} {}", env_file.display())).unwrap();
+    new
+}
+
+/// A host an earlier install left, settled and picked up, with the outgoing binary and an frpc in `bin/`.
+fn installed_machine() -> Machine {
     let machine = Machine::new();
     machine.settings(Some("mothership"), Some(CODE));
-    // The settings are as an earlier install left them, picked up.
     fs::remove_file(pending_file(&machine.paths)).unwrap();
     fs::create_dir(&machine.paths.bin_dir).unwrap();
-    let (exe, frpc) = (service::exe(&machine.paths), download::tools(&machine.paths).frpc);
-    fs::write(&exe, b"the outgoing binary").unwrap();
-    // An frpc that rejects whatever it is asked to verify. A link: writing a program and running it races a fork.
-    symlink("/usr/bin/false", &frpc).unwrap();
-    let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
-    let id = service::spec(&machine.paths).id;
+    fs::write(service::exe(&machine.paths), b"the outgoing binary").unwrap();
+    fs::write(download::tools(&machine.paths).frpc, b"frpc").unwrap();
+    machine
+}
 
-    let err = apply(&manager, &machine.account, &machine.paths, None, None, false).unwrap_err();
-
-    assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
-    assert_eq!(fs::read(&exe).unwrap(), b"the outgoing binary");
-    assert_eq!(fs::read(machine.config()).unwrap(), config);
-    assert!(matches!(manager.status(&id), Err(goetia::Error::NotInstalled { .. })));
-    assert!(!pending_file(&machine.paths).exists());
+fn staged_copies(machine: &Machine) -> Vec<PathBuf> {
+    files_under(&machine.paths.bin_dir)
+        .into_iter()
+        .filter(|path| path.file_name().unwrap().to_str().unwrap().starts_with(upgrade::STAGED))
+        .collect()
 }
 
 #[test]
-fn first_install_aborts_when_check_fails() {
+fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
+    let machine = installed_machine();
+    let new = new_binary(&machine, "fail");
+    let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
+    // Not the unit the new binary would register.
+    let mut outgoing = service::spec(&machine.paths);
+    outgoing.command.push("--outgoing".into());
+    manager.install(&outgoing, false).unwrap();
+
+    let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
+
+    // The outgoing binary is not executable: it is the new one's check that failed.
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("the service would not start with this configuration"),
+        "{text}"
+    );
+    assert!(text.contains("stub stderr line"), "{text}");
+    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), b"the outgoing binary");
+    assert_eq!(fs::read(machine.config()).unwrap(), config);
+    assert_eq!(manager.preview_install(&outgoing).unwrap(), Outcome::UpToDate);
+    assert!(!pending_file(&machine.paths).exists());
+    assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
+}
+
+#[test]
+fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     let machine = Machine::new();
     fs::create_dir(&machine.paths.bin_dir).unwrap();
-    // An frpc that rejects whatever it is asked to verify; see `upgrade_aborts_when_check_fails`.
-    symlink("/usr/bin/false", download::tools(&machine.paths).frpc).unwrap();
+    fs::write(download::tools(&machine.paths).frpc, b"frpc").unwrap();
+    let new = new_binary(&machine, "fail");
     let join = join::decode(CODE).unwrap();
+    let manager = Fake::default();
 
     let err = apply(
-        &Fake::default(),
+        &manager,
         &machine.account,
         &machine.paths,
+        &new,
         Some("mothership"),
         Some(&join),
         false,
     )
     .unwrap_err();
 
-    assert!(format!("{err:#}").contains("frpc verify rejected"), "{err:#}");
+    assert!(format!("{err:#}").contains("stub stderr line"), "{err:#}");
+    // Not registered: no unit points at a binary that was never placed.
+    assert_eq!(
+        manager.preview_install(&service::spec(&machine.paths)).unwrap(),
+        Outcome::Create
+    );
     assert!(!service::exe(&machine.paths).exists());
+    assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
+}
+
+#[test]
+fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
+    let machine = installed_machine();
+    let new = new_binary(&machine, "pass");
+    let manager = Fake::default();
+    manager.install(&service::spec(&machine.paths), false).unwrap();
+
+    apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
+
+    assert!(machine.dir.path().join("expected-env.ran").exists(), "the check ran");
+    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), fs::read(&new).unwrap());
+    assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }

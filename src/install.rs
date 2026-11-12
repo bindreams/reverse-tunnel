@@ -23,7 +23,7 @@ use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, ope
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
-use crate::{download, ops, service, supervisor, upgrade};
+use crate::{download, ops, service, upgrade};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -83,38 +83,38 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     };
 
     let account = account::ensure(service::ACCOUNT)?;
+    let new = env::current_exe().context("finding this binary")?;
     apply(
         &*goetia::manager::native()?,
         &account,
         paths,
+        &new,
         host.as_deref(),
         join.as_ref(),
         changed,
     )
 }
 
-/// What `install` does once it holds the lock and knows its inputs. `changed`: an earlier run changed something that
-/// has not been restarted yet.
+/// What `install` does once it holds the lock and knows its inputs. `new` is the binary being installed. `changed`: an
+/// earlier run changed something that has not been restarted yet.
 fn apply(
     manager: &dyn ServiceManager,
     account: &Account,
     paths: &Paths,
+    new: &Path,
     host: Option<&str>,
     join: Option<&JoinInfo>,
     mut changed: bool,
 ) -> Result<()> {
     let spec = service::spec(paths);
-    // Settings that are all there and stay as they are can be checked before anything is changed: a failure leaves the
-    // installation as it was.
-    let settled = join.is_none() && host.is_none() && paths.secrets_dir.join("host.token").try_exists()?;
-    if settled {
-        verify_tools(paths)?;
-        changed |= settle(manager, &spec, account, paths, host, join)?;
-    } else {
-        changed |= settle(manager, &spec, account, paths, host, join)?;
-        verify_tools(paths)?;
-    }
-    changed |= place_binaries(paths)?;
+    let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
+    // The check reads the settings as the account, so they are written first (a new join code's or host's settings
+    // stay even if the binary is rejected); the unit comes after it, so a rejected binary leaves the unit as it was.
+    changed |= write_settings(paths, account, host, join)?;
+    verify_tools(paths, &binary, account)?;
+    // The binary is not in place yet; the manager does not look.
+    changed |= register(manager, &spec, paths)?;
+    changed |= place_binaries(paths, &binary)?;
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -122,20 +122,6 @@ fn apply(
     );
     manager.enable(&spec.id)?;
     pick_up(manager, &spec.id, paths, changed)
-}
-
-/// Registers the service and writes the settings. Whether either changed.
-fn settle(
-    manager: &dyn ServiceManager,
-    spec: &DaemonSpec,
-    account: &Account,
-    paths: &Paths,
-    host: Option<&str>,
-    join: Option<&JoinInfo>,
-) -> Result<bool> {
-    // The binary and the settings may not exist yet; the manager does not look.
-    let registered = register(manager, spec, paths)?;
-    Ok(write_settings(paths, account, host, join)? | registered)
 }
 
 /// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.
@@ -577,9 +563,11 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing, and has this binary, the new one, check the settings
-/// with it. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries` marks.
-fn verify_tools(paths: &Paths) -> Result<()> {
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
+/// bin dir where `account` can run it, check the settings as `account` (see `ops::check`). The copy is removed whatever
+/// the outcome. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries`
+/// marks.
+fn verify_tools(paths: &Paths, binary: &[u8], account: &Account) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
@@ -590,15 +578,15 @@ fn verify_tools(paths: &Paths) -> Result<()> {
     if !download::tools(paths).frpc.try_exists()? {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
-    supervisor::run(paths, &download::tools(paths), true)?;
-    Ok(())
+    let staged = upgrade::stage(paths, binary)?;
+    let checked = ops::check(paths, &staged, Some(*account), "the new binary's `run --check`");
+    upgrade::discard(&staged);
+    checked
 }
 
-/// Puts this binary and the symlink in place. Whether the binary changed.
-fn place_binaries(paths: &Paths) -> Result<bool> {
+/// Puts the binary `binary` and the symlink in place. Whether the binary changed.
+fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
-    let me = env::current_exe().context("finding this binary")?;
-    let binary = fs::read(&me).with_context(|| format!("reading {}", me.display()))?;
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     if let Some(link) = &paths.link {

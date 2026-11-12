@@ -1,5 +1,5 @@
-//! Stands in for frpc in `tests/`, and for the installed binary's `run --check` in `src/ops_tests.rs`. What it does is
-//! the text of `<this exe>.mode`:
+//! Stands in for frpc in `tests/`, and for a binary's `run --check` in `src/ops_tests.rs` and `src/install_tests.rs`.
+//! What it does is the text of `<this exe>.mode`, or else of `stub.mode` beside it (a staged copy has a random name):
 //!
 //! - `exit <code>`: print a line to stderr and exit.
 //! - `record <code> <file>`: write `ARG <argument>` and `ENV <name>=<value>` lines, then `TOML` and the `-c` file's
@@ -8,8 +8,8 @@
 //!   obey one byte at a time until the peer closes: `f` opens `FLOOD` connections to that port and answers `flooded`,
 //!   anything else closes them again.
 //! - `check <pass|fail> <file>`: exit 1 unless the arguments are exactly `run --check`, the environment is exactly
-//!   the `NAME=value` lines of `<file>`, in any order, and on Unix the working directory is `/`. Then `pass` exits 0;
-//!   `fail` prints a line to each stream and exits 1.
+//!   the `NAME=value` lines of `<file>`, in any order, and on Unix the working directory is `/`. Then `pass` creates
+//!   `<file>.ran` and exits 0; `fail` prints a line to each stream and exits 1.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -20,7 +20,10 @@ use std::{env, fs};
 const FLOOD: usize = 100;
 
 fn main() {
-    let mode = fs::read_to_string(env::current_exe().unwrap().with_extension("mode")).unwrap();
+    let exe = env::current_exe().unwrap();
+    let mode = fs::read_to_string(exe.with_extension("mode"))
+        .or_else(|_| fs::read_to_string(exe.with_file_name("stub.mode")))
+        .unwrap();
     let words: Vec<&str> = mode.trim_end().splitn(3, ' ').collect();
     let args: Vec<String> = env::args().skip(1).collect();
     let config = args
@@ -73,7 +76,7 @@ fn main() {
                 exit(1);
             }
             match outcome {
-                "pass" => {}
+                "pass" => fs::write(format!("{file}.ran"), "").unwrap(),
                 "fail" => {
                     println!("stub stdout line");
                     eprintln!("stub stderr line");
