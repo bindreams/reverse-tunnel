@@ -20,8 +20,8 @@ use crate::command;
 use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
 use crate::join::{self, JoinInfo};
-use crate::paths::Paths;
 use crate::ops::{mark_pending, pending_file};
+use crate::paths::Paths;
 use crate::{download, ops, service, supervisor, upgrade};
 
 /// Directories, and files everyone may read.
@@ -654,7 +654,8 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     let Err(failed) = ops::restart_pending(manager, id, paths) else {
         return Ok(());
     };
-    let (err, restart_failed) = (failed.error, "the new files are in place, but the service was not restarted");
+    let err = failed.error;
+    let restart_failed = "the new files are in place, but the service was not restarted";
     match failed.marker {
         Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
         Err(write) => Err(write.context(format!(
