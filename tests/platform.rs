@@ -1,14 +1,14 @@
-//! `install` and `uninstall` against the real service manager, account database and file system, as root. They run
-//! only on CI's `platform` job (`RT_PLATFORM_TESTS=1`), one at a time, on a machine nothing else lives on; never on a
-//! developer's machine.
-
-#![cfg(unix)]
+//! `install` and `uninstall` against the real service manager, account database and file system, as root (on Windows,
+//! as an Administrator). They run only on CI's `platform` job (`RT_PLATFORM_TESTS=1`), one at a time, on a machine
+//! nothing else lives on; never on a developer's machine.
 
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -17,20 +17,25 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use goetia::manager::{self, Installed, ServiceManager, State, Status};
+use goetia::manager::{Installed, ServiceManager, State, Status};
 use goetia::spec::Id;
+#[cfg(unix)]
 use reverse_tunnel::account::{self, Account};
 use reverse_tunnel::command;
 use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
+#[cfg(windows)]
+use reverse_tunnel::schtasks;
 use reverse_tunnel::service;
 use reverse_tunnel::upgrade;
+#[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group};
 
 const BIN: &str = env!("CARGO_BIN_EXE_reverse-tunnel");
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
 /// An account the test creates, to stand in for any local user.
+#[cfg(unix)]
 const PROBE: &str = "rtprobe";
 
 /// A join code for a domain that never resolves; its token names the domain.
@@ -62,8 +67,18 @@ fn removal_units(state: &str) -> String {
     )
 }
 
+/// Waits for the removal, which `uninstall` starts, to end. On Windows it is a scheduled task, over when it has an exit
+/// code or is gone; call it once the removal has started.
+#[cfg(windows)]
+fn wait_until_removed() {
+    wait_until("the removal's task ends", || {
+        !matches!(schtasks::exit_code(schtasks::REMOVAL), Ok(None))
+    });
+}
+
 /// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit named for the run,
 /// and is over when it is gone. Call it once the removal has started, as the unit exists from then on.
+#[cfg(unix)]
 fn wait_until_removed() {
     wait_until("the removal ends", || {
         #[cfg(target_os = "linux")]
@@ -81,25 +96,58 @@ fn output_of(program: &str, args: &[&str]) -> String {
     command::run(&[&[program], args].concat()).unwrap()
 }
 
+/// A running process: `owner` is its uid, or on Windows its user's name; `args` is its command line, or on Windows its
+/// image name.
 struct Process {
     pid: u32,
-    uid: u32,
+    owner: String,
     args: String,
 }
 
+#[cfg(unix)]
 fn processes() -> Vec<Process> {
     output_of("ps", &["-axo", "pid=,uid=,args="])
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
-            let (pid, uid) = (fields.next()?.parse().ok()?, fields.next()?.parse().ok()?);
+            let (pid, owner) = (fields.next()?.parse().ok()?, fields.next()?.to_string());
             Some(Process {
                 pid,
-                uid,
+                owner,
                 args: fields.collect::<Vec<_>>().join(" "),
             })
         })
         .collect()
+}
+
+#[cfg(windows)]
+fn processes() -> Vec<Process> {
+    // "Image Name","PID","Session Name","Session#","Mem Usage","Status","User Name",...
+    output_of("tasklist", &["/V", "/FO", "CSV", "/NH"])
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.trim().trim_matches('"').split("\",\"").collect();
+            Some(Process {
+                pid: fields.get(1)?.parse().ok()?,
+                owner: fields.get(6)?.to_string(),
+                args: fields[0].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// What `Process::owner` is for the service's account.
+#[cfg(unix)]
+fn service_owner() -> String {
+    account::lookup(service::ACCOUNT)
+        .expect("install creates the service account")
+        .uid
+        .to_string()
+}
+
+#[cfg(windows)]
+fn service_owner() -> String {
+    service::ACCOUNT.to_string()
 }
 
 /// The system, with the service not installed. Dropping it removes whatever a test installed.
@@ -116,16 +164,22 @@ impl Machine {
             Ok("1"),
             "these tests install a real service; they run on CI's platform job only (RT_PLATFORM_TESTS=1)"
         );
-        assert_eq!(rustix::process::getuid().as_raw(), 0, "these tests need root");
+        assert!(
+            cosca::elevation::is_elevated(),
+            "these tests need root, or an Administrator"
+        );
         let paths = Paths::system().unwrap();
         let id = service::id();
-        let manager = manager::native().unwrap();
+        let manager = service::manager(&paths).unwrap();
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());
         }
-        let accounts = account_names();
-        for account in [service::ACCOUNT, PROBE] {
-            assert!(!accounts.contains(account), "{account} is left from before");
+        #[cfg(unix)]
+        {
+            let accounts = account_names();
+            for account in [service::ACCOUNT, PROBE] {
+                assert!(!accounts.contains(account), "{account} is left from before");
+            }
         }
         assert!(
             matches!(manager.status(&id), Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })),
@@ -167,7 +221,8 @@ impl Machine {
 
     /// Has root write `config.yaml` anew, readable by root only: a check run as root would pass it, and the service
     /// account cannot read it. Returns its path.
-    fn hide_config(&self) -> PathBuf {
+    #[cfg(unix)]
+    fn break_config(&self) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
         let config = self.paths.config_dir.join("config.yaml");
@@ -178,13 +233,27 @@ impl Machine {
         config
     }
 
+    /// Has `config.yaml` hold what no binary accepts. Returns its path. (On Windows the check runs as the caller, so a
+    /// file only the service account cannot read is not caught.)
+    #[cfg(windows)]
+    fn break_config(&self) -> PathBuf {
+        let config = self.paths.config_dir.join("config.yaml");
+        fs::write(&config, "host: [unclosed").unwrap();
+        config
+    }
+
     /// The service's account, which exists once installed.
+    #[cfg(unix)]
     fn service_account(&self) -> Account {
         account::lookup(service::ACCOUNT).expect("install creates the service account")
     }
 
     fn frpc(&self) -> Vec<Process> {
-        let prefix = format!("{}/frpc-", self.paths.bin_dir.display());
+        let prefix = if cfg!(windows) {
+            "frpc-".to_string()
+        } else {
+            format!("{}/frpc-", self.paths.bin_dir.display())
+        };
         processes()
             .into_iter()
             .filter(|p| p.args.starts_with(&prefix))
@@ -201,6 +270,7 @@ impl Machine {
     }
 
     /// Runs `program args` as the probe account, which `acls_as_specified` creates; whether it succeeded.
+    #[cfg(unix)]
     fn probe(&self, program: &str, path: &Path) -> bool {
         let status = Command::new("sudo")
             .args(["-n", "-u", PROBE, "--", program])
@@ -216,6 +286,12 @@ impl Machine {
 impl Drop for Machine {
     fn drop(&mut self) {
         let _ = Command::new(BIN).args(["uninstall", "--finish"]).status();
+        // What a removal that was cut short, or that failed, leaves.
+        #[cfg(windows)]
+        {
+            let _ = schtasks::delete(schtasks::REMOVAL);
+            let _ = fs::remove_dir_all(self.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"));
+        }
         #[cfg(target_os = "linux")]
         {
             // `su -l` starts the account's user manager, user@<uid>.service, which outlives the session, and `userdel`
@@ -225,15 +301,19 @@ impl Drop for Machine {
                 !Command::new("pgrep").args(["-u", PROBE]).status().unwrap().success()
             });
         }
-        let removed = account::remove(PROBE);
-        if !thread::panicking() {
-            removed.unwrap();
+        #[cfg(unix)]
+        {
+            let removed = account::remove(PROBE);
+            if !thread::panicking() {
+                removed.unwrap();
+            }
         }
     }
 }
 
 /// The name of every user and group, from the account database; the lookup cache that `account::lookup` goes through
 /// can still answer for an account that has just been removed.
+#[cfg(unix)]
 fn account_names() -> BTreeSet<String> {
     let listing = if cfg!(target_os = "macos") {
         output_of("dscl", &[".", "-list", "/Users"]) + &output_of("dscl", &[".", "-list", "/Groups"])
@@ -286,13 +366,20 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     }
     let units: &[&str] = if cfg!(target_os = "macos") {
         &["/Library/LaunchDaemons", "/Library/Application Support/Goetia"]
+    } else if cfg!(windows) {
+        &[]
     } else {
         &["/etc/systemd/system"]
     };
     for dir in units {
         tree(Path::new(dir), &mut seen);
     }
+    #[cfg(unix)]
     seen.extend(account_names().into_iter().map(|name| format!("account {name}")));
+    #[cfg(windows)]
+    if schtasks::exit_code(schtasks::REMOVAL).is_ok() {
+        seen.insert(format!("task {}", schtasks::REMOVAL));
+    }
     for installed in machine.manager.list().unwrap() {
         seen.insert(match installed {
             Installed::Ours { spec, .. } => format!("service {}", spec.id),
@@ -302,11 +389,13 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     seen
 }
 
+#[cfg(unix)]
 fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().mode() & 0o7777
 }
 
 /// The modes, the owners and the access the installation is specified to give.
+#[cfg(unix)]
 fn assert_installed_as_specified(machine: &Machine) {
     let paths = &machine.paths;
     let service = machine.service_account();
@@ -363,7 +452,75 @@ fn assert_installed_as_specified(machine: &Machine) {
     }
 
     // frpc runs only after the supervisor read both tokens, which it does as the service account.
-    assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.uid == service.uid));
+    assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
+}
+
+/// What `icacls` says `who` may do with `path`: the rights of its ACE, such as `(OI)(CI)(RX)`, or none.
+#[cfg(windows)]
+fn rights_of(path: &Path, who: &str) -> Option<String> {
+    let acl = output_of("icacls", &[path.to_str().unwrap()]);
+    let (_, rest) = acl.split_once(&format!("{who}:"))?;
+    Some(rest.split_whitespace().next().unwrap().to_string())
+}
+
+/// The ACLs the installation is specified to give; the service account's own access is shown by frpc running, which
+/// needs both tokens, and by the supervisor's files in `logs/`.
+#[cfg(windows)]
+fn assert_installed_as_specified(machine: &Machine) {
+    let paths = &machine.paths;
+    let (system, admins, everyone) = ("NT AUTHORITY\\SYSTEM", "BUILTIN\\Administrators", "Everyone");
+    let readers = [everyone, "BUILTIN\\Users", "NT AUTHORITY\\Authenticated Users"];
+    let rights =
+        |path: &Path, who| rights_of(path, who).unwrap_or_else(|| panic!("{who} has no ACE on {}", path.display()));
+    let all = |path: &Path| {
+        assert!(
+            rights(path, system).ends_with("(F)") && rights(path, admins).ends_with("(F)"),
+            "{}",
+            path.display()
+        )
+    };
+    let reads = |path: &Path, who| assert!(rights(path, who).ends_with("(RX)"), "{who} on {}", path.display());
+    let no_write = |path: &Path, who: &str| {
+        let granted = rights_of(path, who).unwrap_or_default();
+        let write = ["(F)", "(M)", "(W)", "(WD)", "(AD)", "(D)", "(DC)", "(WDAC)", "(WO)"];
+        assert!(
+            !write.iter().any(|right| granted.contains(right)),
+            "{who} may write {}: {granted}",
+            path.display()
+        );
+    };
+
+    for public in [
+        &paths.config_dir,
+        &paths.config_dir.join("config.yaml"),
+        &paths.config_dir.join("bridge.pem"),
+    ] {
+        all(public);
+        reads(public, everyone);
+    }
+    reads(&paths.log_dir, everyone);
+    assert!(
+        rights(&paths.log_dir, service::ACCOUNT).ends_with("(M)"),
+        "the service account does not write logs/"
+    );
+    for secret in [
+        &paths.secrets_dir,
+        &machine.secrets().join("bridge.token"),
+        &machine.secrets().join("host.token"),
+    ] {
+        all(secret);
+        reads(secret, service::ACCOUNT);
+        for who in readers {
+            assert_eq!(rights_of(secret, who), None, "{who} has an ACE on {}", secret.display());
+        }
+    }
+    for binary in [&paths.bin_dir, &service::exe(paths)] {
+        for who in readers.into_iter().chain([service::ACCOUNT]) {
+            no_write(binary, who);
+        }
+    }
+    // frpc runs only after the supervisor read both tokens, which it does as the service account.
+    assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
 }
 
 #[test]
@@ -392,6 +549,7 @@ fn acls_as_specified() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(unix)]
 fn install_under_umask_077() {
     let machine = Machine::begin();
     let mut install = Command::new("sh");
@@ -479,10 +637,14 @@ fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) 
     session.wait().unwrap();
 
     wait_until_removed();
-    assert!(
-        !account_names().contains(service::ACCOUNT),
-        "the removal died with the session"
+    #[cfg(unix)]
+    let removed = !account_names().contains(service::ACCOUNT);
+    #[cfg(windows)]
+    let removed = matches!(
+        service::manager(&Paths::system().unwrap()).unwrap().status(&service::id()),
+        Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
     );
+    assert!(removed, "the removal died with the session");
 }
 
 #[test]
@@ -493,10 +655,17 @@ fn uninstall_survives_session_end() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let mut session = Command::new(BIN);
-    session.arg("uninstall").process_group(0);
+    session.arg("uninstall");
+    #[cfg(unix)]
+    session.process_group(0);
     uninstall_survives(session, |session, _| {
-        let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
-        kill_process_group(group, Signal::KILL).unwrap();
+        #[cfg(unix)]
+        {
+            let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
+            kill_process_group(group, Signal::KILL).unwrap();
+        }
+        #[cfg(windows)]
+        session.kill().unwrap();
     });
 }
 
@@ -609,17 +778,18 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    // Not Linux (it opens no file): what the service account, which owns logs/, can plant for root to follow.
-    #[cfg(not(target_os = "linux"))]
+    // macOS (Linux opens no file, and Windows keeps the log outside logs/): what the service account, which owns
+    // logs/, can plant for root to follow.
+    #[cfg(target_os = "macos")]
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     std::os::unix::fs::symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
     assert_eq!(
@@ -635,10 +805,34 @@ fn uninstall_leaves_nothing() {
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
 }
 
-/// Makes `path` impossible to remove, even by root, until it drops.
+/// Makes `path` impossible to remove, even by root, until it drops. On Windows a handle without delete sharing does.
+#[cfg(unix)]
 struct Unremovable<'a>(&'a Path);
 
-impl Unremovable<'_> {
+#[cfg(windows)]
+struct Unremovable<'a>(&'a Path, #[allow(dead_code)] fs::File);
+
+impl<'a> Unremovable<'a> {
+    #[cfg(unix)]
+    fn new(path: &'a Path) -> Self {
+        let held = Unremovable(path);
+        held.set(true);
+        held
+    }
+
+    #[cfg(windows)]
+    fn new(path: &'a Path) -> Self {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+            .unwrap();
+        Unremovable(path, handle)
+    }
+
+    #[cfg(unix)]
     fn set(&self, on: bool) {
         let (program, flag) = match (cfg!(target_os = "macos"), on) {
             (true, true) => ("chflags", "uchg"),
@@ -650,6 +844,7 @@ impl Unremovable<'_> {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Unremovable<'_> {
     fn drop(&mut self) {
         self.set(false);
@@ -665,8 +860,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
     // of an earlier removal can stand in for it.
     let stuck = machine.paths.config_dir.join(format!("stuck-{}", std::process::id()));
     fs::write(&stuck, "").unwrap();
-    let stuck = Unremovable(&stuck);
-    stuck.set(true);
+    let stuck = Unremovable::new(&stuck);
 
     // The unit's earlier runs are in the journal too: read from here on.
     #[cfg(target_os = "linux")]
@@ -707,6 +901,23 @@ fn a_failed_removal_logs_where_uninstall_says() {
     assert!(logged.contains(&removing), "the log has no `{removing}`: {logged}");
 }
 
+/// A newer build in a directory of its own: this one with a byte appended, which differs and which the loader ignores.
+/// Returns the directory, which removes it when it drops, and the build.
+fn newer_build() -> (tempfile::TempDir, PathBuf) {
+    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch
+        .path()
+        .join(format!("reverse-tunnel{}", env::consts::EXE_SUFFIX));
+    fs::write(&path, newer).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (scratch, path)
+}
+
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
@@ -715,24 +926,37 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
     let rendered = machine.paths.log_dir.join("frpc.toml");
     wait_until("the supervisor renders its first start", || rendered.exists());
 
-    // A file copied over the link makes the rejoin fail after it wrote the new bridge files.
-    let link = machine.paths.link.as_ref().unwrap();
-    fs::remove_file(link).unwrap();
-    fs::write(link, "").unwrap();
+    // A file copied over the link makes the rejoin fail after it wrote the new bridge files. On Windows there is no
+    // link, and a different binary cannot replace the one the running service holds (`upgrade` will).
     let rejoin = join_code("new.example.test");
-    let failed = machine.install_command(&rejoin).output().unwrap();
+    #[cfg(unix)]
+    let (blocker, mut failing) = {
+        let link = machine.paths.link.as_ref().unwrap();
+        fs::remove_file(link).unwrap();
+        fs::write(link, "").unwrap();
+        (link.clone(), machine.install_command(&rejoin))
+    };
+    #[cfg(windows)]
+    let (blocker, mut failing, _scratch) = {
+        let (scratch, newer) = newer_build();
+        let mut install = Command::new(&newer);
+        install.args(["install", "--host", "testhost", "--join", &rejoin]);
+        (service::exe(&machine.paths), install, scratch)
+    };
+    let failed = failing.output().unwrap();
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success() && stderr.contains(&link.display().to_string()),
+        !failed.status.success() && stderr.contains(&blocker.display().to_string()),
         "the rejoin should fail on the file at {}: {stderr}",
-        link.display()
+        blocker.display()
     );
     let token = fs::read_to_string(machine.secrets().join("bridge.token")).unwrap();
     assert_eq!(
         token, "token-for-new.example.test\n",
         "the rejoin failed before it wrote the bridge files"
     );
-    fs::remove_file(link).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(&blocker).unwrap();
 
     machine.install(&rejoin);
 
@@ -743,18 +967,13 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(unix)]
 fn upgrade_from_local_build() {
-    use std::os::unix::fs::PermissionsExt;
-
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let supervisor = machine.status().pid.expect("a running service has a pid");
-    // A newer build: this one with a byte appended, which differs and which the loader ignores.
-    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
-    let scratch = tempfile::tempdir().unwrap();
-    let path = scratch.path().join("reverse-tunnel");
-    fs::write(&path, &newer).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let (_scratch, path) = newer_build();
+    let newer = fs::read(&path).unwrap();
 
     let mut upgrade = Command::new(BIN);
     upgrade.arg("upgrade").arg("--from").arg(&path);
@@ -767,6 +986,18 @@ fn upgrade_from_local_build() {
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
 }
 
+/// Whether `stderr` says that the check refused `config`: unreadable by the service account, or, on Windows where the
+/// check runs as the caller, invalid.
+fn rejects_config(stderr: &str, config: &Path) -> bool {
+    if cfg!(windows) {
+        stderr.contains("the service would not start with this configuration")
+    } else {
+        stderr.contains("reading")
+            && stderr.contains(&config.display().to_string())
+            && stderr.contains("Permission denied")
+    }
+}
+
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn restart_checks_the_configuration_as_the_service_account() {
@@ -774,7 +1005,7 @@ fn restart_checks_the_configuration_as_the_service_account() {
     machine.install(&join_code("tunnel.example.test"));
     let first = machine.status().pid.expect("a running service has a pid");
 
-    // The check runs as the service account, with nothing inherited: it must pass, and the service run again.
+    // The check runs with nothing inherited (on Windows as the caller): it must pass, and the service run again.
     let mut restart = Command::new(BIN);
     restart.arg("restart");
     machine.run_ok(restart);
@@ -784,13 +1015,13 @@ fn restart_checks_the_configuration_as_the_service_account() {
     });
     let running = machine.status().pid;
 
-    let config = machine.hide_config();
+    let config = machine.break_config();
     let failed = Command::new(BIN).arg("restart").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success() && stderr.contains("reading") && stderr.contains("Permission denied"),
-        "restart should fail on reading {}: {stderr}",
+        !failed.status.success() && rejects_config(&stderr, &config),
+        "restart should fail on {}: {stderr}",
         config.display()
     );
     let status = machine.status();
@@ -800,29 +1031,20 @@ fn restart_checks_the_configuration_as_the_service_account() {
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn install_checks_the_configuration_as_the_service_account() {
-    use std::os::unix::fs::PermissionsExt;
-
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let status = machine.status();
     let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
-    let config = machine.hide_config();
+    let config = machine.break_config();
     // A newer build in a directory the service account cannot enter.
-    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
-    let scratch = tempfile::tempdir().unwrap();
-    let path = scratch.path().join("reverse-tunnel");
-    fs::write(&path, newer).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let (_scratch, path) = newer_build();
 
     let failed = Command::new(&path).arg("install").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success()
-            && stderr.contains("reading")
-            && stderr.contains(&config.display().to_string())
-            && stderr.contains("Permission denied"),
-        "install should fail on reading {}: {stderr}",
+        !failed.status.success() && rejects_config(&stderr, &config),
+        "install should fail on {}: {stderr}",
         config.display()
     );
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), outgoing);
@@ -879,6 +1101,7 @@ fn install_is_refused_while_an_uninstall_is_unfinished() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(unix)]
 fn status_needs_no_elevation() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));

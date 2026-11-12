@@ -48,12 +48,14 @@ copy in place and linked it as `reverse-tunnel` on the `PATH`.
 By default the host publishes SSH (port 22): the host is reachable at `<host>.T`. `install` is safe to run again; it
 changes only what differs.
 
-**Windows**: `install`, `upgrade` and `uninstall` are not available on Windows yet
-([goetia#104](https://github.com/bindreams/goetia/issues/104)), so a Windows host cannot be set up. The binary is
-released:
+**Windows**: download the binary, then run `install` and the other commands that say `sudo` from an elevated prompt, without
+`sudo`. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
+`%ProgramData%\reverse-tunnel`, and no link is put on the `PATH`. `restart` and `install` check `config.yaml` as the
+caller, not as the service account. `upgrade` is not available yet: to change the binary, uninstall and install again.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe
+.\reverse-tunnel.exe install
 ```
 
 ## Set up a client

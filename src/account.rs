@@ -1,15 +1,21 @@
-//! The service account of a Linux or macOS install: a system account with a group of its own.
+//! The service account of an install: on Linux and macOS a system account with a group of its own; on Windows the
+//! virtual account `NT SERVICE\reverse-tunnel`, which SCM makes with the service and removes with it.
 
-use anyhow::{Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::Result;
 
+#[cfg(unix)]
 use crate::command::run;
 
+/// The ids of the account. Windows has none: they are zero there, and `Perm` ignores them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Account {
     pub uid: u32,
     pub gid: u32,
 }
 
+#[cfg(unix)]
 pub fn lookup(name: &str) -> Option<Account> {
     let user = uzers::get_user_by_name(name)?;
     Some(Account {
@@ -19,9 +25,22 @@ pub fn lookup(name: &str) -> Option<Account> {
 }
 
 /// The account `name`, created if it is missing, and completed if a failed run left part of it.
+#[cfg(unix)]
 pub fn ensure(name: &str) -> Result<Account> {
     complete(name)?;
     lookup(name).with_context(|| format!("created {name}, but the system does not list it"))
+}
+
+/// Nothing to create: SCM makes the account when the service is registered.
+#[cfg(windows)]
+pub fn ensure(_name: &str) -> Result<Account> {
+    Ok(Account { uid: 0, gid: 0 })
+}
+
+/// Nothing to remove: SCM removes the account with the service.
+#[cfg(windows)]
+pub fn remove(_name: &str) -> Result<()> {
+    Ok(())
 }
 
 // Commands are named by absolute path: root's `PATH` may lack `sbin` (`su` without `-`).

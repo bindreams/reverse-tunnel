@@ -1,4 +1,4 @@
-//! `reverse-tunnel install` and `uninstall` on Linux and macOS.
+//! `reverse-tunnel install` and `uninstall`.
 //!
 //! Everything a run writes is final when it is written: modes and owners are set before any content (see `files`),
 //! and each step can be repeated, so an install that failed midway is finished by running it again.
@@ -6,6 +6,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
@@ -23,7 +24,15 @@ use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, ope
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
+#[cfg(windows)]
+use crate::schtasks;
 use crate::{download, ops, service, upgrade};
+
+/// There is no link on Windows (`Paths::link` is `None`).
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _link: &Path) -> io::Result<()> {
+    unreachable!("Windows installs no link")
+}
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -43,10 +52,16 @@ pub struct InstallOpts {
 /// Holds the exclusive lock until the guard is dropped. `install` and `uninstall --finish` take it for their whole
 /// run; a second one waits.
 pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
+    // On Windows `paths.lock` names a global mutex, which only administrators and SYSTEM can open.
+    #[cfg(windows)]
+    let lock = NamedLock::create(paths.lock.to_str().expect("Paths::system() guarantees Unicode"));
     // Made here, owner-only: named-lock would use the umask's mode, and whoever can open the file can hold the lock.
-    open_file(&paths.lock, Perm::new(0o600), false)?;
-    NamedLock::with_path(&paths.lock)
-        .and_then(|lock| lock.lock())
+    #[cfg(unix)]
+    let lock = {
+        open_file(&paths.lock, Perm::new(0o600), false)?;
+        NamedLock::with_path(&paths.lock)
+    };
+    lock.and_then(|lock| lock.lock())
         .with_context(|| format!("locking {}", paths.lock.display()))
 }
 
@@ -85,7 +100,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     let account = account::ensure(service::ACCOUNT)?;
     let new = env::current_exe().context("finding this binary")?;
     apply(
-        &*goetia::manager::native()?,
+        &*service::manager(paths)?,
         &account,
         paths,
         &new,
@@ -108,13 +123,17 @@ fn apply(
 ) -> Result<()> {
     let spec = service::spec(paths)?;
     let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
-    // The check reads the settings as the account, so they are written first (a new join code's or host's settings
-    // stay even if the binary is rejected); the unit comes after it, so a rejected binary leaves the unit as it was.
+    // The check reads the settings (as the account, except on Windows), so they are written first (a new join code's
+    // or host's settings stay even if the binary is rejected); the binary and the unit come after it, so a rejected
+    // binary leaves both as they were. The binary is in place before the unit: on Windows it is the unit's host, which
+    // the manager looks at.
     changed |= write_settings(paths, account, host, join)?;
-    verify_tools(paths, &binary, account)?;
-    // The binary is not in place yet; the manager does not look.
-    changed |= register(manager, &spec, paths)?;
+    verify_tools(paths, &binary, cfg!(unix).then_some(*account))?;
     changed |= place_binaries(paths, &binary)?;
+    changed |= register(manager, &spec, paths)?;
+    // The account of a Windows service exists once the service does.
+    #[cfg(windows)]
+    grant_service(paths)?;
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -169,16 +188,27 @@ pub fn removal_log(_paths: &Paths) -> String {
         .to_string()
 }
 
-/// Where the removal's output is, for the operator: a file in `logs/`, which the removal deletes when it succeeds.
+/// Where the removal's output is, for the operator: a file, which the removal deletes when it succeeds.
 #[cfg(not(target_os = "linux"))]
 pub fn removal_log(paths: &Paths) -> String {
     removal_log_file(paths).display().to_string()
 }
 
-/// The file the removal's output goes to.
+/// The file the removal's output goes to: in `logs/`, or on Windows in `removal_dir`.
 #[cfg(not(target_os = "linux"))]
 pub fn removal_log_file(paths: &Paths) -> PathBuf {
-    paths.log_dir.join("uninstall.log")
+    if cfg!(windows) {
+        removal_dir(paths).join("uninstall.log")
+    } else {
+        paths.log_dir.join("uninstall.log")
+    }
+}
+
+/// Windows: where the removal runs from, a directory next to the bin dir (so only administrators can have made it): a
+/// running binary cannot be deleted, so the removal runs a copy, which its task deletes with the directory.
+#[cfg(windows)]
+fn removal_dir(paths: &Paths) -> PathBuf {
+    paths.bin_dir.with_file_name("reverse-tunnel-uninstall")
 }
 
 /// How a waited-for removal ended, when it could be waited for.
@@ -239,10 +269,34 @@ impl Removal {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+struct Removal;
+
+#[cfg(windows)]
+impl Removal {
+    /// Waits for the removal's task to end, then deletes it. A removal that succeeded ended with 0.
+    fn wait(self) -> Result<WaitOutcome> {
+        let code = loop {
+            if let Some(code) = schtasks::exit_code(schtasks::REMOVAL)? {
+                break code;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        };
+        if let Err(err) = schtasks::delete(schtasks::REMOVAL) {
+            eprintln!("could not delete the removal's task: {err:#}");
+        }
+        Ok(if code == 0 {
+            WaitOutcome::Ended
+        } else {
+            WaitOutcome::Failed(format!("the removal's task ended with {code}"))
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
 struct Removal(std::process::Child);
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 impl Removal {
     /// Waits for the removal to end.
     fn wait(mut self) -> Result<WaitOutcome> {
@@ -286,10 +340,31 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
     Ok(Removal { unit })
 }
 
+/// Windows: a one-time scheduled task run by SYSTEM, since an OpenSSH session ends everything it started, and no job
+/// object can be left. It runs a copy of this binary from `removal_dir`, with the output in the log, and deletes the
+/// directory if the removal succeeded.
+#[cfg(windows)]
+fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
+    let dir = removal_dir(paths);
+    // Left by a failed removal.
+    remove_entry(&dir)?;
+    make_dir(&dir, Perm::new(0o700))?;
+    let copy = dir.join(exe.file_name().context("this binary has no file name")?);
+    fs::copy(exe, &copy).with_context(|| format!("copying {}", copy.display()))?;
+    let script = format!(
+        r#""{}" uninstall --finish > "{}" 2>&1 && rmdir /s /q "{}""#,
+        copy.display(),
+        removal_log_file(paths).display(),
+        dir.display()
+    );
+    schtasks::start(schtasks::REMOVAL, &dir.join("task.xml"), &script)?;
+    Ok(Removal)
+}
+
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
 /// inherits the log, which is opened here, by root without following a link: `logs/` belongs to the service account,
 /// which may have left anything in it.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -311,8 +386,15 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
 /// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
 fn rerun_uninstall(paths: &Paths) -> String {
     let exe = service::exe(paths);
+    let (sudo, elevated) = if cfg!(windows) {
+        ("", " in an elevated prompt")
+    } else {
+        ("sudo ", "")
+    };
     if exe.exists() {
-        format!("run `sudo {} uninstall`", exe.display())
+        format!("run `{sudo}{} uninstall`{elevated}", exe.display())
+    } else if cfg!(windows) {
+        "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)".to_string()
     } else {
         "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
     }
@@ -321,7 +403,7 @@ fn rerun_uninstall(paths: &Paths) -> String {
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
-    if let Err(err) = goetia::manager::native()?.uninstall(&service::id())
+    if let Err(err) = service::manager(paths)?.uninstall(&service::id())
         && !matches!(err.cause(), goetia::Error::NotInstalled { .. })
     {
         return Err(err).context("removing the service");
@@ -564,10 +646,10 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
 }
 
 /// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
-/// bin dir where `account` can run it, check the settings as `account` (see `ops::check`). The copy is removed whatever
+/// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
 /// the outcome. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries`
 /// marks.
-fn verify_tools(paths: &Paths, binary: &[u8], account: &Account) -> Result<()> {
+fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
@@ -579,9 +661,16 @@ fn verify_tools(paths: &Paths, binary: &[u8], account: &Account) -> Result<()> {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
     let staged = upgrade::stage(paths, binary)?;
-    let checked = ops::check(paths, &staged, Some(*account), "the new binary's `run --check`");
+    let checked = ops::check(paths, &staged, run_as, "the new binary's `run --check`");
     upgrade::discard(&staged);
     checked
+}
+
+/// Windows: the service's account reads `secrets/` and writes `logs/`.
+#[cfg(windows)]
+fn grant_service(paths: &Paths) -> Result<()> {
+    crate::files::grant(&paths.secrets_dir, service::ACCOUNT, "RX")?;
+    crate::files::grant(&paths.log_dir, service::ACCOUNT, "M")
 }
 
 /// Puts the binary `binary` and the symlink in place. Whether the binary changed.
@@ -661,6 +750,6 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "install_tests.rs"]
 mod tests;

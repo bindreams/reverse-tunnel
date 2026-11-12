@@ -1,6 +1,8 @@
 //! Files and directories are created the way an installation needs them: the final mode and owner are set on the open
 //! handle before any content exists, whatever the umask.
 
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
@@ -11,7 +13,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use anyhow::{Context, Result, ensure};
 
 /// Mode and owner for a file or directory. `None` leaves the creator as owner or group. Windows files take their
-/// directory's ACL, and ignore this.
+/// directory's ACL, and ignore this; a directory there is given an ACL by its mode (see `make_dir`).
 #[derive(Debug, Clone, Copy)]
 pub struct Perm {
     pub mode: u32,
@@ -71,6 +73,10 @@ pub fn apply(file: &File, perm: Perm) -> Result<()> {
 /// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had. A new directory is
 /// owner-only until then, so it is never wider than its final mode, whatever the umask. Fails if something else is
 /// there, a link to a directory included.
+///
+/// Windows: the directory is owned by Administrators, and what it holds inherits an ACL of full control for SYSTEM and
+/// Administrators, and read for Everyone if `perm.mode` has the other-read bit. A new directory inherits its parent's
+/// ACL until then, and is empty.
 pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
     #[cfg(unix)]
     let builder = {
@@ -85,8 +91,52 @@ pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("creating {}", path.display())),
         Ok(()) => {}
     }
-    let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+    // Windows cannot open a directory as a file.
+    #[cfg(unix)]
+    {
+        let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+    }
+    #[cfg(windows)]
+    protect_dir(path, perm.mode & 0o004 != 0)
+}
+
+/// The security identifiers `icacls` is given (`*` marks one): SYSTEM, Administrators and Everyone.
+#[cfg(windows)]
+const SYSTEM: &str = "*S-1-5-18";
+#[cfg(windows)]
+const ADMINISTRATORS: &str = "*S-1-5-32-544";
+#[cfg(windows)]
+const EVERYONE: &str = "*S-1-1-0";
+
+/// Windows: `make_dir`'s ACL for `dir`, replacing the one it inherited and any grant to these three.
+#[cfg(windows)]
+fn protect_dir(dir: &Path, everyone_reads: bool) -> Result<()> {
+    let mut grants = vec![format!("{SYSTEM}:(OI)(CI)F"), format!("{ADMINISTRATORS}:(OI)(CI)F")];
+    if everyone_reads {
+        grants.push(format!("{EVERYONE}:(OI)(CI)RX"));
+    }
+    let mut args: Vec<&OsStr> = vec![
+        "icacls".as_ref(),
+        dir.as_ref(),
+        "/setowner".as_ref(),
+        ADMINISTRATORS.as_ref(),
+        "/inheritance:r".as_ref(),
+    ];
+    for grant in &grants {
+        args.extend([OsStr::new("/grant:r"), OsStr::new(grant)]);
+    }
+    crate::command::run(&args).with_context(|| format!("setting the ACL of {}", dir.display()))?;
+    Ok(())
+}
+
+/// Windows: gives `account` (a name `icacls` resolves) `rights` (`icacls`'s letters) on `dir` and what it holds.
+#[cfg(windows)]
+pub fn grant(dir: &Path, account: &str, rights: &str) -> Result<()> {
+    let who = format!("{account}:(OI)(CI){rights}");
+    crate::command::run(&["icacls".as_ref(), dir.as_os_str(), "/grant".as_ref(), who.as_ref()])
+        .with_context(|| format!("giving {account} access to {}", dir.display()))?;
+    Ok(())
 }
 
 /// Fails unless `path` is a directory itself, not a link to one.

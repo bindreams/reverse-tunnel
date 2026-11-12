@@ -34,14 +34,17 @@ jobs:
       - name: Fetch every pinned frpc
         run: cargo test --locked --lib -- --ignored
 
-  # Installs the real service on the runner, as root.
+  # Installs the real service on the runner, as root; on Windows, as the runner's Administrator.
   platform:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Build the platform tests
@@ -49,13 +52,17 @@ jobs:
           set -euo pipefail
           cargo test --locked --test platform --no-run --message-format=json \
               | jq -r 'select(.target.name == "platform" and .executable != null) | .executable' \
-              > "$RUNNER_TEMP/platform-tests"
+              | tr -d '\r' > "$RUNNER_TEMP/platform-tests"
       # A hung wait ends the step, rather than the job, so that its log is kept.
       - name: Run the platform tests as root
         timeout-minutes: 10
         run: |
           set -euxo pipefail
-          sudo env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture
+          if [ "$RUNNER_OS" = Windows ]; then
+            env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture
+          else
+            sudo env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture
+          fi
 
   # Defender flags the frp Windows zip but not frpc.exe; fetch writes only frpc.exe. Fails if Defender, live and with
   # no exclusions, blocks it.

@@ -1,17 +1,17 @@
-#[cfg(unix)]
 pub mod account;
 pub mod command;
 pub mod config;
 pub mod download;
 pub mod files;
 pub mod frpc;
-#[cfg(unix)]
 pub mod install;
 pub mod join;
 pub mod logfile;
 pub mod ops;
 pub mod paths;
 pub mod report;
+#[cfg(windows)]
+pub mod schtasks;
 pub mod service;
 pub mod supervisor;
 #[cfg(all(test, unix))]

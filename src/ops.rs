@@ -15,11 +15,11 @@ use goetia::manager::{Budget, ServiceManager, State};
 use goetia::spec::Id;
 use sha2::{Digest, Sha256};
 
-#[cfg(unix)]
 use crate::account;
 use crate::command;
 use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
+use crate::install::refuse_while_uninstalling;
 use crate::paths::Paths;
 use crate::service;
 
@@ -38,8 +38,7 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 /// Has the service read its configuration again, after the installed binary has checked it as the service account: a
 /// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
 pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
-    #[cfg(unix)]
-    crate::install::refuse_while_uninstalling(paths)?;
+    refuse_while_uninstalling(paths)?;
     // Decided from the binary: the account database can answer for an account that has just been removed.
     ensure!(service::exe(paths).try_exists()?, "the service is not installed");
     check_and_restart_as(manager, paths, service_identity()?)
@@ -112,11 +111,8 @@ fn drop_to(root: bool, uid: u32, gid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Who the check runs as: the service's account on Linux and macOS; on Windows, the caller.
-#[cfg(unix)]
+/// Who the check runs as: the service's account on Linux and macOS; on Windows, always the caller (`None`).
 pub(crate) type RunAs = account::Account;
-#[cfg(not(unix))]
-pub(crate) type RunAs = std::convert::Infallible;
 
 #[cfg(unix)]
 fn service_identity() -> Result<Option<RunAs>> {

@@ -21,6 +21,8 @@ pub const STAGED: &str = "upgrade-";
 pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
     let mut file = tempfile::Builder::new()
         .prefix(STAGED)
+        // Windows runs a file only if its name has an extension.
+        .suffix(std::env::consts::EXE_SUFFIX)
         .tempfile_in(&paths.bin_dir)
         .with_context(|| format!("creating a staged copy of the binary in {}", paths.bin_dir.display()))?;
     let path = file.path().to_path_buf();

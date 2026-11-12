@@ -3,6 +3,7 @@ use std::env::consts::EXE_SUFFIX;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use goetia::manager::ServiceManager;
 use goetia::spec::{DaemonFields, DaemonSpec, Id, Kind, Restart, User};
 
 use crate::paths::Paths;
@@ -23,6 +24,27 @@ pub fn exe(paths: &Paths) -> PathBuf {
 
 pub fn id() -> Id {
     ID.parse().expect("a valid id")
+}
+
+/// The first argument with which SCM starts the installed binary as its service host: `main` then hands over to goetia.
+pub const SERVICE_HOST_ARG: &str = "--service-host";
+
+/// The service manager of this platform. On Windows the installed binary is the service host of the daemon: goetia's
+/// shim, started with `SERVICE_HOST_ARG`.
+pub fn manager(paths: &Paths) -> goetia::Result<Box<dyn ServiceManager>> {
+    #[cfg(windows)]
+    {
+        use goetia::backend::scm::manager::Scm;
+        use goetia::shim::{CheckPermissions, StandaloneShim};
+
+        let host = StandaloneShim::new(exe(paths), vec![SERVICE_HOST_ARG.into()]);
+        Ok(Box::new(Scm::with_shim(host, CheckPermissions::Enable)))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        goetia::manager::native()
+    }
 }
 
 /// The one daemon this tool installs. It names a fixed path, so an upgrade never changes the spec. Errors when
