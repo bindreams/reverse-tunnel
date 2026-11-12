@@ -61,7 +61,10 @@ push_tag() {
     # Refused: the mirror has the tag. That is fine if it is on this commit, as after another run's push.
     # `ls-remote` lists an annotated tag twice, the tag object and, as `^{}`, the commit it points to.
     local peeled
-    peeled="$(git ls-remote "$remote" "refs/tags/${tag}" "refs/tags/${tag}^{}" | awk '{ sha = $1 } END { print sha }')"
+    if ! peeled="$(git ls-remote "$remote" "refs/tags/${tag}" "refs/tags/${tag}^{}" | awk '{ sha = $1 } END { print sha }')"; then
+        echo "::error::the push was refused and the mirror's ${tag} cannot be read; the errors above are the cause" >&2
+        exit 1
+    fi
     if [[ "$peeled" == "$split" ]]; then
         echo "the mirror has ${tag} on ${split}"
         return

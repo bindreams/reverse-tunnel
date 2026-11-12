@@ -67,7 +67,8 @@ jobs:
             exit 1
           fi
           echo "commit_sha=$TARGET" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$(jq -r '.isPrerelease' <<<"$RELEASE_JSON")" >> "$GITHUB_OUTPUT"
+          PRERELEASE="$(jq -er '.isPrerelease' <<<"$RELEASE_JSON")"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -99,9 +100,15 @@ jobs:
           fi
           echo "newest of the published releases and $TAG: $NEWEST; marking $TAG latest=$LATEST"
 
-          # This run creates the tag, which fails with 422 if the ref exists, so the release is bound to $SHA and never to
-          # a tag that appeared since the draft. If a later step fails the tag stays: delete it before publishing again.
-          gh api -X POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}"
+          # This run creates the tag, so the release is bound to $SHA and never to a tag that appeared since the draft. A
+          # tag already on $SHA is this release's own, from a publish that failed after creating it.
+          if ! gh api -X POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}" >/dev/null; then
+            EXISTING="$(gh api -X GET "repos/${GH_REPO}/commits/${TAG}" --jq '.sha')"
+            if [ "$EXISTING" != "$SHA" ]; then
+              echo "::error::Tag $TAG exists on $EXISTING, not on the draft's $SHA. Delete the tag or recreate the draft."
+              exit 1
+            fi
+          fi
 
           gh release edit "$TAG" --draft=false --latest="$LATEST"
 

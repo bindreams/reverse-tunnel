@@ -25,10 +25,7 @@ fn draft_release_builds_every_release_target_under_the_name_upgrade_asks_for() {
     }
     // The file the job copies and uploads is the one the matrix names.
     let steps = build["steps"].as_sequence().expect("jobs.build.steps is a list");
-    let copy = steps
-        .iter()
-        .find(|step| step["name"].as_str() == Some("Build"))
-        .expect("a build step named Build");
+    let copy = named(steps, "Build");
     assert_eq!(
         copy["env"]["ASSET"].as_str(),
         Some("${{ matrix.asset }}"),
@@ -59,13 +56,7 @@ fn draft_release_builds_every_release_target_under_the_name_upgrade_asks_for() {
     let release = workflow["jobs"]["release"]["steps"]
         .as_sequence()
         .expect("jobs.release.steps is a list");
-    let step = |name: &str| {
-        release
-            .iter()
-            .find(|step| step["name"].as_str() == Some(name))
-            .unwrap_or_else(|| panic!("a release step named {name}"))
-    };
-    let sums = step("Write SHA256SUMS");
+    let sums = named(release, "Write SHA256SUMS");
     assert_eq!(
         sums["working-directory"].as_str(),
         Some("dist"),
@@ -79,10 +70,17 @@ fn draft_release_builds_every_release_target_under_the_name_upgrade_asks_for() {
         "the release job does not write {SUMS_FILE} over the assets"
     );
     assert!(
-        step("Create draft release pinned to commit SHA")["run"]
+        named(release, "Create draft release pinned to commit SHA")["run"]
             .as_str()
             .unwrap()
             .contains(r#"gh release create "$TAG" dist/*"#),
         "the release does not upload dist/*, where {SUMS_FILE} is written"
     );
+}
+
+fn named<'a>(steps: &'a [Value], name: &str) -> &'a Value {
+    steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("a step named {name}"))
 }
