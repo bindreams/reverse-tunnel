@@ -66,9 +66,8 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// `service::spec`, nothing inherited, as `run_as`. Fails with what the check printed.
 ///
 /// Runs as the service account with its primary group only (std drops supplementary groups when the caller is root, as
-/// `restart` is; the unit tests, run as themselves, keep theirs); the files it reads are
-/// install's, owner or primary-group readable by contract. A file the account reads only through another group is
-/// refused.
+/// `restart` is; the unit tests, run as themselves, keep theirs). The files it reads are install's and open to the
+/// account by contract; one it reads only through another group is refused.
 fn check(paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
     let spec = service::spec(paths);
     let (exe, args) = spec.command.split_first().expect("the service has a command");

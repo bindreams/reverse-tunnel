@@ -97,9 +97,9 @@ published at `jellyfin.<host>.T`; the `default` service also at `<host>.T`.
 ```
 
 Edit `config.yaml`, then `sudo reverse-tunnel restart`: it checks the file first, as the service's account, and works
-over the tunnel. The service's account is `reverse-tunnel` on Linux and `_reverse-tunnel` on macOS. A file the service
-reads, and the directories above it, must be open to that account by owner, primary group, an ACL entry for it, or
-everyone; access only through another group makes `restart` refuse a configuration that works.
+over the tunnel. The service's account is `reverse-tunnel` on Linux and `_reverse-tunnel` on macOS. That account must
+be able to read each file the service reads and search (`x`) each directory above it, as owner, primary group, an ACL
+entry for it, or everyone; access only through another group makes `restart` refuse a configuration that works.
 
 To give an `http` service a public name, run this in the bridge folder; the public name must not be under `T`, its DNS
 must point at the server that runs the bridge's Traefik, and Traefik's `letsencrypt` resolver (DNS-01; see
