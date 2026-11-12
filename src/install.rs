@@ -350,7 +350,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
     remove_link(paths)?;
-    remove_files(paths).with_context(|| format!("the binary may be gone; {}", rerun_uninstall(paths)))
+    remove_files(paths).with_context(|| rerun_uninstall(paths))
 }
 
 /// Removes the link to the binary, unless it points elsewhere.

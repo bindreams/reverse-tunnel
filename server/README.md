@@ -95,4 +95,5 @@ nobody is locked out.
    prints `login host='<name>'` for each one.
 4. Delete the old certificate from `tls/trust.pem`, leaving the new one. New join codes carry only that.
 5. `uv run ctl join-code` again, and run `sudo reverse-tunnel install --join <code>` on every host again. Until a host
-   has, it still trusts the old certificate. Only after step 4: a code made earlier still carries the old one.
+   has, it still trusts the old certificate. Only after step 4: a code made earlier still carries the old one. (On
+   RHEL and Fedora, use the full path, as in step 2.)

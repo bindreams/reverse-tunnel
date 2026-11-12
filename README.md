@@ -32,9 +32,9 @@ chmod +x reverse-tunnel
 sudo ./reverse-tunnel install
 ```
 
-`install` asks for the join code (paste it, press Enter) and names the host after the machine (lowercased); to choose a
-name, add `--host NAME`. A host with a `config.yaml` keeps its name; to rename, uninstall and install again, register
-the new name and revoke the old. It installs and starts the service, and prints a line:
+`install` asks for the join code (paste it, press Enter; or pass it as `--join CODE`) and names the host after the
+machine (lowercased); to choose a name, add `--host NAME`. A host with a `config.yaml` keeps its name, and `--host` with
+another name fails; to rename, uninstall and install again, register the new name and revoke the old. It installs and starts the service, and prints a line:
 
 ```
 Register this host on the bridge by running:
@@ -135,8 +135,8 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 
 | Command | What it does |
 |---|---|
-| `reverse-tunnel status` | What the service is doing, and which bridge it trusts (one `certificate:` line per certificate in `bridge.pem`). No `sudo`. |
-| `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. |
+| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain, and which bridge it trusts: one `certificate:` line per certificate in `bridge.pem`, two during a rotation. No `sudo`. |
+| `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
