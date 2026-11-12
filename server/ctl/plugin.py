@@ -37,6 +37,7 @@ def decide(op: str, content: dict, hosts: dict[str, str], domain: str) -> dict:
         case "Login", {"user": str(user), "metas": {"token": str(token)}}:
             if reason := _unauthenticated(user, token, hosts):
                 return _reject(reason, user)
+            print(f"login host={user!r}", file=sys.stderr)
         case "NewProxy", {"user": {"user": str(user), "metas": {"token": str(token)}}, "proxy_type": str(kind), **rest}:
             if reason := _unauthenticated(user, token, hosts):
                 return _reject(reason, user)

@@ -279,3 +279,24 @@ fn restart_failure_is_retried_by_install() {
     );
     assert!(pending_file(&machine.paths).exists());
 }
+
+#[test]
+fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
+    let machine = Machine::new();
+    let spec = service::spec(&machine.paths);
+    // The marker cannot be written without its directory; the kill fails, as the service was never installed.
+    fs::remove_dir_all(&machine.paths.config_dir).unwrap();
+    let err = pick_up(&Fake::default(), &spec.id, &machine.paths, true).unwrap_err();
+
+    let text = format!("{err:#}");
+    assert!(text.contains("the service was not restarted"), "{text}");
+    assert!(text.contains("restart-pending"), "{text}");
+    // The failure of the restart itself is there too: without it the operator is not told why.
+    let restart_error = restart(&Fake::default(), &spec.id).unwrap_err();
+    assert!(text.contains(&format!("{restart_error:#}")), "{text}");
+    assert!(!text.contains("`reverse-tunnel install` again"), "{text}");
+    assert!(
+        text.contains("`reverse-tunnel stop`") && text.contains("`reverse-tunnel start`"),
+        "{text}"
+    );
+}

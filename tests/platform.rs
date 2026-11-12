@@ -8,10 +8,10 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +20,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use goetia::manager::{self, Installed, ServiceManager, State, Status};
 use goetia::spec::Id;
 use reverse_tunnel::account::{self, Account};
+use reverse_tunnel::command;
+use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::service;
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -43,23 +45,39 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
-/// Waits for the detached `uninstall --finish`, which `uninstall` starts, to end.
+/// The removal's systemd units that are loaded in `state` (`--all` for any: a unit that is queued reads as inactive,
+/// with no process).
+#[cfg(target_os = "linux")]
+fn removal_units(state: &str) -> String {
+    output_of(
+        "systemctl",
+        &[
+            "list-units",
+            state,
+            "--plain",
+            "--no-legend",
+            "reverse-tunnel-uninstall-*",
+        ],
+    )
+}
+
+/// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit named for the run,
+/// and is over when it is gone. Call it once the removal has started, as the unit exists from then on.
 fn wait_until_removed() {
     wait_until("the removal ends", || {
-        !processes()
-            .iter()
-            .any(|process| process.args.ends_with("uninstall --finish"))
+        #[cfg(target_os = "linux")]
+        let unit_present = !removal_units("--all").trim().is_empty();
+        #[cfg(not(target_os = "linux"))]
+        let unit_present = false;
+        !unit_present
+            && !processes()
+                .iter()
+                .any(|process| process.args.ends_with("uninstall --finish"))
     });
 }
 
 fn output_of(program: &str, args: &[&str]) -> String {
-    let out = Command::new(program).args(args).output().unwrap();
-    assert!(
-        out.status.success(),
-        "{program} {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap()
+    command::run(&[&[program], args].concat()).unwrap()
 }
 
 struct Process {
@@ -184,7 +202,19 @@ impl Machine {
 impl Drop for Machine {
     fn drop(&mut self) {
         let _ = Command::new(BIN).args(["uninstall", "--finish"]).status();
-        let _ = account::remove(PROBE);
+        #[cfg(target_os = "linux")]
+        {
+            // `su -l` starts the account's user manager, user@<uid>.service, which outlives the session, and `userdel`
+            // refuses while anything of the account runs. (`pgrep` fails for an account that is gone.)
+            let _ = Command::new("loginctl").args(["terminate-user", PROBE]).status();
+            wait_until("the probe account has no processes", || {
+                !Command::new("pgrep").args(["-u", PROBE]).status().unwrap().success()
+            });
+        }
+        let removed = account::remove(PROBE);
+        if !thread::panicking() {
+            removed.unwrap();
+        }
     }
 }
 
@@ -412,29 +442,26 @@ fn rejoin_takes_effect() {
     assert_ne!(machine.status().pid, supervisor);
 }
 
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-fn uninstall_survives_session_end() {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-
-    // A session of its own, as ssh's, which is killed once the removal has started: the tunnel it ran over goes with
-    // the service.
-    let mut session = Command::new(BIN);
-    session.arg("uninstall").stdout(Stdio::piped()).process_group(0);
-    let mut session = session.spawn().unwrap();
+/// Runs `session` (which must run `uninstall`, on an installed machine) until the removal has started, ends the
+/// session with `end`, which is given the session and what it printed, and returns once the removal is over.
+fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) {
+    let mut session = session.stdout(Stdio::piped()).spawn().unwrap();
     let mut output = BufReader::new(session.stdout.take().unwrap());
-    let mut line = String::new();
-    while !line.starts_with("Removing.") {
-        line.clear();
+    let mut printed = String::new();
+    while !printed.lines().last().is_some_and(|line| line.starts_with("Removing.")) {
         assert_ne!(
-            output.read_line(&mut line).unwrap(),
+            output.read_line(&mut printed).unwrap(),
             0,
             "uninstall ended before starting the removal"
         );
     }
-    let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
-    kill_process_group(group, Signal::KILL).unwrap();
+    // The removal may cut the session before anything after "Removing." is read.
+    let log = install::removal_log(&Paths::system().unwrap());
+    assert!(
+        printed.contains(&format!("Its log will be {log}.")),
+        "{log} was not printed as the log before the removal started: {printed}"
+    );
+    end(&mut session, &printed);
     session.wait().unwrap();
 
     wait_until_removed();
@@ -446,19 +473,139 @@ fn uninstall_survives_session_end() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+fn uninstall_survives_session_end() {
+    // A session of its own, as ssh's, which is killed once the removal has started: the tunnel it ran over goes with
+    // the service.
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let mut session = Command::new(BIN);
+    session.arg("uninstall").process_group(0);
+    uninstall_survives(session, |session, _| {
+        let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
+        kill_process_group(group, Signal::KILL).unwrap();
+    });
+}
+
+/// A file the test puts under `/etc`, removed when it drops. `restart` names a service to restart after each change.
+#[cfg(target_os = "linux")]
+struct EtcFile {
+    path: &'static str,
+    restart: Option<&'static str>,
+}
+
+#[cfg(target_os = "linux")]
+impl EtcFile {
+    fn write(path: &'static str, mode: u32, content: &str, restart: Option<&'static str>) -> EtcFile {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::create_dir_all(Path::new(path).parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        let file = EtcFile { path, restart };
+        file.restart();
+        file
+    }
+
+    fn restart(&self) {
+        if let Some(service) = self.restart {
+            output_of("systemctl", &["restart", service]);
+        }
+    }
+
+    /// `KillUserProcesses=yes`: logind kills what a session leaves in its scope when it ends. Not for root, whom logind
+    /// leaves alone however `KillExcludeUsers=` is set.
+    fn kill_user_processes() -> EtcFile {
+        Self::write(
+            "/etc/systemd/logind.conf.d/zz-reverse-tunnel-test.conf",
+            0o644,
+            "[Login]
+KillUserProcesses=yes
+",
+            Some("systemd-logind"),
+        )
+    }
+
+    /// `PROBE` may run anything as root without a password.
+    fn probe_sudoers() -> EtcFile {
+        Self::write(
+            "/etc/sudoers.d/zz-reverse-tunnel-test",
+            0o440,
+            &format!(
+                "{PROBE} ALL=(root) NOPASSWD: ALL
+"
+            ),
+            None,
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for EtcFile {
+    fn drop(&mut self) {
+        let removed = fs::remove_file(self.path);
+        if !thread::panicking() {
+            removed.unwrap();
+            self.restart();
+        } else if let Some(service) = self.restart {
+            // A second panic would abort, and the cleanups after this one would not run.
+            let _ = Command::new("systemctl").args(["restart", service]).status();
+        }
+    }
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(target_os = "linux")]
+fn uninstall_survives_logind_session_end() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let _kill = EtcFile::kill_user_processes();
+    account::ensure(PROBE).unwrap();
+    let _sudoers = EtcFile::probe_sudoers();
+    // A real logind session of an ordinary user, who runs `uninstall` as root with sudo, as an administrator logged in
+    // over ssh does.
+    let mut session = Command::new("su");
+    session
+        .args(["-s", "/bin/sh", "-l", PROBE, "-c"])
+        .arg(format!("echo session=$XDG_SESSION_ID; exec sudo -n '{BIN}' uninstall"));
+    uninstall_survives(session, |session, printed| {
+        let id = printed
+            .lines()
+            .find_map(|line| line.strip_prefix("session="))
+            .expect("su -l opens a logind session");
+        // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the scope
+        // because of the drop-in. (A `su` killed outright leaves the scope alone.)
+        output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
+        session.wait().unwrap();
+        wait_until("logind has ended the session", || {
+            !Command::new("loginctl")
+                .args(["show-session", id])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        });
+    });
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
 fn uninstall_leaves_nothing() {
     let machine = Machine::begin();
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    // What the service account, which owns logs/ and runs frpc, can plant for root to follow.
+    // Not Linux (it opens no file): what the service account, which owns logs/, can plant for root to follow.
+    #[cfg(not(target_os = "linux"))]
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
-    symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
+    #[cfg(not(target_os = "linux"))]
+    std::os::unix::fs::symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
 
+    #[cfg(not(target_os = "linux"))]
     assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
     assert_eq!(
@@ -472,6 +619,78 @@ fn uninstall_leaves_nothing() {
         "removed besides ours"
     );
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
+}
+
+/// Makes `path` impossible to remove, even by root, until it drops.
+struct Unremovable<'a>(&'a Path);
+
+impl Unremovable<'_> {
+    fn set(&self, on: bool) {
+        let (program, flag) = match (cfg!(target_os = "macos"), on) {
+            (true, true) => ("chflags", "uchg"),
+            (true, false) => ("chflags", "nouchg"),
+            (false, true) => ("chattr", "+i"),
+            (false, false) => ("chattr", "-i"),
+        };
+        output_of(program, &[flag, self.0.to_str().unwrap()]);
+    }
+}
+
+impl Drop for Unremovable<'_> {
+    fn drop(&mut self) {
+        self.set(false);
+    }
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn a_failed_removal_logs_where_uninstall_says() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    // The removal starts, then cannot remove this file, and its failure names it: the name is this run's, so no line
+    // of an earlier removal can stand in for it.
+    let stuck = machine.paths.config_dir.join(format!("stuck-{}", std::process::id()));
+    fs::write(&stuck, "").unwrap();
+    let stuck = Unremovable(&stuck);
+    stuck.set(true);
+
+    // The unit's earlier runs are in the journal too: read from here on.
+    #[cfg(target_os = "linux")]
+    let cursor = {
+        output_of("journalctl", &["--sync"]);
+        output_of("journalctl", &["-n", "1", "-o", "cat", "--show-cursor"])
+            .lines()
+            .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_string))
+            .expect("journalctl prints a cursor")
+    };
+    let failed = Command::new(BIN).arg("uninstall").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success(), "the removal should fail: {stderr}");
+    let log = install::removal_log(&machine.paths);
+    assert!(stderr.contains(&log), "{log} was not named as the log: {stderr}");
+    // The unit's own result, not systemd-run's text.
+    #[cfg(target_os = "linux")]
+    assert!(
+        stderr.contains("Result=exit-code"),
+        "the unit's result is not in the failure: {stderr}"
+    );
+    // A failed unit stays loaded until it is reset.
+    #[cfg(target_os = "linux")]
+    assert_eq!(removal_units("--failed").trim(), "", "the failed unit was not reset");
+    #[cfg(target_os = "linux")]
+    let logged = {
+        output_of("journalctl", &["--sync"]);
+        let after = format!("--after-cursor={cursor}");
+        output_of(
+            "journalctl",
+            &["-u", "reverse-tunnel-uninstall-*", "--no-pager", &after],
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let logged = fs::read_to_string(install::removal_log_file(&machine.paths)).unwrap();
+    let removing = format!("removing {}", stuck.0.display());
+    assert!(logged.contains(&removing), "the log has no `{removing}`: {logged}");
 }
 
 #[test]
