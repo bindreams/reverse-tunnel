@@ -8,6 +8,7 @@ use reverse_tunnel::download::tools;
 use reverse_tunnel::install::{self, InstallOpts};
 use reverse_tunnel::ops;
 use reverse_tunnel::paths::Paths;
+use reverse_tunnel::report::report;
 use reverse_tunnel::supervisor;
 #[cfg(unix)]
 use reverse_tunnel::upgrade;
@@ -66,7 +67,12 @@ enum Command {
     Status,
 }
 
+/// std prints the error, ignoring a closed stderr; it is handed the report, as std alone would drop goetia's details.
 fn main() -> Result<ExitCode> {
+    run().map_err(|err| anyhow::anyhow!(report(&err)))
+}
+
+fn run() -> Result<ExitCode> {
     match Cli::parse().command {
         Command::Run { check } => {
             let paths = Paths::system()?;
@@ -101,12 +107,12 @@ fn main() -> Result<ExitCode> {
         }
         Command::Start => {
             require_root()?;
-            ops::start(&*goetia::manager::native()?, &Paths::system()?)?;
+            ops::start(&*goetia::manager::native()?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Stop => {
             require_root()?;
-            ops::stop(&*goetia::manager::native()?, &Paths::system()?)?;
+            ops::stop(&*goetia::manager::native()?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Restart => {

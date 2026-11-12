@@ -23,14 +23,14 @@ use crate::files::{Perm, open_file, remove_entry};
 use crate::paths::Paths;
 use crate::service;
 
-pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
-    manager.start(&service::spec(paths).id, Budget::Unbounded)?;
+pub fn start(manager: &dyn ServiceManager) -> Result<()> {
+    manager.start(&service::id(), Budget::Unbounded)?;
     println_best_effort("The service is running.");
     Ok(())
 }
 
-pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
-    manager.stop(&service::spec(paths).id, Budget::Unbounded)?;
+pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
+    manager.stop(&service::id(), Budget::Unbounded)?;
     println_best_effort("The service is stopped. It starts again at boot if it is enabled.");
     Ok(())
 }
@@ -54,7 +54,7 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
         run_as,
         &format!("the installed binary `{}`'s `run --check`", exe.display()),
     )?;
-    let outcome = restart_pending(manager, &service::spec(paths).id, paths).map_err(|failed| {
+    let outcome = restart_pending(manager, &service::id(), paths).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
             Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
@@ -75,7 +75,7 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
 /// install's and open to the account by contract.
 pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
-    let spec = service::spec(paths);
+    let spec = service::spec(paths)?;
     let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
     check.args(args).arg("--check").env_clear().envs(&spec.env);
@@ -176,7 +176,7 @@ pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> 
 pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
     match manager.kill(id) {
         Ok(()) => Ok(RestartOutcome::Killed),
-        Err(goetia::Error::NotRunning { .. }) => {
+        Err(err) if matches!(err.cause(), goetia::Error::NotRunning { .. }) => {
             manager.start(id, Budget::Unbounded)?;
             Ok(RestartOutcome::Started)
         }
@@ -192,7 +192,7 @@ pub fn println_best_effort(message: &str) {
 
 /// Never prints a token.
 pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
-    let state = manager.status(&service::spec(paths).id)?;
+    let state = manager.status(&service::id())?;
     let word = match state.state {
         State::Running => "running",
         State::Stopped => "stopped",

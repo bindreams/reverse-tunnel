@@ -106,7 +106,7 @@ fn apply(
     join: Option<&JoinInfo>,
     mut changed: bool,
 ) -> Result<()> {
-    let spec = service::spec(paths);
+    let spec = service::spec(paths)?;
     let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
     // The check reads the settings as the account, so they are written first (a new join code's or host's settings
     // stay even if the binary is rejected); the unit comes after it, so a rejected binary leaves the unit as it was.
@@ -321,10 +321,10 @@ fn rerun_uninstall(paths: &Paths) -> String {
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
-    let spec = service::spec(paths);
-    match goetia::manager::native()?.uninstall(&spec.id) {
-        Ok(()) | Err(goetia::Error::NotInstalled { .. }) => {}
-        Err(err) => return Err(err).context("removing the service"),
+    if let Err(err) = goetia::manager::native()?.uninstall(&service::id())
+        && !matches!(err.cause(), goetia::Error::NotInstalled { .. })
+    {
+        return Err(err).context("removing the service");
     }
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
@@ -651,11 +651,12 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     };
     let err = failed.error;
     let restart_failed = "the new files are in place, but the service was not restarted";
+    // The remedy leads because the restart's own error is appended after the last words.
     match failed.marker {
-        Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
-        Err(write) => Err(write.context(format!(
-            "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will \
-            not notice, so run `reverse-tunnel restart`"
+        Ok(()) => Err(err.context(format!("run `reverse-tunnel install` again to retry; {restart_failed}"))),
+        Err(write) => Err(err.context(format!(
+            "the marker for retrying the restart could not be written ({write:#}): the next `install` will not \
+            notice, so run `reverse-tunnel restart`; {restart_failed}"
         ))),
     }
 }
