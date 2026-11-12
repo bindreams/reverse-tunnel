@@ -11,6 +11,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# One draft run at a time, whatever the version. A duplicate dispatch waits, then fails fast at `validate` on the first
+# run's draft.
+concurrency:
+  group: draft-release
+  cancel-in-progress: false
+
 jobs:
   validate:
     name: Validate version
@@ -22,6 +28,7 @@ jobs:
       contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -45,17 +52,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         shell: bash
-        run: bash .github/scripts/assert-release-absent.sh "v${VERSION}"
+        run: bash .github/scripts/assert-release-absent.sh "$TAG"
 
       # A tag with no release attached is the dangerous case: `gh release create --target` is silently ignored when
       # the tag exists, binding the release to the old tag's commit.
       - name: Fail if the tag already exists
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         shell: bash
-        run: bash .github/scripts/assert-tag-absent.sh "v${VERSION}"
+        run: bash .github/scripts/assert-tag-absent.sh "$TAG"
 
       # `workflow_dispatch` accepts --ref, so without this a draft can be pinned to unmerged code.
       - name: Verify the release commit is on main
@@ -131,11 +138,6 @@ jobs:
   release:
     name: Create draft release
     needs: [validate, ci, build]
-    # Keyed on the normalized version, so `0.1.0` and `v0.1.0` take turns. The re-check below then sees the first
-    # run's draft and fails the second.
-    concurrency:
-      group: draft-release-${{ needs.validate.outputs.version }}
-      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -162,23 +164,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.validate.outputs.version }}
+          TAG: ${{ needs.validate.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
-          bash .github/scripts/assert-tag-absent.sh "v${VERSION}"
-          bash .github/scripts/assert-release-absent.sh "v${VERSION}"
+          bash .github/scripts/assert-tag-absent.sh "$TAG"
+          bash .github/scripts/assert-release-absent.sh "$TAG"
 
       - name: Create draft release pinned to commit SHA
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.validate.outputs.version }}
+          TAG: ${{ needs.validate.outputs.tag }}
           SHA: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="v${VERSION}"
           URL="$(gh release create "$TAG" dist/* \
             --draft \
             --generate-notes \

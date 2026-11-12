@@ -50,13 +50,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # `workflow_dispatch` accepts any ref, and without a tag the split goes to the mirror's `main`.
+      # `workflow_dispatch` accepts any ref, and the split goes to the mirror's `main` or under a release tag: either
+      # way only a commit on `main` (the checked-out commit is the tag's, when there is a tag).
       - name: Check the commit is on main
-        if: inputs.tag == ''
-        env:
-          SHA: ${{ github.sha }}
         shell: bash
-        run: bash .github/scripts/assert-on-main.sh "$SHA"
+        run: bash .github/scripts/assert-on-main.sh "$(git rev-parse HEAD)"
 
       # GitHub's host keys come from its API over TLS, so the first connection trusts nothing it was not told.
       - name: Set up the deploy key
