@@ -64,8 +64,11 @@ fn host_checked_by(program: &str) -> (TempDir, Paths, Fake) {
 }
 
 #[cfg(unix)]
-fn as_current_user() -> Option<(u32, u32)> {
-    Some((uzers::get_current_uid(), uzers::get_current_gid()))
+fn as_current_user() -> Option<crate::account::Account> {
+    Some(crate::account::Account {
+        uid: uzers::get_current_uid(),
+        gid: uzers::get_current_gid(),
+    })
 }
 
 #[cfg(unix)]
@@ -101,4 +104,16 @@ fn restart_says_whether_it_killed_or_started_the_service() {
     assert_eq!(restart(&manager, &id).unwrap(), RestartOutcome::Started);
     manager.seed_state(id.as_str(), State::Running);
     assert_eq!(restart(&manager, &id).unwrap(), RestartOutcome::Killed);
+}
+
+#[test]
+fn restart_without_the_installed_binary_says_the_service_is_not_installed() {
+    let (_dir, paths) = host();
+    let manager = Fake::default();
+
+    let err = check_and_restart(&manager, &paths).unwrap_err();
+
+    // Not the account lookup's message: the account database can still answer for an account just removed.
+    assert_eq!(err.to_string(), "the service is not installed");
+    assert_eq!(manager.calls(), []);
 }

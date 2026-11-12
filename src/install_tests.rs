@@ -359,7 +359,10 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     let restart_error = ops::restart(&Fake::default(), &spec.id).unwrap_err();
     assert!(text.contains(&format!("{restart_error:#}")), "{text}");
     assert!(!text.contains("`reverse-tunnel install` again"), "{text}");
-    assert!(text.contains("`reverse-tunnel restart`"), "{text}");
+    assert!(
+        text.contains("the next `install` will not notice, so run `reverse-tunnel restart`"),
+        "{text}"
+    );
 }
 
 #[test]

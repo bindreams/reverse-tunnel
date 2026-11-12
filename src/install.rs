@@ -659,7 +659,8 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     match failed.marker {
         Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
         Err(write) => Err(write.context(format!(
-            "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will              not notice, so run `reverse-tunnel restart`"
+            "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will \
+            not notice, so run `reverse-tunnel restart`"
         ))),
     }
 }
