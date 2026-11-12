@@ -201,14 +201,16 @@ pub fn removal_log(paths: &Paths) -> String {
     removal_log_file(paths).display().to_string()
 }
 
-/// The file the removal's output goes to: in `logs/`, or on Windows in `removal_dir`.
-#[cfg(not(target_os = "linux"))]
+/// The file the removal's output goes to: in `logs/`.
+#[cfg(target_os = "macos")]
 pub fn removal_log_file(paths: &Paths) -> PathBuf {
-    if cfg!(windows) {
-        removal_dir(paths).join("uninstall.log")
-    } else {
-        paths.log_dir.join("uninstall.log")
-    }
+    paths.log_dir.join("uninstall.log")
+}
+
+/// The file the removal's output goes to: in `removal_dir`.
+#[cfg(windows)]
+pub fn removal_log_file(paths: &Paths) -> PathBuf {
+    removal_dir(paths).join("uninstall.log")
 }
 
 /// Windows: where the removal runs from, a directory next to the bin dir (so only administrators can have made it): a
