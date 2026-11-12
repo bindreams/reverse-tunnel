@@ -901,6 +901,7 @@ dependencies = [
  "jiff",
  "known-folders",
  "libc",
+ "libsearch-guard",
  "named-lock",
  "rustix",
  "serde",
