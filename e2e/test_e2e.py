@@ -119,6 +119,7 @@ class Frpc:
             if found.search(line):
                 return line
         for line in self.proc.stdout:
+            print("frpc:", line, end="")  # pytest -s: a hung wait leaves the log
             self.lines.append(line)
             if found.search(line):
                 return line
@@ -148,12 +149,23 @@ class Stack:
     def compose(self, *args):
         return run("docker", "compose", *args, cwd=SERVER)
 
-    def ssh(self, command: str) -> subprocess.CompletedProcess:
+    def ssh_command(self, command: str) -> tuple[list, dict]:
         options = ["IdentitiesOnly=yes", "StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null", "BatchMode=yes"]
         flags = [f"-o{o}" for o in options]
         env = {**os.environ, "SSL_CERT_FILE": str(self.root)}  # websocat trusts Pebble's root
         cmd = ["ssh", "-F", self.ssh_config, "-i", self.key, "-l", getpass.getuser(), "-oLogLevel=ERROR", *flags]
-        return run(*cmd, HOST, command, env=env, check=False)
+        return [*cmd, HOST, command], env
+
+    def ssh_popen(self, command: str) -> subprocess.Popen:
+        cmd, env = self.ssh_command(command)
+        return subprocess.Popen(cmd, env=env)  # its output goes to the log (pytest -s)
+
+    def ssh(self, command: str) -> subprocess.CompletedProcess:
+        cmd, env = self.ssh_command(command)
+        done = run(*cmd, env=env, check=False)
+        if done.returncode:
+            print(f"ssh {command!r} ended with {done.returncode}: {done.stderr.strip()}")
+        return done
 
     def ssh_works(self) -> bool:
         return self.ssh(f"echo {MARK}").stdout.strip() == MARK
@@ -380,8 +392,10 @@ def test_upgrade_through_tunnel_keeps_access(stack, registered):
     new.write_bytes(BUILT.read_bytes() + b"\ne2e upgrade\n")  # a different build; ELF ignores what follows it
     new.chmod(0o755)
     want = hashlib.sha256(new.read_bytes()).hexdigest()
-    stack.ssh(f"sudo {INSTALLED} upgrade --from {new}")  # the restart cuts it
+    # The restart cuts this session, and ssh may then wait for a connection that nothing closes.
+    session = stack.ssh_popen(f"sudo {INSTALLED} upgrade --from {new}")
     pid = wait_until(lambda: (p := stack.pid()) != old_pid and p)
+    session.kill()
     assert hashlib.sha256(INSTALLED.read_bytes()).hexdigest() == want
     assert run("sudo", "sha256sum", f"/proc/{pid}/exe").stdout.split()[0] == want
     wait_until(stack.ssh_works)
