@@ -52,9 +52,16 @@ pub struct InstallOpts {
 /// Holds the exclusive lock until the guard is dropped. `install` and `uninstall --finish` take it for their whole
 /// run; a second one waits.
 pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
-    // On Windows `paths.lock` names a global mutex, which only administrators and SYSTEM can open.
+    // On Windows `paths.lock` names a global mutex, which only administrators and SYSTEM can open; named-lock adds the
+    // `Global\` itself.
     #[cfg(windows)]
-    let lock = NamedLock::create(paths.lock.to_str().expect("Paths::system() guarantees Unicode"));
+    let lock = NamedLock::create(
+        paths
+            .lock
+            .to_str()
+            .and_then(|name| name.strip_prefix("Global\\"))
+            .expect("Paths::system() names a global mutex"),
+    );
     // Made here, owner-only: named-lock would use the umask's mode, and whoever can open the file can hold the lock.
     #[cfg(unix)]
     let lock = {

@@ -352,10 +352,12 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
         paths.config_dir.parent(),
         paths.log_dir.parent(),
     ];
+    // On Windows, `logs/` is in `config_dir`, which an install creates.
     for parent in parents
         .into_iter()
         .flatten()
         .chain(paths.link.as_deref().and_then(Path::parent))
+        .filter(|parent| parent.exists())
     {
         for entry in fs::read_dir(parent).unwrap() {
             let path = entry.unwrap().path();
