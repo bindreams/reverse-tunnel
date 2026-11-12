@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
+use ureq::ResponseExt;
 
 use crate::files::{Perm, Replace, write_atomic};
 use crate::paths::Paths;
@@ -23,7 +24,7 @@ pub const RELEASE_TARGETS: [&str; 5] = [
 const VERSION: &str = "0.71.1";
 
 /// How long a download may deliver nothing before `fetch` gives up on it.
-const STALL: Duration = Duration::from_secs(60);
+pub(crate) const STALL: Duration = Duration::from_secs(60);
 
 /// A tool release archive, and the one file of it that gets installed. `url` ends in `.zip` or `.tar.gz`.
 pub struct Pin {
@@ -94,16 +95,21 @@ fn file_name(name: &str, version: &str) -> String {
     format!("{name}-{version}{EXE_SUFFIX}")
 }
 
-/// The pin for the OS and architecture this binary runs on.
-pub fn host_pin() -> Result<&'static Pin> {
-    let target = match (OS, ARCH) {
+/// The release target for the OS and architecture this binary runs on.
+pub fn host_target() -> Result<&'static str> {
+    Ok(match (OS, ARCH) {
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         ("macos", "x86_64") => "x86_64-apple-darwin",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        _ => bail!("no pinned frpc for {OS} on {ARCH}"),
-    };
+        _ => bail!("no release for {OS} on {ARCH}"),
+    })
+}
+
+/// The pin for the OS and architecture this binary runs on.
+pub fn host_pin() -> Result<&'static Pin> {
+    let target = host_target()?;
     Ok(PINS
         .iter()
         .find(|pin| pin.target == target)
@@ -121,20 +127,48 @@ pub fn fetch(pin: &Pin, dest_dir: &Path) -> Result<PathBuf> {
     install(pin, &download(pin.url, STALL)?, dest_dir)
 }
 
+struct Transfer {
+    /// Where the request ended, after redirects.
+    url: String,
+    body: Vec<u8>,
+}
+
+/// Reader-thread messages of `transfer`; an empty `Chunk` ends the body.
+enum Piece {
+    Url(String),
+    Chunk(Vec<u8>),
+}
+
+/// The body at `url`. Fails, naming `url`, when nothing arrives for `stall`; see `transfer`.
+pub(crate) fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
+    Ok(transfer(url, stall, false)?.body)
+}
+
+/// Where `url` ends up after redirects, from a HEAD request. Fails like `download`.
+pub(crate) fn resolve(url: &str, stall: Duration) -> Result<String> {
+    Ok(transfer(url, stall, true)?.url)
+}
+
 /// Fails, naming `url`, when nothing arrives for `stall`; a slow download that keeps progressing is never cut off. A
-/// reader thread feeds the chunks, so the wait covers connecting too.
-fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
+/// reader thread feeds the pieces, so the wait covers connecting too. `head`: a HEAD request, whose body is empty.
+fn transfer(url: &str, stall: Duration, head: bool) -> Result<Transfer> {
     let (send, recv) = mpsc::channel();
     let owned = url.to_string();
     thread::spawn(move || {
         let read = || -> Result<()> {
-            let mut body = ureq::get(&owned).call()?.into_body().into_reader();
+            let response = if head { ureq::head(&owned) } else { ureq::get(&owned) }.call()?;
+            send.send(Ok(Piece::Url(response.get_uri().to_string()))).ok();
+            if head {
+                send.send(Ok(Piece::Chunk(Vec::new()))).ok();
+                return Ok(());
+            }
+            let mut body = response.into_body().into_reader();
             loop {
                 let mut chunk = vec![0; 1 << 16];
                 let len = body.read(&mut chunk)?;
                 chunk.truncate(len);
                 // An empty chunk is the end of the body.
-                if send.send(Ok(chunk)).is_err() || len == 0 {
+                if send.send(Ok(Piece::Chunk(chunk))).is_err() || len == 0 {
                     return Ok(());
                 }
             }
@@ -143,31 +177,36 @@ fn download(url: &str, stall: Duration) -> Result<Vec<u8>> {
             let _ = send.send(Err(err));
         }
     });
-    let mut archive = Vec::new();
+    let mut got = Transfer {
+        url: url.to_string(),
+        body: Vec::new(),
+    };
     loop {
         match recv.recv_timeout(stall) {
-            Ok(chunk) => {
-                let chunk = chunk.with_context(|| format!("downloading {url}"))?;
-                if chunk.is_empty() {
-                    return Ok(archive);
-                }
-                archive.extend(chunk);
-            }
+            Ok(piece) => match piece.with_context(|| format!("downloading {url}"))? {
+                Piece::Url(ended) => got.url = ended,
+                Piece::Chunk(chunk) if chunk.is_empty() => return Ok(got),
+                Piece::Chunk(chunk) => got.body.extend(chunk),
+            },
             Err(RecvTimeoutError::Disconnected) => bail!("downloading {url}: the reader stopped before the end"),
             Err(RecvTimeoutError::Timeout) => bail!("downloading {url}: no data for {stall:?}"),
         }
     }
 }
 
+/// Fails unless `data` has SHA-256 `want` (hex). `what` and `said_by` only label the error.
+pub(crate) fn verify_digest(what: &str, data: &[u8], want: &str, said_by: &str) -> Result<()> {
+    let digest = hex::encode(Sha256::digest(data));
+    ensure!(
+        digest.eq_ignore_ascii_case(want),
+        "{what} has SHA-256 {digest}, not the {said_by} {want}"
+    );
+    Ok(())
+}
+
 /// Writes only the pinned member, and only if `archive` matches the pinned digest.
 fn install(pin: &Pin, archive: &[u8], dest_dir: &Path) -> Result<PathBuf> {
-    let digest = hex::encode(Sha256::digest(archive));
-    ensure!(
-        digest == pin.sha256,
-        "{} has SHA-256 {digest}, not the pinned {}",
-        pin.url,
-        pin.sha256
-    );
+    verify_digest(pin.url, archive, pin.sha256, "pinned")?;
     let mut tool = Vec::new();
     if pin.url.ends_with(".zip") {
         let mut zip = zip::ZipArchive::new(Cursor::new(archive))?;
