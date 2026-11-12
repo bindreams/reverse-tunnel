@@ -106,7 +106,8 @@ fn render_config(setup: &Setup<'_>, port: u16, dir: &Path) -> Result<PathBuf> {
 
 /// Has frpc verify the rendered configuration.
 async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
-    // `--check` runs as the caller, who may not write the log dir.
+    // A temp dir, not the log dir: as root (`install`'s check) this would leave files there that the service account
+    // cannot overwrite, and as the account (`restart`'s) it would overwrite the running service's frpc.toml.
     let dir = tempfile::tempdir()?;
     let config = render_config(setup, CHECK_PORT, dir.path())?;
     let status = setup.frpc(&["verify"], &config).status().await;

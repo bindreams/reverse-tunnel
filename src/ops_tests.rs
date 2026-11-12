@@ -5,7 +5,7 @@ use goetia::manager::fake::Fake;
 use tempfile::TempDir;
 
 use super::*;
-use crate::{download, service};
+use crate::service;
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 /// SHA-256 of `CERT`'s DER.
@@ -47,38 +47,58 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(!text.contains("secret"), "{text}");
 }
 
-#[test]
-fn restart_with_a_broken_config_leaves_the_service_alone() {
-    let (_dir, paths) = host();
-    fs::write(paths.config_dir.join("config.yaml"), "services: [").unwrap();
+/// A host whose installed binary is a link to `program`, which stands for what `run --check` does; running as the
+/// current user, which stands for the service account.
+#[cfg(unix)]
+fn host_checked_by(program: &str) -> (TempDir, Paths, Fake) {
+    let (dir, paths) = host();
+    fs::create_dir(&paths.bin_dir).unwrap();
+    // A link: writing a program and running it races a fork.
+    std::os::unix::fs::symlink(program, service::exe(&paths)).unwrap();
     let manager = Fake::default();
     let id = service::spec(&paths).id;
     manager.install(&service::spec(&paths), false).unwrap();
     manager.seed_state(id.as_str(), State::Running);
+    fs::write(pending_file(&paths), "").unwrap();
+    (dir, paths, manager)
+}
 
-    let err = check_and_restart(&manager, &paths, &download::tools(&paths)).unwrap_err();
-
-    assert!(format!("{err:#}").contains("config.yaml"), "{err:#}");
-    assert_eq!(manager.calls(), []);
+#[cfg(unix)]
+fn as_current_user() -> Option<(u32, u32)> {
+    Some((uzers::get_current_uid(), uzers::get_current_gid()))
 }
 
 #[cfg(unix)]
 #[test]
-fn restart_with_a_valid_config_kills_the_service() {
-    let (_dir, paths) = host();
-    for token in ["bridge.token", "host.token"] {
-        fs::write(paths.secrets_dir.join(token), "secret\n").unwrap();
-    }
-    fs::create_dir(&paths.bin_dir).unwrap();
-    // An frpc that accepts whatever it is asked to verify. A link: writing a program and running it races a fork.
-    let tools = download::tools(&paths);
-    std::os::unix::fs::symlink("/bin/true", &tools.frpc).unwrap();
-    let manager = Fake::default();
-    let id = service::spec(&paths).id;
-    manager.install(&service::spec(&paths), false).unwrap();
-    manager.seed_state(id.as_str(), State::Running);
+fn restart_with_a_failing_check_leaves_the_service_alone() {
+    let (_dir, paths, manager) = host_checked_by("/bin/false");
 
-    check_and_restart(&manager, &paths, &tools).unwrap();
+    let err = check_and_restart_as(&manager, &paths, as_current_user()).unwrap_err();
+
+    assert!(format!("{err:#}").contains("ended with"), "{err:#}");
+    assert_eq!(manager.calls(), []);
+    assert!(pending_file(&paths).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_with_a_passing_check_kills_the_service() {
+    let (_dir, paths, manager) = host_checked_by("/bin/true");
+    let id = service::spec(&paths).id;
+
+    check_and_restart_as(&manager, &paths, as_current_user()).unwrap();
 
     assert_eq!(manager.calls(), [("kill", id.to_string())]);
+    assert!(!pending_file(&paths).exists());
+}
+
+#[test]
+fn restart_says_whether_it_killed_or_started_the_service() {
+    let (_dir, paths) = host();
+    let (manager, id) = (Fake::default(), service::spec(&paths).id);
+    manager.install(&service::spec(&paths), false).unwrap();
+
+    assert_eq!(restart(&manager, &id).unwrap(), RestartOutcome::Started);
+    manager.seed_state(id.as_str(), State::Running);
+    assert_eq!(restart(&manager, &id).unwrap(), RestartOutcome::Killed);
 }

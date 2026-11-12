@@ -21,6 +21,7 @@ use crate::config::{Config, valid_label};
 use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
 use crate::join::{self, JoinInfo};
 use crate::paths::Paths;
+use crate::ops::{mark_pending, pending_file};
 use crate::{download, ops, service, supervisor, upgrade};
 
 /// Directories, and files everyone may read.
@@ -54,19 +55,8 @@ fn uninstalling_file(paths: &Paths) -> PathBuf {
     paths.config_dir.join("uninstalling")
 }
 
-/// Exists from the first change to what the service runs until the service has picked it up, so that a run that fails
-/// in between is made up for by the next.
-fn pending_file(paths: &Paths) -> PathBuf {
-    paths.config_dir.join("restart-pending")
-}
-
-fn mark_pending(paths: &Paths) -> Result<()> {
-    open_file(&pending_file(paths), Perm::new(0o600), false)?;
-    Ok(())
-}
-
-/// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything it reads
-/// changed. Prints the line that registers the host on the bridge.
+/// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything `install`
+/// writes changed. Prints the line that registers the host on the bridge.
 pub fn install(opts: InstallOpts) -> Result<()> {
     let paths = &opts.paths;
     let _lock = lock(paths)?;
@@ -654,27 +644,21 @@ fn revoke_line(paths: &Paths) -> Result<String> {
     Ok(format!("uv run ctl revoke {}", Config::load(&config_file(paths))?.host))
 }
 
-/// Has the service run what is now in place. After a change it is killed, and the manager restarts it; it is never
-/// stopped first, because run over the tunnel the stop cuts this session and the start never comes. Without one, it
-/// is started, which leaves a running service alone.
-///
-/// The restart marker is removed just before, since nothing that runs after the kill is sure to run; it is put back
-/// if the service was not picked up.
+/// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is
+/// started, which leaves a running service alone.
 fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
     if !changed {
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }
-    remove_entry(&pending_file(paths))?;
-    let Err(err) = ops::restart(manager, id) else {
+    let Err(failed) = ops::restart_pending(manager, id, paths) else {
         return Ok(());
     };
-    let restart_failed = "the new files are in place, but the service was not restarted";
-    match mark_pending(paths) {
+    let (err, restart_failed) = (failed.error, "the new files are in place, but the service was not restarted");
+    match failed.marker {
         Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
         Err(write) => Err(write.context(format!(
-            "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will \
-             not notice, so run `reverse-tunnel restart`"
+            "{restart_failed} ({err:#}), and the marker for retrying it could not be written; the next `install` will              not notice, so run `reverse-tunnel restart`"
         ))),
     }
 }

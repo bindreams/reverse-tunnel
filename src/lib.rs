@@ -1,6 +1,5 @@
 #[cfg(unix)]
 pub mod account;
-#[cfg(unix)]
 pub mod command;
 pub mod config;
 pub mod download;

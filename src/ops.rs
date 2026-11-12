@@ -1,8 +1,13 @@
 //! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
-//! user may read. Only `check_and_restart` reads `secrets_dir`, as root, through the configuration check.
+//! user may read. Nothing here reads `secrets_dir`: the check that `restart` runs is the installed binary's, as the
+//! service account.
 
 use std::fs;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::process;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -11,10 +16,13 @@ use goetia::manager::{Budget, ServiceManager, State};
 use goetia::spec::Id;
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
+use crate::account;
+use crate::command;
 use crate::config::Config;
-use crate::download::Tools;
+use crate::files::{Perm, open_file, remove_entry};
 use crate::paths::Paths;
-use crate::{service, supervisor};
+use crate::service;
 
 pub fn start(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     manager.start(&service::spec(paths).id, Budget::Unbounded)?;
@@ -28,21 +36,104 @@ pub fn stop(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Has the service read its configuration again, after checking it. The check is `run --check`, in this process; when
-/// it fails the service is left as it is.
-pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths, tools: &Tools) -> Result<()> {
-    supervisor::run(paths, tools, true)?;
-    restart(manager, &service::spec(paths).id)?;
-    println_best_effort("The service is restarting.");
+/// Has the service read its configuration again, after the installed binary has checked it as the service account: a
+/// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
+pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
+    check_and_restart_as(manager, paths, service_identity()?)
+}
+
+/// `check_and_restart`, with the check run as `run_as` (a uid and gid; `None`: as the caller).
+fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Option<(u32, u32)>) -> Result<()> {
+    check(paths, run_as)?;
+    let outcome = restart_pending(manager, &service::spec(paths).id, paths).map_err(|failed| {
+        failed.error.context(match failed.marker {
+            Ok(()) => "the service was not restarted".to_string(),
+            Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
+        })
+    })?;
+    println_best_effort(match outcome {
+        RestartOutcome::Killed => "The service is restarting.",
+        RestartOutcome::Started => "The service was not running; it is started.",
+    });
     Ok(())
+}
+
+/// The installed binary's `run --check`, started as the service starts it: its command and environment from
+/// `service::spec`, nothing inherited, as `run_as`. Fails with what the check printed.
+fn check(paths: &Paths, run_as: Option<(u32, u32)>) -> Result<()> {
+    let spec = service::spec(paths);
+    let (exe, args) = spec.command.split_first().expect("the service has a command");
+    let mut check = process::Command::new(exe);
+    check.args(args).arg("--check").env_clear().envs(&spec.env);
+    #[cfg(unix)]
+    if let Some((uid, gid)) = run_as {
+        check.uid(uid).gid(gid);
+    }
+    #[cfg(not(unix))]
+    let _ = run_as;
+    command::run_built(&mut check).context("the service would not start with this configuration")?;
+    Ok(())
+}
+
+/// The service's account on Linux and macOS; on Windows the check runs as the caller.
+#[cfg(unix)]
+fn service_identity() -> Result<Option<(u32, u32)>> {
+    let account = account::lookup(service::ACCOUNT)
+        .with_context(|| format!("the service is not installed: there is no account {}", service::ACCOUNT))?;
+    Ok(Some((account.uid, account.gid)))
+}
+
+#[cfg(not(unix))]
+fn service_identity() -> Result<Option<(u32, u32)>> {
+    Ok(None)
+}
+
+/// How `restart` had the service run again.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RestartOutcome {
+    Killed,
+    /// It was not running.
+    Started,
+}
+
+/// Why `restart_pending` did not restart the service, and whether the marker is back.
+pub struct NotRestarted {
+    pub error: anyhow::Error,
+    pub marker: Result<()>,
+}
+
+/// Exists from the first change to what the service runs until the service has picked it up, so that a run that fails
+/// in between is made up for by the next.
+pub fn pending_file(paths: &Paths) -> PathBuf {
+    paths.config_dir.join("restart-pending")
+}
+
+pub fn mark_pending(paths: &Paths) -> Result<()> {
+    open_file(&pending_file(paths), Perm::new(0o600), false)?;
+    Ok(())
+}
+
+/// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
+/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up.
+pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> Result<RestartOutcome, NotRestarted> {
+    if let Err(error) = remove_entry(&pending_file(paths)) {
+        return Err(NotRestarted { error, marker: Ok(()) });
+    }
+    restart(manager, id).map_err(|error| NotRestarted {
+        error,
+        marker: mark_pending(paths),
+    })
 }
 
 /// Has the service run again. It is killed, and the manager starts it again; it is never stopped first, because run
 /// over the tunnel the stop cuts this session and the start never comes. A service that is not running is started.
-pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<()> {
+pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
     match manager.kill(id) {
-        Ok(()) => Ok(()),
-        Err(goetia::Error::NotRunning { .. }) => Ok(manager.start(id, Budget::Unbounded)?),
+        Ok(()) => Ok(RestartOutcome::Killed),
+        Err(goetia::Error::NotRunning { .. }) => {
+            manager.start(id, Budget::Unbounded)?;
+            Ok(RestartOutcome::Started)
+        }
         Err(err) => Err(err.into()),
     }
 }

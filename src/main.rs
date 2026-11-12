@@ -110,7 +110,7 @@ fn main() -> Result<ExitCode> {
         Command::Restart => {
             require_root()?;
             let paths = Paths::system()?;
-            ops::check_and_restart(&*goetia::manager::native()?, &paths, &tools(&paths))?;
+            ops::check_and_restart(&*goetia::manager::native()?, &paths)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {
