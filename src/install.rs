@@ -651,11 +651,12 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     };
     let err = failed.error;
     let restart_failed = "the new files are in place, but the service was not restarted";
+    // The remedy comes first: the restart's own error follows the last words, "was not restarted".
     match failed.marker {
-        Ok(()) => Err(err.context(format!("{restart_failed}; run `reverse-tunnel install` again to retry"))),
+        Ok(()) => Err(err.context(format!("run `reverse-tunnel install` again to retry; {restart_failed}"))),
         Err(write) => Err(err.context(format!(
-            "{restart_failed}, and the marker for retrying it could not be written ({write:#}); the next `install` \
-            will not notice, so run `reverse-tunnel restart`"
+            "the marker for retrying the restart could not be written ({write:#}): the next `install` will not \
+            notice, so run `reverse-tunnel restart`; {restart_failed}"
         ))),
     }
 }
