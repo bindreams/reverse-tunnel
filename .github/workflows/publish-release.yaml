@@ -95,7 +95,9 @@ jobs:
           PUBLISHED_TAGS="$(gh api -X GET --paginate "repos/${GH_REPO}/releases" --jq '.[] | select((.draft or .prerelease) | not) | .tag_name')"
           NEWEST="$({ grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' <<<"$PUBLISHED_TAGS" || true; echo "$TAG"; } | sort -V | tail -n 1)"
           LATEST=false
-          if [ "$NEWEST" = "$TAG" ]; then LATEST=true; fi
+          if [ "$NEWEST" = "$TAG" ] && [ "$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease')" = false ]; then
+            LATEST=true
+          fi
           echo "newest of the published releases and $TAG: $NEWEST; marking $TAG latest=$LATEST"
 
           gh release edit "$TAG" --draft=false --latest="$LATEST"
