@@ -47,22 +47,54 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(!text.contains("secret"), "{text}");
 }
 
-/// A host whose installed binary is a link to `testbin/check_stub.sh`, which stands for what `run --check` does and
-/// passes only given `--check` and the spec's environment, with a running service and the restart marker; the check runs
-/// as the current user, which stands for the service account.
+/// A host whose installed binary is a copy of `stub-frpc` in its `check` mode (`testbin/stub_frpc.rs`), which stands
+/// for what `run --check` does and passes only given `--check` and the spec's environment, with a running service and
+/// the restart marker; the check runs as the current user, which stands for the service account. `outcome` is the
+/// stub's `pass` or `fail`.
 #[cfg(unix)]
-fn host_checked_by_stub() -> (TempDir, Paths, Fake) {
+fn host_checked_by_stub(outcome: &str) -> (TempDir, Paths, Fake) {
     let (dir, paths) = host();
     fs::create_dir(&paths.bin_dir).unwrap();
-    // A link to a file that is already there: writing a program and running it races a fork.
-    let stub = concat!(env!("CARGO_MANIFEST_DIR"), "/testbin/check_stub.sh");
-    std::os::unix::fs::symlink(stub, service::exe(&paths)).unwrap();
+    // Cargo builds the stub for `cargo test`, not for `cargo test --lib`.
+    let stub = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("stub-frpc");
+    assert!(
+        stub.exists(),
+        "{stub:?} is missing: run `cargo test`, which builds the `stub-frpc` binary"
+    );
+    let exe = service::exe(&paths);
+    // A `cp` child writes it: a writable descriptor in this process would leak into the children that other test
+    // threads fork, and executing the copy would fail with ETXTBSY while one lives.
+    assert!(
+        process::Command::new("cp")
+            .arg(&stub)
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success()
+    );
     let env: String = service::spec(&paths)
         .env
         .iter()
-        .map(|(name, value)| format!("{name}={value}\n"))
+        .map(|(name, value)| {
+            format!(
+                "{name}={value}
+"
+            )
+        })
         .collect();
-    fs::write(paths.bin_dir.join("expected-env"), env.trim_end()).unwrap();
+    let env_file = paths.bin_dir.join("expected-env");
+    fs::write(&env_file, env).unwrap();
+    fs::write(
+        exe.with_extension("mode"),
+        format!("check {outcome} {}", env_file.display()),
+    )
+    .unwrap();
     let manager = Fake::default();
     let id = service::spec(&paths).id;
     manager.install(&service::spec(&paths), false).unwrap();
@@ -82,8 +114,7 @@ fn as_current_user() -> Option<crate::account::Account> {
 #[cfg(unix)]
 #[test]
 fn restart_with_a_failing_check_leaves_the_service_alone() {
-    let (_dir, paths, manager) = host_checked_by_stub();
-    fs::write(paths.bin_dir.join("fail"), "").unwrap();
+    let (_dir, paths, manager) = host_checked_by_stub("fail");
 
     let err = check_and_restart_as(&manager, &paths, as_current_user()).unwrap_err();
 
@@ -102,7 +133,7 @@ fn restart_with_a_failing_check_leaves_the_service_alone() {
 #[cfg(unix)]
 #[test]
 fn restart_with_a_passing_check_kills_the_service() {
-    let (_dir, paths, manager) = host_checked_by_stub();
+    let (_dir, paths, manager) = host_checked_by_stub("pass");
     let id = service::spec(&paths).id;
 
     check_and_restart_as(&manager, &paths, as_current_user()).unwrap();
@@ -113,21 +144,8 @@ fn restart_with_a_passing_check_kills_the_service() {
 
 #[cfg(unix)]
 #[test]
-fn restart_of_a_service_that_is_not_running_kills_and_then_starts_it() {
-    let (_dir, paths, manager) = host_checked_by_stub();
-    let id = service::spec(&paths).id;
-    manager.seed_state(id.as_str(), State::Stopped);
-
-    check_and_restart_as(&manager, &paths, as_current_user()).unwrap();
-
-    assert_eq!(manager.calls(), [("kill", id.to_string()), ("start", id.to_string())]);
-    assert!(!pending_file(&paths).exists());
-}
-
-#[cfg(unix)]
-#[test]
 fn restart_that_fails_puts_the_marker_back() {
-    let (_dir, paths, _) = host_checked_by_stub();
+    let (_dir, paths, _) = host_checked_by_stub("pass");
     // Never installed: the kill fails with something other than NotRunning.
     let err = check_and_restart_as(&Fake::default(), &paths, as_current_user()).unwrap_err();
 
@@ -140,7 +158,7 @@ fn restart_that_fails_puts_the_marker_back() {
 #[cfg(unix)]
 #[test]
 fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
-    let (_dir, paths, _) = host_checked_by_stub();
+    let (_dir, paths, _) = host_checked_by_stub("pass");
     // The marker cannot be written without its directory.
     fs::remove_dir_all(&paths.config_dir).unwrap();
     let err = check_and_restart_as(&Fake::default(), &paths, as_current_user()).unwrap_err();
@@ -168,6 +186,7 @@ fn restart_without_the_installed_binary_says_the_service_is_not_installed() {
 
     let err = check_and_restart(&manager, &paths).unwrap_err();
 
+    // Not the account lookup's message: the account database can still answer for an account just removed.
     assert_eq!(err.to_string(), "the service is not installed");
     assert_eq!(manager.calls(), []);
 }

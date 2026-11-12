@@ -93,7 +93,8 @@ type RunAs = std::convert::Infallible;
 
 #[cfg(unix)]
 fn service_identity() -> Result<Option<RunAs>> {
-    let account = account::lookup(service::ACCOUNT).context("the service is not installed")?;
+    let account = account::lookup(service::ACCOUNT)
+        .with_context(|| format!("the service is not installed: there is no account {}", service::ACCOUNT))?;
     Ok(Some(account))
 }
 
@@ -106,6 +107,7 @@ fn service_identity() -> Result<Option<RunAs>> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
     Killed,
+    /// It was not running: the kill found nothing, and it was started.
     Started,
 }
 
