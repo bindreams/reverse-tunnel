@@ -1,0 +1,64 @@
+# The edge of the end-to-end test: Pebble (an ACME server) and Traefik, as voyager's Traefik is for the bridge.
+name: rt-e2e-edge
+
+services:
+  pebble:
+    container_name: pebble
+    image: ghcr.io/letsencrypt/pebble@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef
+    command: -config /pebble-config.json
+    environment:
+      PEBBLE_VA_ALWAYS_VALID: "1"
+      PEBBLE_VA_NOSLEEP: "1"
+    ports:
+      - "127.0.0.1:15000:15000"
+    volumes:
+      - type: bind
+        source: ./pebble-config.json
+        target: /pebble-config.json
+        read_only: true
+    networks:
+      - edge
+
+  traefik:
+    container_name: traefik
+    image: traefik:v3.6.14
+    command: --configFile=/etc/traefik/traefik.yaml
+    environment:
+      LEGO_CA_CERTIFICATES: /etc/traefik/pebble.minica.pem
+      EXEC_PATH: /etc/traefik/dns-exec.sh
+    ports:
+      - "127.0.0.1:443:443"
+      - "127.0.0.1:8088:8080"
+    volumes:
+      - type: bind
+        source: ./traefik.yaml
+        target: /etc/traefik/traefik.yaml
+        read_only: true
+      - type: bind
+        source: ./dns-exec.sh
+        target: /etc/traefik/dns-exec.sh
+        read_only: true
+      - type: bind
+        source: ./pebble.minica.pem
+        target: /etc/traefik/pebble.minica.pem
+        read_only: true
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: volume
+        source: acme
+        target: /acme
+    networks:
+      - edge
+      - gateway
+    depends_on:
+      - pebble
+
+networks:
+  edge:
+  gateway:
+    external: true
+
+volumes:
+  acme:
