@@ -182,18 +182,12 @@ public static class Probe {
         return sb.Length == 0 ? "none" : sb.ToString();
     }
     static string Log;
-    static void Say(string s) { File.AppendAllText(Log, DateTime.UtcNow.ToString("HH:mm:ss.fff") + " " + s + "
-"); }
+    static void Say(string s) { File.AppendAllText(Log, DateTime.UtcNow.ToString("HH:mm:ss.fff") + " " + s + "\n"); }
     static string Snap(string copy, out string sig) {
         var sw = Stopwatch.StartNew();
         string rm = RestartManager(copy), live = Live(copy), h = Handles(copy);
-        sig = rm + "|" + live + "|" + System.Text.RegularExpressions.Regex.Replace(h, "table:[^
-]*
-", "");
-        return "(took " + sw.ElapsedMilliseconds + " ms)
-  restart manager: " + rm + "
-  live processes with this image: " + live + "
-" + h;
+        sig = rm + "|" + live + "|" + System.Text.RegularExpressions.Regex.Replace(h, "table:[^\n]*\n", "");
+        return "(took " + sw.ElapsedMilliseconds + " ms)\n  restart manager: " + rm + "\n  live processes with this image: " + live + "\n" + h;
     }
     // probe.exe <copy> <out dir> <tag>: run right after `del` failed, in the removal's script.
     public static int Main(string[] a) {
