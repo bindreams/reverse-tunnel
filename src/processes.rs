@@ -1,119 +1,150 @@
-//! Windows: the processes that run as an account, which `install`'s removal waits for.
+//! Windows: the processes of a service, which `install`'s removal waits for.
 
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::null_mut;
 
-use anyhow::{Context, Result};
-use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
-use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+use anyhow::{Context, Result, anyhow};
+use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+use windows_sys::Win32::System::RemoteDesktop::{
+    WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFO_EXW, WTSEnumerateProcessesExW, WTSFreeMemoryExW,
+    WTSTypeProcessInfoLevel1,
 };
-use windows_sys::Win32::System::Threading::{
-    INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    WaitForSingleObject,
-};
+use windows_sys::Win32::System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
 
 use crate::account::Account;
 use crate::security::string_of_sid;
 
-/// Waits, with no cap, until no process has `account`'s SID as its token's user: a snapshot of the processes, then a
-/// wait on each one that matches, repeated until a snapshot finds none. A process that cannot be opened, or whose token
-/// cannot be read, is not waited for: a service's processes are ordinary ones that an administrator can open, and
-/// waiting on one that cannot be opened is not possible.
+/// `WTSEnumerateProcessesExW`'s session id for every session.
+const WTS_ANY_SESSION: u32 = 0xFFFF_FFFE;
+
+/// A process of the system's listing.
+#[derive(Debug, Clone)]
+struct Listed {
+    pid: u32,
+    /// The name of the image, without its directory.
+    image: String,
+    /// The SID of its token's user, as `S-1-5-...`; none for the few processes that have no user.
+    sid: Option<String>,
+}
+
+/// Waits, with no cap, until no process runs as the virtual account of the service `service` (`NT SERVICE\<service>`):
+/// the system lists the processes with their users, and each one of the account is waited for, until a listing finds
+/// none. Each round that finds some says which. Nothing is opened but the processes of the account: one that has ended
+/// since the listing is gone, and one that cannot be opened for any other reason fails the wait.
 ///
 /// goetia's `uninstall` returns while the service's processes are still ending (goetia#241), and Windows will not
 /// delete the image of a process that runs, or a file that it holds open. Delete this when goetia#241 is fixed.
-pub fn wait_until_none_runs_as(account: &Account) -> Result<()> {
-    let sid = account.sid();
+pub fn wait_until_none_runs_as_service(service: &str) -> Result<()> {
+    let sid = Account::of_service(service).sid();
+    let name = format!(r"NT SERVICE\{service}");
     loop {
-        let running = running_as(&sid).context("listing the processes that run as the service's account")?;
+        let running = running_as(&sid).context("listing the processes of the service's account")?;
         if running.is_empty() {
             return Ok(());
         }
-        wait_for_exit(&running).context("waiting for the service's processes to end")?;
-    }
-}
-
-/// The processes that run as the user `sid`, as handles that can be waited on.
-fn running_as(sid: &str) -> io::Result<Vec<OwnedHandle>> {
-    let mut found = Vec::new();
-    for pid in process_ids()? {
-        // A process that has ended since the snapshot, or one that cannot be opened, is skipped.
-        let Some(process) = open(pid) else { continue };
-        if user_of(process.as_raw_handle()).is_ok_and(|user| user == sid) {
-            found.push(process);
+        println!("{}", waiting_line(&name, &running));
+        let mut handles = Vec::new();
+        for process in &running {
+            handles.extend(open(process)?);
         }
+        wait_for_exit(&handles).context("waiting for the service's processes to end")?;
     }
-    Ok(found)
 }
 
-/// The ids of the processes that run now.
-fn process_ids() -> io::Result<Vec<u32>> {
-    // SAFETY: a plain call; the handle it returns is closed by `OwnedHandle`.
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a handle that this function owns.
-    let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
-    let mut entry = PROCESSENTRY32W {
-        dwSize: size_of::<PROCESSENTRY32W>() as u32,
-        ..Default::default()
-    };
-    let mut ids = Vec::new();
-    // SAFETY: the handle is live, and `entry` has its size set.
-    let mut more = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
-    while more != 0 {
-        ids.push(entry.th32ProcessID);
-        // SAFETY: as above.
-        more = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
-    }
-    let end = io::Error::last_os_error();
-    if end.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
-        return Err(end);
-    }
-    Ok(ids)
+/// What is said before waiting for `processes` of the account `name`.
+fn waiting_line(name: &str, processes: &[Listed]) -> String {
+    let each: Vec<String> = processes
+        .iter()
+        .map(|process| format!("{} {}", process.pid, process.image))
+        .collect();
+    format!(
+        "waiting for {} processes of {name} to end: {}",
+        processes.len(),
+        each.join(", ")
+    )
 }
 
-/// The process `pid`, opened to read its token and to wait for it.
-fn open(pid: u32) -> Option<OwnedHandle> {
-    // SAFETY: a plain call.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid) };
-    // SAFETY: a handle that this function owns, unless the call failed.
-    (!process.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(process) })
+/// The processes that run as the user `sid`.
+fn running_as(sid: &str) -> io::Result<Vec<Listed>> {
+    let mut processes = list()?;
+    processes.retain(|process| process.sid.as_deref() == Some(sid));
+    Ok(processes)
 }
 
-/// The SID of the user of `process`'s token, as `S-1-5-...`.
-fn user_of(process: HANDLE) -> io::Result<String> {
-    let mut token = null_mut();
-    // SAFETY: `process` is live, and the out pointer is live.
-    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: a handle that this function owns.
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
-    let mut size = 0;
-    // SAFETY: a size query: no buffer, which the call answers by failing with the size it needs.
-    unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut size) };
-    // Words, so that the `TOKEN_USER` in it is aligned.
-    let mut buffer = vec![0usize; (size as usize).div_ceil(size_of::<usize>())];
-    // SAFETY: the buffer is `size` bytes at least, and the out pointer is live.
-    let read = unsafe {
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            size,
-            &mut size,
+/// Every process of the system, with its user, in one call: no process is opened to read it.
+fn list() -> io::Result<Vec<Listed>> {
+    let mut level = 1;
+    let mut first = null_mut();
+    let mut count = 0;
+    // SAFETY: the out pointers are live; level 1 makes the buffer `WTS_PROCESS_INFO_EXW` entries.
+    let listed = unsafe {
+        WTSEnumerateProcessesExW(
+            WTS_CURRENT_SERVER_HANDLE,
+            &mut level,
+            WTS_ANY_SESSION,
+            &mut first,
+            &mut count,
         )
     };
-    if read == 0 {
+    if listed == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: the call filled the buffer with a `TOKEN_USER`, whose SID points into the buffer, which is live.
-    unsafe { string_of_sid((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) }
+    let buffer = Buffer { first, count };
+    // SAFETY: Windows wrote `count` entries at `first`, which `buffer` keeps until it drops.
+    let entries = unsafe { std::slice::from_raw_parts(buffer.first.cast::<WTS_PROCESS_INFO_EXW>(), count as usize) };
+    entries
+        .iter()
+        .map(|entry| {
+            // SAFETY: Windows wrote a NUL-terminated name, and a user SID or none.
+            let (image, sid) = unsafe {
+                let len = (0..).take_while(|&at| *entry.pProcessName.add(at) != 0).count();
+                let image = String::from_utf16_lossy(std::slice::from_raw_parts(entry.pProcessName, len));
+                let sid = (!entry.pUserSid.is_null())
+                    .then(|| string_of_sid(entry.pUserSid))
+                    .transpose()?;
+                (image, sid)
+            };
+            Ok(Listed {
+                pid: entry.ProcessId,
+                image,
+                sid,
+            })
+        })
+        .collect()
+}
+
+/// The buffer of `WTSEnumerateProcessesExW`'s level 1, freed when it drops.
+struct Buffer {
+    first: *mut u16,
+    count: u32,
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        // SAFETY: the buffer and its entry count are what the enumeration returned, and it is freed once.
+        unsafe { WTSFreeMemoryExW(WTSTypeProcessInfoLevel1, self.first.cast(), self.count) };
+    }
+}
+
+/// `process`, opened to wait for it; none if it has ended since the listing, which Windows answers with "invalid
+/// parameter" for an id that no process has. Any other failure is an error.
+fn open(process: &Listed) -> Result<Option<OwnedHandle>> {
+    // SAFETY: a plain call.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, process.pid) };
+    if handle.is_null() {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
+            return Ok(None);
+        }
+        return Err(anyhow!(
+            "opening process {} ({}) to wait for it: {err}",
+            process.pid,
+            process.image
+        ));
+    }
+    // SAFETY: a handle that this function owns.
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(handle) }))
 }
 
 /// Waits, with no cap, until every one of `processes` has ended.

@@ -578,7 +578,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     // goetia returns while the service's own processes (the host, frpc) are still ending, and they hold their images in
     // the bin dir and their logs in `logs/`.
     #[cfg(windows)]
-    processes::wait_until_none_runs_as(&account::ensure(service::ACCOUNT)?)?;
+    processes::wait_until_none_runs_as_service(service::ID)?;
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
     // until the rest of `config_dir` is gone, since `install` is refused while it exists; and `logs/` is last, so that

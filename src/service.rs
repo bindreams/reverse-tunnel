@@ -8,7 +8,8 @@ use goetia::spec::{DaemonFields, DaemonSpec, Id, Kind, Restart, User};
 
 use crate::paths::Paths;
 
-const ID: &str = "reverse-tunnel";
+/// The name of the service, and of its virtual account on Windows.
+pub const ID: &str = "reverse-tunnel";
 
 #[cfg(windows)]
 pub const ACCOUNT: &str = r"NT SERVICE\reverse-tunnel";
