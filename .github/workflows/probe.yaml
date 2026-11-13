@@ -8,7 +8,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -28,6 +28,7 @@ jobs:
           New-Item -ItemType Directory -Path C:\probe-bin, C:\probe-out, C:\selftest -Force | Out-Null
           & "$env:windir\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /platform:x64 /out:C:\probe-bin\probe.exe tests\probe\probe.cs
           if ($LASTEXITCODE -ne 0) { throw 'csc failed' }
+          Set-Content C:\probe-bin\providers.txt -Value @('"Microsoft-Windows-Kernel-File" 0xFFFFFFFFFFFFFFFF 0xFF', '"Microsoft-Windows-Kernel-Process" 0x10 0xFF')
       - name: Self-test the probe (an exited process whose handle is held, a held file, a live image)
         shell: pwsh
         run: |
@@ -58,7 +59,7 @@ jobs:
         timeout-minutes: 45
         run: |
           set -euxo pipefail
-          env RT_PLATFORM_TESTS=1 RT_FLAKE2_ROUNDS=150 RT_FLAKE2_SHARD=${{ matrix.shard }} \
+          env RT_PLATFORM_TESTS=1 RT_FLAKE2_ROUNDS=200 RT_FLAKE2_SHARD=${{ matrix.shard }} \
               RT_FLAKE2_PROBE="$(cygpath -w "$PWD/tests/probe/flake2.ps1")" \
               "$(cat "$RUNNER_TEMP/platform-tests")" measure_flake2 --ignored --test-threads=1 --nocapture
       - name: Show what the probe saw

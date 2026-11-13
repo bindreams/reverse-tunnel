@@ -1673,8 +1673,18 @@ fn measure_flake2() {
             .arg("uninstall")
             .current_dir(env::temp_dir())
             .env("RT_FLAKE2_ROUND", &tag);
+        let etl = format!(r"C:\probe-out\r{tag}.etl");
+        let session = format!("f2-{tag}");
+        let trace = Command::new("logman")
+            .args(["start", &session, "-ets", "-pf", r"C:\probe-bin\providers.txt", "-o", &etl])
+            .args(["-bs", "1024", "-nb", "64", "256", "-ct", "system"])
+            .output()
+            .unwrap();
+        assert!(trace.status.success(), "logman start: {}", String::from_utf8_lossy(&trace.stdout));
         let started = std::time::Instant::now();
         let ran = uninstall.output().unwrap();
+        let stopped = Command::new("logman").args(["stop", &session, "-ets"]).output().unwrap();
+        assert!(stopped.status.success(), "logman stop: {}", String::from_utf8_lossy(&stopped.stdout));
         let said = format!(
             "{}{}",
             String::from_utf8_lossy(&ran.stdout),
@@ -1686,6 +1696,9 @@ fn measure_flake2() {
             ran.status,
             started.elapsed().as_millis()
         );
+        if !held {
+            let _ = fs::remove_file(&etl);
+        }
         if !ran.status.success() {
             eprintln!("ROUND {tag} output: {said}");
         }
