@@ -65,134 +65,47 @@ fn installed() -> (tempfile::TempDir, Paths) {
 }
 
 #[test]
-fn the_installed_binary_is_copied_out_run_and_the_copy_removed_by_one_powershell_line() {
-    let paths = Paths::testing(r"C:\host");
+fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_not() {
+    let advice = rerun_uninstall(&Paths::testing(r"C:\host"));
 
     assert_eq!(
-        copy_out_commands(&paths),
-        r"Set-Location -LiteralPath $env:SystemRoot; [Environment]::CurrentDirectory = $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path 'C:\host\reverse-tunnel-copy' > $null; if ($?) { Copy-Item -Force -LiteralPath 'C:\host\bin\reverse-tunnel.exe' -Destination 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe'; if ($?) { & 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe' uninstall; $code = $LASTEXITCODE } }; Remove-Item -Recurse -Force -LiteralPath 'C:\host\reverse-tunnel-copy'; $global:LASTEXITCODE = $code"
+        advice,
+        "run `reverse-tunnel uninstall` in an elevated prompt (with any `reverse-tunnel` binary, if that is not found)"
     );
 }
 
 #[test]
-fn a_quote_in_a_path_is_doubled_so_that_nothing_expands() {
-    let paths = Paths::testing(r"C:\it's");
-
-    assert!(copy_out_commands(&paths).contains(r"'C:\it''s\bin\reverse-tunnel.exe'"));
-}
-
-#[test]
-fn a_typographic_quote_in_a_path_is_doubled_too() {
-    // PowerShell reads U+2018 to U+201B as single quotes.
-    for quote in ['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}'] {
-        let paths = Paths::testing(format!("C:\\it{quote}s"));
-
-        let line = copy_out_commands(&paths);
-
-        assert!(
-            line.contains(&format!("'C:\\it{quote}{quote}s\\bin\\reverse-tunnel.exe'")),
-            "{line}"
-        );
-    }
-}
-
-#[test]
-fn the_rerun_advice_is_the_copy_out_line() {
+fn a_binary_in_the_bin_dir_runs_from_a_directory_the_removal_deletes() {
     let (_dir, paths) = installed();
 
-    assert_eq!(
-        rerun_uninstall(&paths),
-        format!("run `{}` in an elevated PowerShell", copy_out_commands(&paths))
-    );
+    assert!(runs_from_a_deleted_directory(&paths, &service::exe(&paths)).unwrap());
 }
 
 #[test]
-fn the_rerun_advice_without_the_installed_binary_names_any_other() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let advice = rerun_uninstall(&Paths::testing(dir.path()));
-
-    assert!(advice.contains("any `reverse-tunnel` binary"), "{advice}");
-}
-
-/// A working directory outside everything the removal deletes.
-fn elsewhere() -> tempfile::TempDir {
-    tempfile::tempdir().unwrap()
-}
-
-#[test]
-fn uninstall_refuses_to_run_from_the_bin_dir_with_the_whole_text() {
-    let (_dir, paths) = installed();
-
-    let err = refuse_running_from_a_deleted_directory(&paths, &service::exe(&paths), elsewhere().path()).unwrap_err();
-
-    assert_eq!(
-        format!("{err:#}"),
-        format!(
-            "`uninstall` is running from {}, which the removal deletes, and Windows cannot delete a running binary. \
-             Run it from a copy, in an elevated PowerShell (over SSH, run `powershell` first):\n    {}",
-            paths.bin_dir.display(),
-            copy_out_commands(&paths)
-        )
-    );
-}
-
-#[test]
-fn uninstall_refuses_to_run_from_the_removals_own_directory() {
+fn a_binary_in_the_removals_own_directory_does_too() {
     let (_dir, paths) = installed();
     fs::create_dir_all(removal_dir(&paths)).unwrap();
     let copy = removal_dir(&paths).join("reverse-tunnel.exe");
     fs::write(&copy, "").unwrap();
 
-    let err = refuse_running_from_a_deleted_directory(&paths, &copy, elsewhere().path()).unwrap_err();
-
-    assert!(format!("{err:#}").contains(&removal_dir(&paths).display().to_string()));
+    assert!(runs_from_a_deleted_directory(&paths, &copy).unwrap());
 }
 
 #[test]
-fn uninstall_refuses_to_run_from_inside_a_directory_the_removal_deletes() {
+fn a_binary_inside_a_directory_the_removal_deletes_does_too() {
     let (_dir, paths) = installed();
     let deep = paths.bin_dir.join("old").join("v1");
     fs::create_dir_all(&deep).unwrap();
-    let in_config = paths.config_dir.join("reverse-tunnel.exe");
     fs::create_dir_all(&paths.config_dir).unwrap();
-
-    for exe in [deep.join("reverse-tunnel.exe"), in_config] {
-        let err = refuse_running_from_a_deleted_directory(&paths, &exe, elsewhere().path()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("which the removal deletes"),
-            "{exe:?}: {err:#}"
-        );
-    }
-}
-
-#[test]
-fn uninstall_refuses_to_run_with_its_working_directory_in_a_directory_the_removal_deletes() {
-    let (dir, paths) = installed();
-    let binary = dir.path().join("reverse-tunnel.exe");
     fs::create_dir_all(&paths.log_dir).unwrap();
-    let inside = paths.bin_dir.join("sub");
-    fs::create_dir_all(&inside).unwrap();
 
-    for cwd in [&paths.bin_dir, &paths.log_dir, &inside] {
-        let err = refuse_running_from_a_deleted_directory(&paths, &binary, cwd).unwrap_err();
-        let err = format!("{err:#}");
-        assert!(err.contains("current directory"), "{err}");
-        assert!(err.contains("Change to another directory first"), "{err}");
+    for exe in [
+        deep.join("reverse-tunnel.exe"),
+        paths.config_dir.join("reverse-tunnel.exe"),
+        paths.log_dir.join("reverse-tunnel.exe"),
+    ] {
+        assert!(runs_from_a_deleted_directory(&paths, &exe).unwrap(), "{exe:?}");
     }
-}
-
-#[test]
-fn a_directory_that_cannot_be_resolved_is_named_in_the_error() {
-    let (dir, paths) = installed();
-    let binary = dir.path().join("reverse-tunnel.exe");
-    let missing = dir.path().join("gone");
-
-    let err = refuse_running_from_a_deleted_directory(&paths, &binary, &missing).unwrap_err();
-
-    let err = format!("{err:#}");
-    assert!(err.contains(&missing.display().to_string()), "{err}");
-    assert!(err.contains("the removal deletes"), "{err}");
 }
 
 #[test]
@@ -200,22 +113,40 @@ fn the_directory_is_the_same_by_whatever_case_the_path_names_it() {
     let (_dir, paths) = installed();
     let shouted = PathBuf::from(service::exe(&paths).to_string_lossy().to_uppercase());
 
-    assert!(refuse_running_from_a_deleted_directory(&paths, &shouted, elsewhere().path()).is_err());
+    assert!(runs_from_a_deleted_directory(&paths, &shouted).unwrap());
 }
 
 #[test]
-fn uninstall_runs_from_a_binary_elsewhere_or_with_nothing_installed() {
+fn a_binary_elsewhere_does_not_run_from_a_directory_the_removal_deletes() {
     let (dir, paths) = installed();
     let elsewhere = dir.path().join("reverse-tunnel.exe");
     fs::write(&elsewhere, "").unwrap();
-    let cwd = dir.path();
-    refuse_running_from_a_deleted_directory(&paths, &elsewhere, cwd).unwrap();
-    // The copy-out line's own directory is outside what the removal deletes.
-    fs::create_dir_all(copy_dir(&paths)).unwrap();
-    let copy = copy_dir(&paths).join("reverse-tunnel.exe");
-    fs::write(&copy, "").unwrap();
-    refuse_running_from_a_deleted_directory(&paths, &copy, cwd).unwrap();
 
+    assert!(!runs_from_a_deleted_directory(&paths, &elsewhere).unwrap());
+    // A directory that only starts with a deleted one's name is another directory.
+    let beside = paths.bin_dir.with_file_name("bin-old");
+    fs::create_dir_all(&beside).unwrap();
+    assert!(!runs_from_a_deleted_directory(&paths, &beside.join("reverse-tunnel.exe")).unwrap());
+}
+
+#[test]
+fn with_nothing_installed_no_binary_runs_from_a_deleted_directory() {
+    let (dir, paths) = installed();
+    let elsewhere = dir.path().join("reverse-tunnel.exe");
+    fs::write(&elsewhere, "").unwrap();
     fs::remove_dir_all(&paths.bin_dir).unwrap();
-    refuse_running_from_a_deleted_directory(&paths, &elsewhere, cwd).unwrap();
+
+    assert!(!runs_from_a_deleted_directory(&paths, &elsewhere).unwrap());
+}
+
+#[test]
+fn a_directory_that_cannot_be_resolved_is_named_in_the_error() {
+    let (dir, paths) = installed();
+    let missing = dir.path().join("gone");
+
+    let err = runs_from_a_deleted_directory(&paths, &missing.join("reverse-tunnel.exe")).unwrap_err();
+
+    let err = format!("{err:#}");
+    assert!(err.contains(&missing.display().to_string()), "{err}");
+    assert!(err.contains("the removal deletes"), "{err}");
 }

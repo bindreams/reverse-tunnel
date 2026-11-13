@@ -34,22 +34,38 @@ fn a_task_that_is_queued_or_running_runs_whatever_its_last_result() {
 }
 
 #[test]
-fn a_task_that_is_ready_has_ended_unless_its_result_says_it_has_not_run() {
+fn a_task_that_is_ready_has_ended_with_any_result_that_is_an_exit_code() {
     assert_eq!(task_state(TASK_STATE_READY, 0, 3), TaskState::Ended(3));
     assert_eq!(
         task_state(TASK_STATE_READY, 0, -1073741510),
         TaskState::Ended(-1073741510)
     );
-    for not_ended in NOT_ENDED {
-        assert_eq!(task_state(TASK_STATE_READY, 0, not_ended), TaskState::Running);
+    // Just outside Task Scheduler's informational range.
+    assert_eq!(task_state(TASK_STATE_READY, 0, 0x41310), TaskState::Ended(0x41310));
+    assert_eq!(task_state(TASK_STATE_READY, 0, 0x412FF), TaskState::Ended(0x412FF));
+}
+
+#[test]
+fn an_informational_result_is_not_an_exit_code_so_a_task_that_is_not_disabled_runs() {
+    // Ready, running, disabled, never run, no more runs, terminated, queued.
+    for informational in [0x41300, 0x41301, 0x41302, 0x41303, 0x41304, 0x41306, 0x4130F, 0x41325] {
+        assert_eq!(task_state(TASK_STATE_READY, 0, informational), TaskState::Running);
     }
 }
 
 #[test]
-fn a_task_that_is_disabled_before_it_ran_is_disabled() {
-    for not_ended in NOT_ENDED {
-        assert_eq!(task_state(TASK_STATE_DISABLED, 0, not_ended), TaskState::Disabled);
+fn a_task_that_is_disabled_with_an_informational_result_is_disabled() {
+    for informational in [0x41300, 0x41302, 0x41304, 0x4130F, 0x41325] {
+        assert_eq!(task_state(TASK_STATE_DISABLED, 0, informational), TaskState::Disabled);
     }
+}
+
+#[test]
+fn a_failed_read_of_a_task_that_was_found_is_looked_at_again() {
+    // The next `GetTask` says whether the task is gone, or cannot be asked about.
+    let failed = Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
+    assert_eq!(task_state_of(failed), TaskState::Running);
+    assert_eq!(task_state_of(Ok((TASK_STATE_READY, 0, 7))), TaskState::Ended(7));
 }
 
 #[test]

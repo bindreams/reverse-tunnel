@@ -16,6 +16,8 @@ pub mod schtasks;
 pub mod security;
 pub mod service;
 pub mod supervisor;
+#[cfg(windows)]
+pub mod system_path;
 #[cfg(all(test, unix))]
 mod test_stub;
 pub mod upgrade;

@@ -17,10 +17,11 @@ use windows::core::{BSTR, HRESULT};
 /// The task's name.
 pub const REMOVAL: &str = "reverse-tunnel-uninstall";
 
-/// What a task's last result reads while it has not ended (Task Scheduler's informational `SCHED_S_*` codes): ready,
-/// running, never run, and queued. Other informational codes (disabled, no more runs, terminated) mean it will not
-/// run, and are results like any other.
-const NOT_ENDED: [i32; 4] = [0x41300, 0x41301, 0x41303, 0x41325];
+/// Whether a task's last result is one of Task Scheduler's informational `SCHED_S_*` codes (`0x41300` to `0x4130F`, and
+/// the queued `0x41325`) rather than an exit code: the task has not run, or says what it is, not how it ended.
+fn informational(last: i32) -> bool {
+    (0x41300..=0x4130F).contains(&last) || last == 0x41325
+}
 
 /// The account of SYSTEM, which the task's principal and its registration both name.
 const SYSTEM: &str = "S-1-5-18";
@@ -72,8 +73,8 @@ pub enum TaskState {
     Gone,
 }
 
-/// The state of task `name`. Only "no such task" is `Gone`; any other failure to ask is an error, as it says nothing
-/// about the task.
+/// The state of task `name`. Only `GetTask` finding no such task is `Gone`; any other `GetTask` failure is an error, as
+/// it says nothing about the task.
 pub fn state(name: &str) -> Result<TaskState> {
     let name = name.to_string();
     on_scheduler(move |folder| {
@@ -90,24 +91,27 @@ pub fn state(name: &str) -> Result<TaskState> {
                 Ok((state, instances, task.LastTaskResult()?))
             })
         };
-        match read {
-            Err(err) if err.code() == not_found() => Ok(TaskState::Gone),
-            read => {
-                let (state, instances, last) = com(read, "reading the removal's task")?;
-                Ok(task_state(state, instances, last))
-            }
-        }
+        Ok(task_state_of(read))
+    })
+}
+
+/// The state a task's reads (state, running instances, last result) say. A read that failed is not an answer: the task
+/// may have deleted itself meanwhile, so it reads as running, and the next `state` call, which looks the task up again,
+/// finds it gone or fails.
+fn task_state_of(read: windows::core::Result<(TASK_STATE, i32, i32)>) -> TaskState {
+    read.map_or(TaskState::Running, |(state, instances, last)| {
+        task_state(state, instances, last)
     })
 }
 
 /// What a task with this state, number of running instances and last result is doing. An instance that runs makes it
-/// running, whatever its state: disabling a task does not stop it. A last result that is not an exit code means it has
-/// not run: then a disabled task never will. Any other last result means it ran, and was disabled after.
+/// running, whatever its state: disabling a task does not stop it. An informational last result is not an exit code, so
+/// it never means the task ended: a disabled task is disabled, any other runs. Any other last result is an exit code,
+/// which means it ran, and was disabled after if it is.
 fn task_state(state: TASK_STATE, instances: i32, last: i32) -> TaskState {
-    let ran = !NOT_ENDED.contains(&last);
     if instances > 0 || state == TASK_STATE_RUNNING || state == TASK_STATE_QUEUED {
         TaskState::Running
-    } else if ran {
+    } else if !informational(last) {
         TaskState::Ended(last)
     } else if state == TASK_STATE_DISABLED {
         TaskState::Disabled

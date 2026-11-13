@@ -26,6 +26,8 @@ use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
 #[cfg(windows)]
 use crate::schtasks::{self, TaskState};
+#[cfg(windows)]
+use crate::system_path;
 use crate::{download, ops, service, upgrade};
 
 /// Directories, and files everyone may read.
@@ -124,6 +126,8 @@ fn apply(
     changed |= write_settings(paths, account, host, join)?;
     verify_tools(paths, &binary, Some(*account))?;
     changed |= place_binaries(paths, &binary)?;
+    #[cfg(windows)]
+    system_path::add(&paths.bin_dir)?;
     changed |= register(manager, &spec, paths)?;
 
     println!(
@@ -134,11 +138,25 @@ fn apply(
     pick_up(manager, &spec.id, paths, changed)
 }
 
-/// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.
+/// Runs the removal: see `hand_off`. On Windows a binary that the removal would delete is first moved out of its way,
+/// and deleted once this process has exited.
 pub fn uninstall(paths: &Paths) -> Result<()> {
     let exe = env::current_exe()?;
     #[cfg(windows)]
-    refuse_running_from_a_deleted_directory(paths, &exe, &env::current_dir()?)?;
+    {
+        let aside = make_way(paths, &exe)?;
+        let done = hand_off(paths, aside.as_ref().map_or(&exe, |aside| &aside.to));
+        if let Some(aside) = aside {
+            aside.settle(done.is_ok());
+        }
+        done
+    }
+    #[cfg(not(windows))]
+    hand_off(paths, &exe)
+}
+
+/// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it. `exe` is this binary.
+fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
     let lock = lock(paths)?;
     match revoke_line(paths) {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
@@ -150,7 +168,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     drop(lock);
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
     println!("Its log will be {}.", removal_log(paths));
-    let removal = spawn_finish(&exe, paths).context("starting the removal")?;
+    let removal = spawn_finish(exe, paths).context("starting the removal")?;
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
@@ -209,13 +227,6 @@ pub fn removal_log_file(paths: &Paths) -> PathBuf {
 #[cfg(windows)]
 fn removal_dir(paths: &Paths) -> PathBuf {
     paths.bin_dir.with_file_name("reverse-tunnel-uninstall")
-}
-
-/// Windows: where the copy of the binary that `copy_out_commands` runs lives while it does: next to the bin dir (so
-/// only administrators can have made it), and outside everything the removal deletes.
-#[cfg(windows)]
-fn copy_dir(paths: &Paths) -> PathBuf {
-    paths.bin_dir.with_file_name("reverse-tunnel-copy")
 }
 
 /// How a waited-for removal ended, when it could be waited for.
@@ -379,7 +390,12 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     // Left by a failed removal.
     remove_entry(&dir)?;
     make_dir(&dir, Perm::new(0o700))?;
-    let copy = dir.join(exe.file_name().context("this binary has no file name")?);
+    // Named as the installed binary is, whatever `exe` was moved to.
+    let copy = dir.join(
+        service::exe(paths)
+            .file_name()
+            .context("the installed binary has no file name")?,
+    );
     fs::copy(exe, &copy).with_context(|| format!("copying {}", copy.display()))?;
     let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL);
     schtasks::start(schtasks::REMOVAL, &script)?;
@@ -419,52 +435,12 @@ fn rerun_uninstall(paths: &Paths) -> String {
     }
 }
 
-/// How to run `uninstall` again: by a copy of the installed binary, or by any `reverse-tunnel` binary once that is gone.
+/// How to run `uninstall` again: by the command on the `PATH`, or by any `reverse-tunnel` binary where it is not found
+/// (after a removal that got as far as the `PATH`, or in a shell that was opened before `install`).
 #[cfg(windows)]
-fn rerun_uninstall(paths: &Paths) -> String {
-    if service::exe(paths).exists() {
-        format!("run `{}` in an elevated PowerShell", copy_out_commands(paths))
-    } else {
-        "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)".to_string()
-    }
-}
-
-/// Windows: one Windows PowerShell 5.1 line that runs `uninstall` by a copy of the installed binary, then removes the
-/// copy. The removal deletes the installed one's directory, which it cannot while a binary in it runs, nor while a
-/// process has it as its working directory: the line starts in the system directory (`Set-Location` moves PowerShell's
-/// location, not the process's directory, which the copy and the removal inherit). Each step runs only if the one
-/// before succeeded (5.1 has no `&&`); the copy's directory is removed whatever happened, and the line leaves the copy's
-/// exit code in `$LASTEXITCODE` (1 if the copy did not run), without ending a session it is pasted into. The paths are absolute,
-/// in single quotes, so that nothing expands.
-#[cfg(windows)]
-fn copy_out_commands(paths: &Paths) -> String {
-    let exe = service::exe(paths);
-    let dir = copy_dir(paths);
-    let copy = dir.join(exe.file_name().unwrap_or_default());
-    let quoted = |path: &Path| {
-        // PowerShell reads each of these as a single quote, and ends the literal at an odd one.
-        let doubled: String = path
-            .display()
-            .to_string()
-            .chars()
-            .flat_map(|c| {
-                let times = if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
-                    2
-                } else {
-                    1
-                };
-                std::iter::repeat_n(c, times)
-            })
-            .collect();
-        format!("'{doubled}'")
-    };
-    let (exe, dir, copy) = (quoted(&exe), quoted(&dir), quoted(&copy));
-    format!(
-        "Set-Location -LiteralPath $env:SystemRoot; [Environment]::CurrentDirectory = $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path {dir} > $null; \
-         if ($?) {{ Copy-Item -Force -LiteralPath {exe} -Destination {copy}; \
-         if ($?) {{ & {copy} uninstall; $code = $LASTEXITCODE }} }}; \
-         Remove-Item -Recurse -Force -LiteralPath {dir}; $global:LASTEXITCODE = $code"
-    )
+fn rerun_uninstall(_paths: &Paths) -> String {
+    "run `reverse-tunnel uninstall` in an elevated prompt (with any `reverse-tunnel` binary, if that is not found)"
+        .to_string()
 }
 
 /// Windows: every directory the removal deletes: the bin dir, the config dir, the logs, and the removal's own.
@@ -478,42 +454,71 @@ fn deleted_dirs(paths: &Paths) -> [PathBuf; 4] {
     ]
 }
 
-/// Windows: fails if this binary, or the working directory `cwd`, is in a directory the removal deletes (see
-/// `deleted_dirs`), saying how to run `uninstall` from a copy, or from another directory: a binary that runs and a
-/// process's working directory each keep their directory from being deleted. The OS resolves the directories, so short
-/// names and case do not matter.
+/// Windows: whether the binary `exe` is in a directory the removal deletes (see `deleted_dirs`). Windows cannot delete
+/// a running binary, so it has to move. The OS resolves the directories, so short names and case do not matter.
 #[cfg(windows)]
-fn refuse_running_from_a_deleted_directory(paths: &Paths, exe: &Path, cwd: &Path) -> Result<()> {
+fn runs_from_a_deleted_directory(paths: &Paths, exe: &Path) -> Result<bool> {
     let canonical = |path: &Path| {
         fs::canonicalize(path).with_context(|| {
             format!(
-                "resolving {} to check that it is not a directory the removal deletes",
+                "resolving {} to check whether it is a directory the removal deletes",
                 path.display()
             )
         })
     };
     let exe_dir = canonical(exe.parent().context("this binary has no directory")?)?;
-    let cwd = canonical(cwd)?;
     for deleted in deleted_dirs(paths) {
-        if !deleted.try_exists()? {
-            continue;
+        if deleted.try_exists()? && exe_dir.starts_with(canonical(&deleted)?) {
+            return Ok(true);
         }
-        let deleted_here = canonical(&deleted)?;
-        ensure!(
-            !exe_dir.starts_with(&deleted_here),
-            "`uninstall` is running from {}, which the removal deletes, and Windows cannot delete a running binary. \
-             Run it from a copy, in an elevated PowerShell (over SSH, run `powershell` first):\n    {}",
-            deleted.display(),
-            copy_out_commands(paths)
-        );
-        ensure!(
-            !cwd.starts_with(&deleted_here),
-            "`uninstall` has its current directory in {}, which the removal deletes, and Windows cannot delete a \
-             directory that a process is in. Change to another directory first.",
-            deleted.display()
-        );
     }
-    Ok(())
+    Ok(false)
+}
+
+/// Windows: where `uninstall` moved the image of its own binary, which the removal would have deleted.
+#[cfg(windows)]
+struct Aside {
+    from: PathBuf,
+    to: PathBuf,
+}
+
+/// Windows: leaves the working directory for the system directory, since a process's own directory cannot be deleted,
+/// and, if this binary is in a directory the removal deletes, renames its image aside, which Windows allows while it
+/// runs (what it refuses is deleting it). The image goes to the directory that holds the bin dir, `%ProgramFiles%`,
+/// which only administrators can write to and the removal leaves alone, under a name of its own; the same volume, so
+/// that the rename needs no copy.
+#[cfg(windows)]
+fn make_way(paths: &Paths, exe: &Path) -> Result<Option<Aside>> {
+    let system = known_folders::get_known_folder_path(known_folders::KnownFolder::Windows)
+        .context("the system has no Windows folder")?;
+    env::set_current_dir(&system).with_context(|| format!("leaving the working directory for {}", system.display()))?;
+    if !runs_from_a_deleted_directory(paths, exe)? {
+        return Ok(None);
+    }
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
+    let to = paths.bin_dir.parent().context("the bin dir has no parent")?;
+    let to = to.join(format!(".reverse-tunnel.{}.exe", hex::encode(random)));
+    fs::rename(exe, &to).with_context(|| format!("moving {} to {}", exe.display(), to.display()))?;
+    Ok(Some(Aside {
+        from: exe.to_path_buf(),
+        to,
+    }))
+}
+
+#[cfg(windows)]
+impl Aside {
+    /// Deletes the image once this process has exited (`self_replace` starts a helper that waits for it), unless the
+    /// removal did not succeed and the image can go back where it was: then `reverse-tunnel uninstall` still runs, for
+    /// the rerun that the failure advises.
+    fn settle(self, removed: bool) {
+        if !removed && fs::rename(&self.to, &self.from).is_ok() {
+            return;
+        }
+        if let Err(err) = self_replace::self_delete_at(&self.to) {
+            eprintln!("could not have {} deleted: {err}", self.to.display());
+        }
+    }
 }
 
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
@@ -532,7 +537,11 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     account::remove(service::ACCOUNT)?;
     #[cfg(unix)]
     remove_link(paths)?;
-    remove_files(paths).with_context(|| rerun_uninstall(paths))
+    remove_files(paths).with_context(|| rerun_uninstall(paths))?;
+    // Last: until then the rerun that a failure advises is run by name, and the `PATH` finds it.
+    #[cfg(windows)]
+    system_path::remove(&paths.bin_dir)?;
+    Ok(())
 }
 
 /// Removes the link to the binary, unless it points elsewhere.

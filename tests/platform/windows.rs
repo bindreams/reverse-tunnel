@@ -1,10 +1,11 @@
 //! What the platform tests need of Windows: a DACL's effective rights, a job object that ends a session, a local
-//! standard user.
+//! standard user, the machine's `Path` and the images `uninstall` moves aside.
 
 use std::cell::Cell;
+use std::env;
 use std::fs;
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
 
@@ -22,8 +23,10 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
+use winreg::RegKey;
+use winreg::enums::HKEY_LOCAL_MACHINE;
 
-use super::{Machine, output_of, service, service_owner};
+use super::{Machine, output_of, service, service_owner, wait_until};
 
 const SYSTEM: &str = "S-1-5-18";
 const ADMINISTRATORS: &str = "S-1-5-32-544";
@@ -269,4 +272,55 @@ impl Drop for Probe {
     fn drop(&mut self) {
         let _ = Command::new("net").args(["user", PROBE, "/delete"]).output();
     }
+}
+
+/// The machine's `Path`, as stored: unexpanded.
+fn machine_path() -> String {
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        .unwrap()
+        .get_value("Path")
+        .unwrap()
+}
+
+/// How many entries of the machine's `Path` name `dir`, whatever their case or a trailing backslash.
+pub fn path_entries_naming(dir: &Path) -> usize {
+    let bare = |text: &str| text.trim_end_matches('\\').to_lowercase();
+    let dir = bare(dir.to_str().unwrap());
+    machine_path().split(';').filter(|entry| bare(entry) == dir).count()
+}
+
+/// The machine's `Path` as a process started now would have it, each `%NAME%` expanded: the environment of a shell
+/// opened after `install`, unlike this process's own.
+pub fn fresh_path() -> String {
+    machine_path()
+        .split('%')
+        .enumerate()
+        .map(|(at, part)| match (at % 2, env::var(part)) {
+            (1, Ok(value)) => value,
+            (1, Err(_)) => format!("%{part}%"),
+            _ => part.to_string(),
+        })
+        .collect()
+}
+
+/// Waits, with no cap, until no image that `uninstall` moved aside, or that the deletion's helper copied, is left: they
+/// are named `.reverse-tunnel.<...>` and are in the folder that holds the bin dir or in the temp directory (which the
+/// child inherited from this process). `uninstall` has exited by now; the helper deletes them once it has.
+pub fn wait_until_moved_images_are_gone(machine: &Machine) {
+    let leftovers = |dir: Option<&Path>| -> Vec<PathBuf> {
+        fs::read_dir(dir.unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".reverse-tunnel.")
+            })
+            .collect()
+    };
+    wait_until("the images uninstall moved aside are deleted", || {
+        leftovers(machine.paths.bin_dir.parent()).is_empty() && leftovers(Some(&env::temp_dir())).is_empty()
+    });
 }

@@ -201,6 +201,13 @@ impl Machine {
             matches!(manager.status(&id), Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })),
             "the service is left from before"
         );
+        #[cfg(windows)]
+        assert_eq!(
+            windows::path_entries_naming(&paths.bin_dir),
+            0,
+            "the machine's Path names {} from before",
+            paths.bin_dir.display()
+        );
         if let Some(link) = &paths.link {
             assert!(
                 link.symlink_metadata().is_err(),
@@ -395,8 +402,13 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     #[cfg(unix)]
     seen.extend(account_names().into_iter().map(|name| format!("account {name}")));
     #[cfg(windows)]
-    if schtasks::state(schtasks::REMOVAL).unwrap() != TaskState::Gone {
-        seen.insert(format!("task {}", schtasks::REMOVAL));
+    {
+        if schtasks::state(schtasks::REMOVAL).unwrap() != TaskState::Gone {
+            seen.insert(format!("task {}", schtasks::REMOVAL));
+        }
+        if windows::path_entries_naming(&paths.bin_dir) > 0 {
+            seen.insert("a Path entry for the bin dir".to_string());
+        }
     }
     for installed in machine.manager.list().unwrap() {
         seen.insert(match installed {
@@ -746,8 +758,8 @@ fn uninstall_survives_logind_session_end() {
                 .lines()
                 .find_map(|line| line.strip_prefix("session="))
                 .expect("su -l opens a logind session");
-            // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the scope
-            // because of the drop-in. (A `su` killed outright leaves the scope alone.)
+            // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the
+            // scope because of the drop-in. (A `su` killed outright leaves the scope alone.)
             output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
             session.wait().unwrap();
             wait_until("logind has ended the session", || {
@@ -1234,10 +1246,10 @@ impl Drop for TaskGuard {
     }
 }
 
-/// Runs the removal's own script as a SYSTEM task, on a machine with nothing installed (its `uninstall --finish` has run
-/// if the config directory the test made is gone), with a file made impossible to delete while it runs: `hold` is given
-/// the removal's directory and the copy in it, and names that file. Returns how the task ended, with the directory,
-/// the copy and the log.
+/// Runs the removal's own script as a SYSTEM task, on a machine with nothing installed (its `uninstall --finish` has
+/// run if the config directory the test made is gone), with a file made impossible to delete while it runs: `hold` is
+/// given the removal's directory and the copy in it, and names that file. Returns how the task ended, with the
+/// directory, the copy and the log.
 #[cfg(windows)]
 fn run_removal_script_holding(
     hold: impl FnOnce(&Path, &Path) -> PathBuf,
@@ -1321,54 +1333,23 @@ fn the_removal_task_runs_as_system() {
     assert!(said.contains("S-1-5-18"), "the task ran as: {said}");
 }
 
-/// The removal deletes the installed binary's directory, which Windows cannot do while that binary runs: `uninstall`
-/// run by it refuses before it changes anything, and prints a PowerShell line that runs it from a copy. Run under
-/// Windows PowerShell 5.1, that line removes the host and its own copy.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
+/// `command` is `uninstall` run by the installed binary, which the removal deletes and Windows cannot delete while it
+/// runs: it moves its image out of the way, finishes, and deletes the image once it has exited. Asserts that it ended
+/// well and left nothing: not the service, the task, the directories, the `Path` entry or the moved image.
 #[cfg(windows)]
-fn uninstall_run_by_the_installed_binary_refuses_and_its_copy_out_line_removes_the_host() {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-
-    let refused = Command::new(service::exe(&machine.paths))
-        .arg("uninstall")
-        .output()
-        .unwrap();
-
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(!refused.status.success(), "uninstall should refuse: {stderr}");
-    let line = stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("Set-Location -LiteralPath"))
-        .unwrap_or_else(|| panic!("the copy-out line is not in: {stderr}"));
-    assert_eq!(machine.status().state, State::Running, "the service was touched");
-    assert!(
-        !machine.paths.config_dir.join("uninstalling").exists(),
-        "the uninstalling marker was written"
-    );
-
-    // From inside the directory the removal deletes: the line moves out of it first.
-    // The line leaves the copy's exit code in $LASTEXITCODE and does not end the session; the process exit shows it.
-    let ran = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("{line}; exit $LASTEXITCODE"),
-        ])
-        .current_dir(&machine.paths.bin_dir)
-        .output()
-        .unwrap();
+fn assert_uninstalled_by_the_installed_binary(machine: &Machine, mut command: Command) {
+    let ran = command.output().unwrap();
 
     let said = format!(
         "{}{}",
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
-    assert!(ran.status.success(), "the line exited with {}: {said}", ran.status);
-    assert!(said.contains("Removed."), "the copy did not remove the host: {said}");
+    assert!(ran.status.success(), "uninstall exited with {}: {said}", ran.status);
+    assert!(
+        said.contains("Removed."),
+        "uninstall did not say it removed the host: {said}"
+    );
     let removed = matches!(
         machine.manager.status(&machine.id),
         Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
@@ -1379,9 +1360,72 @@ fn uninstall_run_by_the_installed_binary_refuses_and_its_copy_out_line_removes_t
         &machine.paths.config_dir,
         &machine.paths.log_dir,
         &machine.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"),
-        &machine.paths.bin_dir.with_file_name("reverse-tunnel-copy"),
     ] {
         assert!(!left.exists(), "{} is left: {said}", left.display());
     }
     assert_eq!(schtasks::state(schtasks::REMOVAL).unwrap(), TaskState::Gone);
+    assert_eq!(
+        windows::path_entries_naming(&machine.paths.bin_dir),
+        0,
+        "the Path entry is left"
+    );
+    windows::wait_until_moved_images_are_gone(machine);
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_binary() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let mut uninstall = Command::new(service::exe(&machine.paths));
+    uninstall.arg("uninstall").current_dir(env::temp_dir());
+
+    assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+}
+
+/// By name, from the environment of a shell opened after `install`, which has the machine's `Path`.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_run_by_name_through_the_path_removes_the_host_and_the_binary() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let cmd = Path::new(&env::var("SystemRoot").unwrap())
+        .join("System32")
+        .join("cmd.exe");
+    let mut uninstall = Command::new(cmd);
+    uninstall
+        .args(["/c", "reverse-tunnel", "uninstall"])
+        .env("PATH", windows::fresh_path())
+        .current_dir(env::temp_dir());
+
+    assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+}
+
+/// A process's working directory keeps that directory from being deleted: `uninstall` leaves it.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_started_in_the_install_directory_leaves_it_and_removes_the_host() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let mut uninstall = Command::new(service::exe(&machine.paths));
+    uninstall.arg("uninstall").current_dir(&machine.paths.bin_dir);
+
+    assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+}
+
+/// `install` puts the bin dir on the machine's `Path` once, however often it runs.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn install_puts_the_bin_dir_on_the_machine_path_once() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
+
+    machine.install(&join_code("tunnel.example.test"));
+
+    assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
 }
