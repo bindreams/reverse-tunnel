@@ -1322,27 +1322,57 @@ fn the_removal_task_runs_as_system() {
 }
 
 /// The removal deletes the installed binary's directory, which Windows cannot do while that binary runs: `uninstall`
-/// run by it refuses before it changes anything, and says how to run it from a copy.
+/// run by it refuses before it changes anything, and prints a PowerShell line that runs it from a copy. Run under
+/// Windows PowerShell 5.1, that line removes the host and its own copy.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
-fn uninstall_run_by_the_installed_binary_refuses_before_changing_anything() {
+fn uninstall_run_by_the_installed_binary_refuses_and_its_copy_out_line_removes_the_host() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let installed = service::exe(&machine.paths);
 
-    let refused = Command::new(&installed).arg("uninstall").output().unwrap();
+    let refused = Command::new(service::exe(&machine.paths))
+        .arg("uninstall")
+        .output()
+        .unwrap();
 
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(!refused.status.success(), "uninstall should refuse: {stderr}");
-    let copy_out = format!(
-        r#"Copy-Item "{}" $env:TEMP; & "$env:TEMP\reverse-tunnel.exe" uninstall"#,
-        installed.display()
-    );
-    assert!(stderr.contains(&copy_out), "the copy-out command is not in: {stderr}");
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("New-Item -ItemType Directory"))
+        .unwrap_or_else(|| panic!("the copy-out line is not in: {stderr}"));
     assert_eq!(machine.status().state, State::Running, "the service was touched");
     assert!(
         !machine.paths.config_dir.join("uninstalling").exists(),
         "the uninstalling marker was written"
     );
+
+    let ran = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", line])
+        .output()
+        .unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(said.contains("Removed."), "the copy did not remove the host: {said}");
+    let removed = matches!(
+        machine.manager.status(&machine.id),
+        Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
+    );
+    assert!(removed, "the service is left: {said}");
+    for left in [
+        &machine.paths.bin_dir,
+        &machine.paths.config_dir,
+        &machine.paths.log_dir,
+        &machine.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"),
+        &machine.paths.bin_dir.with_file_name("reverse-tunnel-copy"),
+    ] {
+        assert!(!left.exists(), "{} is left: {said}", left.display());
+    }
+    assert_eq!(schtasks::state(schtasks::REMOVAL).unwrap(), TaskState::Gone);
 }

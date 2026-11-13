@@ -29,21 +29,31 @@ fn each_step_of_the_script_fails_with_its_own_exit_code() {
 
 #[test]
 fn a_task_that_is_queued_or_running_runs_whatever_its_last_result() {
-    assert_eq!(task_state(TASK_STATE_RUNNING, 1), TaskState::Running);
-    assert_eq!(task_state(TASK_STATE_QUEUED, 0), TaskState::Running);
+    assert_eq!(task_state(TASK_STATE_RUNNING, 0, 1), TaskState::Running);
+    assert_eq!(task_state(TASK_STATE_QUEUED, 0, 0), TaskState::Running);
 }
 
 #[test]
 fn a_task_that_is_ready_has_ended_unless_its_result_says_it_has_not_run() {
-    assert_eq!(task_state(TASK_STATE_READY, 3), TaskState::Ended(3));
-    assert_eq!(task_state(TASK_STATE_READY, -1073741510), TaskState::Ended(-1073741510));
+    assert_eq!(task_state(TASK_STATE_READY, 0, 3), TaskState::Ended(3));
+    assert_eq!(
+        task_state(TASK_STATE_READY, 0, -1073741510),
+        TaskState::Ended(-1073741510)
+    );
     for not_ended in NOT_ENDED {
-        assert_eq!(task_state(TASK_STATE_READY, not_ended), TaskState::Running);
+        assert_eq!(task_state(TASK_STATE_READY, 0, not_ended), TaskState::Running);
     }
 }
 
 #[test]
 fn a_disabled_task_never_runs_whatever_its_last_result() {
-    assert_eq!(task_state(TASK_STATE_DISABLED, 0x41303), TaskState::Disabled);
-    assert_eq!(task_state(TASK_STATE_DISABLED, 4), TaskState::Disabled);
+    assert_eq!(task_state(TASK_STATE_DISABLED, 0, 0x41303), TaskState::Disabled);
+    assert_eq!(task_state(TASK_STATE_DISABLED, 0, 4), TaskState::Disabled);
+}
+
+#[test]
+fn a_task_with_an_instance_running_runs_even_when_it_is_disabled() {
+    // Disabling a task does not stop the instance that runs.
+    assert_eq!(task_state(TASK_STATE_DISABLED, 1, 0x41301), TaskState::Running);
+    assert_eq!(task_state(TASK_STATE_DISABLED, 1, 0), TaskState::Running);
 }

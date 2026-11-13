@@ -190,15 +190,18 @@ tunnel-only host out until someone is at the machine.
 Revoking does not cut the host's current connection; `ctl revoke` prints the command that does.
 
 **Windows**: the removal deletes `%ProgramFiles%\reverse-tunnel`, and Windows cannot delete a running binary, so
-`uninstall` refuses when the installed binary runs it, before it changes anything. Run it, in an elevated prompt, from
-the binary you downloaded, or from a copy of the installed one:
+`uninstall` refuses when the installed binary runs it, before it changes anything, and prints the line to run instead
+(or run `uninstall` from the binary you downloaded). In an elevated PowerShell (over SSH, run `powershell` first), the
+line copies the installed binary to `%ProgramFiles%\reverse-tunnel-copy`, runs `uninstall` from the copy, and deletes the
+copy:
 
 ```powershell
-Copy-Item "$env:ProgramFiles\reverse-tunnel\reverse-tunnel.exe" $env:TEMP; & "$env:TEMP\reverse-tunnel.exe" uninstall
+New-Item -ItemType Directory -Force -Path 'C:\Program Files\reverse-tunnel-copy' > $null; if ($?) { Copy-Item -Force -LiteralPath 'C:\Program Files\reverse-tunnel\reverse-tunnel.exe' -Destination 'C:\Program Files\reverse-tunnel-copy\reverse-tunnel.exe'; if ($?) { & 'C:\Program Files\reverse-tunnel-copy\reverse-tunnel.exe' uninstall } }; Remove-Item -Recurse -Force -LiteralPath 'C:\Program Files\reverse-tunnel-copy'
 ```
 
-A failed removal's log is `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`; run `uninstall` again, the same way,
-to finish it.
+If your session ends mid-removal (an `uninstall` run through the host's own tunnel), the removal finishes, but
+`%ProgramFiles%\reverse-tunnel-copy` stays: delete it by hand. A failed removal's log is
+`%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`; run the line again to finish it.
 
 - On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
   unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.

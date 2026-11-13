@@ -138,7 +138,7 @@ fn apply(
 pub fn uninstall(paths: &Paths) -> Result<()> {
     let exe = env::current_exe()?;
     #[cfg(windows)]
-    refuse_running_from_bin_dir(paths, &exe)?;
+    refuse_running_from_a_deleted_directory(paths, &exe)?;
     let lock = lock(paths)?;
     match revoke_line(paths) {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
@@ -209,6 +209,12 @@ pub fn removal_log_file(paths: &Paths) -> PathBuf {
 #[cfg(windows)]
 fn removal_dir(paths: &Paths) -> PathBuf {
     paths.bin_dir.with_file_name("reverse-tunnel-uninstall")
+}
+
+/// Windows: where the copy of the binary that `copy_out_commands` runs lives while it does: next to the bin dir (so
+/// only administrators can have made it), and outside everything the removal deletes.
+fn copy_dir(paths: &Paths) -> PathBuf {
+    paths.bin_dir.with_file_name("reverse-tunnel-copy")
 }
 
 /// How a waited-for removal ended, when it could be waited for.
@@ -406,7 +412,7 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
 fn rerun_uninstall(paths: &Paths) -> String {
     let installed = service::exe(paths).exists();
     match (cfg!(windows), installed) {
-        (true, true) => format!("run `{}` in an elevated prompt", copy_out_commands(paths)),
+        (true, true) => format!("run `{}` in an elevated PowerShell", copy_out_commands(paths)),
         (true, false) => {
             "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
                 .to_string()
@@ -418,32 +424,39 @@ fn rerun_uninstall(paths: &Paths) -> String {
     }
 }
 
-/// Windows: PowerShell commands that run `uninstall` by a copy of the installed binary. The removal deletes the
-/// installed one's directory, which it cannot while a binary in it runs.
+/// Windows: one Windows PowerShell 5.1 line that runs `uninstall` by a copy of the installed binary, then removes the
+/// copy. The removal deletes the installed one's directory, which it cannot while a binary in it runs. Each step runs
+/// only if the one before succeeded (5.1 has no `&&`); the copy's directory is removed whatever happened. The paths are
+/// absolute, in single quotes, so that nothing expands.
 fn copy_out_commands(paths: &Paths) -> String {
     let exe = service::exe(paths);
-    let name = exe.file_name().unwrap_or_default().to_string_lossy();
+    let dir = copy_dir(paths);
+    let copy = dir.join(exe.file_name().unwrap_or_default());
+    let quoted = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "''"));
+    let (exe, dir, copy) = (quoted(&exe), quoted(&dir), quoted(&copy));
     format!(
-        "Copy-Item \"{}\" $env:TEMP; & \"$env:TEMP\\{name}\" uninstall",
-        exe.display()
+        "New-Item -ItemType Directory -Force -Path {dir} > $null; if ($?) {{ Copy-Item -Force -LiteralPath {exe} \
+         -Destination {copy}; if ($?) {{ & {copy} uninstall }} }}; Remove-Item -Recurse -Force -LiteralPath {dir}"
     )
 }
 
-/// Windows: fails if this binary is in the bin dir, saying how to run `uninstall` from a copy. The OS resolves both
-/// directories, so short names and case do not matter.
+/// Windows: fails if this binary is in a directory the removal deletes (the bin dir, or the removal's own), saying how
+/// to run `uninstall` from a copy. The OS resolves the directories, so short names and case do not matter.
 #[cfg(windows)]
-fn refuse_running_from_bin_dir(paths: &Paths, exe: &Path) -> Result<()> {
-    if !paths.bin_dir.try_exists()? {
-        return Ok(());
-    }
+fn refuse_running_from_a_deleted_directory(paths: &Paths, exe: &Path) -> Result<()> {
     let here = fs::canonicalize(exe.parent().context("this binary has no directory")?)?;
-    ensure!(
-        here != fs::canonicalize(&paths.bin_dir)?,
-        "`uninstall` is running from {}, which the removal deletes, and Windows cannot delete a running binary. Run it          from a copy, in an elevated prompt:
-    {}",
-        paths.bin_dir.display(),
-        copy_out_commands(paths)
-    );
+    for deleted in [&paths.bin_dir, &removal_dir(paths)] {
+        if !deleted.try_exists()? {
+            continue;
+        }
+        ensure!(
+            here != fs::canonicalize(deleted)?,
+            "`uninstall` is running from {}, which the removal deletes, and Windows cannot delete a running binary. \
+             Run it from a copy, in an elevated PowerShell (over SSH, run `powershell` first):\n    {}",
+            deleted.display(),
+            copy_out_commands(paths)
+        );
+    }
     Ok(())
 }
 

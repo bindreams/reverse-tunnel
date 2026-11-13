@@ -65,15 +65,30 @@ fn installed() -> (tempfile::TempDir, Paths) {
 }
 
 #[test]
-fn the_rerun_advice_copies_the_installed_binary_out_of_the_directory_the_removal_deletes() {
+fn the_installed_binary_is_copied_out_run_and_the_copy_removed_by_one_powershell_line() {
+    let paths = Paths::testing(r"C:\host");
+
+    assert_eq!(
+        copy_out_commands(&paths),
+        r"New-Item -ItemType Directory -Force -Path 'C:\host\reverse-tunnel-copy' > $null; if ($?) { Copy-Item -Force -LiteralPath 'C:\host\bin\reverse-tunnel.exe' -Destination 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe'; if ($?) { & 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe' uninstall } }; Remove-Item -Recurse -Force -LiteralPath 'C:\host\reverse-tunnel-copy'"
+    );
+}
+
+#[test]
+fn a_quote_in_a_path_is_doubled_so_that_nothing_expands() {
+    let paths = Paths::testing(r"C:\it's");
+
+    assert!(copy_out_commands(&paths).contains(r"'C:\it''s\bin\reverse-tunnel.exe'"));
+}
+
+#[test]
+fn the_rerun_advice_is_the_copy_out_line() {
     let (_dir, paths) = installed();
 
     assert_eq!(
         rerun_uninstall(&paths),
-        format!("run `{}` in an elevated prompt", copy_out_commands(&paths))
+        format!("run `{}` in an elevated PowerShell", copy_out_commands(&paths))
     );
-    assert!(copy_out_commands(&paths).starts_with("Copy-Item \""));
-    assert!(copy_out_commands(&paths).ends_with("; & \"$env:TEMP\\reverse-tunnel.exe\" uninstall"));
 }
 
 #[test]
@@ -86,14 +101,32 @@ fn the_rerun_advice_without_the_installed_binary_names_any_other() {
 }
 
 #[test]
-fn uninstall_refuses_to_run_from_the_directory_it_deletes() {
+fn uninstall_refuses_to_run_from_the_bin_dir_with_the_whole_text() {
     let (_dir, paths) = installed();
 
-    let err = refuse_running_from_bin_dir(&paths, &service::exe(&paths)).unwrap_err();
+    let err = refuse_running_from_a_deleted_directory(&paths, &service::exe(&paths)).unwrap_err();
 
-    let err = format!("{err:#}");
-    assert!(err.contains(&copy_out_commands(&paths)), "{err}");
-    assert!(err.contains("cannot delete a running binary"), "{err}");
+    assert_eq!(
+        format!("{err:#}"),
+        format!(
+            "`uninstall` is running from {}, which the removal deletes, and Windows cannot delete a running binary. \
+             Run it from a copy, in an elevated PowerShell (over SSH, run `powershell` first):\n    {}",
+            paths.bin_dir.display(),
+            copy_out_commands(&paths)
+        )
+    );
+}
+
+#[test]
+fn uninstall_refuses_to_run_from_the_removals_own_directory() {
+    let (_dir, paths) = installed();
+    fs::create_dir_all(removal_dir(&paths)).unwrap();
+    let copy = removal_dir(&paths).join("reverse-tunnel.exe");
+    fs::write(&copy, "").unwrap();
+
+    let err = refuse_running_from_a_deleted_directory(&paths, &copy).unwrap_err();
+
+    assert!(format!("{err:#}").contains(&removal_dir(&paths).display().to_string()));
 }
 
 #[test]
@@ -101,7 +134,7 @@ fn the_directory_is_the_same_by_whatever_case_the_path_names_it() {
     let (_dir, paths) = installed();
     let shouted = PathBuf::from(service::exe(&paths).to_string_lossy().to_uppercase());
 
-    assert!(refuse_running_from_bin_dir(&paths, &shouted).is_err());
+    assert!(refuse_running_from_a_deleted_directory(&paths, &shouted).is_err());
 }
 
 #[test]
@@ -109,8 +142,13 @@ fn uninstall_runs_from_a_binary_elsewhere_or_with_nothing_installed() {
     let (dir, paths) = installed();
     let elsewhere = dir.path().join("reverse-tunnel.exe");
     fs::write(&elsewhere, "").unwrap();
-    refuse_running_from_bin_dir(&paths, &elsewhere).unwrap();
+    refuse_running_from_a_deleted_directory(&paths, &elsewhere).unwrap();
+    // The copy-out line's own directory is outside what the removal deletes.
+    fs::create_dir_all(copy_dir(&paths)).unwrap();
+    let copy = copy_dir(&paths).join("reverse-tunnel.exe");
+    fs::write(&copy, "").unwrap();
+    refuse_running_from_a_deleted_directory(&paths, &copy).unwrap();
 
     fs::remove_dir_all(&paths.bin_dir).unwrap();
-    refuse_running_from_bin_dir(&paths, &service::exe(&paths)).unwrap();
+    refuse_running_from_a_deleted_directory(&paths, &elsewhere).unwrap();
 }

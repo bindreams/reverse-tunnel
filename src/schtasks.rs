@@ -83,21 +83,29 @@ pub fn state(name: &str) -> Result<TaskState> {
             found => com(found, "looking up the removal's task")?,
         };
         // SAFETY: plain reads of a live task.
-        let (state, last) = unsafe {
+        let (state, instances, last) = unsafe {
             (
                 com(task.State(), "reading the task's state")?,
+                com(
+                    com(task.GetInstances(0), "listing the task's running instances")?.Count(),
+                    "counting the task's running instances",
+                )?,
                 com(task.LastTaskResult(), "reading the task's last result")?,
             )
         };
-        Ok(task_state(state, last))
+        Ok(task_state(state, instances, last))
     })
 }
 
-/// What a task with this state and last result is doing. A disabled task will not run, whatever its last result says.
-fn task_state(state: TASK_STATE, last: i32) -> TaskState {
-    if state == TASK_STATE_DISABLED {
+/// What a task with this state, number of running instances and last result is doing. An instance that runs makes it
+/// running, whatever its state: disabling a task does not stop it. Otherwise a disabled task will not run, whatever its
+/// last result says.
+fn task_state(state: TASK_STATE, instances: i32, last: i32) -> TaskState {
+    if instances > 0 || state == TASK_STATE_RUNNING || state == TASK_STATE_QUEUED {
+        TaskState::Running
+    } else if state == TASK_STATE_DISABLED {
         TaskState::Disabled
-    } else if state == TASK_STATE_RUNNING || state == TASK_STATE_QUEUED || NOT_ENDED.contains(&last) {
+    } else if NOT_ENDED.contains(&last) {
         TaskState::Running
     } else {
         TaskState::Ended(last)
