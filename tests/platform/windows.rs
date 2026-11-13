@@ -298,20 +298,24 @@ pub fn fresh_path() -> String {
     system_path::expand(&machine_path())
 }
 
-/// Waits, with no cap, until the image that `uninstall` moved aside, which the removal's task deletes once `uninstall`
-/// has exited, is gone: it is named `.reverse-tunnel.<...>` and is in the folder that holds the bin dir.
+/// The images that `uninstall` moved aside, which the removal's task deletes once `uninstall` has exited: named
+/// `.reverse-tunnel.<...>` and in the folder that holds the bin dir.
+pub fn moved_images(machine: &Machine) -> Vec<PathBuf> {
+    fs::read_dir(machine.paths.bin_dir.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".reverse-tunnel.")
+        })
+        .collect()
+}
+
+/// Waits, with no cap, until the moved images are gone.
 pub fn wait_until_the_moved_image_is_gone(machine: &Machine) {
-    let leftovers = || -> Vec<PathBuf> {
-        fs::read_dir(machine.paths.bin_dir.parent().unwrap())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(".reverse-tunnel.")
-            })
-            .collect()
-    };
-    wait_until("the image uninstall moved aside is deleted", || leftovers().is_empty());
+    wait_until("the image uninstall moved aside is deleted", || {
+        moved_images(machine).is_empty()
+    });
 }

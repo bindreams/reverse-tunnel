@@ -185,13 +185,13 @@ fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
         paths: machine.paths.clone(),
     };
     let err = format!("{:#}", install(opts).unwrap_err());
-    assert!(err.contains(&rerun_uninstall(&machine.paths)), "{err}");
+    assert!(err.contains(&rerun_uninstall(&machine.paths, None)), "{err}");
     assert!(err.contains("`uninstall` with `sudo` and any"), "{err}");
 
     fs::create_dir_all(&machine.paths.bin_dir).unwrap();
     fs::write(service::exe(&machine.paths), "").unwrap();
     assert_eq!(
-        rerun_uninstall(&machine.paths),
+        rerun_uninstall(&machine.paths, None),
         format!("run `sudo {} uninstall`", service::exe(&machine.paths).display())
     );
 }

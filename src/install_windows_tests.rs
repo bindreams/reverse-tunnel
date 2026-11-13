@@ -66,11 +66,24 @@ fn installed() -> (tempfile::TempDir, Paths) {
 
 #[test]
 fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_not() {
-    let advice = rerun_uninstall(&Paths::testing(r"C:\host"));
+    let advice = rerun_uninstall(&Paths::testing(r"C:\host"), None);
 
     assert_eq!(
         advice,
         "run `reverse-tunnel uninstall` in an elevated prompt (with any `reverse-tunnel` binary, if that is not found)"
+    );
+}
+
+#[test]
+fn the_rerun_advice_of_a_removal_with_a_moved_image_names_it_quoted() {
+    let advice = rerun_uninstall(
+        &Paths::testing(r"C:\host"),
+        Some(Path::new(r"C:\Program Files\.reverse-tunnel.0123.exe")),
+    );
+
+    assert_eq!(
+        advice,
+        r#"run `"C:\Program Files\.reverse-tunnel.0123.exe" uninstall` in an elevated prompt"#
     );
 }
 
@@ -164,10 +177,10 @@ fn uninstall_runs_with_its_working_directory_elsewhere() {
 fn moved_aside() -> (tempfile::TempDir, Paths, Aside) {
     let (dir, paths) = installed();
     let aside = Aside {
-        from: service::exe(&paths),
+        from: Some(service::exe(&paths)),
         to: dir.path().join(".reverse-tunnel.0123.exe"),
     };
-    fs::rename(&aside.from, &aside.to).unwrap();
+    fs::rename(service::exe(&paths), &aside.to).unwrap();
     (dir, paths, aside)
 }
 
@@ -177,8 +190,8 @@ fn an_image_put_back_is_where_it_was_and_the_advice_is_the_name() {
 
     let advice = aside.put_back(&paths);
 
-    assert!(aside.from.exists() && !aside.to.exists());
-    assert_eq!(advice, rerun_uninstall(&paths));
+    assert!(service::exe(&paths).exists() && !aside.to.exists());
+    assert_eq!(advice, rerun_uninstall(&paths, None));
 }
 
 #[test]
@@ -189,33 +202,79 @@ fn an_image_that_cannot_be_put_back_is_named_as_the_binary_to_run() {
 
     let advice = aside.put_back(&paths);
 
-    let to = aside.to.display().to_string();
+    assert!(
+        advice.starts_with(&rerun_uninstall(&paths, Some(&aside.to))),
+        "{advice}"
+    );
     assert!(advice.contains("could not be moved back"), "{advice}");
-    assert!(advice.contains(&format!("\"{to}\" uninstall")), "{advice}");
 }
 
 #[test]
-fn a_removal_that_left_its_task_names_the_moved_image_to_delete_beside_it() {
-    let (_dir, _paths, aside) = moved_aside();
+fn an_image_in_the_bin_dir_is_moved_next_to_it_under_a_name_of_its_own() {
+    let (dir, paths) = installed();
+
+    let aside = move_aside(&paths, &service::exe(&paths)).unwrap().unwrap();
+
+    assert_eq!(aside.from, Some(service::exe(&paths)));
+    assert_eq!(aside.to.parent(), Some(dir.path()));
+    let name = aside.to.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with(".reverse-tunnel.") && name.ends_with(".exe"), "{name}");
+    assert!(aside.to.exists() && !service::exe(&paths).exists());
+}
+
+#[test]
+fn an_image_that_is_aside_already_is_the_one_the_removal_deletes_and_is_not_moved() {
+    let (_dir, paths, aside) = moved_aside();
+
+    let again = move_aside(&paths, &aside.to).unwrap().unwrap();
+
+    assert_eq!((again.from, again.to.as_path()), (None, aside.to.as_path()));
+    assert!(aside.to.exists());
+    let advice = Aside {
+        from: None,
+        to: aside.to.clone(),
+    }
+    .put_back(&paths);
+    assert_eq!(advice, rerun_uninstall(&paths, Some(&aside.to)));
+    assert!(aside.to.exists());
+}
+
+#[test]
+fn a_binary_outside_the_directories_the_removal_deletes_stays_where_it_is() {
+    let (dir, paths) = installed();
+    let elsewhere = dir.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    // Named as a moved image, but not in the directory that holds the bin dir.
+    let lookalike = elsewhere.join(".reverse-tunnel.0123.exe");
+    fs::write(&lookalike, "").unwrap();
+    // In the directory that holds the bin dir, but not named as a moved image.
+    let beside = dir.path().join("reverse-tunnel.exe");
+    fs::write(&beside, "").unwrap();
+
+    for exe in [lookalike, beside] {
+        assert!(move_aside(&paths, &exe).unwrap().is_none(), "{exe:?}");
+        assert!(exe.exists());
+    }
+}
+
+#[test]
+fn a_removal_that_left_its_task_and_the_image_says_how_to_run_it_again() {
     let task = "the task is still registered";
 
-    let with = left_behind(task, Some(&aside));
+    let with = left_behind(task, Some("run `\"X\" uninstall`".to_string()));
 
     assert!(with.starts_with(task), "{with}");
-    assert!(with.contains(&aside.to.display().to_string()), "{with}");
+    assert!(with.ends_with("run `\"X\" uninstall`"), "{with}");
     assert_eq!(left_behind(task, None), task);
 }
 
-/// Opens `path` so that nothing can delete it until the returned file drops.
+#[path = "../tests/support/held.rs"]
+mod held;
+
+/// Writes `path` and opens it so that nothing can delete it until the returned file drops.
 fn held(path: &Path) -> fs::File {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_SHARE_READ: u32 = 1;
     fs::write(path, "x").unwrap();
-    fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(path)
-        .unwrap()
+    held::open_held(path)
 }
 
 #[test]

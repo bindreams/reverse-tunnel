@@ -36,6 +36,9 @@ use rustix::process::{Pid, Signal, kill_process_group};
 mod windows;
 #[cfg(windows)]
 use windows::assert_installed_as_specified;
+#[cfg(windows)]
+#[path = "support/held.rs"]
+mod held;
 
 const BIN: &str = env!("CARGO_BIN_EXE_reverse-tunnel");
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
@@ -825,14 +828,7 @@ impl<'a> Unremovable<'a> {
 
     #[cfg(windows)]
     fn new(path: &'a Path) -> Self {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 1;
-        let handle = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(path)
-            .unwrap();
-        Unremovable(path, handle)
+        Unremovable(path, held::open_held(path))
     }
 
     #[cfg(unix)]
@@ -874,8 +870,8 @@ fn a_failed_removal_logs_where_uninstall_says() {
             .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_string))
             .expect("journalctl prints a cursor")
     };
-    // On Windows the installed binary runs it: the removal deletes its folder, so it moves itself aside and, when the
-    // removal fails, back.
+    // On Windows the installed binary runs it: the removal deletes its folder, so it moves itself aside, and when the
+    // removal fails it stays there.
     #[cfg(windows)]
     let runner = service::exe(&machine.paths);
     #[cfg(not(windows))]
@@ -884,8 +880,6 @@ fn a_failed_removal_logs_where_uninstall_says() {
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(!failed.status.success(), "the removal should fail: {stderr}");
-    #[cfg(windows)]
-    assert!(runner.exists(), "the binary was not put back: {stderr}");
     let log = install::removal_log(&machine.paths);
     assert!(stderr.contains(&log), "{log} was not named as the log: {stderr}");
     // The unit's own result, not systemd-run's text.
@@ -922,6 +916,19 @@ fn a_failed_removal_logs_where_uninstall_says() {
             install::removal_log_file(&machine.paths).exists(),
             "the failed removal's log is gone"
         );
+        // The image is where the error says: nothing moved it after the hand-off. Running it finishes the removal.
+        let images = windows::moved_images(&machine);
+        let [image] = images.as_slice() else {
+            panic!("expected one moved image, found {images:?}: {stderr}")
+        };
+        assert!(
+            stderr.contains(&format!("\"{}\" uninstall", image.display())),
+            "the error does not name the image as the binary to run: {stderr}"
+        );
+        drop(stuck);
+        let mut rerun = Command::new(image);
+        rerun.arg("uninstall");
+        assert_uninstalled_by_the_installed_binary(&machine, rerun);
     }
 }
 
@@ -1342,7 +1349,8 @@ fn the_removal_task_runs_as_system() {
 }
 
 /// `command` is `uninstall` run by the installed binary, which the removal deletes and Windows cannot delete while it
-/// runs: it moves its image out of the way, finishes, and deletes the image once it has exited. Asserts that it ended
+/// runs, or by an image that an earlier run moved aside: it moves its image out of the way (or is out of the way),
+/// finishes, and the removal deletes the image once it has exited. Asserts that it ended
 /// well and left nothing: not the service, the task, the directories, the `Path` entry or the moved image.
 #[cfg(windows)]
 fn assert_uninstalled_by_the_installed_binary(machine: &Machine, mut command: Command) {
