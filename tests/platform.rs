@@ -1472,26 +1472,3 @@ fn install_puts_the_bin_dir_on_the_machine_path_once() {
 
     assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
 }
-
-// PROBE (removed after the run): does `ping -n 2` pause about a second inside a task with no console?
-#[test]
-#[ignore = "probe"]
-#[cfg(windows)]
-fn probe_ping_pause() {
-    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
-    let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
-    let stamp = |file: &Path| {
-        format!(
-            r#"powershell -NoProfile -Command "[DateTime]::UtcNow.ToString('o') | Out-File -Encoding ascii '{}'""#,
-            file.display()
-        )
-    };
-    let task = "reverse-tunnel-ping-probe";
-    let _guard = TaskGuard(task);
-    let script = format!("{} & ping -n 2 127.0.0.1 >nul & {}", stamp(&a), stamp(&b));
-    schtasks::start(task, &script).unwrap();
-    let state = wait_until_task_is_over(task);
-    eprintln!("PROBE state {state:?}");
-    eprintln!("PROBE before ping {}", fs::read_to_string(&a).unwrap());
-    eprintln!("PROBE after ping {}", fs::read_to_string(&b).unwrap());
-}
