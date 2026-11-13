@@ -1210,32 +1210,3 @@ fn status_needs_no_elevation() {
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
 }
-
-/// Measurement, not a test: whether a running task that deletes its own registration is ended by it.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-#[cfg(windows)]
-fn probe_a_running_task_deletes_itself() {
-    let _machine = Machine::begin();
-    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
-    let (deleted, after) = (dir.path().join("deleted.txt"), dir.path().join("after.txt"));
-    let name = "rt-probe-self-delete";
-    let script = format!(
-        r#"schtasks /Delete /F /TN {name} & echo x> "{}" & ping -n 4 127.0.0.1 > nul & echo x> "{}""#,
-        deleted.display(),
-        after.display()
-    );
-    schtasks::start(name, &dir.path().join("task.xml"), &script).unwrap();
-    wait_until("the probe task ends or is gone", || {
-        !matches!(schtasks::exit_code(name), Ok(None))
-    });
-    // A measurement, so a fixed wait for the 3 s `ping` is fine: nothing depends on it.
-    thread::sleep(Duration::from_secs(8));
-    eprintln!(
-        "PROBE: after the task deleted itself, its script ran the next command: {}, and the one 3 s later: {}; task now: {:?}",
-        deleted.exists(),
-        after.exists(),
-        schtasks::exit_code(name).map_err(|err| err.to_string())
-    );
-    windows::delete_removal_task();
-}

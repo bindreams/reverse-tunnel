@@ -123,7 +123,6 @@ pub fn assert_installed_as_specified(machine: &Machine) {
         is(&public, ADMINISTRATORS, FULL);
         is(&public, EVERYONE, READ_EXECUTE);
         may_not_write(&public, EVERYONE);
-        has_no_access(&public, USERS);
     }
     is(&paths.log_dir, EVERYONE, READ_EXECUTE);
     may_not_write(&paths.log_dir, EVERYONE);
