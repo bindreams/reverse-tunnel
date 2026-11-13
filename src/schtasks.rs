@@ -177,7 +177,7 @@ fn task_xml(script: &str) -> String {
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Principals>
-    <Principal id="Removal"><UserId>{SYSTEM}</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal>
+    <Principal id="Removal"><UserId>{SYSTEM}</UserId><RunLevel>HighestAvailable</RunLevel></Principal>
   </Principals>
   <Settings>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
