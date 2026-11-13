@@ -431,7 +431,8 @@ fn rerun_uninstall(paths: &Paths) -> String {
 
 /// Windows: one Windows PowerShell 5.1 line that runs `uninstall` by a copy of the installed binary, then removes the
 /// copy. The removal deletes the installed one's directory, which it cannot while a binary in it runs, nor while a
-/// process has it as its working directory: the line starts in the system directory. Each step runs only if the one
+/// process has it as its working directory: the line starts in the system directory (`Set-Location` moves PowerShell's
+/// location, not the process's directory, which the copy and the removal inherit). Each step runs only if the one
 /// before succeeded (5.1 has no `&&`); the copy's directory is removed whatever happened, and the line exits with the
 /// copy's exit code, or 1 if the copy did not run. The paths are absolute, in single quotes, so that nothing expands.
 #[cfg(windows)]
@@ -458,7 +459,7 @@ fn copy_out_commands(paths: &Paths) -> String {
     };
     let (exe, dir, copy) = (quoted(&exe), quoted(&dir), quoted(&copy));
     format!(
-        "Set-Location -LiteralPath $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path {dir} > $null; \
+        "Set-Location -LiteralPath $env:SystemRoot; [Environment]::CurrentDirectory = $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path {dir} > $null; \
          if ($?) {{ Copy-Item -Force -LiteralPath {exe} -Destination {copy}; \
          if ($?) {{ & {copy} uninstall; $code = $LASTEXITCODE }} }}; \
          Remove-Item -Recurse -Force -LiteralPath {dir}; exit $code"
