@@ -1269,7 +1269,7 @@ fn run_removal_script_holding(
         TaskState::Gone,
         "a task that was never registered is gone"
     );
-    schtasks::start(task, &schtasks::removal_script(&copy, &log, dir.path(), task)).unwrap();
+    schtasks::start(task, &schtasks::removal_script(&copy, &log, dir.path(), task, None)).unwrap();
 
     let state = wait_until_task_is_over(task);
 
@@ -1369,7 +1369,7 @@ fn assert_uninstalled_by_the_installed_binary(machine: &Machine, mut command: Co
         0,
         "the Path entry is left"
     );
-    windows::wait_until_moved_images_are_gone(machine);
+    windows::wait_until_the_moved_image_is_gone(machine);
 }
 
 #[test]
@@ -1403,17 +1403,60 @@ fn uninstall_run_by_name_through_the_path_removes_the_host_and_the_binary() {
     assert_uninstalled_by_the_installed_binary(&machine, uninstall);
 }
 
-/// A process's working directory keeps that directory from being deleted: `uninstall` leaves it.
+/// A process's working directory keeps that directory from being deleted, and the shell that started `uninstall` stays
+/// in it: `uninstall` refuses before it changes anything.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
-fn uninstall_started_in_the_install_directory_leaves_it_and_removes_the_host() {
+fn uninstall_started_in_the_install_directory_refuses_before_changing_anything() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let mut uninstall = Command::new(service::exe(&machine.paths));
-    uninstall.arg("uninstall").current_dir(&machine.paths.bin_dir);
 
-    assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+    let refused = Command::new(service::exe(&machine.paths))
+        .arg("uninstall")
+        .current_dir(&machine.paths.bin_dir)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "uninstall should refuse: {stderr}");
+    assert!(stderr.contains("Change to another directory first"), "{stderr}");
+    assert_eq!(machine.status().state, State::Running, "the service was touched");
+    assert!(
+        !machine.paths.config_dir.join("uninstalling").exists(),
+        "the uninstalling marker was written"
+    );
+    assert!(service::exe(&machine.paths).exists(), "the binary was moved");
+}
+
+/// The removal's last step, after its task has deleted itself, deletes the image that `uninstall` moved aside, however
+/// long something holds it, as `uninstall`'s own waiter does until it has seen the task gone.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_removal_deletes_the_moved_image_after_its_task_is_gone() {
+    let machine = Machine::begin();
+    fs::create_dir(&machine.paths.config_dir).unwrap();
+    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let (copy, log) = (dir.path().join("reverse-tunnel.exe"), dir.path().join("uninstall.log"));
+    fs::copy(BIN, &copy).unwrap();
+    // Outside the directory the script deletes, as the moved image is.
+    let kept = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let image = kept.path().join(".reverse-tunnel.test.exe");
+    fs::copy(BIN, &image).unwrap();
+    // Held open without delete sharing: `del` fails until the test lets go.
+    let held = Unremovable::new(&image);
+    let task = "reverse-tunnel-moved-image-test";
+    let _guard = TaskGuard(task);
+    let script = schtasks::removal_script(&copy, &log, dir.path(), task, Some(&image));
+    schtasks::start(task, &script).unwrap();
+
+    // The task deletes itself, and its `cmd` goes on, and fails to delete the held image.
+    assert_eq!(wait_until_task_is_over(task), TaskState::Gone);
+    assert!(image.exists(), "the held image is gone");
+    drop(held);
+
+    wait_until("the image is deleted by the task's `cmd`", || !image.exists());
 }
 
 /// `install` puts the bin dir on the machine's `Path` once, however often it runs.
@@ -1428,4 +1471,27 @@ fn install_puts_the_bin_dir_on_the_machine_path_once() {
     machine.install(&join_code("tunnel.example.test"));
 
     assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
+}
+
+// PROBE (removed after the run): does `ping -n 2` pause about a second inside a task with no console?
+#[test]
+#[ignore = "probe"]
+#[cfg(windows)]
+fn probe_ping_pause() {
+    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+    let stamp = |file: &Path| {
+        format!(
+            r#"powershell -NoProfile -Command "[DateTime]::UtcNow.ToString('o') | Out-File -Encoding ascii '{}'""#,
+            file.display()
+        )
+    };
+    let task = "reverse-tunnel-ping-probe";
+    let _guard = TaskGuard(task);
+    let script = format!("{} & ping -n 2 127.0.0.1 >nul & {}", stamp(&a), stamp(&b));
+    schtasks::start(task, &script).unwrap();
+    let state = wait_until_task_is_over(task);
+    eprintln!("PROBE state {state:?}");
+    eprintln!("PROBE before ping {}", fs::read_to_string(&a).unwrap());
+    eprintln!("PROBE after ping {}", fs::read_to_string(&b).unwrap());
 }

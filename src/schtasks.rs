@@ -17,11 +17,10 @@ use windows::core::{BSTR, HRESULT};
 /// The task's name.
 pub const REMOVAL: &str = "reverse-tunnel-uninstall";
 
-/// Whether a task's last result is one of Task Scheduler's informational `SCHED_S_*` codes (`0x41300` to `0x4130F`, and
-/// the queued `0x41325`) rather than an exit code: the task has not run, or says what it is, not how it ended.
-fn informational(last: i32) -> bool {
-    (0x41300..=0x4130F).contains(&last) || last == 0x41325
-}
+/// What a task's last result reads while it has not ended (Task Scheduler's informational `SCHED_S_*` codes): ready,
+/// running, never run, and queued. Other informational codes (disabled, no more runs, terminated) mean it will not
+/// run: they are results like any other, and end the wait.
+const NOT_ENDED: [i32; 4] = [0x41300, 0x41301, 0x41303, 0x41325];
 
 /// The account of SYSTEM, which the task's principal and its registration both name.
 const SYSTEM: &str = "S-1-5-18";
@@ -78,8 +77,11 @@ pub enum TaskState {
 pub fn state(name: &str) -> Result<TaskState> {
     let name = name.to_string();
     on_scheduler(move |folder| {
-        // SAFETY: the string outlives the call.
-        let task = match unsafe { folder.GetTask(&BSTR::from(name.as_str())) } {
+        let get = || {
+            // SAFETY: the string outlives the call.
+            unsafe { folder.GetTask(&BSTR::from(name.as_str())) }
+        };
+        let task = match get() {
             Err(err) if err.code() == not_found() => return Ok(TaskState::Gone),
             found => com(found, "looking up the removal's task")?,
         };
@@ -91,27 +93,31 @@ pub fn state(name: &str) -> Result<TaskState> {
                 Ok((state, instances, task.LastTaskResult()?))
             })
         };
-        Ok(task_state_of(read))
+        match read {
+            Ok((state, instances, last)) => Ok(task_state(state, instances, last)),
+            Err(err) => after_a_failed_read(get().map(drop), err),
+        }
     })
 }
 
-/// The state a task's reads (state, running instances, last result) say. A read that failed is not an answer: the task
-/// may have deleted itself meanwhile, so it reads as running, and the next `state` call, which looks the task up again,
-/// finds it gone or fails.
-fn task_state_of(read: windows::core::Result<(TASK_STATE, i32, i32)>) -> TaskState {
-    read.map_or(TaskState::Running, |(state, instances, last)| {
-        task_state(state, instances, last)
-    })
+/// What a failed read of a task that was found means, given what looking the task up again said (`lookup`): the task is
+/// gone if it is not there now, and otherwise the read's own error, since nothing says what the task is doing.
+fn after_a_failed_read(lookup: windows::core::Result<()>, read: windows::core::Error) -> Result<TaskState> {
+    match lookup {
+        Err(err) if err.code() == not_found() => Ok(TaskState::Gone),
+        _ => com(Err(read), "reading the removal's task"),
+    }
 }
 
 /// What a task with this state, number of running instances and last result is doing. An instance that runs makes it
-/// running, whatever its state: disabling a task does not stop it. An informational last result is not an exit code, so
-/// it never means the task ended: a disabled task is disabled, any other runs. Any other last result is an exit code,
-/// which means it ran, and was disabled after if it is.
+/// running, whatever its state: disabling a task does not stop it. A last result that is not a not-ended one is an exit
+/// code, or an informational code that says it will not run: it ended with that. A not-ended result means it has not
+/// run: then a disabled task never will.
 fn task_state(state: TASK_STATE, instances: i32, last: i32) -> TaskState {
+    let ran = !NOT_ENDED.contains(&last);
     if instances > 0 || state == TASK_STATE_RUNNING || state == TASK_STATE_QUEUED {
         TaskState::Running
-    } else if !informational(last) {
+    } else if ran {
         TaskState::Ended(last)
     } else if state == TASK_STATE_DISABLED {
         TaskState::Disabled
@@ -171,15 +177,28 @@ fn connect() -> Result<ITaskFolder> {
 }
 
 /// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, the copy's deletion, then the directory
-/// `dir` that holds the copy and the log `log`, and last the task `name` itself. Each step that fails ends `cmd` with
+/// `dir` that holds the copy and the log `log`, and then the task `name` itself. Each step that fails ends `cmd` with
 /// a code of its own, which the task's last result carries (`exit /b` ends `cmd`, and with it the rest): 1 the removal,
 /// 2 the copy, 3 the directory, 4 the task. A program is judged by its exit code, a builtin by what it left, since
 /// `del` and `rmdir` report a file that something holds only in their message.
-pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str) -> String {
+///
+/// With `moved`, the image of the binary that ran `uninstall`, which it moved aside and which this task is to delete,
+/// a last step deletes it, and checks that it is gone, and pauses and tries again until it is. It comes after the
+/// task's own deletion: until then `uninstall`'s waiter is alive and holds the image, and the waiter ends once the task
+/// is gone. A session that was cut has no waiter, so the first try succeeds. `ping` is the pause between two checks of
+/// the file, as `timeout` needs a console, which a task has none of.
+pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, moved: Option<&Path>) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
-    format!(
+    let mut script = format!(
         r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4)"#
-    )
+    );
+    if let Some(moved) = moved {
+        let moved = moved.display();
+        script += &format!(
+            r#" & for /l %i in (1,0,2) do ((del /q "{moved}" >nul 2>&1) & (if not exist "{moved}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+        );
+    }
+    script
 }
 
 /// The definition of a task with no trigger that runs `script` as SYSTEM, however long it takes and whatever the power.

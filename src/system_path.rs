@@ -1,10 +1,14 @@
 //! The machine's `Path` on Windows, which `install` adds the bin dir to and `uninstall` removes it from, as rustup does
 //! to the user's `Path`: edited in the registry, then every program is told to read the environment again.
+//!
+//! The edit is a read, a change and a write, like every installer's: another program that edits the machine's `Path`
+//! at the same moment can lose one of the two edits, and running that program's installer again restores its entry.
 
 use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
@@ -60,8 +64,9 @@ fn edit(dir: &Path, change: fn(&str, &str) -> Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Tells every top-level window that the environment changed, so that a new shell started from Explorer sees it.
-fn broadcast() {
+/// Tells every top-level window of this session's desktop that the environment changed, so that a new shell started
+/// from Explorer sees it. A process that is not on the desktop (a service, or an SSH session) cannot reach it.
+pub fn broadcast() {
     let area: Vec<u16> = "Environment".encode_utf16().chain([0]).collect();
     // SAFETY: `area` is NUL-terminated and outlives the call, which returns only when every window has handled the
     // message or has not answered within the timeout.
@@ -78,10 +83,30 @@ fn broadcast() {
     }
 }
 
-/// Whether the `Path` entry `entry` names the directory `dir`: by whatever case, with or without quotes and a trailing
-/// backslash.
-fn names(entry: &str, dir: &str) -> bool {
-    let bare = |text: &str| text.trim_matches('"').trim_end_matches('\\').to_lowercase();
+/// `text` with its `%NAME%` environment variables expanded, as a process that reads the `Path` would; one that is not
+/// set stays as it is.
+fn expand(text: &str) -> String {
+    let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    // SAFETY: `wide` is NUL-terminated; the buffer has the length that is passed, and it is read up to what is written.
+    unsafe {
+        let needed = ExpandEnvironmentStringsW(wide.as_ptr(), std::ptr::null_mut(), 0);
+        let mut expanded = vec![0u16; needed as usize];
+        let written = ExpandEnvironmentStringsW(wide.as_ptr(), expanded.as_mut_ptr(), needed);
+        if needed == 0 || written == 0 || written > needed {
+            return text.to_string();
+        }
+        String::from_utf16_lossy(&expanded[..written as usize - 1])
+    }
+}
+
+/// Whether the `Path` entry `entry` names the directory `dir`: once its variables are expanded, by whatever case, with
+/// or without surrounding whitespace and quotes and a trailing backslash.
+pub fn names(entry: &str, dir: &str) -> bool {
+    let bare = |text: &str| {
+        let expanded = expand(text);
+        let trimmed = expanded.trim_matches(|c: char| c.is_whitespace() || c == '"');
+        trimmed.trim_end_matches('\\').to_lowercase()
+    };
     bare(entry) == bare(dir)
 }
 

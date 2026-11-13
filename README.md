@@ -51,8 +51,10 @@ changes only what differs.
 **Windows**: download the binary, then run `install` and the other commands that say `sudo` from an elevated prompt, without
 `sudo`. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
 `%ProgramData%\reverse-tunnel`, and `install` puts `%ProgramFiles%\reverse-tunnel` on the system `PATH`: open a new shell
-to run `reverse-tunnel`. `restart` and `install` check `config.yaml` as the caller, not as the service account. `upgrade`
-is not available yet: to change the binary, uninstall and install again.
+to run `reverse-tunnel` (on the desktop, sign out and in; an SSH session sees it at once). `install` edits the `PATH` as
+every installer does, by reading it and writing it back: another program that edits it at the same moment can lose one of
+the two edits, and running that program's installer again restores its entry. `restart` and `install` check `config.yaml`
+as the caller, not as the service account. `upgrade` is not available yet: to change the binary, uninstall and install again.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe
@@ -190,12 +192,13 @@ tunnel-only host out until someone is at the machine.
 Revoking does not cut the host's current connection; `ctl revoke` prints the command that does.
 
 **Windows**: `uninstall` also takes `%ProgramFiles%\reverse-tunnel` off the system `PATH`. Run by the installed binary, it
-moves that binary aside, since Windows cannot delete a running one, and has it deleted as soon as `uninstall` exits. A
-failed removal's message says why and names `reverse-tunnel uninstall` to finish it; its log is
-`%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. A shell whose working directory is inside the install folder
-holds it even after `cd`: the removal then fails and says so, and running `uninstall` again from elsewhere finishes it.
-If your session ends before `uninstall` does (an `uninstall` run through the host's own tunnel), the removal finishes,
-but the moved binary, `%ProgramFiles%\.reverse-tunnel.<...>.exe`, stays: delete it by hand.
+moves that binary aside, since Windows cannot delete a running one, and the removal's task deletes it once `uninstall`
+has exited. `uninstall` refuses to run in a shell whose working directory is inside a folder it deletes: change to another
+directory first. A failed removal's message says why and names `reverse-tunnel uninstall` to finish it; its log is
+`%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. Another shell or program with its working directory in the
+install folder holds it: the removal then fails and says so, and running `uninstall` again once that is closed
+finishes it. A failed removal leaves the moved binary, `%ProgramFiles%\.reverse-tunnel.<...>.exe`, which is then the
+only copy of the binary: run `uninstall` with it, or with any other `reverse-tunnel` binary, and delete it by hand.
 
 - On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
   unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.

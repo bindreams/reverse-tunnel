@@ -138,20 +138,12 @@ fn apply(
     pick_up(manager, &spec.id, paths, changed)
 }
 
-/// Runs the removal: see `hand_off`. On Windows a binary that the removal would delete is first moved out of its way,
-/// and deleted once this process has exited.
+/// Runs the removal: see `hand_off`. On Windows it first checks that its working directory is not one the removal
+/// deletes, and leaves the one it has.
 pub fn uninstall(paths: &Paths) -> Result<()> {
     let exe = env::current_exe()?;
     #[cfg(windows)]
-    {
-        let aside = make_way(paths, &exe)?;
-        let done = hand_off(paths, aside.as_ref().map_or(&exe, |aside| &aside.to));
-        if let Some(aside) = aside {
-            aside.settle(done.is_ok());
-        }
-        done
-    }
-    #[cfg(not(windows))]
+    leave_working_directory(paths)?;
     hand_off(paths, &exe)
 }
 
@@ -164,11 +156,27 @@ fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
     }
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     open_file(&uninstalling_file(paths), Perm::new(0o600), false)?;
-    // `--finish` takes the lock itself; an `install` in between is refused by the marker.
-    drop(lock);
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
     println!("Its log will be {}.", removal_log(paths));
-    let removal = spawn_finish(exe, paths).context("starting the removal")?;
+    // Under the lock, and just before the hand-off, so that this binary is out of place for as short a time as can be.
+    #[cfg(windows)]
+    let aside = move_aside(paths, exe)?;
+    // `--finish` takes the lock itself; an `install` in between is refused by the marker.
+    drop(lock);
+    #[cfg(windows)]
+    let started = {
+        let moved = aside.as_ref().map(|aside| aside.to.as_path());
+        spawn_finish(moved.unwrap_or(exe), moved, paths).context("starting the removal")
+    };
+    #[cfg(not(windows))]
+    let started = spawn_finish(exe, paths).context("starting the removal");
+    // Once the removal has started, the task deletes the moved image; before, nothing does, so it goes back.
+    #[cfg(windows)]
+    let started = match (started, aside) {
+        (Err(err), Some(aside)) => Err(aside.put_back(err)),
+        (started, _) => started,
+    };
+    let removal = started?;
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
@@ -191,6 +199,9 @@ fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
             )
         });
     }
+    // The removal's own broadcast, from the task, does not reach the desktop.
+    #[cfg(windows)]
+    system_path::broadcast();
     ops::println_best_effort("Removed.");
     Ok(())
 }
@@ -382,10 +393,11 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
 }
 
 /// Windows: a one-time scheduled task run by SYSTEM, since an OpenSSH session ends everything it started, and no job
-/// object can be left. It runs a copy of this binary from `removal_dir`, with the output in the log, and if the
-/// removal succeeded deletes the directory and then itself (see `schtasks::removal_script`).
+/// object can be left. It runs a copy of `exe` from `removal_dir`, with the output in the log, and if the removal
+/// succeeded deletes the directory and then itself, and then `moved`, the image of this binary that `move_aside` moved
+/// (see `schtasks::removal_script`).
 #[cfg(windows)]
-fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
+fn spawn_finish(exe: &Path, moved: Option<&Path>, paths: &Paths) -> Result<Removal> {
     let dir = removal_dir(paths);
     // Left by a failed removal.
     remove_entry(&dir)?;
@@ -397,7 +409,7 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
             .context("the installed binary has no file name")?,
     );
     fs::copy(exe, &copy).with_context(|| format!("copying {}", copy.display()))?;
-    let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL);
+    let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL, moved);
     schtasks::start(schtasks::REMOVAL, &script)?;
     Ok(Removal(dir))
 }
@@ -454,10 +466,10 @@ fn deleted_dirs(paths: &Paths) -> [PathBuf; 4] {
     ]
 }
 
-/// Windows: whether the binary `exe` is in a directory the removal deletes (see `deleted_dirs`). Windows cannot delete
-/// a running binary, so it has to move. The OS resolves the directories, so short names and case do not matter.
+/// Windows: the directory the removal deletes (see `deleted_dirs`) that `dir` is, or is inside of. The OS resolves the
+/// directories, so short names and case do not matter.
 #[cfg(windows)]
-fn runs_from_a_deleted_directory(paths: &Paths, exe: &Path) -> Result<bool> {
+fn deleted_dir_holding(paths: &Paths, dir: &Path) -> Result<Option<PathBuf>> {
     let canonical = |path: &Path| {
         fs::canonicalize(path).with_context(|| {
             format!(
@@ -466,13 +478,39 @@ fn runs_from_a_deleted_directory(paths: &Paths, exe: &Path) -> Result<bool> {
             )
         })
     };
-    let exe_dir = canonical(exe.parent().context("this binary has no directory")?)?;
+    let dir = canonical(dir)?;
     for deleted in deleted_dirs(paths) {
-        if deleted.try_exists()? && exe_dir.starts_with(canonical(&deleted)?) {
-            return Ok(true);
+        if deleted.try_exists()? && dir.starts_with(canonical(&deleted)?) {
+            return Ok(Some(deleted));
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// Windows: fails if the working directory `cwd` is in a directory the removal deletes, since Windows cannot delete a
+/// directory that a process is in, and the shell that ran `uninstall` stays there whatever this process does.
+#[cfg(windows)]
+fn refuse_deleted_working_directory(paths: &Paths, cwd: &Path) -> Result<()> {
+    if let Some(held) = deleted_dir_holding(paths, cwd)? {
+        bail!(
+            concat!(
+                "`uninstall` has its current directory in {}, which the removal deletes, and Windows cannot delete a ",
+                "directory that a process is in. Change to another directory first."
+            ),
+            held.display()
+        );
+    }
+    Ok(())
+}
+
+/// Windows: refuses a working directory that the removal deletes, then leaves the working directory for the system
+/// directory, so that this process never holds a directory itself.
+#[cfg(windows)]
+fn leave_working_directory(paths: &Paths) -> Result<()> {
+    refuse_deleted_working_directory(paths, &env::current_dir()?)?;
+    let system = known_folders::get_known_folder_path(known_folders::KnownFolder::Windows)
+        .context("the system has no Windows folder")?;
+    env::set_current_dir(&system).with_context(|| format!("leaving the working directory for {}", system.display()))
 }
 
 /// Windows: where `uninstall` moved the image of its own binary, which the removal would have deleted.
@@ -482,17 +520,14 @@ struct Aside {
     to: PathBuf,
 }
 
-/// Windows: leaves the working directory for the system directory, since a process's own directory cannot be deleted,
-/// and, if this binary is in a directory the removal deletes, renames its image aside, which Windows allows while it
-/// runs (what it refuses is deleting it). The image goes to the directory that holds the bin dir, `%ProgramFiles%`,
-/// which only administrators can write to and the removal leaves alone, under a name of its own; the same volume, so
-/// that the rename needs no copy.
+/// Windows: if this binary, `exe`, is in a directory the removal deletes, renames its image aside, which Windows allows
+/// while it runs (what it refuses is deleting it). The removal task deletes the image once this process has exited
+/// (see `schtasks::removal_script`). The image goes to the directory that holds the bin dir, `%ProgramFiles%`, which
+/// only administrators can write to and the removal leaves alone, under a name of its own; the same volume, so that the
+/// rename needs no copy.
 #[cfg(windows)]
-fn make_way(paths: &Paths, exe: &Path) -> Result<Option<Aside>> {
-    let system = known_folders::get_known_folder_path(known_folders::KnownFolder::Windows)
-        .context("the system has no Windows folder")?;
-    env::set_current_dir(&system).with_context(|| format!("leaving the working directory for {}", system.display()))?;
-    if !runs_from_a_deleted_directory(paths, exe)? {
+fn move_aside(paths: &Paths, exe: &Path) -> Result<Option<Aside>> {
+    if deleted_dir_holding(paths, exe.parent().context("this binary has no directory")?)?.is_none() {
         return Ok(None);
     }
     let mut random = [0u8; 16];
@@ -508,15 +543,15 @@ fn make_way(paths: &Paths, exe: &Path) -> Result<Option<Aside>> {
 
 #[cfg(windows)]
 impl Aside {
-    /// Deletes the image once this process has exited (`self_replace` starts a helper that waits for it), unless the
-    /// removal did not succeed and the image can go back where it was: then `reverse-tunnel uninstall` still runs, for
-    /// the rerun that the failure advises.
-    fn settle(self, removed: bool) {
-        if !removed && fs::rename(&self.to, &self.from).is_ok() {
-            return;
-        }
-        if let Err(err) = self_replace::self_delete_at(&self.to) {
-            eprintln!("could not have {} deleted: {err}", self.to.display());
+    /// `err`, once the image is back where it was: the removal did not start, so nothing deletes it, and `uninstall`
+    /// can run again. If it cannot be moved back it stays, and the error says where: it is the only copy.
+    fn put_back(&self, err: anyhow::Error) -> anyhow::Error {
+        match fs::rename(&self.to, &self.from) {
+            Ok(()) => err,
+            Err(back) => err.context(format!(
+                "this binary could not be moved back ({back}): it is at {}",
+                self.to.display()
+            )),
         }
     }
 }
@@ -563,6 +598,15 @@ fn remove_link(paths: &Paths) -> Result<()> {
 
 /// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs.
 fn remove_files(paths: &Paths) -> Result<()> {
+    // On Windows a shell or program whose working directory is in the folder holds it.
+    #[cfg(windows)]
+    remove_entry(&paths.bin_dir).with_context(|| {
+        format!(
+            "if a shell or program has its working directory in {}, it holds it",
+            paths.bin_dir.display()
+        )
+    })?;
+    #[cfg(not(windows))]
     remove_entry(&paths.bin_dir)?;
     let marker = uninstalling_file(paths);
     match fs::read_dir(&paths.config_dir) {

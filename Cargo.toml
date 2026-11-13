@@ -51,12 +51,10 @@ rustix = { version = "1", default-features = false, features = ["process"] }
 known-folders = "1.4.2"
 # The machine's `Path` (src/system_path.rs).
 winreg = "0.56.0"
-# Deletes the binary that runs `uninstall` once it has exited.
-self-replace = "1.5.1"
 # The virtual account's SID is the SHA-1 of its name.
 sha1 = "0.11.0"
-# Security descriptors from SDDL strings (src/security.rs), and the broadcast that the `Path` changed.
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
+# Security descriptors from SDDL strings (src/security.rs), the expansion of `Path` entries, and the broadcast that it changed.
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_UI_WindowsAndMessaging"] }
 # Task Scheduler's COM API, for the removal's task (src/schtasks.rs): the modules it imports. `RegisterTask` takes VARIANTs,
 # and is gated on Ole and Variant.
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }

@@ -74,69 +74,56 @@ fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_
     );
 }
 
-#[test]
-fn a_binary_in_the_bin_dir_runs_from_a_directory_the_removal_deletes() {
-    let (_dir, paths) = installed();
-
-    assert!(runs_from_a_deleted_directory(&paths, &service::exe(&paths)).unwrap());
+/// The deleted directory that holds `dir`, by the name `paths` gives it.
+fn holder(paths: &Paths, dir: &Path) -> Option<PathBuf> {
+    deleted_dir_holding(paths, dir).unwrap()
 }
 
 #[test]
-fn a_binary_in_the_removals_own_directory_does_too() {
+fn each_directory_the_removal_deletes_holds_itself_and_what_is_inside() {
     let (_dir, paths) = installed();
     fs::create_dir_all(removal_dir(&paths)).unwrap();
-    let copy = removal_dir(&paths).join("reverse-tunnel.exe");
-    fs::write(&copy, "").unwrap();
-
-    assert!(runs_from_a_deleted_directory(&paths, &copy).unwrap());
-}
-
-#[test]
-fn a_binary_inside_a_directory_the_removal_deletes_does_too() {
-    let (_dir, paths) = installed();
-    let deep = paths.bin_dir.join("old").join("v1");
-    fs::create_dir_all(&deep).unwrap();
     fs::create_dir_all(&paths.config_dir).unwrap();
     fs::create_dir_all(&paths.log_dir).unwrap();
+    let deep = paths.bin_dir.join("old").join("v1");
+    fs::create_dir_all(&deep).unwrap();
 
-    for exe in [
-        deep.join("reverse-tunnel.exe"),
-        paths.config_dir.join("reverse-tunnel.exe"),
-        paths.log_dir.join("reverse-tunnel.exe"),
+    for (inside, held) in [
+        (paths.bin_dir.clone(), paths.bin_dir.clone()),
+        (deep, paths.bin_dir.clone()),
+        (paths.config_dir.clone(), paths.config_dir.clone()),
+        (paths.log_dir.clone(), paths.log_dir.clone()),
+        (removal_dir(&paths), removal_dir(&paths)),
     ] {
-        assert!(runs_from_a_deleted_directory(&paths, &exe).unwrap(), "{exe:?}");
+        assert_eq!(holder(&paths, &inside), Some(held), "{inside:?}");
     }
 }
 
 #[test]
 fn the_directory_is_the_same_by_whatever_case_the_path_names_it() {
     let (_dir, paths) = installed();
-    let shouted = PathBuf::from(service::exe(&paths).to_string_lossy().to_uppercase());
+    let shouted = PathBuf::from(paths.bin_dir.to_string_lossy().to_uppercase());
 
-    assert!(runs_from_a_deleted_directory(&paths, &shouted).unwrap());
+    assert_eq!(holder(&paths, &shouted), Some(paths.bin_dir.clone()));
 }
 
 #[test]
-fn a_binary_elsewhere_does_not_run_from_a_directory_the_removal_deletes() {
+fn a_directory_elsewhere_is_held_by_none() {
     let (dir, paths) = installed();
-    let elsewhere = dir.path().join("reverse-tunnel.exe");
-    fs::write(&elsewhere, "").unwrap();
 
-    assert!(!runs_from_a_deleted_directory(&paths, &elsewhere).unwrap());
+    assert_eq!(holder(&paths, dir.path()), None);
     // A directory that only starts with a deleted one's name is another directory.
     let beside = paths.bin_dir.with_file_name("bin-old");
     fs::create_dir_all(&beside).unwrap();
-    assert!(!runs_from_a_deleted_directory(&paths, &beside.join("reverse-tunnel.exe")).unwrap());
+    assert_eq!(holder(&paths, &beside), None);
 }
 
 #[test]
-fn with_nothing_installed_no_binary_runs_from_a_deleted_directory() {
+fn with_nothing_installed_no_directory_is_held() {
     let (dir, paths) = installed();
-    let elsewhere = dir.path().join("reverse-tunnel.exe");
-    fs::write(&elsewhere, "").unwrap();
     fs::remove_dir_all(&paths.bin_dir).unwrap();
 
-    assert!(!runs_from_a_deleted_directory(&paths, &elsewhere).unwrap());
+    assert_eq!(holder(&paths, dir.path()), None);
 }
 
 #[test]
@@ -144,9 +131,31 @@ fn a_directory_that_cannot_be_resolved_is_named_in_the_error() {
     let (dir, paths) = installed();
     let missing = dir.path().join("gone");
 
-    let err = runs_from_a_deleted_directory(&paths, &missing.join("reverse-tunnel.exe")).unwrap_err();
+    let err = deleted_dir_holding(&paths, &missing).unwrap_err();
 
     let err = format!("{err:#}");
     assert!(err.contains(&missing.display().to_string()), "{err}");
     assert!(err.contains("the removal deletes"), "{err}");
+}
+
+#[test]
+fn uninstall_refuses_a_working_directory_in_a_directory_the_removal_deletes() {
+    let (_dir, paths) = installed();
+    fs::create_dir_all(&paths.log_dir).unwrap();
+    let inside = paths.bin_dir.join("sub");
+    fs::create_dir_all(&inside).unwrap();
+
+    for cwd in [&paths.bin_dir, &paths.log_dir, &inside] {
+        let err = refuse_deleted_working_directory(&paths, cwd).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("current directory"), "{err}");
+        assert!(err.contains("Change to another directory first"), "{err}");
+    }
+}
+
+#[test]
+fn uninstall_runs_with_its_working_directory_elsewhere() {
+    let (dir, paths) = installed();
+
+    refuse_deleted_working_directory(&paths, dir.path()).unwrap();
 }

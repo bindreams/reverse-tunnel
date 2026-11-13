@@ -18,6 +18,7 @@ fn each_step_of_the_script_fails_with_its_own_exit_code() {
         Path::new(r"C:\d\log"),
         Path::new(r"C:\d"),
         "task",
+        None,
     );
     // A program is judged by its exit code, a builtin (`del`, `rmdir`) by what it left, since it reports a held file
     // only in its message.
@@ -34,38 +35,37 @@ fn a_task_that_is_queued_or_running_runs_whatever_its_last_result() {
 }
 
 #[test]
-fn a_task_that_is_ready_has_ended_with_any_result_that_is_an_exit_code() {
+fn a_task_that_is_ready_has_ended_unless_its_result_says_it_has_not_run() {
     assert_eq!(task_state(TASK_STATE_READY, 0, 3), TaskState::Ended(3));
     assert_eq!(
         task_state(TASK_STATE_READY, 0, -1073741510),
         TaskState::Ended(-1073741510)
     );
-    // Just outside Task Scheduler's informational range.
-    assert_eq!(task_state(TASK_STATE_READY, 0, 0x41310), TaskState::Ended(0x41310));
-    assert_eq!(task_state(TASK_STATE_READY, 0, 0x412FF), TaskState::Ended(0x412FF));
-}
-
-#[test]
-fn an_informational_result_is_not_an_exit_code_so_a_task_that_is_not_disabled_runs() {
-    // Ready, running, disabled, never run, no more runs, terminated, queued.
-    for informational in [0x41300, 0x41301, 0x41302, 0x41303, 0x41304, 0x41306, 0x4130F, 0x41325] {
-        assert_eq!(task_state(TASK_STATE_READY, 0, informational), TaskState::Running);
+    for not_ended in NOT_ENDED {
+        assert_eq!(task_state(TASK_STATE_READY, 0, not_ended), TaskState::Running);
     }
 }
 
 #[test]
-fn a_task_that_is_disabled_with_an_informational_result_is_disabled() {
-    for informational in [0x41300, 0x41302, 0x41304, 0x4130F, 0x41325] {
-        assert_eq!(task_state(TASK_STATE_DISABLED, 0, informational), TaskState::Disabled);
+fn an_informational_result_that_is_not_a_not_ended_one_is_an_ended_task_with_that_code() {
+    // Disabled, no more runs, terminated: the task will not run, and none of them is an exit code of the script's.
+    for informational in [0x41302, 0x41304, 0x41306, 0x4130F] {
+        assert_eq!(
+            task_state(TASK_STATE_READY, 0, informational),
+            TaskState::Ended(informational)
+        );
+        assert_eq!(
+            task_state(TASK_STATE_DISABLED, 0, informational),
+            TaskState::Ended(informational)
+        );
     }
 }
 
 #[test]
-fn a_failed_read_of_a_task_that_was_found_is_looked_at_again() {
-    // The next `GetTask` says whether the task is gone, or cannot be asked about.
-    let failed = Err(windows::core::Error::from(windows::Win32::Foundation::E_FAIL));
-    assert_eq!(task_state_of(failed), TaskState::Running);
-    assert_eq!(task_state_of(Ok((TASK_STATE_READY, 0, 7))), TaskState::Ended(7));
+fn a_task_that_is_disabled_before_it_ran_is_disabled() {
+    for not_ended in NOT_ENDED {
+        assert_eq!(task_state(TASK_STATE_DISABLED, 0, not_ended), TaskState::Disabled);
+    }
 }
 
 #[test]
@@ -79,4 +79,36 @@ fn a_task_with_an_instance_running_runs_even_when_it_is_disabled() {
     // Disabling a task does not stop the instance that runs.
     assert_eq!(task_state(TASK_STATE_DISABLED, 1, 0x41301), TaskState::Running);
     assert_eq!(task_state(TASK_STATE_DISABLED, 1, 0), TaskState::Running);
+}
+
+#[test]
+fn a_failed_read_is_gone_if_the_task_is_gone_when_looked_up_again_and_an_error_otherwise() {
+    let failed = || windows::core::Error::from(windows::Win32::Foundation::E_FAIL);
+
+    let gone = windows::core::Error::from_hresult(not_found());
+    assert_eq!(after_a_failed_read(Err(gone), failed()).unwrap(), TaskState::Gone);
+    // Found again, or another failure: nothing says the task is gone, and a failed read is no state.
+    let found = after_a_failed_read(Ok(()), failed()).unwrap_err().to_string();
+    assert!(found.contains("reading the removal's task"), "{found}");
+    assert!(after_a_failed_read(Err(failed()), failed()).is_err());
+}
+
+#[test]
+fn the_script_deletes_the_moved_image_after_the_task_itself_and_until_it_is_gone() {
+    let script = removal_script(
+        Path::new(r"C:\d\x.exe"),
+        Path::new(r"C:\d\log"),
+        Path::new(r"C:\d"),
+        "task",
+        Some(Path::new(r"C:\p\.moved.exe")),
+    );
+
+    // The waiter holds the image until the task is gone, so the step comes after it; it repeats, with a pause between
+    // the checks, until the file is not there.
+    assert!(
+        script.ends_with(
+            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /q "C:\p\.moved.exe" >nul 2>&1) & (if not exist "C:\p\.moved.exe" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+        ),
+        "{script}"
+    );
 }

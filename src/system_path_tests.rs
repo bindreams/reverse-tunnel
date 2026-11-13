@@ -87,3 +87,34 @@ fn a_path_value_survives_being_stored_and_read_back() {
     assert_eq!(decode(&bytes).unwrap(), text);
     assert!(decode(&bytes[1..]).is_err(), "half a code unit is not text");
 }
+
+#[test]
+fn an_entry_that_names_the_directory_through_an_environment_variable_names_it() {
+    let program_files = std::env::var("ProgramFiles").unwrap();
+    let dir = format!(r"{program_files}\reverse-tunnel");
+
+    assert_eq!(with_entry(r"%ProgramFiles%\reverse-tunnel;C:\Tools", &dir), None);
+    assert_eq!(with_entry(r"%PROGRAMFILES%\Reverse-Tunnel\", &dir), None);
+    assert_eq!(
+        without_entry(r"C:\Tools;%ProgramFiles%\reverse-tunnel", &dir).unwrap(),
+        r"C:\Tools"
+    );
+    // A variable that is not set stays as it is, and names nothing.
+    assert_eq!(
+        with_entry(r"%NoSuchVariableForReverseTunnel%\reverse-tunnel", &dir).unwrap(),
+        format!(r"%NoSuchVariableForReverseTunnel%\reverse-tunnel;{dir}")
+    );
+}
+
+#[test]
+fn whitespace_and_quotes_around_an_entry_do_not_change_what_it_names() {
+    for named in [
+        format!("  {DIR}"),
+        format!("{DIR}\t "),
+        format!(r#" "{DIR}\" "#),
+        format!(r#""  {DIR}  ""#),
+    ] {
+        assert_eq!(with_entry(&named, DIR), None, "{named:?}");
+        assert_eq!(without_entry(&named, DIR).unwrap(), "", "{named:?}");
+    }
+}

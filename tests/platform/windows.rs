@@ -13,6 +13,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use reverse_tunnel::account;
 use reverse_tunnel::security::owner_of;
+use reverse_tunnel::system_path;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSidToSidW, GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
@@ -283,11 +284,13 @@ fn machine_path() -> String {
         .unwrap()
 }
 
-/// How many entries of the machine's `Path` name `dir`, whatever their case or a trailing backslash.
+/// How many entries of the machine's `Path` name `dir`, as the product decides it.
 pub fn path_entries_naming(dir: &Path) -> usize {
-    let bare = |text: &str| text.trim_end_matches('\\').to_lowercase();
-    let dir = bare(dir.to_str().unwrap());
-    machine_path().split(';').filter(|entry| bare(entry) == dir).count()
+    let dir = dir.to_str().unwrap();
+    machine_path()
+        .split(';')
+        .filter(|entry| system_path::names(entry, dir))
+        .count()
 }
 
 /// The machine's `Path` as a process started now would have it, each `%NAME%` expanded: the environment of a shell
@@ -304,12 +307,11 @@ pub fn fresh_path() -> String {
         .collect()
 }
 
-/// Waits, with no cap, until no image that `uninstall` moved aside, or that the deletion's helper copied, is left: they
-/// are named `.reverse-tunnel.<...>` and are in the folder that holds the bin dir or in the temp directory (which the
-/// child inherited from this process). `uninstall` has exited by now; the helper deletes them once it has.
-pub fn wait_until_moved_images_are_gone(machine: &Machine) {
-    let leftovers = |dir: Option<&Path>| -> Vec<PathBuf> {
-        fs::read_dir(dir.unwrap())
+/// Waits, with no cap, until the image that `uninstall` moved aside, which the removal's task deletes once `uninstall`
+/// has exited, is gone: it is named `.reverse-tunnel.<...>` and is in the folder that holds the bin dir.
+pub fn wait_until_the_moved_image_is_gone(machine: &Machine) {
+    let leftovers = || -> Vec<PathBuf> {
+        fs::read_dir(machine.paths.bin_dir.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .filter(|path| {
@@ -320,7 +322,5 @@ pub fn wait_until_moved_images_are_gone(machine: &Machine) {
             })
             .collect()
     };
-    wait_until("the images uninstall moved aside are deleted", || {
-        leftovers(machine.paths.bin_dir.parent()).is_empty() && leftovers(Some(&env::temp_dir())).is_empty()
-    });
+    wait_until("the image uninstall moved aside is deleted", || leftovers().is_empty());
 }
