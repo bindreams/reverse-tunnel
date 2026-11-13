@@ -14,7 +14,7 @@ fn the_script_reaches_cmd_whole() {
 }
 
 #[test]
-fn the_script_deletes_its_copy_its_directory_and_its_task_in_turn_each_when_the_one_before_is_gone() {
+fn the_script_runs_each_step_once_in_turn_and_each_deletion_until_its_target_is_gone() {
     let script = removal_script(
         Path::new(r"C:\d\x.exe"),
         Path::new(r"C:\d\log"),
@@ -23,15 +23,17 @@ fn the_script_deletes_its_copy_its_directory_and_its_task_in_turn_each_when_the_
         Path::new(r"C:\p"),
     );
     // A program is judged by its exit code, a builtin (`del`, `rmdir`) by what it left, since it reports a held file
-    // only in its message. Each deletion is tried again, with a pause, until its target is gone, and the next step
-    // waits for it; the task is deleted once, if it is still registered. Only a failed `--finish` and a failed
-    // deletion of the task have exit codes.
-    assert!(
-        script.starts_with(
-            r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1) & for /l %i in (1,0,2) do ((del /q "C:\d\x.exe" >nul 2>&1) & (if not exist "C:\d\x.exe" ((rmdir /s /q "C:\d" >nul 2>&1) & (if not exist "C:\d" ((schtasks /Query /TN task >nul 2>&1 && "#
-        ),
-        "{script}"
-    );
+    // only in its message. Each deletion is a `cmd` of its own that repeats, with a pause, and ends when its target is
+    // gone (a `for /l` ends in no other way); the steps follow one another, and the task is deleted once, with no
+    // query. Only a failed `--finish` and a failed deletion of the task have exit codes.
+    let expected = [
+        r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1)"#,
+        r#"cmd /s /c "for /l %i in (1,0,2) do ((del /q "C:\d\x.exe" >nul 2>&1) & (if not exist "C:\d\x.exe" exit /b 0) & ping -n 2 127.0.0.1 >nul)""#,
+        r#"cmd /s /c "for /l %i in (1,0,2) do ((rmdir /s /q "C:\d" >nul 2>&1) & (if not exist "C:\d" exit /b 0) & ping -n 2 127.0.0.1 >nul)""#,
+        r#"(schtasks /Delete /F /TN task || exit /b 4)"#,
+        r#"cmd /s /c "for /l %i in (1,0,2) do ((del /f /q /a "C:\p\.reverse-tunnel.*" >nul 2>&1) & (dir /b /a:-d "C:\p\.reverse-tunnel.*" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)""#,
+    ];
+    assert_eq!(script, expected.join(" & "));
 }
 
 #[test]
@@ -109,17 +111,17 @@ fn the_script_sweeps_the_leftover_images_after_the_task_itself_and_until_none_is
         Path::new(r"C:\p"),
     );
 
-    // The waiter holds its image until the task is gone, so the step comes after it; it repeats, with a pause between
-    // the checks, until no file of the pattern is there. `/f` deletes a read-only file and `/a` a hidden or system one,
-    // which `del` skips without it; the check counts files only (`/a:-d`), so a directory of the pattern, which `del`
-    // does not delete, does not keep the loop going.
+    // The waiter holds its image until the task is gone, so the sweep comes after the task's deletion. `/f` deletes a
+    // read-only file and `/a` a hidden or system one, which `del` skips without it; the check counts files only
+    // (`/a:-d`), so a directory of the pattern, which `del` does not delete, does not keep the loop going.
     let pattern = leftover_pattern(Path::new(r"C:\p")).display().to_string();
     assert_eq!(pattern, r"C:\p\.reverse-tunnel.*");
-    assert!(
-        script.ends_with(&format!(
-            r#"(schtasks /Delete /F /TN task || exit /b 4)) & (del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0))))) & ping -n 2 127.0.0.1 >nul)"#
-        )),
-        "{script}"
+    let (_, sweep) = script.split_once("exit /b 4) & ").unwrap();
+    assert_eq!(
+        sweep,
+        format!(
+            r#"cmd /s /c "for /l %i in (1,0,2) do ((del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)""#
+        )
     );
 }
 

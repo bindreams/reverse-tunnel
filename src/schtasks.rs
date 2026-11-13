@@ -213,29 +213,49 @@ pub fn is_leftover_of(name: &str, original: &str) -> bool {
         .is_some_and(|(_id, kept)| kept.eq_ignore_ascii_case(original))
 }
 
-/// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, and then, in one loop, the copy's deletion,
-/// the directory `dir` that holds the copy and the log `log`, the task `name` itself, and the leftover files. `--finish`
-/// that fails ends `cmd` with code 1 (`exit /b` ends `cmd`, and with it the rest), and the task carries it as its last
-/// result; a program is judged by its exit code.
+/// What `cmd` runs for the removal task, each step once and in order: `uninstall --finish` from `copy`, the copy's
+/// deletion, the deletion of the directory `dir` that holds the copy and the log `log`, the task `name`'s own deletion,
+/// and the deletion of the leftover files. `--finish` that fails ends `cmd` with code 1 (`exit /b` ends `cmd`, and with
+/// it the rest), and the task carries it as its last result; a program is judged by its exit code. So is the task's
+/// deletion, which fails with code 4, and is not preceded by a query that could hide its failure.
 ///
 /// A builtin is judged by what it left, since `del` and `rmdir` report a file that something holds only in their
-/// message, and what holds it (a scan, a program that watches files) lets go in time. So the loop deletes the copy and
-/// goes no further until it is gone, then the directory and goes no further until it is gone, then the task, and then
-/// the leftover files; it pauses and begins again, with no end, until a pass finds no leftover file. The task is
-/// deleted once: while it is registered (`schtasks /Query`), and a failure to delete it ends `cmd` with code 4. The
-/// leftover files are the ones in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`), deleted
+/// message, and what holds it (a scan, a program that watches files, a process that runs a file from `dir`) lets go in
+/// time or never: each of the three deletions repeats with no end (see `until_gone`), and the next step waits for it.
+/// The leftover files are the ones in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`), deleted
 /// whatever their attributes (`del /f /a`: read-only, hidden and system ones too). The check counts files only
 /// (`dir /a:-d`): a directory of the pattern is not deleted by `del`, and must not keep the loop going. The leftovers
 /// come after the task's own deletion: until then `uninstall`'s waiter is alive and may be running a leftover, and the
-/// waiter ends once the task is gone. `ping` is the pause between two passes, as `timeout` needs a console, which a
-/// task has none of.
+/// waiter ends once the task is gone.
 pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
     let pattern = leftover_pattern(leftovers);
     let pattern = pattern.display();
-    format!(
-        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & for /l %i in (1,0,2) do ((del /q "{copy}" >nul 2>&1) & (if not exist "{copy}" ((rmdir /s /q "{dir}" >nul 2>&1) & (if not exist "{dir}" ((schtasks /Query /TN {name} >nul 2>&1 && (schtasks /Delete /F /TN {name} || exit /b 4)) & (del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0))))) & ping -n 2 127.0.0.1 >nul)"#
-    )
+    [
+        format!(r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1)"#),
+        until_gone(
+            &format!(r#"del /q "{copy}""#),
+            &format!(r#"if not exist "{copy}" exit /b 0"#),
+        ),
+        until_gone(
+            &format!(r#"rmdir /s /q "{dir}""#),
+            &format!(r#"if not exist "{dir}" exit /b 0"#),
+        ),
+        format!("(schtasks /Delete /F /TN {name} || exit /b 4)"),
+        until_gone(
+            &format!(r#"del /f /q /a "{pattern}""#),
+            &format!(r#"dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0"#),
+        ),
+    ]
+    .join(" & ")
+}
+
+/// One loop of the removal script: `delete`, then `done`, which ends the loop (`exit /b 0`) when what `delete` deletes
+/// is gone, then a pause, and again, with no end otherwise. A `for /l` ends in no other way than `exit /b`, which ends
+/// the `cmd` it runs in, so the loop has a `cmd` of its own and the script goes on after it. The pause is `ping`, as
+/// `timeout` needs a console, which a task has none of.
+fn until_gone(delete: &str, done: &str) -> String {
+    format!(r#"cmd /s /c "for /l %i in (1,0,2) do (({delete} >nul 2>&1) & ({done}) & ping -n 2 127.0.0.1 >nul)""#)
 }
 
 /// The definition of a task with no trigger that runs `script` as SYSTEM, however long it takes and whatever the power.

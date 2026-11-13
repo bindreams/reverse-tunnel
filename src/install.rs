@@ -662,14 +662,6 @@ fn remove_files(paths: &Paths) -> Result<()> {
     let bin_dir = remove_or_rename(&paths.bin_dir, leftover_dir(paths)?);
     #[cfg(not(windows))]
     let bin_dir = remove_entry(&paths.bin_dir);
-    // On Windows a shell or program whose working directory is in the folder holds it.
-    #[cfg(windows)]
-    let bin_dir = bin_dir.with_context(|| {
-        format!(
-            "if a shell or program has its working directory in {}, it holds it",
-            paths.bin_dir.display()
-        )
-    });
     bin_dir?;
     let marker = uninstalling_file(paths);
     match fs::read_dir(&paths.config_dir) {
