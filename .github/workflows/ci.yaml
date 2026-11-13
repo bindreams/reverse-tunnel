@@ -59,9 +59,9 @@ jobs:
         run: |
           set -euxo pipefail
           if [ "$RUNNER_OS" = Windows ]; then
-            env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture
+            env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture measure_
           else
-            sudo env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture
+            sudo env RT_PLATFORM_TESTS=1 "$(cat "$RUNNER_TEMP/platform-tests")" --ignored --test-threads=1 --nocapture measure_
           fi
 
   # Defender flags the frp Windows zip but not frpc.exe; fetch writes only frpc.exe. Fails if Defender, live and with

@@ -1488,3 +1488,73 @@ fn install_puts_the_bin_dir_on_the_machine_path_once() {
 
     assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
 }
+
+/// THROWAWAY MEASUREMENT (i63a flake 1): what still runs when the manager's `uninstall` returns.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn measure_uninstall_race() {
+    use std::time::Instant;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+
+    let code = join_code("tunnel.example.test");
+    for round in 0..40 {
+        let machine = Machine::begin();
+        machine.install(&code);
+        let waited = round % 2 == 1;
+        if waited {
+            machine.wait_for_frpc();
+        }
+        let host = machine.status().pid;
+        let mut held = vec![];
+        for p in processes() {
+            let name = p.args.to_lowercase();
+            if name.starts_with("frpc-") || name == "reverse-tunnel.exe" {
+                let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, p.pid) };
+                held.push((p, handle));
+            }
+        }
+        let t0 = Instant::now();
+        machine.manager.uninstall(&machine.id).unwrap();
+        let took = t0.elapsed();
+        let at_return: Vec<String> = held
+            .iter()
+            .map(|(p, h)| {
+                let state = if h.is_null() {
+                    "unopened"
+                } else if unsafe { WaitForSingleObject(*h, 0) } == WAIT_OBJECT_0 {
+                    "exited"
+                } else {
+                    "RUNNING"
+                };
+                format!(
+                    "{}#{}{}={state}",
+                    p.args,
+                    p.pid,
+                    if Some(p.pid) == host { "(host)" } else { "" }
+                )
+            })
+            .collect();
+        let t1 = Instant::now();
+        let removal = fs::remove_dir_all(&machine.paths.bin_dir);
+        let removal_took = t1.elapsed();
+        let mut exits = vec![];
+        for (p, h) in &held {
+            if !h.is_null() {
+                unsafe { WaitForSingleObject(*h, INFINITE) };
+                exits.push(format!("{}#{} after {:?}", p.args, p.pid, t0.elapsed() - took));
+                unsafe { CloseHandle(*h) };
+            }
+        }
+        let again = fs::remove_dir_all(&machine.paths.bin_dir);
+        eprintln!(
+            "MEASURE round={round} frpc_waited={waited} uninstall_took={took:?} at_return=[{}] first_removal={:?} ({removal_took:?}) \
+             all_exited_after=[{}] second_removal={:?}",
+            at_return.join(", "),
+            removal.map_err(|e| e.to_string()),
+            exits.join(", "),
+            again.map_err(|e| e.to_string()),
+        );
+    }
+}
