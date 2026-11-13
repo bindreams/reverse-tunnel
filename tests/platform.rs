@@ -1234,21 +1234,6 @@ fn a_held_copy_fails_the_removal_and_keeps_its_log() {
     fs::copy(BIN, &copy).unwrap();
     // Held open without delete sharing, as an antivirus scan may.
     let held = Unremovable::new(&copy);
-    let probe = {
-        use std::os::windows::process::CommandExt;
-        Command::new("cmd")
-            .raw_arg(format!(
-                r#"/s /c "del /q "{}" && echo DEL_RETURNED_ZERO""#,
-                copy.display()
-            ))
-            .output()
-            .unwrap()
-    };
-    eprintln!(
-        "PROBE: del on a held file: {} / {}",
-        String::from_utf8_lossy(&probe.stdout).trim(),
-        String::from_utf8_lossy(&probe.stderr).trim()
-    );
     let task = "reverse-tunnel-held-copy-test";
     let script = schtasks::removal_script(&copy, &log, scratch.path(), task);
     schtasks::start(task, &scratch.path().join("task.xml"), &script).unwrap();
