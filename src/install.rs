@@ -138,7 +138,7 @@ fn apply(
 pub fn uninstall(paths: &Paths) -> Result<()> {
     let exe = env::current_exe()?;
     #[cfg(windows)]
-    refuse_running_from_a_deleted_directory(paths, &exe)?;
+    refuse_running_from_a_deleted_directory(paths, &exe, &env::current_dir()?)?;
     let lock = lock(paths)?;
     match revoke_line(paths) {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
@@ -213,6 +213,7 @@ fn removal_dir(paths: &Paths) -> PathBuf {
 
 /// Windows: where the copy of the binary that `copy_out_commands` runs lives while it does: next to the bin dir (so
 /// only administrators can have made it), and outside everything the removal deletes.
+#[cfg(windows)]
 fn copy_dir(paths: &Paths) -> PathBuf {
     paths.bin_dir.with_file_name("reverse-tunnel-copy")
 }
@@ -407,54 +408,107 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     Ok(Removal(child))
 }
 
-/// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone. On
-/// Windows by a copy of the installed one, which the removal can delete with its directory.
+/// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
+#[cfg(not(windows))]
 fn rerun_uninstall(paths: &Paths) -> String {
-    let installed = service::exe(paths).exists();
-    match (cfg!(windows), installed) {
-        (true, true) => format!("run `{}` in an elevated PowerShell", copy_out_commands(paths)),
-        (true, false) => {
-            "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
-                .to_string()
-        }
-        (false, true) => format!("run `sudo {} uninstall`", service::exe(paths).display()),
-        (false, false) => {
-            "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
-        }
+    let exe = service::exe(paths);
+    if exe.exists() {
+        format!("run `sudo {} uninstall`", exe.display())
+    } else {
+        "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
+    }
+}
+
+/// How to run `uninstall` again: by a copy of the installed binary, or by any `reverse-tunnel` binary once that is gone.
+#[cfg(windows)]
+fn rerun_uninstall(paths: &Paths) -> String {
+    if service::exe(paths).exists() {
+        format!("run `{}` in an elevated PowerShell", copy_out_commands(paths))
+    } else {
+        "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)".to_string()
     }
 }
 
 /// Windows: one Windows PowerShell 5.1 line that runs `uninstall` by a copy of the installed binary, then removes the
-/// copy. The removal deletes the installed one's directory, which it cannot while a binary in it runs. Each step runs
-/// only if the one before succeeded (5.1 has no `&&`); the copy's directory is removed whatever happened. The paths are
-/// absolute, in single quotes, so that nothing expands.
+/// copy. The removal deletes the installed one's directory, which it cannot while a binary in it runs, nor while a
+/// process has it as its working directory: the line starts in the system directory. Each step runs only if the one
+/// before succeeded (5.1 has no `&&`); the copy's directory is removed whatever happened, and the line exits with the
+/// copy's exit code, or 1 if the copy did not run. The paths are absolute, in single quotes, so that nothing expands.
+#[cfg(windows)]
 fn copy_out_commands(paths: &Paths) -> String {
     let exe = service::exe(paths);
     let dir = copy_dir(paths);
     let copy = dir.join(exe.file_name().unwrap_or_default());
-    let quoted = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "''"));
+    let quoted = |path: &Path| {
+        // PowerShell reads each of these as a single quote, and ends the literal at an odd one.
+        let doubled: String = path
+            .display()
+            .to_string()
+            .chars()
+            .flat_map(|c| {
+                let times = if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+                    2
+                } else {
+                    1
+                };
+                std::iter::repeat_n(c, times)
+            })
+            .collect();
+        format!("'{doubled}'")
+    };
     let (exe, dir, copy) = (quoted(&exe), quoted(&dir), quoted(&copy));
     format!(
-        "New-Item -ItemType Directory -Force -Path {dir} > $null; if ($?) {{ Copy-Item -Force -LiteralPath {exe} \
-         -Destination {copy}; if ($?) {{ & {copy} uninstall }} }}; Remove-Item -Recurse -Force -LiteralPath {dir}"
+        "Set-Location -LiteralPath $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path {dir} > $null; \
+         if ($?) {{ Copy-Item -Force -LiteralPath {exe} -Destination {copy}; \
+         if ($?) {{ & {copy} uninstall; $code = $LASTEXITCODE }} }}; \
+         Remove-Item -Recurse -Force -LiteralPath {dir}; exit $code"
     )
 }
 
-/// Windows: fails if this binary is in a directory the removal deletes (the bin dir, or the removal's own), saying how
-/// to run `uninstall` from a copy. The OS resolves the directories, so short names and case do not matter.
+/// Windows: every directory the removal deletes: the bin dir, the config dir, the logs, and the removal's own.
 #[cfg(windows)]
-fn refuse_running_from_a_deleted_directory(paths: &Paths, exe: &Path) -> Result<()> {
-    let here = fs::canonicalize(exe.parent().context("this binary has no directory")?)?;
-    for deleted in [&paths.bin_dir, &removal_dir(paths)] {
+fn deleted_dirs(paths: &Paths) -> [PathBuf; 4] {
+    [
+        paths.bin_dir.clone(),
+        paths.config_dir.clone(),
+        paths.log_dir.clone(),
+        removal_dir(paths),
+    ]
+}
+
+/// Windows: fails if this binary, or the working directory `cwd`, is in a directory the removal deletes (see
+/// `deleted_dirs`), saying how to run `uninstall` from a copy, or from another directory: a binary that runs and a
+/// process's working directory each keep their directory from being deleted. The OS resolves the directories, so short
+/// names and case do not matter.
+#[cfg(windows)]
+fn refuse_running_from_a_deleted_directory(paths: &Paths, exe: &Path, cwd: &Path) -> Result<()> {
+    let canonical = |path: &Path| {
+        fs::canonicalize(path).with_context(|| {
+            format!(
+                "resolving {} to check that it is not a directory the removal deletes",
+                path.display()
+            )
+        })
+    };
+    let exe_dir = canonical(exe.parent().context("this binary has no directory")?)?;
+    let cwd = canonical(cwd)?;
+    for deleted in deleted_dirs(paths) {
         if !deleted.try_exists()? {
             continue;
         }
+        let deleted_here = canonical(&deleted)?;
         ensure!(
-            here != fs::canonicalize(deleted)?,
+            !exe_dir.starts_with(&deleted_here),
             "`uninstall` is running from {}, which the removal deletes, and Windows cannot delete a running binary. \
              Run it from a copy, in an elevated PowerShell (over SSH, run `powershell` first):\n    {}",
             deleted.display(),
             copy_out_commands(paths)
+        );
+        ensure!(
+            !cwd.starts_with(&deleted_here),
+            "`uninstall` has its current directory in {}, which the removal deletes, and Windows cannot delete a \
+             directory that a process is in. Change to another directory first.",
+            deleted.display()
         );
     }
     Ok(())

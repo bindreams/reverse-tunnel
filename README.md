@@ -190,18 +190,15 @@ tunnel-only host out until someone is at the machine.
 Revoking does not cut the host's current connection; `ctl revoke` prints the command that does.
 
 **Windows**: the removal deletes `%ProgramFiles%\reverse-tunnel`, and Windows cannot delete a running binary, so
-`uninstall` refuses when the installed binary runs it, before it changes anything, and prints the line to run instead
-(or run `uninstall` from the binary you downloaded). In an elevated PowerShell (over SSH, run `powershell` first), the
-line copies the installed binary to `%ProgramFiles%\reverse-tunnel-copy`, runs `uninstall` from the copy, and deletes the
-copy:
-
-```powershell
-New-Item -ItemType Directory -Force -Path 'C:\Program Files\reverse-tunnel-copy' > $null; if ($?) { Copy-Item -Force -LiteralPath 'C:\Program Files\reverse-tunnel\reverse-tunnel.exe' -Destination 'C:\Program Files\reverse-tunnel-copy\reverse-tunnel.exe'; if ($?) { & 'C:\Program Files\reverse-tunnel-copy\reverse-tunnel.exe' uninstall } }; Remove-Item -Recurse -Force -LiteralPath 'C:\Program Files\reverse-tunnel-copy'
-```
+`uninstall` refuses when the installed binary runs it, or when your current directory is inside a folder it deletes,
+before it changes anything. For the binary it prints a PowerShell line to run instead (or run `uninstall` from the
+binary you downloaded). In an elevated PowerShell (over SSH, run `powershell` first), that line copies the installed
+binary to `%ProgramFiles%\reverse-tunnel-copy`, runs `uninstall` from the copy, deletes the copy, and exits with
+`uninstall`'s exit code. A failed removal's message prints the same line to finish it; its log is
+`%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`.
 
 If your session ends mid-removal (an `uninstall` run through the host's own tunnel), the removal finishes, but
-`%ProgramFiles%\reverse-tunnel-copy` stays: delete it by hand. A failed removal's log is
-`%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`; run the line again to finish it.
+`%ProgramFiles%\reverse-tunnel-copy` stays: delete it by hand.
 
 - On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
   unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.

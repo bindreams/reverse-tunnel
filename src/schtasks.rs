@@ -82,33 +82,37 @@ pub fn state(name: &str) -> Result<TaskState> {
             Err(err) if err.code() == not_found() => return Ok(TaskState::Gone),
             found => com(found, "looking up the removal's task")?,
         };
+        // The removal's task deletes itself as its last step, so it can go between `GetTask` and any read of it.
         // SAFETY: plain reads of a live task.
-        let (state, instances, last) = unsafe {
-            (
-                com(task.State(), "reading the task's state")?,
-                com(
-                    com(task.GetInstances(0), "listing the task's running instances")?.Count(),
-                    "counting the task's running instances",
-                )?,
-                com(task.LastTaskResult(), "reading the task's last result")?,
-            )
+        let read = unsafe {
+            task.State().and_then(|state| {
+                let instances = task.GetInstances(0)?.Count()?;
+                Ok((state, instances, task.LastTaskResult()?))
+            })
         };
-        Ok(task_state(state, instances, last))
+        match read {
+            Err(err) if err.code() == not_found() => Ok(TaskState::Gone),
+            read => {
+                let (state, instances, last) = com(read, "reading the removal's task")?;
+                Ok(task_state(state, instances, last))
+            }
+        }
     })
 }
 
 /// What a task with this state, number of running instances and last result is doing. An instance that runs makes it
-/// running, whatever its state: disabling a task does not stop it. Otherwise a disabled task will not run, whatever its
-/// last result says.
+/// running, whatever its state: disabling a task does not stop it. A last result that is not an exit code means it has
+/// not run: then a disabled task never will. Any other last result means it ran, and was disabled after.
 fn task_state(state: TASK_STATE, instances: i32, last: i32) -> TaskState {
+    let ran = !NOT_ENDED.contains(&last);
     if instances > 0 || state == TASK_STATE_RUNNING || state == TASK_STATE_QUEUED {
         TaskState::Running
+    } else if ran {
+        TaskState::Ended(last)
     } else if state == TASK_STATE_DISABLED {
         TaskState::Disabled
-    } else if NOT_ENDED.contains(&last) {
-        TaskState::Running
     } else {
-        TaskState::Ended(last)
+        TaskState::Running
     }
 }
 

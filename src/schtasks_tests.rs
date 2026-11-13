@@ -46,9 +46,16 @@ fn a_task_that_is_ready_has_ended_unless_its_result_says_it_has_not_run() {
 }
 
 #[test]
-fn a_disabled_task_never_runs_whatever_its_last_result() {
-    assert_eq!(task_state(TASK_STATE_DISABLED, 0, 0x41303), TaskState::Disabled);
-    assert_eq!(task_state(TASK_STATE_DISABLED, 0, 4), TaskState::Disabled);
+fn a_task_that_is_disabled_before_it_ran_is_disabled() {
+    for not_ended in NOT_ENDED {
+        assert_eq!(task_state(TASK_STATE_DISABLED, 0, not_ended), TaskState::Disabled);
+    }
+}
+
+#[test]
+fn a_task_that_ran_and_was_disabled_after_has_ended() {
+    assert_eq!(task_state(TASK_STATE_DISABLED, 0, 4), TaskState::Ended(4));
+    assert_eq!(task_state(TASK_STATE_DISABLED, 0, 0), TaskState::Ended(0));
 }
 
 #[test]

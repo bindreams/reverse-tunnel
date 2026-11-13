@@ -1349,8 +1349,10 @@ fn uninstall_run_by_the_installed_binary_refuses_and_its_copy_out_line_removes_t
         "the uninstalling marker was written"
     );
 
+    // From inside the directory the removal deletes: the line moves out of it first.
     let ran = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", line])
+        .current_dir(&machine.paths.bin_dir)
         .output()
         .unwrap();
 
@@ -1359,6 +1361,7 @@ fn uninstall_run_by_the_installed_binary_refuses_and_its_copy_out_line_removes_t
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
+    assert!(ran.status.success(), "the line exited with {}: {said}", ran.status);
     assert!(said.contains("Removed."), "the copy did not remove the host: {said}");
     let removed = matches!(
         machine.manager.status(&machine.id),
