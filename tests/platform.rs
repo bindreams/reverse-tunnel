@@ -1303,3 +1303,46 @@ fn a_held_file_in_the_removal_directory_fails_the_removal() {
     assert!(dir.path().join("other.txt").exists(), "the held file is gone");
     assert!(!copy.exists(), "the copy should have been deleted before the directory");
 }
+
+/// The removal's task is registered as SYSTEM: `whoami` in it says so.
+#[test]
+#[ignore = "registers a real scheduled task; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_removal_task_runs_as_system() {
+    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let answer = dir.path().join("whoami.txt");
+    let task = "reverse-tunnel-system-test";
+    let _guard = TaskGuard(task);
+    schtasks::start(task, &format!(r#"whoami /user > "{}""#, answer.display())).unwrap();
+
+    assert_eq!(wait_until_task_is_over(task), TaskState::Ended(0));
+
+    let said = fs::read_to_string(&answer).unwrap();
+    assert!(said.contains("S-1-5-18"), "the task ran as: {said}");
+}
+
+/// The removal deletes the installed binary's directory, which Windows cannot do while that binary runs: `uninstall`
+/// run by it refuses before it changes anything, and says how to run it from a copy.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_run_by_the_installed_binary_refuses_before_changing_anything() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let installed = service::exe(&machine.paths);
+
+    let refused = Command::new(&installed).arg("uninstall").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "uninstall should refuse: {stderr}");
+    let copy_out = format!(
+        r#"Copy-Item "{}" $env:TEMP; & "$env:TEMP\reverse-tunnel.exe" uninstall"#,
+        installed.display()
+    );
+    assert!(stderr.contains(&copy_out), "the copy-out command is not in: {stderr}");
+    assert_eq!(machine.status().state, State::Running, "the service was touched");
+    assert!(
+        !machine.paths.config_dir.join("uninstalling").exists(),
+        "the uninstalling marker was written"
+    );
+}

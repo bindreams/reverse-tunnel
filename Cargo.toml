@@ -53,8 +53,8 @@ known-folders = "1.4.2"
 sha1 = "0.11.0"
 # Security descriptors from SDDL strings (src/security.rs).
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
-# Task Scheduler's COM API, for the removal's task (src/schtasks.rs).
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
+# Task Scheduler's COM API, for the removal's task (src/schtasks.rs). Ole and Variant: `RegisterTask` takes VARIANTs, and is gated on both.
+windows = { version = "0.62.2", features = ["Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
 
 [target."cfg(windows)".dev-dependencies]
 # tests/platform.rs: a job object that ends a session, and a DACL's effective rights.

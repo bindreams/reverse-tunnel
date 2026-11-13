@@ -52,6 +52,7 @@ changes only what differs.
 `sudo`. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
 `%ProgramData%\reverse-tunnel`, and no link is put on the `PATH`. `restart` and `install` check `config.yaml` as the
 caller, not as the service account. `upgrade` is not available yet: to change the binary, uninstall and install again.
+`uninstall` refuses to run from the installed binary, since it deletes that binary's folder: see "Uninstall".
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe
@@ -184,13 +185,24 @@ tunnel-only host out until someone is at the machine.
 
 ### Uninstall
 
-`sudo reverse-tunnel uninstall` prints the line to run in the bridge folder, `uv run ctl revoke <host>`, then removes
-everything, and prints "Removed." The removal continues if your session ends. Revoking does not cut the host's current
-connection; `ctl revoke` prints the command that does.
+`sudo reverse-tunnel uninstall` (on Windows, see below) prints the line to run in the bridge folder,
+`uv run ctl revoke <host>`, then removes everything, and prints "Removed." The removal continues if your session ends.
+Revoking does not cut the host's current connection; `ctl revoke` prints the command that does.
 
-- If the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*` unit, or a shutdown),
-  `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it. A partial removal may
-  have deleted the `reverse-tunnel` link on the `PATH`: then run it through the installed binary,
+**Windows**: the removal deletes `%ProgramFiles%\reverse-tunnel`, and Windows cannot delete a running binary, so
+`uninstall` refuses when the installed binary runs it, before it changes anything. Run it, in an elevated prompt, from
+the binary you downloaded, or from a copy of the installed one:
+
+```powershell
+Copy-Item "$env:ProgramFiles\reverse-tunnel\reverse-tunnel.exe" $env:TEMP; & "$env:TEMP\reverse-tunnel.exe" uninstall
+```
+
+A failed removal's log is `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`; run `uninstall` again, the same way,
+to finish it.
+
+- On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
+  unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.
+  A partial removal may have deleted the `reverse-tunnel` link on the `PATH`: then run it through the installed binary,
   `sudo /usr/local/lib/reverse-tunnel/reverse-tunnel uninstall`, or with any other `reverse-tunnel` binary, such as the
   one you downloaded, if you kept it. If neither the link, the installed binary nor the download is left, download the
   binary again with the commands in "Set up a host", and run `sudo ./reverse-tunnel uninstall` with it.

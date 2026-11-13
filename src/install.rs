@@ -136,12 +136,14 @@ fn apply(
 
 /// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.
 pub fn uninstall(paths: &Paths) -> Result<()> {
+    let exe = env::current_exe()?;
+    #[cfg(windows)]
+    refuse_running_from_bin_dir(paths, &exe)?;
     let lock = lock(paths)?;
     match revoke_line(paths) {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
         Err(err) => eprintln!("{err:#}\nRevoke this host on the bridge by running: uv run ctl revoke <host>"),
     }
-    let exe = env::current_exe()?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     open_file(&uninstalling_file(paths), Perm::new(0o600), false)?;
     // `--finish` takes the lock itself; an `install` in between is refused by the marker.
@@ -157,6 +159,11 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
             rerun_uninstall(paths)
         )
     })?;
+    // Nothing to finish: the log is gone with the rest.
+    #[cfg(windows)]
+    if let WaitOutcome::LeftBehind(why) = outcome {
+        bail!(why);
+    }
     if let WaitOutcome::Failed(why) = outcome {
         return Err(anyhow!(why)).with_context(|| {
             format!(
@@ -208,6 +215,9 @@ fn removal_dir(paths: &Paths) -> PathBuf {
 enum WaitOutcome {
     Ended,
     Failed(String),
+    /// Windows: everything is removed, but the removal's task is still registered.
+    #[cfg(windows)]
+    LeftBehind(String),
 }
 
 /// A started `uninstall --finish`: the transient unit it runs in.
@@ -274,6 +284,7 @@ fn removal_outcome(state: TaskState, dir: &Path, dir_present: bool) -> Option<Wa
     let failed = |why: String| Some(WaitOutcome::Failed(why));
     match state {
         TaskState::Running => None,
+        TaskState::Disabled => failed("the removal's task is disabled, so the removal will not run".to_string()),
         TaskState::Gone if dir_present => failed("the removal's task was deleted before it finished".to_string()),
         TaskState::Gone => Some(WaitOutcome::Ended),
         TaskState::Ended(1) => failed("the removal's `uninstall --finish` failed".to_string()),
@@ -281,10 +292,10 @@ fn removal_outcome(state: TaskState, dir: &Path, dir_present: bool) -> Option<Wa
         TaskState::Ended(3) => failed(format!(
             "the removal could not delete {dir}; its log may be gone with it: delete {dir} by hand"
         )),
-        TaskState::Ended(4) => failed(format!(
+        TaskState::Ended(4) => Some(WaitOutcome::LeftBehind(format!(
             "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`",
             schtasks::REMOVAL
-        )),
+        ))),
         TaskState::Ended(code) => failed(format!("the removal's task ended with {code:#x}")),
     }
 }
@@ -391,21 +402,49 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
 }
 
 /// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone. On
-/// Windows never by the installed one: the removal deletes its directory, which it cannot while a binary in it runs
-/// (measured on CI: "Access is denied").
+/// Windows by a copy of the installed one, which the removal can delete with its directory.
 fn rerun_uninstall(paths: &Paths) -> String {
-    if cfg!(windows) {
-        return format!(
-            "run `uninstall` in an elevated prompt with a `reverse-tunnel` binary from outside {}, such as the one              you downloaded (the removal deletes that directory, and cannot while a binary in it runs)",
-            paths.bin_dir.display()
-        );
+    let installed = service::exe(paths).exists();
+    match (cfg!(windows), installed) {
+        (true, true) => format!("run `{}` in an elevated prompt", copy_out_commands(paths)),
+        (true, false) => {
+            "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
+                .to_string()
+        }
+        (false, true) => format!("run `sudo {} uninstall`", service::exe(paths).display()),
+        (false, false) => {
+            "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
+        }
     }
+}
+
+/// Windows: PowerShell commands that run `uninstall` by a copy of the installed binary. The removal deletes the
+/// installed one's directory, which it cannot while a binary in it runs.
+fn copy_out_commands(paths: &Paths) -> String {
     let exe = service::exe(paths);
-    if exe.exists() {
-        format!("run `sudo {} uninstall`", exe.display())
-    } else {
-        "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
+    let name = exe.file_name().unwrap_or_default().to_string_lossy();
+    format!(
+        "Copy-Item \"{}\" $env:TEMP; & \"$env:TEMP\\{name}\" uninstall",
+        exe.display()
+    )
+}
+
+/// Windows: fails if this binary is in the bin dir, saying how to run `uninstall` from a copy. The OS resolves both
+/// directories, so short names and case do not matter.
+#[cfg(windows)]
+fn refuse_running_from_bin_dir(paths: &Paths, exe: &Path) -> Result<()> {
+    if !paths.bin_dir.try_exists()? {
+        return Ok(());
     }
+    let here = fs::canonicalize(exe.parent().context("this binary has no directory")?)?;
+    ensure!(
+        here != fs::canonicalize(&paths.bin_dir)?,
+        "`uninstall` is running from {}, which the removal deletes, and Windows cannot delete a running binary. Run it          from a copy, in an elevated prompt:
+    {}",
+        paths.bin_dir.display(),
+        copy_out_commands(paths)
+    );
+    Ok(())
 }
 
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.

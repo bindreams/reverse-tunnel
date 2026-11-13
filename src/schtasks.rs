@@ -8,7 +8,8 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::TaskScheduler::{
-    ITaskFolder, ITaskService, TASK_CREATE, TASK_LOGON_NONE, TASK_STATE_QUEUED, TASK_STATE_RUNNING, TaskScheduler,
+    ITaskFolder, ITaskService, TASK_CREATE, TASK_LOGON_SERVICE_ACCOUNT, TASK_STATE, TASK_STATE_DISABLED,
+    TASK_STATE_QUEUED, TASK_STATE_RUNNING, TaskScheduler,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{BSTR, HRESULT};
@@ -20,6 +21,9 @@ pub const REMOVAL: &str = "reverse-tunnel-uninstall";
 /// running, never run, and queued. Other informational codes (disabled, no more runs, terminated) mean it will not
 /// run, and are results like any other.
 const NOT_ENDED: [i32; 4] = [0x41300, 0x41301, 0x41303, 0x41325];
+
+/// The account of SYSTEM, which the task's principal and its registration both name.
+const SYSTEM: &str = "S-1-5-18";
 
 /// Registers task `name` as run by SYSTEM, replacing one of the same name, and runs it now. The task runs `script` by
 /// `cmd`, with no time limit.
@@ -35,9 +39,9 @@ pub fn start(name: &str, script: &str) -> Result<()> {
                     &BSTR::from(name.as_str()),
                     &BSTR::from(xml),
                     TASK_CREATE.0,
+                    &VARIANT::from(SYSTEM),
                     &none,
-                    &none,
-                    TASK_LOGON_NONE,
+                    TASK_LOGON_SERVICE_ACCOUNT,
                     &none,
                 )
             },
@@ -60,6 +64,8 @@ pub fn delete(name: &str) -> Result<()> {
 pub enum TaskState {
     /// It runs, or has not run yet.
     Running,
+    /// It is disabled, and will not run.
+    Disabled,
     /// It ended with this exit code.
     Ended(i32),
     /// There is no such task.
@@ -83,14 +89,19 @@ pub fn state(name: &str) -> Result<TaskState> {
                 com(task.LastTaskResult(), "reading the task's last result")?,
             )
         };
-        Ok(
-            if state == TASK_STATE_RUNNING || state == TASK_STATE_QUEUED || NOT_ENDED.contains(&last) {
-                TaskState::Running
-            } else {
-                TaskState::Ended(last)
-            },
-        )
+        Ok(task_state(state, last))
     })
+}
+
+/// What a task with this state and last result is doing. A disabled task will not run, whatever its last result says.
+fn task_state(state: TASK_STATE, last: i32) -> TaskState {
+    if state == TASK_STATE_DISABLED {
+        TaskState::Disabled
+    } else if state == TASK_STATE_RUNNING || state == TASK_STATE_QUEUED || NOT_ENDED.contains(&last) {
+        TaskState::Running
+    } else {
+        TaskState::Ended(last)
+    }
 }
 
 fn not_found() -> HRESULT {
@@ -166,7 +177,7 @@ fn task_xml(script: &str) -> String {
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Principals>
-    <Principal id="Removal"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal>
+    <Principal id="Removal"><UserId>{SYSTEM}</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal>
   </Principals>
   <Settings>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
