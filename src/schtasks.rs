@@ -35,18 +35,51 @@ pub fn start(name: &str, definition: &Path, script: &str) -> Result<()> {
     Ok(())
 }
 
-/// How task `name` ended: its exit code, or none while it has not run or runs.
-pub fn exit_code(name: &str) -> Result<Option<i64>> {
-    last_result(&run(&["schtasks", "/Query", "/TN", name, "/V", "/FO", "CSV", "/NH"])?)
+/// What a task is doing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TaskState {
+    /// It runs, or has not run yet.
+    Running,
+    /// It ended with this exit code.
+    Ended(i64),
+    /// There is no such task.
+    Gone,
 }
 
-/// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, then the copy's deletion (a copy that
-/// something holds fails here, in the log), all logged to `log`; then, if both succeeded, the directory `dir` that holds
-/// the copy and the log, and last the task `name` itself. A removal that failed leaves all three.
+/// The state of task `name`. An error means unknown: `schtasks` did not run, or said what this cannot read, or refused
+/// the task while another query lists it. Only a task that is not in the list of tasks is `Gone` (the refusal's own
+/// text is in the system's language).
+pub fn state(name: &str) -> Result<TaskState> {
+    match run(&["schtasks", "/Query", "/TN", name, "/V", "/FO", "CSV", "/NH"]) {
+        Ok(line) => Ok(last_result(&line)?.map_or(TaskState::Running, TaskState::Ended)),
+        Err(refused) => {
+            let listing = run(&["schtasks", "/Query", "/FO", "CSV", "/NH"])
+                .with_context(|| format!("{refused:#}; and listing the tasks"))?;
+            if lists_task(&listing, name) {
+                return Err(refused);
+            }
+            Ok(TaskState::Gone)
+        }
+    }
+}
+
+/// Whether `schtasks /Query /FO CSV /NH` lists the task `name`, which is at the root: the first field is `\name`.
+fn lists_task(listing: &str, name: &str) -> bool {
+    let wanted = format!("\\{name}");
+    listing.lines().any(|line| {
+        let first = line.trim().trim_start_matches('"').split("\",\"").next();
+        first.is_some_and(|task| task.eq_ignore_ascii_case(&wanted))
+    })
+}
+
+/// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, then the copy's deletion, all logged to
+/// `log`. `del` reports a copy that something holds only in its message, so the group fails if the copy is still there
+/// (`exit /b` ends `cmd`, and with it the rest). Then, if the group succeeded, the directory `dir` that holds the copy
+/// and the log, and last the task `name` itself. A removal that failed leaves all three.
 pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
     format!(
-        r#"( "{copy}" uninstall --finish && del /q "{copy}" ) > "{log}" 2>&1 && rmdir /s /q "{dir}" && schtasks /Delete /F /TN {name}"#
+        r#"( "{copy}" uninstall --finish && del /q "{copy}" && if exist "{copy}" exit /b 1 ) > "{log}" 2>&1 && rmdir /s /q "{dir}" && schtasks /Delete /F /TN {name}"#
     )
 }
 

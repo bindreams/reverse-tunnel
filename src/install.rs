@@ -25,7 +25,7 @@ use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
 #[cfg(windows)]
-use crate::schtasks;
+use crate::schtasks::{self, TaskState};
 use crate::{download, ops, service, upgrade};
 
 /// Directories, and files everyone may read.
@@ -268,22 +268,45 @@ struct Removal(PathBuf);
 
 #[cfg(windows)]
 impl Removal {
-    /// Waits for the removal's task to end or be gone (it deletes itself when it has succeeded), then judges the
-    /// removal by what it leaves: a removal that succeeded ended with 0, or no longer has a task, and its directory
-    /// is gone. A task that cannot be asked about reads as gone: then the directory is the judge.
+    /// Waits, with no cap, until the task has ended or is gone (it deletes itself when the removal has succeeded), and
+    /// judges the removal by the task and by its directory, which a successful removal deletes first. A task that
+    /// cannot be asked about is unknown, not gone: the wait goes on, and says so.
     fn wait(self) -> Result<WaitOutcome> {
-        let code = loop {
-            match schtasks::exit_code(schtasks::REMOVAL) {
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
-                Ok(Some(code)) => break Some(code),
-                Err(_) => break None,
+        let mut unreadable = String::new();
+        let dir = self.0.display();
+        loop {
+            // The task is read first: it deletes itself after the directory, so a task that is gone says the
+            // directory has been deleted by the time it is looked at.
+            match schtasks::state(schtasks::REMOVAL) {
+                Ok(TaskState::Running) => {}
+                Ok(TaskState::Gone) if !self.0.try_exists()? => return Ok(WaitOutcome::Ended),
+                Ok(TaskState::Gone) => {
+                    return Ok(WaitOutcome::Failed(format!(
+                        "the removal's task is gone, but {dir} is not"
+                    )));
+                }
+                Ok(TaskState::Ended(0)) => {
+                    return Ok(WaitOutcome::Failed(if self.0.try_exists()? {
+                        format!("the removal's task ended with 0, but {dir} is still there")
+                    } else {
+                        format!(
+                            "the removal is done, but its task is still registered: delete it with `schtasks /Delete \
+                             /TN {}`",
+                            schtasks::REMOVAL
+                        )
+                    }));
+                }
+                Ok(TaskState::Ended(code)) => {
+                    return Ok(WaitOutcome::Failed(format!("the removal's task ended with {code}")));
+                }
+                Err(err) if format!("{err:#}") != unreadable => {
+                    unreadable = format!("{err:#}");
+                    eprintln!("could not read the removal's task, and waiting on: {unreadable}");
+                }
+                Err(_) => {}
             }
-        };
-        Ok(match (code, self.0.try_exists()?) {
-            (None | Some(0), false) => WaitOutcome::Ended,
-            (Some(code), _) if code != 0 => WaitOutcome::Failed(format!("the removal's task ended with {code}")),
-            _ => WaitOutcome::Failed(format!("the removal's task is gone, but {} is not", self.0.display())),
-        })
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
     }
 }
 
@@ -663,7 +686,7 @@ fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     #[cfg(windows)]
-    for entry in fs::read_dir(&paths.bin_dir)? {
+    for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {
         crate::files::own_by_administrators(&entry?.path())?;
     }
     #[cfg(unix)]

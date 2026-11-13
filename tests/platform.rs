@@ -25,7 +25,7 @@ use reverse_tunnel::command;
 use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
 #[cfg(windows)]
-use reverse_tunnel::schtasks;
+use reverse_tunnel::schtasks::{self, TaskState};
 use reverse_tunnel::service;
 use reverse_tunnel::upgrade;
 #[cfg(unix)]
@@ -78,7 +78,10 @@ fn removal_units(state: &str) -> String {
 #[cfg(windows)]
 fn wait_until_removed() {
     wait_until("the removal's task ends", || {
-        !matches!(schtasks::exit_code(schtasks::REMOVAL), Ok(None))
+        matches!(
+            schtasks::state(schtasks::REMOVAL),
+            Ok(TaskState::Ended(_) | TaskState::Gone)
+        )
     });
 }
 
@@ -385,7 +388,10 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     #[cfg(unix)]
     seen.extend(account_names().into_iter().map(|name| format!("account {name}")));
     #[cfg(windows)]
-    if schtasks::exit_code(schtasks::REMOVAL).is_ok() {
+    if matches!(
+        schtasks::state(schtasks::REMOVAL),
+        Ok(TaskState::Running | TaskState::Ended(_))
+    ) {
         seen.insert(format!("task {}", schtasks::REMOVAL));
     }
     for installed in machine.manager.list().unwrap() {
@@ -592,7 +598,7 @@ fn uninstall_survives(mut session: Command, begin: impl FnOnce(&mut Child), end:
     {
         let paths = Paths::system().unwrap();
         assert!(
-            schtasks::exit_code(schtasks::REMOVAL).is_err(),
+            matches!(schtasks::state(schtasks::REMOVAL), Ok(TaskState::Gone)),
             "the removal's task is left"
         );
         assert!(
@@ -883,7 +889,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
     #[cfg(windows)]
     {
         assert!(
-            schtasks::exit_code(schtasks::REMOVAL).is_ok(),
+            matches!(schtasks::state(schtasks::REMOVAL), Ok(TaskState::Ended(_))),
             "the failed removal's task is gone"
         );
         assert!(
@@ -1209,4 +1215,52 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
+}
+
+/// `del` reports a copy that something holds only in its message. The removal's script must still fail, and keep its
+/// task, its directory and its log; the removal itself (here: the one of a machine with nothing installed, which
+/// removes the config directory the test made) has run.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn a_held_copy_fails_the_removal_and_keeps_its_log() {
+    let machine = Machine::begin();
+    fs::create_dir(&machine.paths.config_dir).unwrap();
+    let scratch = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let (copy, log) = (
+        scratch.path().join("reverse-tunnel.exe"),
+        scratch.path().join("uninstall.log"),
+    );
+    fs::copy(BIN, &copy).unwrap();
+    // Held open without delete sharing, as an antivirus scan may.
+    let held = Unremovable::new(&copy);
+    let probe = Command::new("cmd")
+        .args(["/s", "/c"])
+        .arg(format!(r#""del /q "{}" && echo DEL_RETURNED_ZERO""#, copy.display()))
+        .output()
+        .unwrap();
+    eprintln!(
+        "PROBE: del on a held file: {} / {}",
+        String::from_utf8_lossy(&probe.stdout).trim(),
+        String::from_utf8_lossy(&probe.stderr).trim()
+    );
+    let task = "reverse-tunnel-held-copy-test";
+    let script = schtasks::removal_script(&copy, &log, scratch.path(), task);
+    schtasks::start(task, &scratch.path().join("task.xml"), &script).unwrap();
+
+    wait_until("the task has ended", || {
+        matches!(schtasks::state(task), Ok(TaskState::Ended(_) | TaskState::Gone))
+    });
+
+    let state = schtasks::state(task).unwrap();
+    windows::delete_task(task);
+    assert_eq!(
+        state,
+        TaskState::Ended(1),
+        "the task should end with the script's own failure"
+    );
+    assert!(!machine.paths.config_dir.exists(), "the removal did not run");
+    assert!(log.exists(), "the log is gone");
+    assert!(copy.exists(), "the held copy is gone");
+    drop(held);
 }

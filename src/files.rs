@@ -70,14 +70,19 @@ impl Perm {
     pub fn sddl(&self) -> String {
         let mut sddl = format!("{OWNED_BY_ADMINISTRATORS}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
         let others = rights(self.mode & 0o4).map(|rights| (rights, "WD".to_string()));
-        let owner = self
-            .owner
-            .and_then(|account| Some((rights(self.mode >> 6)?, account.sid())));
-        let group = self
-            .group
-            .filter(|group| Some(*group) != self.owner)
-            .and_then(|account| Some((rights(self.mode >> 3)?, account.sid())));
-        for (rights, who) in others.into_iter().chain(owner).chain(group) {
+        // An account that is both owner and group has what either gives it.
+        let mut accounts: Vec<(Account, u32)> = Vec::new();
+        for (account, bits) in [(self.owner, self.mode >> 6), (self.group, self.mode >> 3)] {
+            let Some(account) = account else { continue };
+            match accounts.iter_mut().find(|(known, _)| *known == account) {
+                Some((_, known)) => *known |= bits,
+                None => accounts.push((account, bits)),
+            }
+        }
+        let accounts = accounts
+            .into_iter()
+            .filter_map(|(account, bits)| Some((rights(bits)?, account.sid())));
+        for (rights, who) in others.into_iter().chain(accounts) {
             sddl += &format!("(A;OICI;{rights};;;{who})");
         }
         sddl

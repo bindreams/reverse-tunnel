@@ -49,8 +49,30 @@ fn a_copy_that_cannot_be_deleted_fails_inside_the_log() {
     );
     let (logged, after) = script.split_once(" > ").unwrap();
     assert!(logged.contains(r#"del /q "C:\d\x.exe""#), "{script}");
+    // `del` succeeds on a copy that is held; the group must fail by itself.
+    assert!(logged.contains(r#"&& if exist "C:\d\x.exe" exit /b 1 )"#), "{script}");
     assert!(
         after.starts_with(r#""C:\d\log" 2>&1 && rmdir /s /q "C:\d" && schtasks /Delete /F /TN task"#),
         "{script}"
     );
+}
+
+const LISTING: &str = r#"
+"\Microsoft\Windows\Defrag\ScheduledDefrag","N/A","Ready"
+"\reverse-tunnel-uninstall-old","N/A","Ready"
+"#;
+
+#[test]
+fn a_listing_without_the_task_says_it_is_gone() {
+    assert!(
+        !lists_task(LISTING, "reverse-tunnel-uninstall"),
+        "a task with a longer name is not it"
+    );
+    assert!(!lists_task("", "reverse-tunnel-uninstall"));
+}
+
+#[test]
+fn a_listing_with_the_task_says_it_is_there() {
+    let listing = format!("{LISTING}{}", r#""\Reverse-Tunnel-Uninstall","N/A","Running""#);
+    assert!(lists_task(&listing, "reverse-tunnel-uninstall"));
 }

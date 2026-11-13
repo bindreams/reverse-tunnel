@@ -273,7 +273,9 @@ impl Drop for Probe {
 
 /// Deletes the removal's task, which a removal that failed or was cut short leaves.
 pub fn delete_removal_task() {
-    let _ = Command::new("schtasks")
-        .args(["/Delete", "/F", "/TN", reverse_tunnel::schtasks::REMOVAL])
-        .output();
+    delete_task(reverse_tunnel::schtasks::REMOVAL);
+}
+
+pub fn delete_task(name: &str) {
+    let _ = Command::new("schtasks").args(["/Delete", "/F", "/TN", name]).output();
 }
