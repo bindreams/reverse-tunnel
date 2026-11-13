@@ -922,8 +922,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
             "the failed removal's log is gone"
         );
         // The removal renamed the waiting `uninstall`'s own image, which was in the bin dir, and logged where it went.
-        // The image is left as the only binary, and the error names it. Running it finishes the removal. Other images
-        // (frpc, which may still be ending) may be left as well.
+        // The image is left as the only binary, and the error names it. Running it finishes the removal.
         let image = leftover_of_the_binary(&machine);
         assert!(
             logged.contains(&format!("moved it to {}", image.display())),
@@ -943,17 +942,11 @@ fn a_failed_removal_logs_where_uninstall_says() {
 /// The leftover image that was the installed binary: the one leftover whose original name is its name.
 #[cfg(windows)]
 fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
-    let binary = service::exe(&machine.paths);
-    let binary = binary.file_name().unwrap().to_str().unwrap();
-    let images = install::leftover_images(&machine.paths).unwrap();
-    let ours: Vec<_> = images
-        .iter()
-        .filter(|image| schtasks::is_leftover_of(image.file_name().unwrap().to_str().unwrap(), binary))
-        .collect();
-    let [image] = ours.as_slice() else {
-        panic!("expected one leftover image of {binary}, found {images:?}")
+    let images = install::leftover_images_of_the_binary(&machine.paths).unwrap();
+    let [image] = images.as_slice() else {
+        panic!("expected one leftover image of the binary, found {images:?}")
     };
-    (*image).clone()
+    image.clone()
 }
 
 /// The removal runs from a copy of the binary in its own directory, which a failed removal leaves. Running that copy
@@ -1410,9 +1403,17 @@ fn the_removal_task_runs_as_system() {
 /// `command` is `uninstall` run by the installed binary, which the removal deletes and Windows cannot delete while it
 /// runs: the removal, run by SYSTEM, renames that image next to the bin dir and deletes it once `uninstall` has exited.
 /// Asserts that it ended well and left nothing: not the service, the task, the directories, the `Path` entry or a
-/// leftover image.
+/// leftover image, once the removal's task has deleted that.
 #[cfg(windows)]
-fn assert_uninstalled_by_the_installed_binary(machine: &Machine, mut command: Command) {
+fn assert_uninstalled_by_the_installed_binary(machine: &Machine, command: Command) {
+    assert_uninstalled(machine, command);
+    windows::wait_until_no_leftover_image_is_left(machine);
+}
+
+/// `command` is `uninstall`, which has returned: asserts that it ended well and that the service, the task, the
+/// directories and the `Path` entry are gone, whether or not a leftover image still is.
+#[cfg(windows)]
+fn assert_uninstalled(machine: &Machine, mut command: Command) {
     let ran = command.output().unwrap();
 
     let said = format!(
@@ -1444,7 +1445,6 @@ fn assert_uninstalled_by_the_installed_binary(machine: &Machine, mut command: Co
         0,
         "the Path entry is left"
     );
-    windows::wait_until_no_leftover_image_is_left(machine);
 }
 
 #[test]
@@ -1453,12 +1453,33 @@ fn assert_uninstalled_by_the_installed_binary(machine: &Machine, mut command: Co
 fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_binary() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    // frpc runs, so that the service's host and frpc may still be ending when the removal reaches their images.
     machine.wait_for_frpc();
     let mut uninstall = Command::new(service::exe(&machine.paths));
     uninstall.arg("uninstall").current_dir(env::temp_dir());
 
     assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+}
+
+/// `uninstall` from outside the bin dir, while frpc runs: goetia's `uninstall` returns while the service's host and
+/// frpc are still ending, and the removal waits for them before it deletes their images, so it renames nothing: no
+/// leftover image is there the moment `uninstall` returns, with no wait for one to be deleted.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_run_from_outside_the_bin_dir_while_frpc_runs_leaves_no_leftover_image() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let mut uninstall = Command::new(BIN);
+    uninstall.arg("uninstall").current_dir(env::temp_dir());
+
+    assert_uninstalled(&machine, uninstall);
+
+    assert_eq!(
+        install::leftover_images(&machine.paths).unwrap(),
+        Vec::<PathBuf>::new(),
+        "the removal renamed an image it should have waited for"
+    );
 }
 
 /// By name, from the environment of a shell opened after `install`, which has the machine's `Path`.
@@ -1567,7 +1588,7 @@ fn uninstall_started_in_the_install_directory_refuses_before_changing_anything()
 }
 
 /// The removal's last step, after its task has deleted itself, deletes the leftover images, however long something holds
-/// one, as `uninstall`'s own waiter does until it has seen the task gone.
+/// one and whatever their attributes, as `uninstall`'s own waiter does until it has seen the task gone.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1583,6 +1604,12 @@ fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
         .path()
         .join(schtasks::leftover_name("test", OsStr::new("reverse-tunnel.exe")));
     fs::copy(BIN, &image).unwrap();
+    // Hidden, system and read-only: `del` skips such a file unless it is told to ignore attributes.
+    let hidden = kept
+        .path()
+        .join(schtasks::leftover_name("hidden", OsStr::new("frpc-0.1.exe")));
+    fs::write(&hidden, "").unwrap();
+    output_of("attrib", &["+h", "+s", "+r", hidden.to_str().unwrap()]);
     // Held open without delete sharing: `del` fails until the test lets go.
     let held = Unremovable::new(&image);
     let task = "reverse-tunnel-leftover-image-test";
@@ -1596,6 +1623,7 @@ fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
     drop(held);
 
     wait_until("the image is deleted by the task's `cmd`", || !image.exists());
+    assert!(!hidden.exists(), "the hidden, read-only leftover is left");
 }
 
 /// `install` puts the bin dir on the machine's `Path` once, however often it runs.

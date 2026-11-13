@@ -108,12 +108,14 @@ fn the_script_sweeps_the_leftover_images_after_the_task_itself_and_until_none_is
     );
 
     // The waiter holds its image until the task is gone, so the step comes after it; it repeats, with a pause between
-    // the checks, until no file of the pattern is there. `/f` deletes a read-only file too.
+    // the checks, until no file of the pattern is there. `/f` deletes a read-only file and `/a` a hidden or system one,
+    // which `del` skips without it; the check counts files only (`/a:-d`), so a directory of the pattern, which `del`
+    // does not delete, does not keep the loop going.
     let pattern = leftover_pattern(Path::new(r"C:\p")).display().to_string();
     assert_eq!(pattern, r"C:\p\.reverse-tunnel.*");
     assert!(
         script.ends_with(&format!(
-            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
         )),
         "{script}"
     );

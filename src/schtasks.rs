@@ -219,17 +219,18 @@ pub fn is_leftover_of(name: &str, original: &str) -> bool {
 /// 2 the copy, 3 the directory, 4 the task. A program is judged by its exit code, a builtin by what it left, since
 /// `del` and `rmdir` report a file that something holds only in their message.
 ///
-/// A last step deletes the leftover files, read-only ones too, in `leftovers`, the folder that holds the bin dir (see
-/// `leftover_pattern`), and checks that none is left, and pauses and tries again until none is. It comes after the
-/// task's own deletion: until then `uninstall`'s waiter is alive and may be running a leftover, and the waiter ends
-/// once the task is gone.
+/// A last step deletes the leftover files, whatever their attributes (`del /f /a`: read-only, hidden and system ones
+/// too), in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`), and checks that none is left, and
+/// pauses and tries again until none is. The check counts files only (`dir /a:-d`): a directory of the pattern is not
+/// deleted by `del`, and must not keep the loop going. The step comes after the task's own deletion: until then
+/// `uninstall`'s waiter is alive and may be running a leftover, and the waiter ends once the task is gone.
 /// `ping` is the pause between two checks, as `timeout` needs a console, which a task has none of.
 pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
     let pattern = leftover_pattern(leftovers);
     let pattern = pattern.display();
     format!(
-        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
     )
 }
 

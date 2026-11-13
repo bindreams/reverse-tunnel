@@ -303,7 +303,7 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
 }
 
 #[test]
-fn a_running_image_in_any_directory_the_removal_deletes_is_renamed() {
+fn only_the_bin_dir_has_a_running_image_renamed() {
     let (dir, paths) = installed();
     for removed in [&paths.config_dir, &paths.log_dir] {
         fs::create_dir_all(removed).unwrap();
@@ -312,29 +312,46 @@ fn a_running_image_in_any_directory_the_removal_deletes_is_renamed() {
     let _running = [
         running(&paths.bin_dir.join("a.exe")),
         running(&paths.config_dir.join("b.exe")),
-        running(&paths.log_dir.join("c.exe")),
     ];
 
-    remove_files(&paths).unwrap();
+    let err = format!("{:#}", remove_files(&paths).unwrap_err());
 
-    for left in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
-        assert!(!left.exists(), "{}", left.display());
-    }
-    let images = leftover_images(&paths).unwrap();
-    let names: Vec<_> = images
+    // The service's own processes are waited for before the removal, so only an image that is not the service's can
+    // be running in the bin dir; anything running from the config dir is the operator's, and fails the removal.
+    assert!(err.contains("b.exe"), "{err}");
+    assert!(paths.config_dir.join("b.exe").exists());
+    assert!(!paths.bin_dir.exists());
+    let names: Vec<_> = leftover_images(&paths)
+        .unwrap()
         .iter()
         .map(|image| {
             assert_eq!(image.parent(), Some(dir.path()));
             image.file_name().unwrap().to_string_lossy().into_owned()
         })
         .collect();
-    for original in ["a.exe", "b.exe", "c.exe"] {
-        let renamed = names
-            .iter()
-            .filter(|name| schtasks::is_leftover_of(name, original))
-            .count();
-        assert_eq!(renamed, 1, "{original}: {names:?}");
+    assert!(
+        names.len() == 1 && schtasks::is_leftover_of(&names[0], "a.exe"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn the_leftover_images_of_the_binary_are_those_that_kept_its_name() {
+    let (dir, paths) = installed();
+    fs::remove_file(service::exe(&paths)).unwrap();
+    let ours = [
+        leftover_in(dir.path(), "a", "reverse-tunnel.exe"),
+        leftover_in(dir.path(), "b", "REVERSE-TUNNEL.EXE"),
+    ];
+    let others = [
+        leftover_in(dir.path(), "c", "frpc-0.1.exe"),
+        leftover_in(dir.path(), "d", "old-reverse-tunnel.exe"),
+    ];
+    for image in ours.iter().chain(&others) {
+        fs::write(image, "").unwrap();
     }
+
+    assert_eq!(leftover_images_of_the_binary(&paths).unwrap(), ours);
 }
 
 #[test]

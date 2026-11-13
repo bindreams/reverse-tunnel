@@ -25,6 +25,8 @@ use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
 #[cfg(windows)]
+use crate::processes;
+#[cfg(windows)]
 use crate::schtasks::{self, TaskState};
 #[cfg(windows)]
 use crate::system_path;
@@ -465,16 +467,7 @@ pub fn rerun_uninstall(paths: &Paths) -> String {
         .to_string();
     }
     // Advice: a folder that cannot be listed has no image to name.
-    let binary = service::exe(paths);
-    let binary = binary.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    let images: Vec<_> = leftover_images(paths)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|image| {
-            let name = image.file_name().and_then(|name| name.to_str());
-            name.is_some_and(|name| schtasks::is_leftover_of(name, binary))
-        })
-        .collect();
+    let images = leftover_images_of_the_binary(paths).unwrap_or_default();
     if images.is_empty() {
         return "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
             .to_string();
@@ -560,6 +553,20 @@ pub fn leftover_images(paths: &Paths) -> Result<Vec<PathBuf>> {
     Ok(images)
 }
 
+/// Windows: the leftover files that kept the name of the installed binary, which can be run with `uninstall`: a removal
+/// that ran from the installed binary may have left that as the only copy.
+#[cfg(windows)]
+pub fn leftover_images_of_the_binary(paths: &Paths) -> Result<Vec<PathBuf>> {
+    let binary = service::exe(paths);
+    let binary = binary.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let mut images = leftover_images(paths)?;
+    images.retain(|image| {
+        let name = image.file_name().and_then(|name| name.to_str());
+        name.is_some_and(|name| schtasks::is_leftover_of(name, binary))
+    });
+    Ok(images)
+}
+
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
@@ -568,6 +575,10 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     {
         return Err(err).context("removing the service");
     }
+    // goetia returns while the service's own processes (the host, frpc) are still ending, and they hold their images in
+    // the bin dir and their logs in `logs/`.
+    #[cfg(windows)]
+    processes::wait_until_none_runs_as(&account::ensure(service::ACCOUNT)?)?;
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
     // until the rest of `config_dir` is gone, since `install` is refused while it exists; and `logs/` is last, so that
@@ -601,13 +612,15 @@ fn remove_link(paths: &Paths) -> Result<()> {
 }
 
 /// Windows: removes `path`, a file or a directory with what is in it (see `remove_entry`). Windows will not delete the
-/// image of a process that runs, and one may: the waiting `uninstall`'s binary, or a binary of the service that is
-/// still ending, since goetia returns once SCM says the service is stopped. So the process that deletes a directory
-/// owns what in it cannot be deleted: a regular file directly in `path` that cannot be deleted is renamed, which
-/// Windows allows for a running image, to a leftover file in `leftovers` that keeps its name (see
+/// image of a process that runs, and one may: the waiting `uninstall`'s own binary, or anything the operator runs from
+/// the bin dir (the service's own processes have ended by now, see `finish_uninstall`). So the process that deletes
+/// such a directory owns what in it cannot be deleted: a regular file directly in `path` that cannot be deleted is
+/// renamed, which Windows allows for a running image, to a leftover file in `leftovers` that keeps its name (see
 /// `schtasks::leftover_name`), and the removal's task deletes it once it has exited (see `schtasks::removal_script`).
 /// The rename is logged. A file that can be neither deleted nor renamed fails the removal, naming both errors. A
 /// directory, junction or link that cannot be deleted is never renamed, since the task's `del` could not delete it.
+/// Only the bin dir and the removal's own directory go by this rule: what the service held in the other directories
+/// has been released.
 #[cfg(windows)]
 fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     if !fs::symlink_metadata(path).is_ok_and(|entry| entry.is_dir()) {
@@ -643,16 +656,13 @@ fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs. On Windows what
-/// cannot be deleted is renamed (see `remove_or_rename`).
+/// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs. On Windows what in
+/// the bin dir cannot be deleted is renamed (see `remove_or_rename`).
 fn remove_files(paths: &Paths) -> Result<()> {
     #[cfg(windows)]
-    let leftovers = leftover_dir(paths)?;
-    #[cfg(windows)]
-    let remove = |path: &Path| remove_or_rename(path, leftovers);
+    let bin_dir = remove_or_rename(&paths.bin_dir, leftover_dir(paths)?);
     #[cfg(not(windows))]
-    let remove = |path: &Path| remove_entry(path);
-    let bin_dir = remove(&paths.bin_dir);
+    let bin_dir = remove_entry(&paths.bin_dir);
     // On Windows a shell or program whose working directory is in the folder holds it.
     #[cfg(windows)]
     let bin_dir = bin_dir.with_context(|| {
@@ -668,7 +678,7 @@ fn remove_files(paths: &Paths) -> Result<()> {
             for entry in entries {
                 let path = entry?.path();
                 if path != marker {
-                    remove(&path)?;
+                    remove_entry(&path)?;
                 }
             }
         }
@@ -677,7 +687,7 @@ fn remove_files(paths: &Paths) -> Result<()> {
     }
     remove_entry(&marker)?;
     remove_entry(&paths.config_dir)?;
-    remove(&paths.log_dir)
+    remove_entry(&paths.log_dir)
 }
 
 /// The hex digits of `N` random bytes from the OS.
