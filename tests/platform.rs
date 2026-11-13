@@ -874,10 +874,18 @@ fn a_failed_removal_logs_where_uninstall_says() {
             .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_string))
             .expect("journalctl prints a cursor")
     };
-    let failed = Command::new(BIN).arg("uninstall").output().unwrap();
+    // On Windows the installed binary runs it: the removal deletes its folder, so it moves itself aside and, when the
+    // removal fails, back.
+    #[cfg(windows)]
+    let runner = service::exe(&machine.paths);
+    #[cfg(not(windows))]
+    let runner = PathBuf::from(BIN);
+    let failed = Command::new(&runner).arg("uninstall").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(!failed.status.success(), "the removal should fail: {stderr}");
+    #[cfg(windows)]
+    assert!(runner.exists(), "the binary was not put back: {stderr}");
     let log = install::removal_log(&machine.paths);
     assert!(stderr.contains(&log), "{log} was not named as the log: {stderr}");
     // The unit's own result, not systemd-run's text.

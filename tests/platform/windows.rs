@@ -2,7 +2,6 @@
 //! standard user, the machine's `Path` and the images `uninstall` moves aside.
 
 use std::cell::Cell;
-use std::env;
 use std::fs;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -296,15 +295,7 @@ pub fn path_entries_naming(dir: &Path) -> usize {
 /// The machine's `Path` as a process started now would have it, each `%NAME%` expanded: the environment of a shell
 /// opened after `install`, unlike this process's own.
 pub fn fresh_path() -> String {
-    machine_path()
-        .split('%')
-        .enumerate()
-        .map(|(at, part)| match (at % 2, env::var(part)) {
-            (1, Ok(value)) => value,
-            (1, Err(_)) => format!("%{part}%"),
-            _ => part.to_string(),
-        })
-        .collect()
+    system_path::expand(&machine_path())
 }
 
 /// Waits, with no cap, until the image that `uninstall` moved aside, which the removal's task deletes once `uninstall`

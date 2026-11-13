@@ -159,3 +159,83 @@ fn uninstall_runs_with_its_working_directory_elsewhere() {
 
     refuse_deleted_working_directory(&paths, dir.path()).unwrap();
 }
+
+/// An image moved aside from the installed binary's place, which exists, as `move_aside` leaves it.
+fn moved_aside() -> (tempfile::TempDir, Paths, Aside) {
+    let (dir, paths) = installed();
+    let aside = Aside {
+        from: service::exe(&paths),
+        to: dir.path().join(".reverse-tunnel.0123.exe"),
+    };
+    fs::rename(&aside.from, &aside.to).unwrap();
+    (dir, paths, aside)
+}
+
+#[test]
+fn an_image_put_back_is_where_it_was_and_the_advice_is_the_name() {
+    let (_dir, paths, aside) = moved_aside();
+
+    let advice = aside.put_back(&paths);
+
+    assert!(aside.from.exists() && !aside.to.exists());
+    assert_eq!(advice, rerun_uninstall(&paths));
+}
+
+#[test]
+fn an_image_that_cannot_be_put_back_is_named_as_the_binary_to_run() {
+    let (_dir, paths, aside) = moved_aside();
+    // Gone, so that the rename back fails.
+    fs::remove_file(&aside.to).unwrap();
+
+    let advice = aside.put_back(&paths);
+
+    let to = aside.to.display().to_string();
+    assert!(advice.contains("could not be moved back"), "{advice}");
+    assert!(advice.contains(&format!("\"{to}\" uninstall")), "{advice}");
+}
+
+#[test]
+fn a_removal_that_left_its_task_names_the_moved_image_to_delete_beside_it() {
+    let (_dir, _paths, aside) = moved_aside();
+    let task = "the task is still registered";
+
+    let with = left_behind(task, Some(&aside));
+
+    assert!(with.starts_with(task), "{with}");
+    assert!(with.contains(&aside.to.display().to_string()), "{with}");
+    assert_eq!(left_behind(task, None), task);
+}
+
+/// Opens `path` so that nothing can delete it until the returned file drops.
+fn held(path: &Path) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+    fs::write(path, "x").unwrap();
+    fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .unwrap()
+}
+
+#[test]
+fn a_staged_copy_that_is_held_does_not_fail_the_sweep_of_the_bin_dir() {
+    let (_dir, paths) = installed();
+    let staged = paths.bin_dir.join(format!("{}x.exe", upgrade::STAGED));
+    let _held = held(&staged);
+
+    clean_bin_dir(&paths).unwrap();
+
+    assert!(staged.exists());
+}
+
+#[test]
+fn a_stale_file_that_is_held_fails_the_sweep_of_the_bin_dir() {
+    let (_dir, paths) = installed();
+    let stale = paths.bin_dir.join("frpc-0.0.1");
+    let _held = held(&stale);
+
+    let err = format!("{:#}", clean_bin_dir(&paths).unwrap_err());
+
+    assert!(err.contains("frpc-0.0.1"), "{err}");
+}

@@ -197,8 +197,9 @@ has exited. `uninstall` refuses to run in a shell whose working directory is ins
 directory first. A failed removal's message says why and names `reverse-tunnel uninstall` to finish it; its log is
 `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. Another shell or program with its working directory in the
 install folder holds it: the removal then fails and says so, and running `uninstall` again once that is closed
-finishes it. A failed removal leaves the moved binary, `%ProgramFiles%\.reverse-tunnel.<...>.exe`, which is then the
-only copy of the binary: run `uninstall` with it, or with any other `reverse-tunnel` binary, and delete it by hand.
+finishes it. A failed removal puts the binary back where it was. If the session that ran `uninstall` was cut as well,
+the binary is left at `%ProgramFiles%\.reverse-tunnel.<...>.exe`, the only copy: run it with `uninstall` (or run any
+other `reverse-tunnel` binary), which finishes the removal, then delete it by hand.
 
 - On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
   unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.

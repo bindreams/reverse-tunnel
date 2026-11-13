@@ -85,7 +85,7 @@ pub fn broadcast() {
 
 /// `text` with its `%NAME%` environment variables expanded, as a process that reads the `Path` would; one that is not
 /// set stays as it is.
-fn expand(text: &str) -> String {
+pub fn expand(text: &str) -> String {
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     // SAFETY: `wide` is NUL-terminated; the buffer has the length that is passed, and it is read up to what is written.
     unsafe {
