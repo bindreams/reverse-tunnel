@@ -7,14 +7,15 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
+use windows::core::PCWSTR;
 use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-    SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
+    DACL_SECURITY_INFORMATION, EqualSid, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 
@@ -141,7 +142,7 @@ pub fn owner_of(path: &Path) -> io::Result<String> {
 ///
 /// # Safety
 /// `sid` points to a valid SID.
-pub(crate) unsafe fn string_of_sid(sid: PSID) -> io::Result<String> {
+unsafe fn string_of_sid(sid: PSID) -> io::Result<String> {
     let mut text = null_mut();
     // SAFETY: the caller's promise.
     if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
@@ -149,9 +150,61 @@ pub(crate) unsafe fn string_of_sid(sid: PSID) -> io::Result<String> {
     }
     let _text = Local(text.cast());
     // SAFETY: Windows wrote a NUL-terminated string.
-    let units = unsafe {
-        let len = (0..).take_while(|&at| *text.add(at) != 0).count();
-        std::slice::from_raw_parts(text, len)
-    };
-    Ok(String::from_utf16_lossy(units))
+    unsafe { PCWSTR(text).to_string() }.map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
+
+/// A SID, in its binary form.
+pub struct Sid(Vec<u32>);
+
+impl Sid {
+    /// The SID that `text` (`S-1-5-...`) spells.
+    pub fn parse(text: &str) -> io::Result<Sid> {
+        let text: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        let mut sid = null_mut();
+        // SAFETY: `text` is NUL-terminated, and the out pointer is live.
+        if unsafe { ConvertStringSidToSidW(text.as_ptr(), &mut sid) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let sid = Local(sid);
+        // SAFETY: Windows made a valid SID, which `sid` keeps until it drops.
+        Ok(unsafe { Sid::copy_of(sid.0) })
+    }
+
+    /// A copy of the SID that `sid` points to.
+    ///
+    /// # Safety
+    /// `sid` points to a valid SID.
+    pub unsafe fn copy_of(sid: PSID) -> Sid {
+        // SAFETY: the caller's promise.
+        let len = unsafe { GetLengthSid(sid) } as usize;
+        // A SID is a whole number of 32-bit words.
+        let mut words = vec![0u32; len.div_ceil(4)];
+        // SAFETY: `words` has room for `len` bytes, and the caller's promise says `sid` has that many.
+        unsafe { std::ptr::copy_nonoverlapping(sid.cast::<u8>(), words.as_mut_ptr().cast::<u8>(), len) };
+        Sid(words)
+    }
+
+    pub fn as_psid(&self) -> PSID {
+        self.0.as_ptr().cast_mut().cast()
+    }
+
+    /// Whether `other` is this SID; never for null.
+    ///
+    /// # Safety
+    /// `other` is null or points to a valid SID.
+    pub unsafe fn is(&self, other: PSID) -> bool {
+        // SAFETY: both are valid SIDs, as the caller promises of `other`.
+        !other.is_null() && unsafe { EqualSid(self.as_psid(), other) } != 0
+    }
+}
+
+impl PartialEq for Sid {
+    fn eq(&self, other: &Sid) -> bool {
+        // SAFETY: `other` is a valid SID that it owns.
+        unsafe { self.is(other.as_psid()) }
+    }
+}
+
+#[cfg(test)]
+#[path = "security_tests.rs"]
+mod tests;

@@ -578,7 +578,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     // goetia returns while the service's own processes (the host, frpc) are still ending, and they hold their images in
     // the bin dir and their logs in `logs/`.
     #[cfg(windows)]
-    processes::wait_until_none_runs_as_service(service::ID)?;
+    processes::wait_until_none_runs_as(service::ACCOUNT)?;
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
     // until the rest of `config_dir` is gone, since `install` is refused while it exists; and `logs/` is last, so that
@@ -637,6 +637,10 @@ fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     remove_entry(path)
 }
 
+/// What the removal says, before where, when it renamed a file that it could not delete.
+#[cfg(windows)]
+pub const MOVED_IT_TO: &str = "moved it to";
+
 /// Windows: deletes `path` (see `remove_entry`), or if it cannot be, renames it (see `remove_or_rename`).
 #[cfg(windows)]
 fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
@@ -650,7 +654,7 @@ fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
     fs::rename(path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
     println!(
-        "{refused:#}: moved it to {}, where the removal's task deletes it",
+        "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
         to.display()
     );
     Ok(())

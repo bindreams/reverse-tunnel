@@ -8,15 +8,22 @@ use goetia::spec::{DaemonFields, DaemonSpec, Id, Kind, Restart, User};
 
 use crate::paths::Paths;
 
+/// The name of the service, which `ID` and the accounts' names are spelled from.
+macro_rules! name {
+    () => {
+        "reverse-tunnel"
+    };
+}
+
 /// The name of the service, and of its virtual account on Windows.
-pub const ID: &str = "reverse-tunnel";
+pub const ID: &str = name!();
 
 #[cfg(windows)]
-pub const ACCOUNT: &str = r"NT SERVICE\reverse-tunnel";
+pub const ACCOUNT: &str = concat!(r"NT SERVICE\", name!());
 #[cfg(target_os = "macos")]
-pub const ACCOUNT: &str = "_reverse-tunnel";
+pub const ACCOUNT: &str = concat!("_", name!());
 #[cfg(not(any(windows, target_os = "macos")))]
-pub const ACCOUNT: &str = "reverse-tunnel";
+pub const ACCOUNT: &str = name!();
 
 /// Where the installed binary is: the one path the service runs.
 pub fn exe(paths: &Paths) -> PathBuf {

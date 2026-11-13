@@ -925,7 +925,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
         // The image is left as the only binary, and the error names it. Running it finishes the removal.
         let image = leftover_of_the_binary(&machine);
         assert!(
-            logged.contains(&format!("moved it to {}", image.display())),
+            logged.contains(&format!("{} {}", install::MOVED_IT_TO, image.display())),
             "the log has no rename of the image: {logged}"
         );
         assert!(
@@ -1490,9 +1490,8 @@ fn uninstall_finish_while_the_service_and_frpc_run_renames_no_image() {
     let said = output_of_success(&mut finish);
 
     assert_nothing_left(&machine, &said);
-    // `remove_or_rename` says this when it renames.
     assert!(
-        !said.contains("moved it to"),
+        !said.contains(install::MOVED_IT_TO),
         "the removal renamed an image it should have waited for: {said}"
     );
 }
