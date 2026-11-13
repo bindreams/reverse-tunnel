@@ -1,16 +1,17 @@
 //! What the platform tests need of Windows: a DACL's effective rights, a job object that ends a session, a local
-//! standard user, the machine's `Path` and the images `uninstall` moves aside.
+//! standard user, the machine's `Path` and the leftover images a removal renames.
 
 use std::cell::Cell;
 use std::fs;
 use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use reverse_tunnel::account;
+use reverse_tunnel::install;
 use reverse_tunnel::security::owner_of;
 use reverse_tunnel::system_path;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
@@ -298,24 +299,10 @@ pub fn fresh_path() -> String {
     system_path::expand(&machine_path())
 }
 
-/// The images that `uninstall` moved aside, which the removal's task deletes once `uninstall` has exited: named
-/// `.reverse-tunnel.<...>` and in the folder that holds the bin dir.
-pub fn moved_images(machine: &Machine) -> Vec<PathBuf> {
-    fs::read_dir(machine.paths.bin_dir.parent().unwrap())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(".reverse-tunnel.")
-        })
-        .collect()
-}
-
-/// Waits, with no cap, until the moved images are gone.
-pub fn wait_until_the_moved_image_is_gone(machine: &Machine) {
-    wait_until("the image uninstall moved aside is deleted", || {
-        moved_images(machine).is_empty()
+/// Waits, with no cap, until the removal's task has deleted every leftover image: the files a removal renamed because
+/// it could not delete them, which are named by `schtasks::leftover_pattern`.
+pub fn wait_until_no_leftover_image_is_left(machine: &Machine) {
+    wait_until("the leftover images are deleted", || {
+        install::leftover_images(&machine.paths).unwrap().is_empty()
     });
 }

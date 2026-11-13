@@ -73,7 +73,7 @@ pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
         !uninstalling_file(paths).try_exists()?,
         "an uninstall is in progress or failed: see {}, and {} to finish it",
         removal_log(paths),
-        rerun_uninstall(paths, None)
+        rerun_uninstall(paths)
     );
     Ok(())
 }
@@ -159,24 +159,15 @@ fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
     open_file(&uninstalling_file(paths), Perm::new(0o600), false)?;
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
     println!("Its log will be {}.", removal_log(paths));
-    #[cfg(windows)]
-    let (removal, moved) = start_removal(paths, exe, lock)?;
-    #[cfg(not(windows))]
-    let (removal, moved) = {
-        // `--finish` takes the lock itself; an `install` in between is refused by the marker.
-        drop(lock);
-        let removal = spawn_finish(exe, paths).with_context(|| not_started(&rerun_uninstall(paths, None)))?;
-        (removal, None::<PathBuf>)
-    };
-    // From here nothing moves the image again: on success the removal deletes it, and in any other case it stays, and
-    // the advice runs it from there.
-    let rerun = || rerun_uninstall(paths, moved.as_deref());
+    // `--finish` takes the lock itself; an `install` in between is refused by the marker.
+    drop(lock);
+    let removal = spawn_finish(exe, paths).with_context(|| not_started(&rerun_uninstall(paths)))?;
     ops::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
             "could not tell how the removal ended; its log is {}, and to finish it {}",
             removal_log(paths),
-            rerun()
+            rerun_uninstall(paths)
         )
     })?;
     // The removal's own broadcast, from the task, does not reach the desktop, and `--finish` may already have taken the
@@ -185,15 +176,15 @@ fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
     system_path::broadcast();
     match outcome {
         WaitOutcome::Ended => {}
-        // Nothing to finish but the task, and the image if there is one: the log is gone with the rest.
+        // Nothing to finish but the task: the log is gone with the rest.
         #[cfg(windows)]
-        WaitOutcome::LeftBehind(why) => bail!(left_behind(&why, moved.as_deref().map(|_| rerun()))),
+        WaitOutcome::LeftBehind(why) => bail!(why),
         WaitOutcome::Failed(why) => {
             return Err(anyhow!(why)).with_context(|| {
                 format!(
                     "the removal failed: see {}, and {} to finish it",
                     removal_log(paths),
-                    rerun()
+                    rerun_uninstall(paths)
                 )
             });
         }
@@ -310,6 +301,8 @@ struct Removal(PathBuf);
 /// does last, after the directory; one that ended has the code of the step that failed (see `removal_script`).
 #[cfg(windows)]
 fn removal_outcome(state: TaskState, dir: &Path, dir_present: bool) -> Option<WaitOutcome> {
+    // The removal's directory is next to the bin dir, where the leftover files are.
+    let leftovers = schtasks::leftover_pattern(dir.parent().unwrap_or(dir));
     let dir = dir.display();
     let failed = |why: String| Some(WaitOutcome::Failed(why));
     match state {
@@ -323,8 +316,9 @@ fn removal_outcome(state: TaskState, dir: &Path, dir_present: bool) -> Option<Wa
             "the removal could not delete {dir}; its log may be gone with it: delete {dir} by hand"
         )),
         TaskState::Ended(4) => Some(WaitOutcome::LeftBehind(format!(
-            "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`",
-            schtasks::REMOVAL
+            "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`, and the              files {} by hand",
+            schtasks::REMOVAL,
+            leftovers.display()
         ))),
         TaskState::Ended(code) => failed(format!("the removal's task ended with {code:#x}")),
     }
@@ -395,22 +389,28 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
 
 /// Windows: a one-time scheduled task run by SYSTEM, since an OpenSSH session ends everything it started, and no job
 /// object can be left. It runs a copy of `exe` from `removal_dir`, with the output in the log, and if the removal
-/// succeeded deletes the directory and then itself, and then `moved`, the image of this binary that `move_aside` moved
-/// (see `schtasks::removal_script`).
+/// succeeded deletes the directory and then itself, and then the files that a removal renamed (see
+/// `schtasks::removal_script`).
 #[cfg(windows)]
-fn spawn_finish(exe: &Path, moved: Option<&Path>, paths: &Paths) -> Result<Removal> {
+fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let dir = removal_dir(paths);
     // Left by a failed removal.
     remove_entry(&dir)?;
     make_dir(&dir, Perm::new(0o700))?;
-    // Named as the installed binary is, whatever `exe` was moved to.
+    // Named as the installed binary is, whatever `exe` is called.
     let copy = dir.join(
         service::exe(paths)
             .file_name()
             .context("the installed binary has no file name")?,
     );
     fs::copy(exe, &copy).with_context(|| format!("copying {}", copy.display()))?;
-    let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL, moved);
+    let script = schtasks::removal_script(
+        &copy,
+        &removal_log_file(paths),
+        &dir,
+        schtasks::REMOVAL,
+        leftover_dir(paths)?,
+    );
     schtasks::start(schtasks::REMOVAL, &script)?;
     Ok(Removal(dir))
 }
@@ -437,10 +437,9 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     Ok(Removal(child))
 }
 
-/// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone. `moved`
-/// is the image of a binary that a removal moved aside, which Windows only has.
+/// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
 #[cfg(not(windows))]
-fn rerun_uninstall(paths: &Paths, _moved: Option<&Path>) -> String {
+fn rerun_uninstall(paths: &Paths) -> String {
     let exe = service::exe(paths);
     if exe.exists() {
         format!("run `sudo {} uninstall`", exe.display())
@@ -449,19 +448,32 @@ fn rerun_uninstall(paths: &Paths, _moved: Option<&Path>) -> String {
     }
 }
 
-/// How to run `uninstall` again: by `moved`, the image that `move_aside` moved aside, if the removal has one, which is
-/// then the only binary there is; else by the command on the `PATH`, or by any `reverse-tunnel` binary where it is not
-/// found (after a removal that got as far as the `PATH`, or in a shell that was opened before `install`).
+/// How to run `uninstall` again: by the command on the `PATH`, or, once the installed binary is gone, by any
+/// `reverse-tunnel` binary, which includes the leftover images in the folder that holds the bin dir (see
+/// `remove_bin_dir`): a removal that ran from the installed binary may have left that as the only copy.
 #[cfg(windows)]
-fn rerun_uninstall(_paths: &Paths, moved: Option<&Path>) -> String {
-    match moved {
-        Some(moved) => format!("run `\"{}\" uninstall` in an elevated prompt", moved.display()),
-        None => concat!(
+fn rerun_uninstall(paths: &Paths) -> String {
+    if service::exe(paths).exists() {
+        return concat!(
             "run `reverse-tunnel uninstall` in an elevated prompt ",
             "(with any `reverse-tunnel` binary, if that is not found)"
         )
-        .to_string(),
+        .to_string();
     }
+    // Advice: a folder that cannot be listed has no image to name.
+    let images = leftover_images(paths).unwrap_or_default();
+    if images.is_empty() {
+        return "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
+            .to_string();
+    }
+    let by_image: Vec<_> = images
+        .iter()
+        .map(|image| format!("`\"{}\" uninstall`", image.display()))
+        .collect();
+    format!(
+        "run {} in an elevated prompt (the installed binary is gone)",
+        by_image.join(" or ")
+    )
 }
 
 /// Windows: every directory the removal deletes: the bin dir, the config dir, the logs, and the removal's own.
@@ -512,101 +524,32 @@ fn refuse_deleted_working_directory(paths: &Paths, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Windows: the image of `uninstall`'s own binary, aside from where it was, where the removal's task deletes it. `from`
-/// is where `move_aside` took it from; none if it was aside already.
+/// Windows: the folder that holds the bin dir, `%ProgramFiles%`, where a removal puts what it cannot delete (see
+/// `remove_bin_dir`). Only administrators can write to it, and the removal leaves it alone.
 #[cfg(windows)]
-struct Aside {
-    from: Option<PathBuf>,
-    to: PathBuf,
+fn leftover_dir(paths: &Paths) -> Result<&Path> {
+    paths.bin_dir.parent().context("the bin dir has no parent")
 }
 
-/// The name that `move_aside` gives an image: `.reverse-tunnel.<hex>.exe`.
+/// Windows: the leftover files that earlier removals renamed (see `remove_bin_dir`), which a removal's task deletes once
+/// they can be.
 #[cfg(windows)]
-const ASIDE_PREFIX: &str = ".reverse-tunnel.";
-#[cfg(windows)]
-const ASIDE_SUFFIX: &str = ".exe";
-
-/// Windows: moves the image aside (see `move_aside`) under `lock`, immediately before the hand-off, so that this binary
-/// is out of place for as short a time as can be, then hands the removal over (see `spawn_finish`). Returns the removal
-/// and where the image is, which the removal's task now deletes if the removal succeeds. The image goes back only if
-/// the hand-off fails, so that no error strands it (see `Aside::put_back`). After the hand-off nothing moves it: it
-/// stays where it is, and the advice runs it from there.
-#[cfg(windows)]
-fn start_removal(paths: &Paths, exe: &Path, lock: NamedLockGuard) -> Result<(Removal, Option<PathBuf>)> {
-    let aside = move_aside(paths, exe).with_context(|| not_started(&rerun_uninstall(paths, None)))?;
-    // `--finish` takes the lock itself; an `install` in between is refused by the marker.
-    drop(lock);
-    let moved = aside.as_ref().map(|aside| aside.to.as_path());
-    match spawn_finish(moved.unwrap_or(exe), moved, paths) {
-        Ok(removal) => Ok((removal, aside.map(|aside| aside.to))),
-        Err(err) => {
-            let rerun = aside.map_or_else(|| rerun_uninstall(paths, None), |aside| aside.put_back(paths));
-            Err(err.context(not_started(&rerun)))
+pub fn leftover_images(paths: &Paths) -> Result<Vec<PathBuf>> {
+    let dir = leftover_dir(paths)?;
+    let mut images = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // The pattern of `schtasks::leftover_pattern`: the prefix, anything, the suffix.
+        if name.len() >= schtasks::LEFTOVER_PREFIX.len() + schtasks::LEFTOVER_SUFFIX.len()
+            && name.starts_with(schtasks::LEFTOVER_PREFIX)
+            && name.ends_with(schtasks::LEFTOVER_SUFFIX)
+        {
+            images.push(entry.path());
         }
     }
-}
-
-/// Windows: decides where this binary's image is and whether the removal's task deletes it. If this binary, `exe`, is
-/// an image that an earlier run moved aside (named as `move_aside` names them, in the directory that holds the bin
-/// dir), it is that already. If it is in a directory the removal deletes, renames its image aside, which Windows allows
-/// while it runs (what it refuses is deleting it). The removal task deletes the image once this process has exited (see
-/// `schtasks::removal_script`). The image goes to the directory that holds the bin dir, `%ProgramFiles%`, which only
-/// administrators can write to and the removal leaves alone, under a name of its own; the same volume, so that the
-/// rename needs no copy. Elsewhere: none.
-#[cfg(windows)]
-fn move_aside(paths: &Paths, exe: &Path) -> Result<Option<Aside>> {
-    let holder = paths.bin_dir.parent().context("the bin dir has no parent")?;
-    let dir = exe.parent().context("this binary has no directory")?;
-    let name = exe.file_name().context("this binary has no name")?.to_string_lossy();
-    if name.starts_with(ASIDE_PREFIX)
-        && name.ends_with(ASIDE_SUFFIX)
-        && fs::canonicalize(dir)? == fs::canonicalize(holder)?
-    {
-        return Ok(Some(Aside {
-            from: None,
-            to: exe.to_path_buf(),
-        }));
-    }
-    if deleted_dir_holding(paths, dir)?.is_none() {
-        return Ok(None);
-    }
-    let mut random = [0u8; 16];
-    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
-    let to = holder.join(format!("{ASIDE_PREFIX}{}{ASIDE_SUFFIX}", hex::encode(random)));
-    fs::rename(exe, &to).with_context(|| format!("moving {} to {}", exe.display(), to.display()))?;
-    Ok(Some(Aside {
-        from: Some(exe.to_path_buf()),
-        to,
-    }))
-}
-
-#[cfg(windows)]
-impl Aside {
-    /// Moves the image back to where it was, after a removal that did not start, so that nothing deletes it, and
-    /// returns how to run `uninstall` again. If the image cannot go back, or was aside already, it stays, since it is
-    /// the only copy, and the advice runs it from there.
-    fn put_back(&self, paths: &Paths) -> String {
-        let by_name = || rerun_uninstall(paths, Some(&self.to));
-        let Some(from) = &self.from else { return by_name() };
-        match fs::rename(&self.to, from) {
-            Ok(()) => rerun_uninstall(paths, None),
-            Err(err) => format!(
-                "{} (this binary could not be moved back to {}, and is the only copy: {err})",
-                by_name(),
-                from.display()
-            ),
-        }
-    }
-}
-
-/// Windows: `why` a removal that finished left its task. `rerun` is how to run `uninstall` again, if the removal also
-/// left the image that `move_aside` moved, which its script did not reach.
-#[cfg(windows)]
-fn left_behind(why: &str, rerun: Option<String>) -> String {
-    match rerun {
-        Some(rerun) => format!("{why}; this binary's image is left too, and to finish it {rerun}"),
-        None => why.to_string(),
-    }
+    images.sort();
+    Ok(images)
 }
 
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
@@ -625,7 +568,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     account::remove(service::ACCOUNT)?;
     #[cfg(unix)]
     remove_link(paths)?;
-    remove_files(paths).with_context(|| rerun_uninstall(paths, None))?;
+    remove_files(paths).with_context(|| rerun_uninstall(paths))?;
     // Last: until then the rerun that a failure advises is run by name, and the `PATH` finds it.
     #[cfg(windows)]
     system_path::remove(&paths.bin_dir)?;
@@ -649,11 +592,43 @@ fn remove_link(paths: &Paths) -> Result<()> {
     }
 }
 
+/// Windows: removes the bin dir. Windows will not delete the image of a process that runs, and one may: the waiting
+/// `uninstall`'s binary, or a binary of the service that is still ending, since goetia returns once SCM says the
+/// service is stopped. Each entry that cannot be deleted is renamed, which Windows allows for a running image, to a
+/// leftover file in the folder that holds the bin dir (see `schtasks::leftover_name`), so that the bin dir can go; the
+/// removal's task deletes it once it has exited (see `schtasks::removal_script`). The rename is logged. An entry that
+/// can be neither deleted nor renamed fails the removal, naming both errors; a directory is never renamed.
+#[cfg(windows)]
+fn remove_bin_dir(paths: &Paths) -> Result<()> {
+    let leftovers = leftover_dir(paths)?;
+    let entries = match fs::read_dir(&paths.bin_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", paths.bin_dir.display())),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        let Err(refused) = remove_entry(&path) else { continue };
+        if fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_dir()) {
+            return Err(refused);
+        }
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).context("reading random bytes from the OS")?;
+        let to = leftovers.join(schtasks::leftover_name(&hex::encode(random)));
+        fs::rename(&path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
+        println!(
+            "{refused:#}: moved it to {}, where the removal's task deletes it",
+            to.display()
+        );
+    }
+    remove_entry(&paths.bin_dir)
+}
+
 /// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs.
 fn remove_files(paths: &Paths) -> Result<()> {
     // On Windows a shell or program whose working directory is in the folder holds it.
     #[cfg(windows)]
-    remove_entry(&paths.bin_dir).with_context(|| {
+    remove_bin_dir(paths).with_context(|| {
         format!(
             "if a shell or program has its working directory in {}, it holds it",
             paths.bin_dir.display()

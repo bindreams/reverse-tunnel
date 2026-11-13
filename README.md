@@ -191,15 +191,13 @@ tunnel-only host out until someone is at the machine.
 `uv run ctl revoke <host>`, then removes everything, and prints "Removed." The removal continues if your session ends.
 Revoking does not cut the host's current connection; `ctl revoke` prints the command that does.
 
-**Windows**: `uninstall` also takes `%ProgramFiles%\reverse-tunnel` off the system `PATH`. Run by the installed binary, it
-moves that binary aside, since Windows cannot delete a running one, and the removal's task deletes it once `uninstall`
-has exited. `uninstall` refuses to run in a shell whose working directory is inside a folder it deletes: change to another
-directory first. A failed removal's message says why and names `reverse-tunnel uninstall` to finish it; its log is
-`%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. Another shell or program with its working directory in the
-install folder holds it: the removal then fails and says so, and running `uninstall` again once that is closed
-finishes it. After a failed removal run from the installed binary, the binary is at the path the error names, in
-`%ProgramFiles%`: run it with `uninstall`, which finishes the removal and deletes it. The same holds if the session that
-ran `uninstall` was cut, when the error was not seen: the file is `%ProgramFiles%\.reverse-tunnel.<...>.exe`.
+**Windows**: `uninstall` also takes `%ProgramFiles%\reverse-tunnel` off the system `PATH`. `uninstall` refuses to run in a
+shell whose working directory is inside a folder it deletes: change to another directory first. A removal that cannot
+delete a running copy of the binary moves it to `%ProgramFiles%\.reverse-tunnel.*.exe` and deletes it once it has
+exited; after a failed removal those files are deleted by the next successful one. A failed removal's message says why
+and names the command to finish it; its log is `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. Another shell or
+program with its working directory in the install folder holds it: the removal then fails and says so, and running
+`uninstall` again once that is closed finishes it.
 
 - On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
   unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.

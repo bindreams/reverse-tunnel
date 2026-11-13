@@ -18,13 +18,15 @@ fn each_step_of_the_script_fails_with_its_own_exit_code() {
         Path::new(r"C:\d\log"),
         Path::new(r"C:\d"),
         "task",
-        None,
+        Path::new(r"C:\p"),
     );
     // A program is judged by its exit code, a builtin (`del`, `rmdir`) by what it left, since it reports a held file
-    // only in its message.
-    assert_eq!(
-        script,
-        r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1) & del /q "C:\d\x.exe" >> "C:\d\log" 2>&1 & (if exist "C:\d\x.exe" exit /b 2) & rmdir /s /q "C:\d" & (if exist "C:\d" exit /b 3) & (schtasks /Delete /F /TN task || exit /b 4)"#
+    // only in its message. The last step, the sweep, has no code: it goes on until it is done.
+    assert!(
+        script.starts_with(
+            r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1) & del /q "C:\d\x.exe" >> "C:\d\log" 2>&1 & (if exist "C:\d\x.exe" exit /b 2) & rmdir /s /q "C:\d" & (if exist "C:\d" exit /b 3) & (schtasks /Delete /F /TN task || exit /b 4) & "#
+        ),
+        "{script}"
     );
 }
 
@@ -94,21 +96,23 @@ fn a_failed_read_is_gone_if_the_task_is_gone_when_looked_up_again_and_an_error_o
 }
 
 #[test]
-fn the_script_deletes_the_moved_image_after_the_task_itself_and_until_it_is_gone() {
+fn the_script_sweeps_the_leftover_images_after_the_task_itself_and_until_none_is_left() {
     let script = removal_script(
         Path::new(r"C:\d\x.exe"),
         Path::new(r"C:\d\log"),
         Path::new(r"C:\d"),
         "task",
-        Some(Path::new(r"C:\p\.moved.exe")),
+        Path::new(r"C:\p"),
     );
 
-    // The waiter holds the image until the task is gone, so the step comes after it; it repeats, with a pause between
-    // the checks, until the file is not there.
+    // The waiter holds its image until the task is gone, so the step comes after it; it repeats, with a pause between
+    // the checks, until no file of the pattern is there.
+    let pattern = leftover_pattern(Path::new(r"C:\p")).display().to_string();
+    assert_eq!(pattern, format!(r"C:\p\{LEFTOVER_PREFIX}*{LEFTOVER_SUFFIX}"));
     assert!(
-        script.ends_with(
-            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /q "C:\p\.moved.exe" >nul 2>&1) & (if not exist "C:\p\.moved.exe" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
-        ),
+        script.ends_with(&format!(
+            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+        )),
         "{script}"
     );
 }

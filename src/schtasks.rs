@@ -1,6 +1,6 @@
 //! The one-time task that finishes an `uninstall` on Windows, through Task Scheduler's COM API.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
@@ -176,29 +176,39 @@ fn connect() -> Result<ITaskFolder> {
     }
 }
 
+/// The name of a file that a removal could not delete, which it renamed (see `install::remove_bin_dir`) so that its
+/// folder can go: `.reverse-tunnel.<id>.exe`, in the folder that holds the bin dir. The removal task's last step deletes
+/// every such file once it can (see `removal_script`).
+pub const LEFTOVER_PREFIX: &str = ".reverse-tunnel.";
+pub const LEFTOVER_SUFFIX: &str = ".exe";
+
+/// The leftover file called `id`.
+pub fn leftover_name(id: &str) -> String {
+    format!("{LEFTOVER_PREFIX}{id}{LEFTOVER_SUFFIX}")
+}
+
+/// The pattern that every leftover file in `dir` matches, for `cmd`.
+pub fn leftover_pattern(dir: &Path) -> PathBuf {
+    dir.join(format!("{LEFTOVER_PREFIX}*{LEFTOVER_SUFFIX}"))
+}
+
 /// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, the copy's deletion, then the directory
 /// `dir` that holds the copy and the log `log`, and then the task `name` itself. Each step that fails ends `cmd` with
 /// a code of its own, which the task's last result carries (`exit /b` ends `cmd`, and with it the rest): 1 the removal,
 /// 2 the copy, 3 the directory, 4 the task. A program is judged by its exit code, a builtin by what it left, since
 /// `del` and `rmdir` report a file that something holds only in their message.
 ///
-/// With `moved`, the image of the binary that ran `uninstall`, which it moved aside and which this task is to delete,
-/// a last step deletes it, and checks that it is gone, and pauses and tries again until it is. It comes after the
-/// task's own deletion: until then `uninstall`'s waiter is alive and holds the image, and the waiter ends once the task
-/// is gone. A session that was cut has no waiter, so the first try succeeds. `ping` is the pause between two checks of
-/// the file, as `timeout` needs a console, which a task has none of.
-pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, moved: Option<&Path>) -> String {
+/// A last step deletes the leftover files in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`),
+/// and checks that none is left, and pauses and tries again until none is. It comes after the task's own deletion:
+/// until then `uninstall`'s waiter is alive and may be running a leftover, and the waiter ends once the task is gone.
+/// `ping` is the pause between two checks, as `timeout` needs a console, which a task has none of.
+pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
-    let mut script = format!(
-        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4)"#
-    );
-    if let Some(moved) = moved {
-        let moved = moved.display();
-        script += &format!(
-            r#" & for /l %i in (1,0,2) do ((del /q "{moved}" >nul 2>&1) & (if not exist "{moved}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
-        );
-    }
-    script
+    let pattern = leftover_pattern(leftovers);
+    let pattern = pattern.display();
+    format!(
+        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4) & for /l %i in (1,0,2) do ((del /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+    )
 }
 
 /// The definition of a task with no trigger that runs `script` as SYSTEM, however long it takes and whatever the power.

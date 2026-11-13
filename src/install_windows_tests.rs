@@ -47,6 +47,8 @@ fn a_removal_that_left_only_its_task_is_done_and_says_how_to_delete_it() {
         panic!("the removal's task is left, but the removal is not a failure");
     };
     assert!(why.contains("schtasks /Delete /TN reverse-tunnel-uninstall"), "{why}");
+    // The task did not reach its last step, which deletes the leftover images.
+    assert!(why.contains(r"C:\.reverse-tunnel.*.exe"), "{why}");
     assert!(!why.contains("failed") && !why.contains("log"), "{why}");
 }
 
@@ -66,24 +68,39 @@ fn installed() -> (tempfile::TempDir, Paths) {
 
 #[test]
 fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_not() {
-    let advice = rerun_uninstall(&Paths::testing(r"C:\host"), None);
+    let (_dir, paths) = installed();
 
     assert_eq!(
-        advice,
+        rerun_uninstall(&paths),
         "run `reverse-tunnel uninstall` in an elevated prompt (with any `reverse-tunnel` binary, if that is not found)"
     );
 }
 
 #[test]
-fn the_rerun_advice_of_a_removal_with_a_moved_image_names_it_quoted() {
-    let advice = rerun_uninstall(
-        &Paths::testing(r"C:\host"),
-        Some(Path::new(r"C:\Program Files\.reverse-tunnel.0123.exe")),
+fn once_the_installed_binary_is_gone_the_rerun_advice_names_the_leftover_images_as_binaries_to_run() {
+    let (dir, paths) = installed();
+    fs::remove_file(service::exe(&paths)).unwrap();
+    assert_eq!(
+        rerun_uninstall(&paths),
+        "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
     );
+    let images = [
+        dir.path().join(schtasks::leftover_name("a")),
+        dir.path().join(schtasks::leftover_name("b")),
+    ];
+    for image in &images {
+        fs::write(image, "").unwrap();
+    }
 
+    let advice = rerun_uninstall(&paths);
+
+    let by_image = |image: &PathBuf| format!("`\"{}\" uninstall`", image.display());
     assert_eq!(
         advice,
-        r#"run `"C:\Program Files\.reverse-tunnel.0123.exe" uninstall` in an elevated prompt"#
+        format!(
+            "run {} in an elevated prompt (the installed binary is gone)",
+            images.iter().map(by_image).collect::<Vec<_>>().join(" or ")
+        )
     );
 }
 
@@ -173,101 +190,6 @@ fn uninstall_runs_with_its_working_directory_elsewhere() {
     refuse_deleted_working_directory(&paths, dir.path()).unwrap();
 }
 
-/// An image moved aside from the installed binary's place, which exists, as `move_aside` leaves it.
-fn moved_aside() -> (tempfile::TempDir, Paths, Aside) {
-    let (dir, paths) = installed();
-    let aside = Aside {
-        from: Some(service::exe(&paths)),
-        to: dir.path().join(".reverse-tunnel.0123.exe"),
-    };
-    fs::rename(service::exe(&paths), &aside.to).unwrap();
-    (dir, paths, aside)
-}
-
-#[test]
-fn an_image_put_back_is_where_it_was_and_the_advice_is_the_name() {
-    let (_dir, paths, aside) = moved_aside();
-
-    let advice = aside.put_back(&paths);
-
-    assert!(service::exe(&paths).exists() && !aside.to.exists());
-    assert_eq!(advice, rerun_uninstall(&paths, None));
-}
-
-#[test]
-fn an_image_that_cannot_be_put_back_is_named_as_the_binary_to_run() {
-    let (_dir, paths, aside) = moved_aside();
-    // Gone, so that the rename back fails.
-    fs::remove_file(&aside.to).unwrap();
-
-    let advice = aside.put_back(&paths);
-
-    assert!(
-        advice.starts_with(&rerun_uninstall(&paths, Some(&aside.to))),
-        "{advice}"
-    );
-    assert!(advice.contains("could not be moved back"), "{advice}");
-}
-
-#[test]
-fn an_image_in_the_bin_dir_is_moved_next_to_it_under_a_name_of_its_own() {
-    let (dir, paths) = installed();
-
-    let aside = move_aside(&paths, &service::exe(&paths)).unwrap().unwrap();
-
-    assert_eq!(aside.from, Some(service::exe(&paths)));
-    assert_eq!(aside.to.parent(), Some(dir.path()));
-    let name = aside.to.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(name.starts_with(".reverse-tunnel.") && name.ends_with(".exe"), "{name}");
-    assert!(aside.to.exists() && !service::exe(&paths).exists());
-}
-
-#[test]
-fn an_image_that_is_aside_already_is_the_one_the_removal_deletes_and_is_not_moved() {
-    let (_dir, paths, aside) = moved_aside();
-
-    let again = move_aside(&paths, &aside.to).unwrap().unwrap();
-
-    assert_eq!((again.from, again.to.as_path()), (None, aside.to.as_path()));
-    assert!(aside.to.exists());
-    let advice = Aside {
-        from: None,
-        to: aside.to.clone(),
-    }
-    .put_back(&paths);
-    assert_eq!(advice, rerun_uninstall(&paths, Some(&aside.to)));
-    assert!(aside.to.exists());
-}
-
-#[test]
-fn a_binary_outside_the_directories_the_removal_deletes_stays_where_it_is() {
-    let (dir, paths) = installed();
-    let elsewhere = dir.path().join("elsewhere");
-    fs::create_dir_all(&elsewhere).unwrap();
-    // Named as a moved image, but not in the directory that holds the bin dir.
-    let lookalike = elsewhere.join(".reverse-tunnel.0123.exe");
-    fs::write(&lookalike, "").unwrap();
-    // In the directory that holds the bin dir, but not named as a moved image.
-    let beside = dir.path().join("reverse-tunnel.exe");
-    fs::write(&beside, "").unwrap();
-
-    for exe in [lookalike, beside] {
-        assert!(move_aside(&paths, &exe).unwrap().is_none(), "{exe:?}");
-        assert!(exe.exists());
-    }
-}
-
-#[test]
-fn a_removal_that_left_its_task_and_the_image_says_how_to_run_it_again() {
-    let task = "the task is still registered";
-
-    let with = left_behind(task, Some("run `\"X\" uninstall`".to_string()));
-
-    assert!(with.starts_with(task), "{with}");
-    assert!(with.ends_with("run `\"X\" uninstall`"), "{with}");
-    assert_eq!(left_behind(task, None), task);
-}
-
 #[path = "../tests/support/held.rs"]
 mod held;
 
@@ -297,4 +219,97 @@ fn a_stale_file_that_is_held_fails_the_sweep_of_the_bin_dir() {
     let err = format!("{:#}", clean_bin_dir(&paths).unwrap_err());
 
     assert!(err.contains("frpc-0.0.1"), "{err}");
+}
+
+/// A process that runs the image `path`, a copy of `cmd.exe`, until it drops: Windows will not delete a running image,
+/// and will rename it.
+struct Running(std::process::Child);
+
+fn running(path: &Path) -> Running {
+    let cmd = Path::new(&env::var("SystemRoot").unwrap())
+        .join("System32")
+        .join("cmd.exe");
+    fs::copy(cmd, path).unwrap();
+    // Waits for input, which the pipe gives it when it is killed.
+    let child = std::process::Command::new(path)
+        .args(["/c", "set /p x="])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    Running(child)
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted() {
+    let (dir, paths) = installed();
+    let _running = running(&paths.bin_dir.join("frpc-0.1.exe"));
+    fs::write(paths.bin_dir.join("upgrade-1.exe"), "").unwrap();
+
+    remove_bin_dir(&paths).unwrap();
+
+    assert!(!paths.bin_dir.exists());
+    let images = leftover_images(&paths).unwrap();
+    let [image] = images.as_slice() else {
+        panic!("expected one image: {images:?}")
+    };
+    assert_eq!(image.parent(), Some(dir.path()));
+    let name = image.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with(schtasks::LEFTOVER_PREFIX) && name.ends_with(schtasks::LEFTOVER_SUFFIX),
+        "{name}"
+    );
+}
+
+#[test]
+fn nothing_is_renamed_when_everything_can_be_deleted() {
+    let (_dir, paths) = installed();
+    fs::write(paths.bin_dir.join("frpc-0.1.exe"), "").unwrap();
+
+    remove_bin_dir(&paths).unwrap();
+
+    assert!(!paths.bin_dir.exists());
+    assert!(leftover_images(&paths).unwrap().is_empty());
+}
+
+#[test]
+fn a_bin_dir_that_is_gone_is_removed() {
+    let (_dir, paths) = installed();
+    fs::remove_dir_all(&paths.bin_dir).unwrap();
+
+    remove_bin_dir(&paths).unwrap();
+}
+
+#[test]
+fn a_file_that_can_be_neither_deleted_nor_renamed_fails_the_removal_naming_both() {
+    let (_dir, paths) = installed();
+    let stuck = paths.bin_dir.join("frpc-0.1.exe");
+    let _held = held(&stuck);
+
+    let err = format!("{:#}", remove_bin_dir(&paths).unwrap_err());
+
+    assert!(err.contains("frpc-0.1.exe"), "{err}");
+    assert!(err.contains("moving it to"), "{err}");
+    assert!(stuck.exists());
+    assert!(leftover_images(&paths).unwrap().is_empty());
+}
+
+#[test]
+fn a_directory_that_cannot_be_deleted_fails_the_removal_and_is_not_renamed() {
+    let (_dir, paths) = installed();
+    let sub = paths.bin_dir.join("old");
+    fs::create_dir_all(&sub).unwrap();
+    let _running = running(&sub.join("frpc-0.1.exe"));
+
+    let err = format!("{:#}", remove_bin_dir(&paths).unwrap_err());
+
+    assert!(err.contains("old"), "{err}");
+    assert!(sub.exists());
+    assert!(leftover_images(&paths).unwrap().is_empty());
 }
