@@ -266,44 +266,39 @@ impl Removal {
 #[cfg(windows)]
 struct Removal(PathBuf);
 
+/// What the removal's task says of how it went, or none while it runs. A task that is gone deleted itself, which it
+/// does last, after the directory; one that ended has the code of the step that failed (see `removal_script`).
+#[cfg(windows)]
+fn removal_outcome(state: TaskState, dir: &Path, dir_present: bool) -> Option<WaitOutcome> {
+    let dir = dir.display();
+    let failed = |why: String| Some(WaitOutcome::Failed(why));
+    match state {
+        TaskState::Running => None,
+        TaskState::Gone if dir_present => failed("the removal's task was deleted before it finished".to_string()),
+        TaskState::Gone => Some(WaitOutcome::Ended),
+        TaskState::Ended(1) => failed("the removal's `uninstall --finish` failed".to_string()),
+        TaskState::Ended(2) => failed("the removal's copy of this binary could not be deleted".to_string()),
+        TaskState::Ended(3) => failed(format!(
+            "the removal could not delete {dir}; its log may be gone with it: delete {dir} by hand"
+        )),
+        TaskState::Ended(4) => failed(format!(
+            "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`",
+            schtasks::REMOVAL
+        )),
+        TaskState::Ended(code) => failed(format!("the removal's task ended with {code:#x}")),
+    }
+}
+
 #[cfg(windows)]
 impl Removal {
-    /// Waits, with no cap, until the task has ended or is gone (it deletes itself when the removal has succeeded), and
-    /// judges the removal by the task and by its directory, which a successful removal deletes first. A task that
-    /// cannot be asked about is unknown, not gone: the wait goes on, and says so.
+    /// Waits, with no cap, until the task has ended or is gone (it deletes itself when the removal has succeeded). The
+    /// task is read first: it deletes itself after the directory, so a task that is gone says the directory has been
+    /// deleted by the time it is looked at. A task that cannot be read is an error.
     fn wait(self) -> Result<WaitOutcome> {
-        let mut unreadable = String::new();
-        let dir = self.0.display();
         loop {
-            // The task is read first: it deletes itself after the directory, so a task that is gone says the
-            // directory has been deleted by the time it is looked at.
-            match schtasks::state(schtasks::REMOVAL) {
-                Ok(TaskState::Running) => {}
-                Ok(TaskState::Gone) if !self.0.try_exists()? => return Ok(WaitOutcome::Ended),
-                Ok(TaskState::Gone) => {
-                    return Ok(WaitOutcome::Failed(format!(
-                        "the removal's task is gone, but {dir} is not"
-                    )));
-                }
-                Ok(TaskState::Ended(0)) => {
-                    return Ok(WaitOutcome::Failed(if self.0.try_exists()? {
-                        format!("the removal's task ended with 0, but {dir} is still there")
-                    } else {
-                        format!(
-                            "the removal is done, but its task is still registered: delete it with `schtasks /Delete \
-                             /TN {}`",
-                            schtasks::REMOVAL
-                        )
-                    }));
-                }
-                Ok(TaskState::Ended(code)) => {
-                    return Ok(WaitOutcome::Failed(format!("the removal's task ended with {code}")));
-                }
-                Err(err) if format!("{err:#}") != unreadable => {
-                    unreadable = format!("{err:#}");
-                    eprintln!("could not read the removal's task, and waiting on: {unreadable}");
-                }
-                Err(_) => {}
+            let state = schtasks::state(schtasks::REMOVAL)?;
+            if let Some(outcome) = removal_outcome(state, &self.0, self.0.try_exists()?) {
+                return Ok(outcome);
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
@@ -369,7 +364,7 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let copy = dir.join(exe.file_name().context("this binary has no file name")?);
     fs::copy(exe, &copy).with_context(|| format!("copying {}", copy.display()))?;
     let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL);
-    schtasks::start(schtasks::REMOVAL, &dir.join("task.xml"), &script)?;
+    schtasks::start(schtasks::REMOVAL, &script)?;
     Ok(Removal(dir))
 }
 

@@ -44,11 +44,11 @@ fn every_descriptor_is_one_windows_accepts() {
 }
 
 #[test]
-fn one_account_as_owner_and_group_has_what_either_bit_set_gives_it() {
+fn one_account_as_owner_and_group_has_what_the_owner_bits_give_it() {
     let sid = service().sid();
-    // The owner may read; the group may also write.
+    // The owner may read; the group may also write, but an owner is judged by the owner bits alone, as on Unix.
     assert_eq!(
         Perm::new(0o460).owner(service()).group(service()).sddl(),
-        format!("{ADMINS}(A;OICI;0x1301bf;;;{sid})")
+        format!("{ADMINS}(A;OICI;0x1200a9;;;{sid})")
     );
 }

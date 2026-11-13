@@ -1,5 +1,5 @@
 //! What the platform tests need of Windows: a DACL's effective rights, a job object that ends a session, a local
-//! standard user, and the removal's scheduled task.
+//! standard user.
 
 use std::cell::Cell;
 use std::fs;
@@ -269,13 +269,4 @@ impl Drop for Probe {
     fn drop(&mut self) {
         let _ = Command::new("net").args(["user", PROBE, "/delete"]).output();
     }
-}
-
-/// Deletes the removal's task, which a removal that failed or was cut short leaves.
-pub fn delete_removal_task() {
-    delete_task(reverse_tunnel::schtasks::REMOVAL);
-}
-
-pub fn delete_task(name: &str) {
-    let _ = Command::new("schtasks").args(["/Delete", "/F", "/TN", name]).output();
 }

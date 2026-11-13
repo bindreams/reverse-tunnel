@@ -66,17 +66,17 @@ fn rights(bits: u32) -> Option<&'static str> {
 impl Perm {
     /// The whole descriptor of a Windows directory with this mode: owned by Administrators, with a protected DACL that
     /// the contents inherit. SYSTEM and Administrators have full control; Everyone reads if the mode lets others; the
-    /// owner and the group, accounts here, have what the mode's owner and group bits say.
+    /// owner and the group, accounts here, have what the mode's owner and group bits say (an account that is both has
+    /// the owner's).
     pub fn sddl(&self) -> String {
         let mut sddl = format!("{OWNED_BY_ADMINISTRATORS}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)");
         let others = rights(self.mode & 0o4).map(|rights| (rights, "WD".to_string()));
-        // An account that is both owner and group has what either gives it.
+        // An account that is both owner and group is the owner, whose bits alone say what it has, as on Unix.
         let mut accounts: Vec<(Account, u32)> = Vec::new();
         for (account, bits) in [(self.owner, self.mode >> 6), (self.group, self.mode >> 3)] {
             let Some(account) = account else { continue };
-            match accounts.iter_mut().find(|(known, _)| *known == account) {
-                Some((_, known)) => *known |= bits,
-                None => accounts.push((account, bits)),
+            if !accounts.iter().any(|(known, _)| *known == account) {
+                accounts.push((account, bits));
             }
         }
         let accounts = accounts

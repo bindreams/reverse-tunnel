@@ -77,12 +77,19 @@ fn removal_units(state: &str) -> String {
 /// code or is gone; call it once the removal has started.
 #[cfg(windows)]
 fn wait_until_removed() {
-    wait_until("the removal's task ends", || {
-        matches!(
-            schtasks::state(schtasks::REMOVAL),
-            Ok(TaskState::Ended(_) | TaskState::Gone)
-        )
+    wait_until_task_is_over(schtasks::REMOVAL);
+}
+
+/// Waits until the scheduled task `name` has ended or is gone, and returns which. A task that cannot be read fails
+/// the test.
+#[cfg(windows)]
+fn wait_until_task_is_over(name: &str) -> TaskState {
+    let mut state = TaskState::Running;
+    wait_until(&format!("task {name} is over"), || {
+        state = schtasks::state(name).unwrap();
+        state != TaskState::Running
     });
+    state
 }
 
 /// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit named for the run,
@@ -298,7 +305,7 @@ impl Drop for Machine {
         // What a removal that was cut short, or that failed, leaves.
         #[cfg(windows)]
         {
-            windows::delete_removal_task();
+            let _ = schtasks::delete(schtasks::REMOVAL);
             let _ = fs::remove_dir_all(self.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"));
         }
         #[cfg(target_os = "linux")]
@@ -388,10 +395,7 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     #[cfg(unix)]
     seen.extend(account_names().into_iter().map(|name| format!("account {name}")));
     #[cfg(windows)]
-    if matches!(
-        schtasks::state(schtasks::REMOVAL),
-        Ok(TaskState::Running | TaskState::Ended(_))
-    ) {
+    if schtasks::state(schtasks::REMOVAL).unwrap() != TaskState::Gone {
         seen.insert(format!("task {}", schtasks::REMOVAL));
     }
     for installed in machine.manager.list().unwrap() {
@@ -597,8 +601,9 @@ fn uninstall_survives(mut session: Command, begin: impl FnOnce(&mut Child), end:
     #[cfg(windows)]
     {
         let paths = Paths::system().unwrap();
-        assert!(
-            matches!(schtasks::state(schtasks::REMOVAL), Ok(TaskState::Gone)),
+        assert_eq!(
+            schtasks::state(schtasks::REMOVAL).unwrap(),
+            TaskState::Gone,
             "the removal's task is left"
         );
         assert!(
@@ -888,9 +893,10 @@ fn a_failed_removal_logs_where_uninstall_says() {
     // A removal that failed leaves its task, its directory and its log for the rerun.
     #[cfg(windows)]
     {
-        assert!(
-            matches!(schtasks::state(schtasks::REMOVAL), Ok(TaskState::Ended(_))),
-            "the failed removal's task is gone"
+        assert_eq!(
+            schtasks::state(schtasks::REMOVAL).unwrap(),
+            TaskState::Ended(1),
+            "the failed removal's task is gone, or did not end with `uninstall --finish`'s failure"
         );
         assert!(
             install::removal_log_file(&machine.paths).exists(),
@@ -1217,40 +1223,139 @@ fn status_needs_no_elevation() {
     assert!(status.contains("certificate: SHA-256 "), "{status}");
 }
 
-/// `del` reports a copy that something holds only in its message. The removal's script must still fail, and keep its
-/// task, its directory and its log; the removal itself (here: the one of a machine with nothing installed, which
-/// removes the config directory the test made) has run.
+/// Deletes the scheduled task `name` when it drops, so that a test that panics leaves none registered.
+#[cfg(windows)]
+struct TaskGuard(&'static str);
+
+#[cfg(windows)]
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        let _ = schtasks::delete(self.0);
+    }
+}
+
+/// Runs the removal's own script as a SYSTEM task, on a machine with nothing installed (its `uninstall --finish` has run
+/// if the config directory the test made is gone), with a file made impossible to delete while it runs: `hold` is given
+/// the removal's directory and the copy in it, and names that file. Returns how the task ended, with the directory,
+/// the copy and the log.
+#[cfg(windows)]
+fn run_removal_script_holding(
+    hold: impl FnOnce(&Path, &Path) -> PathBuf,
+) -> (TaskState, tempfile::TempDir, PathBuf, PathBuf) {
+    let machine = Machine::begin();
+    fs::create_dir(&machine.paths.config_dir).unwrap();
+    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let (copy, log) = (dir.path().join("reverse-tunnel.exe"), dir.path().join("uninstall.log"));
+    fs::copy(BIN, &copy).unwrap();
+    let held = hold(dir.path(), &copy);
+    // Held open without delete sharing, as an antivirus scan may.
+    let held = Unremovable::new(&held);
+    let task = "reverse-tunnel-removal-script-test";
+    let _guard = TaskGuard(task);
+    assert_eq!(
+        schtasks::state(task).unwrap(),
+        TaskState::Gone,
+        "a task that was never registered is gone"
+    );
+    schtasks::start(task, &schtasks::removal_script(&copy, &log, dir.path(), task)).unwrap();
+
+    let state = wait_until_task_is_over(task);
+
+    assert!(!machine.paths.config_dir.exists(), "the removal did not run");
+    drop(held);
+    (state, dir, copy, log)
+}
+
+/// `del` reports a copy that something holds only in its message. The removal's script must still fail, with its own
+/// code, and keep its task, its directory and its log.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
 fn a_held_copy_fails_the_removal_and_keeps_its_log() {
-    let machine = Machine::begin();
-    fs::create_dir(&machine.paths.config_dir).unwrap();
-    let scratch = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
-    let (copy, log) = (
-        scratch.path().join("reverse-tunnel.exe"),
-        scratch.path().join("uninstall.log"),
-    );
-    fs::copy(BIN, &copy).unwrap();
-    // Held open without delete sharing, as an antivirus scan may.
-    let held = Unremovable::new(&copy);
-    let task = "reverse-tunnel-held-copy-test";
-    let script = schtasks::removal_script(&copy, &log, scratch.path(), task);
-    schtasks::start(task, &scratch.path().join("task.xml"), &script).unwrap();
+    let (state, _dir, copy, log) = run_removal_script_holding(|_, copy| copy.to_path_buf());
 
-    wait_until("the task has ended", || {
-        matches!(schtasks::state(task), Ok(TaskState::Ended(_) | TaskState::Gone))
-    });
-
-    let state = schtasks::state(task).unwrap();
-    windows::delete_task(task);
     assert_eq!(
         state,
-        TaskState::Ended(1),
-        "the task should end with the script's own failure"
+        TaskState::Ended(2),
+        "the task should end with the copy's failure"
     );
-    assert!(!machine.paths.config_dir.exists(), "the removal did not run");
     assert!(log.exists(), "the log is gone");
     assert!(copy.exists(), "the held copy is gone");
-    drop(held);
+}
+
+/// `rmdir /s /q` reports a file that something holds only in its message. The removal's script must still fail, with
+/// its own code, and keep its directory.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn a_held_file_in_the_removal_directory_fails_the_removal() {
+    let (state, dir, copy, _log) = run_removal_script_holding(|dir, _| {
+        let other = dir.join("other.txt");
+        fs::write(&other, "").unwrap();
+        other
+    });
+
+    assert_eq!(
+        state,
+        TaskState::Ended(3),
+        "the task should end with the directory's failure"
+    );
+    assert!(dir.path().join("other.txt").exists(), "the held file is gone");
+    assert!(!copy.exists(), "the copy should have been deleted before the directory");
+}
+
+// PROBES, removed after one CI run. ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "probe"]
+#[cfg(windows)]
+fn probe_a_registered_task_that_has_not_run() {
+    let _machine = Machine::begin();
+    let task = "reverse-tunnel-probe-task";
+    let _guard = TaskGuard(task);
+    output_of(
+        "schtasks",
+        &[
+            "/Create",
+            "/F",
+            "/TN",
+            task,
+            "/TR",
+            "cmd /c exit 7",
+            "/SC",
+            "ONSTART",
+            "/RU",
+            "SYSTEM",
+        ],
+    );
+    assert_eq!(
+        schtasks::state(task).unwrap(),
+        TaskState::Running,
+        "registered, never run"
+    );
+    output_of("schtasks", &["/Run", "/TN", task]);
+    assert_eq!(wait_until_task_is_over(task), TaskState::Ended(7), "cmd's exit code");
+    schtasks::delete(task).unwrap();
+    assert_eq!(schtasks::state(task).unwrap(), TaskState::Gone, "deleted");
+    schtasks::delete(task).unwrap();
+}
+
+#[test]
+#[ignore = "probe"]
+#[cfg(windows)]
+fn probe_uninstall_from_the_installed_binary() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let out = Command::new(service::exe(&machine.paths))
+        .arg("uninstall")
+        .output()
+        .unwrap();
+    panic!(
+        "PROBE status={} stdout={} stderr={} bin_dir_exists={} log={:?}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        machine.paths.bin_dir.exists(),
+        fs::read_to_string(install::removal_log_file(&machine.paths)),
+    );
 }
