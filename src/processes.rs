@@ -223,3 +223,10 @@ fn wait_for_exit(processes: &[OwnedHandle]) -> io::Result<()> {
 #[cfg(test)]
 #[path = "processes_tests.rs"]
 mod tests;
+
+/// THROWAWAY measurement.
+pub fn measure(account: &str) -> Result<String> {
+    let sid = Sid::parse(&account::ensure(account)?.sid())?;
+    let running = running_as(&sid)?;
+    Ok(waiting_line(account, &running))
+}

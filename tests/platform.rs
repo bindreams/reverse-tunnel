@@ -1653,3 +1653,43 @@ fn install_puts_the_bin_dir_on_the_machine_path_once() {
 
     assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
 }
+
+fn measure_sc(args: &[&str]) {
+    let out = Command::new("sc.exe").args(args).output().unwrap();
+    eprintln!(
+        "MEASURE sc {args:?}: {} {}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout).replace('\n', " | ")
+    );
+}
+
+/// THROWAWAY measurement: the listing and `uninstall --finish` with TermService stopped and disabled.
+#[test]
+#[ignore = "throwaway"]
+#[cfg(windows)]
+fn measure_wts_without_termservice() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    eprintln!("MEASURE before: {}", reverse_tunnel::processes::measure(service::ACCOUNT).unwrap());
+    measure_sc(&["query", "TermService"]);
+    measure_sc(&["config", "TermService", "start=", "disabled"]);
+    let net = Command::new("net.exe").args(["stop", "TermService", "/y"]).output().unwrap();
+    eprintln!("MEASURE net stop: {} {}", net.status, String::from_utf8_lossy(&net.stdout).replace('\n', " | "));
+    measure_sc(&["query", "TermService"]);
+    let listed = reverse_tunnel::processes::measure(service::ACCOUNT);
+    eprintln!("MEASURE after stop: {listed:?}");
+    let mut finish = Command::new(BIN);
+    finish.args(["uninstall", "--finish"]).current_dir(env::temp_dir());
+    let result = finish.output().unwrap();
+    eprintln!(
+        "MEASURE finish: {} out={} err={}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    measure_sc(&["config", "TermService", "start=", "demand"]);
+    measure_sc(&["start", "TermService"]);
+    assert!(listed.unwrap().contains("frpc"), "frpc not listed");
+    assert!(result.status.success());
+}
