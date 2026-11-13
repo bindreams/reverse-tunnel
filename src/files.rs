@@ -4,6 +4,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::fs::DirBuilder;
@@ -215,18 +217,41 @@ pub fn make_missing_dirs(path: &Path, perm: Perm) -> Result<()> {
 }
 
 /// Removes `path`, a directory with its contents, unless it is already gone. A link is removed, not followed.
+///
+/// On Windows a process that keeps `path`, or a file in it, open without delete sharing (an antivirus scan, a program
+/// that watches files) makes the removal wait until it closes it: the removal is tried again, with no limit, and the
+/// first time says on stderr that it waits. Every other failure is an error.
 pub fn remove_entry(path: &Path) -> Result<()> {
-    let removed = match fs::symlink_metadata(path) {
-        Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(err) => Err(err),
-    };
-    match removed {
-        Err(err) if err.kind() != ErrorKind::NotFound => {
-            Err(err).with_context(|| format!("removing {}", path.display()))
+    let mut said = false;
+    loop {
+        let removed = match fs::symlink_metadata(path) {
+            Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
+            Ok(_) => fs::remove_file(path),
+            Err(err) => Err(err),
+        };
+        match removed {
+            Err(err) if is_open_elsewhere(&err) => {
+                if !said {
+                    eprintln!(
+                        "{}: another process has it open; waiting until that process closes it",
+                        path.display()
+                    );
+                    said = true;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) if err.kind() != ErrorKind::NotFound => {
+                return Err(err).with_context(|| format!("removing {}", path.display()));
+            }
+            _ => return Ok(()),
         }
-        _ => Ok(()),
     }
+}
+
+/// Whether `err` is Windows refusing to delete a file that another process has open without delete sharing
+/// (ERROR_SHARING_VIOLATION). It is no other platform's error: 32 is `EPIPE` on Unix.
+fn is_open_elsewhere(err: &std::io::Error) -> bool {
+    cfg!(windows) && err.raw_os_error() == Some(32)
 }
 
 /// Writes `data` to `dest` through a temp file in the same directory, which has `perm` before it gets any data, so

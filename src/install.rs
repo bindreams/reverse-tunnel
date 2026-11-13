@@ -304,11 +304,10 @@ struct Removal {
 }
 
 /// What the removal's task says of how it went, or none while it runs. A task that is gone deleted itself, which it
-/// does last, after the directory; one that ended has the code of the step that failed (see `removal_script`).
+/// does after the directory; one that ended has the code of the step that failed (see `removal_script`).
 #[cfg(windows)]
-fn removal_outcome(state: TaskState, dir: &Path, dir_present: bool, leftovers: &Path) -> Option<WaitOutcome> {
+fn removal_outcome(state: TaskState, dir_present: bool, leftovers: &Path) -> Option<WaitOutcome> {
     let leftovers = schtasks::leftover_pattern(leftovers);
-    let dir = dir.display();
     let failed = |why: String| Some(WaitOutcome::Failed(why));
     match state {
         TaskState::Running => None,
@@ -316,10 +315,6 @@ fn removal_outcome(state: TaskState, dir: &Path, dir_present: bool, leftovers: &
         TaskState::Gone if dir_present => failed("the removal's task was deleted before it finished".to_string()),
         TaskState::Gone => Some(WaitOutcome::Ended),
         TaskState::Ended(1) => failed("the removal's `uninstall --finish` failed".to_string()),
-        TaskState::Ended(2) => failed("the removal's copy of this binary could not be deleted".to_string()),
-        TaskState::Ended(3) => failed(format!(
-            "the removal could not delete {dir}; its log may be gone with it: delete {dir} by hand"
-        )),
         TaskState::Ended(4) => Some(WaitOutcome::LeftBehind(format!(
             "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`, and the \
              files {} by hand",
@@ -338,7 +333,7 @@ impl Removal {
     fn wait(self) -> Result<WaitOutcome> {
         loop {
             let state = schtasks::state(schtasks::REMOVAL)?;
-            if let Some(outcome) = removal_outcome(state, &self.dir, self.dir.try_exists()?, &self.leftovers) {
+            if let Some(outcome) = removal_outcome(state, self.dir.try_exists()?, &self.leftovers) {
                 return Ok(outcome);
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -935,7 +930,8 @@ fn clean_bin_dir(paths: &Paths) -> Result<()> {
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
         let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
         if name.starts_with(upgrade::STAGED) {
-            // A copy that something still holds (just run, or being scanned) is not worth failing `install` over.
+            // An `install` run from a copy deletes its own running image, which Windows refuses; that is not worth
+            // failing `install` over.
             upgrade::discard(&path);
         } else if stale {
             remove_entry(&path)?;

@@ -8,7 +8,7 @@ use super::*;
 const LEFTOVERS: &str = r"C:\";
 
 fn failure_of(state: TaskState, dir_present: bool) -> String {
-    match removal_outcome(state, Path::new(r"C:\removal"), dir_present, Path::new(LEFTOVERS)) {
+    match removal_outcome(state, dir_present, Path::new(LEFTOVERS)) {
         Some(WaitOutcome::Failed(why)) => why,
         _ => panic!("the removal should have failed"),
     }
@@ -16,13 +16,13 @@ fn failure_of(state: TaskState, dir_present: bool) -> String {
 
 #[test]
 fn a_removal_task_that_runs_is_waited_for() {
-    assert!(removal_outcome(TaskState::Running, Path::new(r"C:\removal"), true, Path::new(LEFTOVERS)).is_none());
+    assert!(removal_outcome(TaskState::Running, true, Path::new(LEFTOVERS)).is_none());
 }
 
 #[test]
 fn a_task_that_deleted_itself_after_the_directory_is_a_removal_that_succeeded() {
     assert!(matches!(
-        removal_outcome(TaskState::Gone, Path::new(r"C:\removal"), false, Path::new(LEFTOVERS)),
+        removal_outcome(TaskState::Gone, false, Path::new(LEFTOVERS)),
         Some(WaitOutcome::Ended)
     ));
 }
@@ -36,9 +36,6 @@ fn a_task_deleted_before_the_directory_went_is_a_failed_removal() {
 #[test]
 fn each_failed_step_of_the_removal_has_its_own_message() {
     assert!(failure_of(TaskState::Ended(1), true).contains("`uninstall --finish`"));
-    assert!(failure_of(TaskState::Ended(2), true).contains("copy"));
-    let by_hand = failure_of(TaskState::Ended(3), true);
-    assert!(by_hand.contains(r"delete C:\removal by hand"), "{by_hand}");
     // A task that was ended by something else has no code of the script's.
     assert!(failure_of(TaskState::Ended(0x41306), true).contains("0x41306"));
     assert!(failure_of(TaskState::Ended(-1073741510), true).contains("0xc000013a"));
@@ -47,12 +44,7 @@ fn each_failed_step_of_the_removal_has_its_own_message() {
 #[test]
 fn a_removal_that_left_only_its_task_is_done_and_says_how_to_delete_it() {
     // The task did not reach its last step, which deletes the leftover images.
-    let Some(WaitOutcome::LeftBehind(why)) = removal_outcome(
-        TaskState::Ended(4),
-        Path::new(r"C:\removal"),
-        false,
-        Path::new(LEFTOVERS),
-    ) else {
+    let Some(WaitOutcome::LeftBehind(why)) = removal_outcome(TaskState::Ended(4), false, Path::new(LEFTOVERS)) else {
         panic!("the removal's task is left, but the removal is not a failure");
     };
 
@@ -228,20 +220,18 @@ fn uninstall_runs_with_its_working_directory_elsewhere() {
     refuse_deleted_working_directory(&paths, dir.path()).unwrap();
 }
 
+// Shared with `tests/`, which uses all of it.
+#[allow(dead_code)]
 #[path = "../tests/support/held.rs"]
 mod held;
 
-/// Writes `path` and opens it so that nothing can delete it until the returned file drops.
-fn held(path: &Path) -> fs::File {
-    fs::write(path, "x").unwrap();
-    held::open_held(path)
-}
+use held::running;
 
 #[test]
-fn a_staged_copy_that_is_held_does_not_fail_the_sweep_of_the_bin_dir() {
+fn a_staged_copy_that_runs_does_not_fail_the_sweep_of_the_bin_dir() {
     let (_dir, paths) = installed();
     let staged = paths.bin_dir.join(format!("{}x.exe", upgrade::STAGED));
-    let _held = held(&staged);
+    let _running = running(&staged);
 
     clean_bin_dir(&paths).unwrap();
 
@@ -249,39 +239,14 @@ fn a_staged_copy_that_is_held_does_not_fail_the_sweep_of_the_bin_dir() {
 }
 
 #[test]
-fn a_stale_file_that_is_held_fails_the_sweep_of_the_bin_dir() {
+fn a_stale_file_that_runs_fails_the_sweep_of_the_bin_dir() {
     let (_dir, paths) = installed();
     let stale = paths.bin_dir.join("frpc-0.0.1");
-    let _held = held(&stale);
+    let _running = running(&stale);
 
     let err = format!("{:#}", clean_bin_dir(&paths).unwrap_err());
 
     assert!(err.contains("frpc-0.0.1"), "{err}");
-}
-
-/// A process that runs the image `path`, a copy of `cmd.exe`, until it drops: Windows will not delete a running image,
-/// and will rename it.
-struct Running(std::process::Child);
-
-fn running(path: &Path) -> Running {
-    let cmd = Path::new(&env::var("SystemRoot").unwrap())
-        .join("System32")
-        .join("cmd.exe");
-    fs::copy(cmd, path).unwrap();
-    // Waits for input, which the pipe gives it when it is killed.
-    let child = std::process::Command::new(path)
-        .args(["/c", "set /p x="])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    Running(child)
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
 }
 
 #[test]
@@ -375,13 +340,14 @@ fn a_bin_dir_that_is_gone_is_removed() {
 
 #[test]
 fn a_file_that_can_be_neither_deleted_nor_renamed_fails_the_removal_naming_both() {
-    let (_dir, paths) = installed();
+    let (dir, paths) = installed();
     let stuck = paths.bin_dir.join("frpc-0.1.exe");
-    let _held = held(&stuck);
+    let _running = running(&stuck);
 
+    // Nothing to rename it into.
     let err = format!(
         "{:#}",
-        remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
+        remove_or_rename(&paths.bin_dir, &dir.path().join("missing")).unwrap_err()
     );
 
     assert!(err.contains("frpc-0.1.exe"), "{err}");

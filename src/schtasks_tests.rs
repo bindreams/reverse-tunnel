@@ -14,7 +14,7 @@ fn the_script_reaches_cmd_whole() {
 }
 
 #[test]
-fn each_step_of_the_script_fails_with_its_own_exit_code() {
+fn the_script_deletes_its_copy_its_directory_and_its_task_in_turn_each_when_the_one_before_is_gone() {
     let script = removal_script(
         Path::new(r"C:\d\x.exe"),
         Path::new(r"C:\d\log"),
@@ -23,10 +23,12 @@ fn each_step_of_the_script_fails_with_its_own_exit_code() {
         Path::new(r"C:\p"),
     );
     // A program is judged by its exit code, a builtin (`del`, `rmdir`) by what it left, since it reports a held file
-    // only in its message. The last step, the sweep, has no code: it goes on until it is done.
+    // only in its message. Each deletion is tried again, with a pause, until its target is gone, and the next step
+    // waits for it; the task is deleted once, if it is still registered. Only a failed `--finish` and a failed
+    // deletion of the task have exit codes.
     assert!(
         script.starts_with(
-            r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1) & del /q "C:\d\x.exe" >> "C:\d\log" 2>&1 & (if exist "C:\d\x.exe" exit /b 2) & rmdir /s /q "C:\d" & (if exist "C:\d" exit /b 3) & (schtasks /Delete /F /TN task || exit /b 4) & "#
+            r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1) & for /l %i in (1,0,2) do ((del /q "C:\d\x.exe" >nul 2>&1) & (if not exist "C:\d\x.exe" ((rmdir /s /q "C:\d" >nul 2>&1) & (if not exist "C:\d" ((schtasks /Query /TN task >nul 2>&1 && "#
         ),
         "{script}"
     );
@@ -115,7 +117,7 @@ fn the_script_sweeps_the_leftover_images_after_the_task_itself_and_until_none_is
     assert_eq!(pattern, r"C:\p\.reverse-tunnel.*");
     assert!(
         script.ends_with(&format!(
-            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+            r#"(schtasks /Delete /F /TN task || exit /b 4)) & (del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0))))) & ping -n 2 127.0.0.1 >nul)"#
         )),
         "{script}"
     );

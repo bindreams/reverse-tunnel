@@ -195,9 +195,11 @@ Revoking does not cut the host's current connection; `ctl revoke` prints the com
 shell whose working directory is inside a folder it deletes: change to another directory first. A removal that cannot
 delete a running file (the binary, say) moves it to `%ProgramFiles%\.reverse-tunnel.*` and deletes it once it has
 exited; after a failed removal those files are deleted by the next successful one. A failed removal's message says why
-and names the command to finish it; its log is `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. Another shell or
-program with its working directory in the install folder holds it: the removal then fails and says so, and running
-`uninstall` again once that is closed finishes it.
+and names the command to finish it; its log is `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. A process that
+keeps one of the files `install` or `uninstall` deletes open without letting others delete it (an antivirus scan, a
+program that watches files, a shell whose working directory is in the install folder) makes them wait until it closes
+the file: they print one line that names the file, or the folder that holds it, and go on by themselves when it is
+closed. The removal that `uninstall` starts waits the same way for its own copy of the binary and its directory.
 
 - On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
   unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.

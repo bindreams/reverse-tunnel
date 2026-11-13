@@ -213,24 +213,28 @@ pub fn is_leftover_of(name: &str, original: &str) -> bool {
         .is_some_and(|(_id, kept)| kept.eq_ignore_ascii_case(original))
 }
 
-/// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, the copy's deletion, then the directory
-/// `dir` that holds the copy and the log `log`, and then the task `name` itself. Each step that fails ends `cmd` with
-/// a code of its own, which the task's last result carries (`exit /b` ends `cmd`, and with it the rest): 1 the removal,
-/// 2 the copy, 3 the directory, 4 the task. A program is judged by its exit code, a builtin by what it left, since
-/// `del` and `rmdir` report a file that something holds only in their message.
+/// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, and then, in one loop, the copy's deletion,
+/// the directory `dir` that holds the copy and the log `log`, the task `name` itself, and the leftover files. `--finish`
+/// that fails ends `cmd` with code 1 (`exit /b` ends `cmd`, and with it the rest), and the task carries it as its last
+/// result; a program is judged by its exit code.
 ///
-/// A last step deletes the leftover files, whatever their attributes (`del /f /a`: read-only, hidden and system ones
-/// too), in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`), and checks that none is left, and
-/// pauses and tries again until none is. The check counts files only (`dir /a:-d`): a directory of the pattern is not
-/// deleted by `del`, and must not keep the loop going. The step comes after the task's own deletion: until then
-/// `uninstall`'s waiter is alive and may be running a leftover, and the waiter ends once the task is gone.
-/// `ping` is the pause between two checks, as `timeout` needs a console, which a task has none of.
+/// A builtin is judged by what it left, since `del` and `rmdir` report a file that something holds only in their
+/// message, and what holds it (a scan, a program that watches files) lets go in time. So the loop deletes the copy and
+/// goes no further until it is gone, then the directory and goes no further until it is gone, then the task, and then
+/// the leftover files; it pauses and begins again, with no end, until a pass finds no leftover file. The task is
+/// deleted once: while it is registered (`schtasks /Query`), and a failure to delete it ends `cmd` with code 4. The
+/// leftover files are the ones in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`), deleted
+/// whatever their attributes (`del /f /a`: read-only, hidden and system ones too). The check counts files only
+/// (`dir /a:-d`): a directory of the pattern is not deleted by `del`, and must not keep the loop going. The leftovers
+/// come after the task's own deletion: until then `uninstall`'s waiter is alive and may be running a leftover, and the
+/// waiter ends once the task is gone. `ping` is the pause between two passes, as `timeout` needs a console, which a
+/// task has none of.
 pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
     let pattern = leftover_pattern(leftovers);
     let pattern = pattern.display();
     format!(
-        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & for /l %i in (1,0,2) do ((del /q "{copy}" >nul 2>&1) & (if not exist "{copy}" ((rmdir /s /q "{dir}" >nul 2>&1) & (if not exist "{dir}" ((schtasks /Query /TN {name} >nul 2>&1 && (schtasks /Delete /F /TN {name} || exit /b 4)) & (del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0))))) & ping -n 2 127.0.0.1 >nul)"#
     )
 }
 

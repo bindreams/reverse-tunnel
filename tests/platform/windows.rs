@@ -79,7 +79,9 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
             GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights),
             0,
             "the rights of {} on {}",
-            trustee_sid.text().unwrap(),
+            trustee_sid
+                .text()
+                .unwrap_or_else(|err| format!("a SID that cannot be written ({err})")),
             path.display()
         );
         LocalFree(descriptor);

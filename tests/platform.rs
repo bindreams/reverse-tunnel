@@ -816,12 +816,13 @@ fn uninstall_leaves_nothing() {
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
 }
 
-/// Makes `path` impossible to remove, even by root, until it drops. On Windows a handle without delete sharing does.
+/// Makes `path` impossible to remove, even by root, until it drops. On Windows it is the image of a process that runs
+/// (access denied, which a removal fails on; a handle without delete sharing is waited out instead).
 #[cfg(unix)]
 struct Unremovable<'a>(&'a Path);
 
 #[cfg(windows)]
-struct Unremovable<'a>(&'a Path, #[allow(dead_code)] fs::File);
+struct Unremovable<'a>(&'a Path, #[allow(dead_code)] held::Running);
 
 impl<'a> Unremovable<'a> {
     #[cfg(unix)]
@@ -831,9 +832,10 @@ impl<'a> Unremovable<'a> {
         held
     }
 
+    /// Replaces the file at `path` with an image that runs.
     #[cfg(windows)]
     fn new(path: &'a Path) -> Self {
-        Unremovable(path, held::open_held(path))
+        Unremovable(path, held::running(path))
     }
 
     #[cfg(unix)]
@@ -1308,80 +1310,45 @@ impl Drop for TaskGuard {
     }
 }
 
-/// Runs the removal's own script as a SYSTEM task, on a machine with nothing installed (its `uninstall --finish` has
-/// run if the config directory the test made is gone), with a file made impossible to delete while it runs: `hold` is
-/// given the removal's directory and the copy in it, and names that file. Returns how the task ended, with the
-/// directory, the copy and the log.
+/// A delete of a file that another process holds open without delete sharing waits until that process lets go, and says
+/// so once. The delete runs in a child, which is this test run again with the path in `CHILD`: its stderr is what shows
+/// that the delete was refused, so the handle is closed only after that.
+#[test]
+#[ignore = "run by CI's platform job"]
 #[cfg(windows)]
-fn run_removal_script_holding(
-    hold: impl FnOnce(&Path, &Path) -> PathBuf,
-) -> (TaskState, tempfile::TempDir, PathBuf, PathBuf) {
-    let machine = Machine::begin();
-    fs::create_dir(&machine.paths.config_dir).unwrap();
-    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
-    let (copy, log) = (dir.path().join("reverse-tunnel.exe"), dir.path().join("uninstall.log"));
-    fs::copy(BIN, &copy).unwrap();
-    let held = hold(dir.path(), &copy);
-    // Held open without delete sharing, as an antivirus scan may.
-    let held = Unremovable::new(&held);
-    let task = "reverse-tunnel-removal-script-test";
-    let _guard = TaskGuard(task);
-    assert_eq!(
-        schtasks::state(task).unwrap(),
-        TaskState::Gone,
-        "a task that was never registered is gone"
-    );
-    // Nothing of this test is in the folder the removal's last step sweeps.
-    let leftovers = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
-    schtasks::start(
-        task,
-        &schtasks::removal_script(&copy, &log, dir.path(), task, leftovers.path()),
-    )
-    .unwrap();
+fn a_delete_waits_for_the_process_that_holds_the_file_open() {
+    const CHILD: &str = "RT_DELETE_THIS";
+    if let Some(path) = env::var_os(CHILD) {
+        reverse_tunnel::files::remove_entry(Path::new(&path)).unwrap();
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held.txt");
+    fs::write(&path, "").unwrap();
+    let held = held::open_held(&path);
+    let mut child = Command::new(env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "--nocapture"])
+        .arg("a_delete_waits_for_the_process_that_holds_the_file_open")
+        .env(CHILD, &path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let named = path.display().to_string();
+    let refused = BufReader::new(child.stderr.take().unwrap())
+        .lines()
+        .map_while(Result::ok)
+        .any(|line| line.contains(&named) && line.contains("waiting until"));
+    assert!(refused, "the delete did not say that it waits");
+    assert!(path.exists(), "the delete took the file while it was held open");
 
-    let state = wait_until_task_is_over(task);
-
-    assert!(!machine.paths.config_dir.exists(), "the removal did not run");
     drop(held);
-    (state, dir, copy, log)
-}
 
-/// `del` reports a copy that something holds only in its message. The removal's script must still fail, with its own
-/// code, and keep its task, its directory and its log.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-#[cfg(windows)]
-fn a_held_copy_fails_the_removal_and_keeps_its_log() {
-    let (state, _dir, copy, log) = run_removal_script_holding(|_, copy| copy.to_path_buf());
-
-    assert_eq!(
-        state,
-        TaskState::Ended(2),
-        "the task should end with the copy's failure"
+    assert!(
+        child.wait().unwrap().success(),
+        "the delete failed after the file was let go"
     );
-    assert!(log.exists(), "the log is gone");
-    assert!(copy.exists(), "the held copy is gone");
-}
-
-/// `rmdir /s /q` reports a file that something holds only in its message. The removal's script must still fail, with
-/// its own code, and keep its directory.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-#[cfg(windows)]
-fn a_held_file_in_the_removal_directory_fails_the_removal() {
-    let (state, dir, copy, _log) = run_removal_script_holding(|dir, _| {
-        let other = dir.join("other.txt");
-        fs::write(&other, "").unwrap();
-        other
-    });
-
-    assert_eq!(
-        state,
-        TaskState::Ended(3),
-        "the task should end with the directory's failure"
-    );
-    assert!(dir.path().join("other.txt").exists(), "the held file is gone");
-    assert!(!copy.exists(), "the copy should have been deleted before the directory");
+    assert!(!path.exists(), "the file is still there");
 }
 
 /// The removal's task is registered as SYSTEM: `whoami` in it says so.
@@ -1545,12 +1512,12 @@ fn a_later_removal_deletes_the_leftover_image_of_an_earlier_one() {
 fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    // A file left in the removal's directory by an earlier failed removal that nothing can delete: the hand-off clears
-    // the directory first, and fails.
+    // A directory left in the removal's directory by an earlier failed removal that nothing can delete, and which is
+    // not renamed: the hand-off clears the directory first, and fails.
     let removal_dir = machine.paths.bin_dir.with_file_name("reverse-tunnel-uninstall");
-    fs::create_dir(&removal_dir).unwrap();
-    let stuck = removal_dir.join("uninstall.log");
-    fs::write(&stuck, "").unwrap();
+    let stuck = removal_dir.join("stuck");
+    fs::create_dir_all(&stuck).unwrap();
+    let stuck = stuck.join("uninstall.log");
     let _held = Unremovable::new(&stuck);
 
     let failed = Command::new(service::exe(&machine.paths))
@@ -1625,7 +1592,7 @@ fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
         .join(schtasks::leftover_name("hidden", OsStr::new("frpc-0.1.exe")));
     fs::write(&hidden, "").unwrap();
     output_of("attrib", &["+h", "+s", "+r", hidden.to_str().unwrap()]);
-    // Held open without delete sharing: `del` fails until the test lets go.
+    // A running image: `del` fails until the test lets go.
     let held = Unremovable::new(&image);
     let task = "reverse-tunnel-leftover-image-test";
     let _guard = TaskGuard(task);

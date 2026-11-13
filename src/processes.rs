@@ -45,36 +45,35 @@ pub fn wait_until_none_runs_as_the_service() -> Result<()> {
     wait_until_none_runs_as(&sid, ACCOUNT)
 }
 
-/// Waits, with no cap, until no process runs as `sid`, the account named `account` in what is printed: the system
-/// lists the processes with their users, and each one of the account is waited for, until a listing finds none. Each
-/// round that waits says for which. Only the processes of the account are opened: one that has ended since the listing
+/// Waits, with no cap, until no process runs as `sid`, the account named `name` in what is printed: the system lists
+/// the processes with their users, and each one of the account is waited for, until a listing finds none. Each round
+/// that waits says for which. Only the processes of the account are opened: one that has ended since the listing
 /// is gone, one whose id another process took is not ours, and one that cannot be opened or read for any other reason
 /// is not ours if a new listing no longer has it, and fails the wait if it does.
-fn wait_until_none_runs_as(sid: &Sid, account: &str) -> Result<()> {
+fn wait_until_none_runs_as(sid: &Sid, name: &str) -> Result<()> {
     loop {
-        let running = running_as(sid).with_context(|| format!("listing the processes of {account}"))?;
+        let running = running_as(sid).with_context(|| format!("listing the processes of {name}"))?;
         if running.is_empty() {
             return Ok(());
         }
-        let (waited_on, handles): (Vec<Listed>, Vec<OwnedHandle>) =
-            open_all(&running, sid, account)?.into_iter().unzip();
+        let (waited_on, handles): (Vec<Listed>, Vec<OwnedHandle>) = open_all(&running, sid, name)?.into_iter().unzip();
         if handles.is_empty() {
             continue;
         }
-        println!("{}", waiting_line(account, &waited_on));
-        wait_for_exit(&handles).context("waiting for the service's processes to end")?;
+        println!("{}", waiting_line(name, &waited_on));
+        wait_for_exit(&handles).with_context(|| format!("waiting for the processes of {name} to end"))?;
     }
 }
 
-/// Each of `running` that is `sid`'s (the account `account`), opened to wait for it.
-fn open_all(running: &[Listed], sid: &Sid, account: &str) -> Result<Vec<(Listed, OwnedHandle)>> {
+/// Each of `running` that is `sid`'s (the account `name`), opened to wait for it.
+fn open_all(running: &[Listed], sid: &Sid, name: &str) -> Result<Vec<(Listed, OwnedHandle)>> {
     let mut opened = Vec::new();
     for process in running {
         match open(process, sid) {
             Ok(handle) => opened.extend(handle.map(|handle| (process.clone(), handle))),
             Err(failure) => {
                 let listing = running_as(sid).context("listing the processes again after one could not be opened")?;
-                println!("{}", skip_if_unlisted(failure, process, &listing, account)?);
+                println!("{}", skip_if_unlisted(failure, process, &listing, name)?);
             }
         }
     }
@@ -83,27 +82,27 @@ fn open_all(running: &[Listed], sid: &Sid, account: &str) -> Result<Vec<(Listed,
 
 /// Whether to go on without `process`, which could not be opened or read (`failure`): its id may be a stranger's that
 /// took it since the first listing, so it is skipped if the `listing` made after the failure no longer has it under
-/// `account`, and the failure stands if it does. A skip is returned as the line that says it.
-fn skip_if_unlisted(failure: anyhow::Error, process: &Listed, listing: &[Listed], account: &str) -> Result<String> {
+/// `name`, and the failure stands if it does. A skip is returned as the line that says it.
+fn skip_if_unlisted(failure: anyhow::Error, process: &Listed, listing: &[Listed], name: &str) -> Result<String> {
     if listing.iter().any(|listed| listed.pid == process.pid) {
         return Err(failure);
     }
     Ok(format!(
-        "not waiting for process {} ({}), no longer listed under {account} (it ended, \
+        "not waiting for process {} ({}), no longer listed under {name} (it ended, \
          or its id is another process's now): {failure:#}",
         process.pid, process.image
     ))
 }
 
-/// What is said before waiting for `processes` of `account`.
-fn waiting_line(account: &str, processes: &[Listed]) -> String {
+/// What is said before waiting for `processes` of the account `name`.
+fn waiting_line(name: &str, processes: &[Listed]) -> String {
     let each: Vec<String> = processes
         .iter()
         .map(|process| format!("{} {}", process.pid, process.image))
         .collect();
     let noun = if processes.len() == 1 { "process" } else { "processes" };
     format!(
-        "waiting for {} {noun} of {account} to end: {}",
+        "waiting for {} {noun} of {name} to end: {}",
         processes.len(),
         each.join(", ")
     )
@@ -180,11 +179,14 @@ impl Buffer {
     /// class of its level, except for a level whose layout is not known: that buffer is leaked, because freeing it as
     /// a layout it does not have risks the heap.
     fn new(first: *mut u16, count: u32, level: u32) -> io::Result<Buffer> {
+        let wrong_level = || io::Error::other(format!("listing the processes gave level {level}, not level {LEVEL}"));
         match class_of(level).map(|class| Buffer { first, count, class }) {
             Some(buffer) if level == LEVEL => Ok(buffer),
-            _ => Err(io::Error::other(format!(
-                "listing the processes gave level {level}, not level {LEVEL}"
-            ))),
+            Some(wrong) => {
+                drop(wrong);
+                Err(wrong_level())
+            }
+            None => Err(wrong_level()),
         }
     }
 
