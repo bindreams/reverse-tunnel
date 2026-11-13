@@ -14,7 +14,7 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, SECURITY_ATTRIBUTES,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
 
@@ -133,9 +133,18 @@ pub fn owner_of(path: &Path) -> io::Result<String> {
         return Err(os_error(code));
     }
     let _descriptor = Local(descriptor);
-    let mut text = null_mut();
     // SAFETY: `owner` points into the descriptor, which is live.
-    if unsafe { ConvertSidToStringSidW(owner, &mut text) } == 0 {
+    unsafe { string_of_sid(owner) }
+}
+
+/// The text of the SID that `sid` points to, as `S-1-5-...`.
+///
+/// # Safety
+/// `sid` points to a valid SID.
+pub(crate) unsafe fn string_of_sid(sid: PSID) -> io::Result<String> {
+    let mut text = null_mut();
+    // SAFETY: the caller's promise.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let _text = Local(text.cast());

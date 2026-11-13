@@ -9,6 +9,8 @@ pub mod join;
 pub mod logfile;
 pub mod ops;
 pub mod paths;
+#[cfg(windows)]
+pub mod processes;
 pub mod report;
 #[cfg(windows)]
 pub mod schtasks;

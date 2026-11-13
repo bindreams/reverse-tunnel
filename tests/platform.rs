@@ -1611,3 +1611,30 @@ fn install_puts_the_bin_dir_on_the_machine_path_once() {
 
     assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
 }
+
+/// Throwaway measurement: the service's processes run with the service account's SID as their token user.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn measure_token_user() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let sid = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
+    let ours = reverse_tunnel::processes::pids_running_as(&sid);
+    eprintln!("MEASURE sid {sid} runs: {ours:?}");
+    let host = machine.status().pid;
+    eprintln!("MEASURE service pid {host:?}");
+    let mut missing = Vec::new();
+    for p in processes() {
+        if p.args == "reverse-tunnel.exe" || p.args.starts_with("frpc-") {
+            eprintln!("MEASURE {} pid {} owner {} in-set {}", p.args, p.pid, p.owner, ours.contains(&p.pid));
+            if p.owner == service::ACCOUNT && !ours.contains(&p.pid) {
+                missing.push(p.pid);
+            }
+        }
+    }
+    assert!(missing.is_empty(), "processes of the service account that the SID check misses: {missing:?}");
+    assert!(host.is_some_and(|pid| ours.contains(&pid)), "the service's host is not found by the SID check");
+    assert!(!ours.is_empty());
+}
