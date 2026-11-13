@@ -1414,18 +1414,32 @@ fn assert_uninstalled_by_the_installed_binary(machine: &Machine, command: Comman
 /// directories and the `Path` entry are gone, whether or not a leftover image still is.
 #[cfg(windows)]
 fn assert_uninstalled(machine: &Machine, mut command: Command) {
-    let ran = command.output().unwrap();
+    let said = output_of_success(&mut command);
 
+    assert!(
+        said.contains("Removed."),
+        "uninstall did not say it removed the host: {said}"
+    );
+    assert_nothing_left(machine, &said);
+}
+
+/// Runs `command`, which must succeed; its stdout and stderr.
+#[cfg(windows)]
+fn output_of_success(command: &mut Command) -> String {
+    let ran = command.output().unwrap();
     let said = format!(
         "{}{}",
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
-    assert!(ran.status.success(), "uninstall exited with {}: {said}", ran.status);
-    assert!(
-        said.contains("Removed."),
-        "uninstall did not say it removed the host: {said}"
-    );
+    assert!(ran.status.success(), "{command:?} exited with {}: {said}", ran.status);
+    said
+}
+
+/// The service, the removal's task, the directories and the `Path` entry are gone, whether or not a leftover image
+/// still is. `said` is what the removal printed.
+#[cfg(windows)]
+fn assert_nothing_left(machine: &Machine, said: &str) {
     let removed = matches!(
         machine.manager.status(&machine.id),
         Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
@@ -1460,25 +1474,26 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
     assert_uninstalled_by_the_installed_binary(&machine, uninstall);
 }
 
-/// `uninstall` from outside the bin dir, while frpc runs: goetia's `uninstall` returns while the service's host and
-/// frpc are still ending, and the removal waits for them before it deletes their images, so it renames nothing: no
-/// leftover image is there the moment `uninstall` returns, with no wait for one to be deleted.
+/// `uninstall --finish` while the service and frpc run: goetia's `uninstall` returns while the host and frpc are still
+/// ending, and `--finish` waits for them before it deletes their images, so it renames nothing. Run directly, as the
+/// removal's task runs it (elevated, from outside the bin dir), so that no sweep deletes a renamed image unseen.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
-fn uninstall_run_from_outside_the_bin_dir_while_frpc_runs_leaves_no_leftover_image() {
+fn uninstall_finish_while_the_service_and_frpc_run_renames_no_image() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    let mut uninstall = Command::new(BIN);
-    uninstall.arg("uninstall").current_dir(env::temp_dir());
+    let mut finish = Command::new(BIN);
+    finish.args(["uninstall", "--finish"]).current_dir(env::temp_dir());
 
-    assert_uninstalled(&machine, uninstall);
+    let said = output_of_success(&mut finish);
 
-    assert_eq!(
-        install::leftover_images(&machine.paths).unwrap(),
-        Vec::<PathBuf>::new(),
-        "the removal renamed an image it should have waited for"
+    assert_nothing_left(&machine, &said);
+    // `remove_or_rename` says this when it renames.
+    assert!(
+        !said.contains("moved it to"),
+        "the removal renamed an image it should have waited for: {said}"
     );
 }
 
@@ -1638,4 +1653,40 @@ fn install_puts_the_bin_dir_on_the_machine_path_once() {
     machine.install(&join_code("tunnel.example.test"));
 
     assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
+}
+
+#[test]
+#[ignore = "throwaway"]
+#[cfg(windows)]
+fn measure_wts() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    eprintln!("MEASURE {}", reverse_tunnel::processes::measure("reverse-tunnel"));
+    let tl = Command::new("tasklist")
+        .args(["/V", "/FO", "CSV", "/NH"])
+        .output()
+        .unwrap();
+    for line in String::from_utf8_lossy(&tl.stdout).lines() {
+        if line.contains("reverse-tunnel") || line.contains("frpc") || line.contains("REVERSE-TUNNEL") {
+            eprintln!("MEASURE tasklist {line}");
+        }
+    }
+    let child = Command::new("cmd").args(["/c", "exit"]).spawn().unwrap();
+    let pid = child.id();
+    let mut child = child;
+    child.wait().unwrap();
+    eprintln!(
+        "MEASURE open of the exited child, handle still held: {}",
+        reverse_tunnel::processes::measure_open(pid)
+    );
+    drop(child);
+    eprintln!(
+        "MEASURE open of the exited child, handle dropped: {}",
+        reverse_tunnel::processes::measure_open(pid)
+    );
+    let mut finish = Command::new(BIN);
+    finish.args(["uninstall", "--finish"]).current_dir(env::temp_dir());
+    let said = output_of_success(&mut finish);
+    eprintln!("MEASURE finish said: {said}");
 }
