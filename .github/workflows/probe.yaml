@@ -22,34 +22,36 @@ jobs:
           cargo test --locked --test platform --no-run --message-format=json \
               | jq -r 'select(.target.name == "platform" and .executable != null) | .executable' \
               | tr -d '\r' > "$RUNNER_TEMP/platform-tests"
-      - name: Self-test the probe (a held process handle, a held file)
+      - name: Build the probe
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path C:\probe-out, C:\selftest -Force | Out-Null
-          $probe = (Resolve-Path tests\probe\flake2.ps1).Path
+          New-Item -ItemType Directory -Path C:\probe-bin, C:\probe-out, C:\selftest -Force | Out-Null
+          & "$env:windir\Microsoft.NET\Framework644.0.30319\csc.exe" /nologo /platform:x64 /out:C:\probe-bin\probe.exe tests\probe\probe.cs
+          if ($LASTEXITCODE -ne 0) { throw 'csc failed' }
+      - name: Self-test the probe (an exited process whose handle is held, a held file, a live image)
+        shell: pwsh
+        run: |
+          Get-MpComputerStatus | Format-List AntivirusEnabled, RealTimeProtectionEnabled, IoavProtectionEnabled, OnAccessProtectionEnabled, BehaviorMonitorEnabled
           # 1. an exited child whose process handle this script keeps open
-          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim1.exe
-          $p = Start-Process C:\selftest\victim1.exe -PassThru -Wait -WindowStyle Hidden
+          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftestictim1.exe
+          $p = Start-Process C:\selftestictim1.exe -PassThru -Wait -WindowStyle Hidden
           $null = $p.Handle
-          New-Item -ItemType File -Path C:\probe-out\rst1.fail -Force | Out-Null
-          $job = Start-Job { param($probe) & powershell -NoProfile -ExecutionPolicy Bypass -File $probe -Copy C:\selftest\victim1.exe -Out C:\probe-out -Tag st1 } -ArgumentList $probe
-          Start-Sleep -Seconds 25
-          Write-Host "--- the held process handle was reported while it was held:"
-          Get-Content C:\probe-out\rst1.log
+          & C:\probe-bin\probe.exe C:\selftestictim1.exe C:\probe-out st1
+          Write-Host "--- exited process, handle held:"; Get-Content C:\probe-outst1.log
           $p.Dispose()
-          $job | Wait-Job | Out-Null
-          Write-Host "--- after the handle was closed:"
-          Get-Content C:\probe-out\rst1.log
-          # 2. a file held open without delete sharing
-          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim2.exe
-          $fs = [IO.File]::Open('C:\selftest\victim2.exe', 'Open', 'Read', 'Read')
-          New-Item -ItemType File -Path C:\probe-out\rst2.fail -Force | Out-Null
-          $job = Start-Job { param($probe) & powershell -NoProfile -ExecutionPolicy Bypass -File $probe -Copy C:\selftest\victim2.exe -Out C:\probe-out -Tag st2 } -ArgumentList $probe
-          Start-Sleep -Seconds 25
-          Get-Content C:\probe-out\rst2.log
-          $fs.Dispose()
-          $job | Wait-Job | Out-Null
-          Write-Host "--- done"
+          # 2. a file held open without delete sharing, released by a timer
+          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftestictim2.exe
+          $fs = [IO.File]::Open('C:\selftestictim2.exe', 'Open', 'Read', 'Read')
+          $timer = [Timers.Timer]::new(1500); $timer.AutoReset = $false
+          Register-ObjectEvent $timer Elapsed -Action { $fs.Dispose() } | Out-Null
+          $timer.Start()
+          & C:\probe-bin\probe.exe C:\selftestictim2.exe C:\probe-out st2
+          Write-Host "--- file held:"; Get-Content C:\probe-outst2.log
+          # 3. a live process with the image
+          Copy-Item "$env:SystemRoot\System32\ping.exe" C:\selftestictim3.exe
+          $live = Start-Process C:\selftestictim3.exe -ArgumentList '-n 4 127.0.0.1' -PassThru -WindowStyle Hidden
+          & C:\probe-bin\probe.exe C:\selftestictim3.exe C:\probe-out st3
+          Write-Host "--- live image:"; Get-Content C:\probe-outst3.log
           Remove-Item C:\probe-out\* -Force
       - name: Measure
         timeout-minutes: 45
@@ -62,8 +64,8 @@ jobs:
         if: always()
         run: |
           cd /c/probe-out || exit 0
-          echo "failing rounds: $(ls *.fail 2>/dev/null | wc -l)"
-          for f in *.fail; do echo "=== ${f%.fail}"; cat "${f%.fail}.log"; done 2>/dev/null || true
+          echo "failing rounds: $(ls r*.log 2>/dev/null | wc -l)"
+          for f in r*.log; do echo "=== $f"; cat "$f"; echo "--- uninstall.log:"; cat "${f%.log}.uninstall.log"; done 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

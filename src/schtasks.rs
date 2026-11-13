@@ -232,14 +232,13 @@ pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers
     let tail = format!(
         r#"(if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
     );
-    if let Some(probe) = std::env::var_os("RT_FLAKE2_PROBE") {
-        // THROWAWAY MEASUREMENT: a pre-warmed probe watches the copy's deletion (see tests/probe/flake2.ps1).
-        let probe = Path::new(&probe).display().to_string();
+    if std::env::var_os("RT_FLAKE2_PROBE").is_some() {
+        // THROWAWAY MEASUREMENT: where `del` leaves the copy, record who holds it (see tests/probe/probe.cs).
         let out = r"C:\probe-out";
         let round = std::env::var("RT_FLAKE2_ROUND").unwrap_or_else(|_| "0".to_string());
         let g = format!("{out}\\r{round}");
         return format!(
-            r#"(start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "{probe}" -Copy "{copy}" -Out "{out}" -Tag {round} > "{g}.ps.log" 2>&1) & (cmd /s /c "for /l %i in (1,0,2) do (if exist "{g}.ready" exit)") & ("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" (copy /y "{log}" "{g}.uninstall.log" >nul & type nul > "{g}.fail" & cmd /s /c "for /l %i in (1,0,2) do (if not exist "{copy}" exit)") else (type nul > "{g}.ok")) & {tail}"#
+            r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" (copy /y "{log}" "{g}.uninstall.log" >nul & C:\probe-bin\probe.exe "{copy}" "{out}" {round} >> "{g}.probe.out" 2>&1)) & {tail}"#
         );
     }
     format!(

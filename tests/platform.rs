@@ -1680,7 +1680,7 @@ fn measure_flake2() {
             String::from_utf8_lossy(&ran.stdout),
             String::from_utf8_lossy(&ran.stderr)
         );
-        let held = Path::new(&format!(r"C:\probe-out\r{tag}.fail")).exists();
+        let held = Path::new(&format!(r"C:\probe-out\r{tag}.log")).exists();
         eprintln!(
             "ROUND {tag}: uninstall exit {} after {} ms; copy still there after del: {held}",
             ran.status,

@@ -1,17 +1,10 @@
-# THROWAWAY MEASUREMENT (flake 2): who holds the removal's copy of the binary when `del` fails.
-# Started before `uninstall --finish`; signals <Out>\r<Tag>.ready when warm; then waits for .ok (copy deleted: exits) or
-# .fail (copy still there after `del`): snapshots the holders at once and again until the copy can be deleted.
-param([string]$Copy, [string]$Out, [string]$Tag)
-$ErrorActionPreference = 'Continue'
-$g = Join-Path $Out "r$Tag"
-$log = "$g.log"
-
-Add-Type -TypeDefinition @'
+// THROWAWAY MEASUREMENT (flake 2). Built with csc /platform:x64.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Diagnostics;
+using System.IO;
 
 public static class Probe {
     [DllImport("ntdll.dll")] static extern int NtQuerySystemInformation(int cls, IntPtr buf, int len, out int ret);
@@ -78,7 +71,24 @@ public static class Probe {
         } finally { RmEndSession(h); }
     }
 
-    class Target { public uint Pid; public string Image; public bool Alive; public List<string> Holders = new List<string>(); }
+    class Target { public uint Pid; public string Image; public bool Alive; public string Times; public List<string> Holders = new List<string>(); }
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int cls, IntPtr buf, int len, out int ret);
+    [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long c, out long e, out long k, out long u);
+    // The NT path of the image (works for an exited process, where QueryFullProcessImageName does not).
+    static string NtImageOf(IntPtr h) {
+        IntPtr b = Marshal.AllocHGlobal(2048); int r;
+        try {
+            if (NtQueryInformationProcess(h, 27, b, 2048, out r) != 0) return null;
+            int len = Marshal.ReadInt16(b); IntPtr p = Marshal.ReadIntPtr(b, 8);
+            return len == 0 ? null : Marshal.PtrToStringUni(p, len / 2);
+        } finally { Marshal.FreeHGlobal(b); }
+    }
+    static string Times(IntPtr h) {
+        long c, e, k, u;
+        if (!GetProcessTimes(h, out c, out e, out k, out u)) return "?";
+        Func<long, string> f = x => x == 0 ? "-" : DateTime.FromFileTimeUtc(x).ToString("HH:mm:ss.fff");
+        return "created " + f(c) + " exited " + f(e);
+    }
 
     // Every process or thread handle in the system that refers to a process whose image is `copy`, live or exited.
     public static string Handles(string copy) {
@@ -131,7 +141,8 @@ public static class Probe {
                     t = new Target { Pid = tpid };
                     var ph = isProc ? dup : OpenProcess(0x1000, false, tpid);
                     if (ph != IntPtr.Zero) {
-                        t.Image = ImageOf(ph);
+                        t.Image = ImageOf(ph) ?? NtImageOf(ph);
+                        t.Times = Times(ph);
                         uint code; t.Alive = GetExitCodeProcess(ph, out code) && code == 259;
                         if (!isProc) CloseHandle(ph);
                     }
@@ -150,14 +161,12 @@ public static class Probe {
         sb.AppendLine("  table: " + n + " handles; process-type " + procHandles + ", thread-type " + thrHandles + "; owners unopenable " + unreachable);
         int deadOther = 0;
         foreach (var t in targets.Values) {
-            bool mine = t.Image != null && string.Equals(t.Image, copy, StringComparison.OrdinalIgnoreCase);
-            if (!mine) { if (!t.Alive) deadOther++; continue; }
-            sb.AppendLine("  COPY PROCESS pid " + t.Pid + " alive=" + t.Alive + " referenced by:");
+            bool mine = t.Image != null && (string.Equals(t.Image, copy, StringComparison.OrdinalIgnoreCase) || t.Image.EndsWith(copy.Substring(2), StringComparison.OrdinalIgnoreCase));
+            if (!mine) { if (!t.Alive) { deadOther++; sb.AppendLine("  exited process pid " + t.Pid + " " + t.Image + " " + t.Times + " held by " + string.Join("; ", t.Holders.ToArray())); } continue; }
+            sb.AppendLine("  COPY PROCESS pid " + t.Pid + " alive=" + t.Alive + " " + t.Times + " referenced by:");
             foreach (var h in t.Holders) sb.AppendLine("    " + h);
         }
-        sb.AppendLine("  other exited processes still referenced: " + deadOther);
-        foreach (var t in targets.Values)
-            if (!t.Alive && t.Image == null) sb.AppendLine("  exited process of unknown image pid " + t.Pid + " held by " + string.Join("; ", t.Holders.ToArray()));
+        sb.AppendLine("  exited processes referenced, not the copy: " + deadOther);
         return sb.ToString();
     }
 
@@ -172,65 +181,38 @@ public static class Probe {
         }
         return sb.Length == 0 ? "none" : sb.ToString();
     }
-}
-'@
-
-function Say([string]$text) {
-    $stamp = [DateTime]::UtcNow.ToString('HH:mm:ss.fff')
-    Add-Content -LiteralPath $log -Value "$stamp $text"
-}
-
-function Snap([string]$label) {
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    $rm = [Probe]::RestartManager($Copy)
-    $live = [Probe]::Live($Copy)
-    $h = [Probe]::Handles($Copy)
-    Say "$label (took $($sw.ElapsedMilliseconds) ms)`n  restart manager: $rm`n  live processes with this image: $live`n$h"
-    return "$rm|$live|$($h -replace 'took.*','' -replace 'table:.*','')"
-}
-
-[Probe]::Warm()
-$null = [Probe]::RestartManager($Copy)
-$null = [Probe]::Handles($Copy)
-$null = [Probe]::Live($Copy)
-Say "warm; copy exists: $(Test-Path -LiteralPath $Copy)"
-New-Item -ItemType File -Path "$g.ready" -Force | Out-Null
-
-while ($true) {
-    if (Test-Path -LiteralPath "$g.ok") { exit 0 }
-    if (Test-Path -LiteralPath "$g.fail") { break }
-    Start-Sleep -Milliseconds 5
-}
-
-$t0 = (Get-Item -LiteralPath "$g.fail").CreationTimeUtc
-$sinceFail = ([DateTime]::UtcNow - $t0).TotalMilliseconds
-Say "COPY STILL THERE AFTER del; probe saw the fail flag $([int]$sinceFail) ms after it was written"
-Say ("processes: " + ((Get-Process | ForEach-Object { "$($_.Id):$($_.ProcessName)" }) -join ' '))
-$last = $null
-$i = 0
-while ($true) {
-    $sig = Snap "snapshot $i, +$([int]([DateTime]::UtcNow - $t0).TotalMilliseconds) ms since the fail flag"
-    if ($sig -eq $last) { Say "  (same holders as the previous snapshot)" }
-    $last = $sig
-    try {
-        [IO.File]::Delete($Copy)
-        Say "DELETE SUCCEEDED +$([int]([DateTime]::UtcNow - $t0).TotalMilliseconds) ms since the fail flag, after $i failed snapshot(s)"
-        break
-    } catch {
-        Say "  delete failed: $($_.Exception.GetType().Name) HResult=0x$($_.Exception.HResult.ToString('x')) $($_.Exception.Message)"
+    static string Log;
+    static void Say(string s) { File.AppendAllText(Log, DateTime.UtcNow.ToString("HH:mm:ss.fff") + " " + s + "
+"); }
+    static string Snap(string copy, out string sig) {
+        var sw = Stopwatch.StartNew();
+        string rm = RestartManager(copy), live = Live(copy), h = Handles(copy);
+        sig = rm + "|" + live + "|" + System.Text.RegularExpressions.Regex.Replace(h, "table:[^
+]*
+", "");
+        return "(took " + sw.ElapsedMilliseconds + " ms)
+  restart manager: " + rm + "
+  live processes with this image: " + live + "
+" + h;
     }
-    $i++
+    // probe.exe <copy> <out dir> <tag>: run right after `del` failed, in the removal's script.
+    public static int Main(string[] a) {
+        var t0 = DateTime.UtcNow;
+        string copy = a[0]; Log = Path.Combine(a[1], "r" + a[2] + ".log");
+        Warm();
+        Say("probe started; copy exists: " + File.Exists(copy));
+        string last = null; int i = 0;
+        while (true) {
+            string err = null;
+            try { File.Delete(copy); } catch (Exception e) { err = e.GetType().Name + " HResult=0x" + e.HResult.ToString("x") + " " + e.Message; }
+            double ms = (DateTime.UtcNow - t0).TotalMilliseconds;
+            if (err == null) { Say("DELETE SUCCEEDED +" + (int)ms + " ms after the probe started, after " + i + " failed attempt(s)"); break; }
+            string sig, text = Snap(copy, out sig);
+            Say("attempt " + i + " failed +" + (int)ms + " ms: " + err);
+            if (sig != last) Say("snapshot " + text); else Say("  (same holders as the previous snapshot)");
+            last = sig; i++;
+        }
+        string sig2; Say("snapshot after the deletion " + Snap(copy, out sig2));
+        return 0;
+    }
 }
-$null = Snap "snapshot after the deletion"
-
-try {
-    $mp = Get-MpComputerStatus
-    Say ("Defender: RealTimeProtectionEnabled=$($mp.RealTimeProtectionEnabled) IoavProtectionEnabled=$($mp.IoavProtectionEnabled) " +
-         "BehaviorMonitorEnabled=$($mp.BehaviorMonitorEnabled) OnAccessProtectionEnabled=$($mp.OnAccessProtectionEnabled) " +
-         "AMServiceEnabled=$($mp.AMServiceEnabled) AntivirusSignatureVersion=$($mp.AntivirusSignatureVersion)")
-} catch { Say "Defender status: $($_.Exception.Message)" }
-try {
-    $events = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; StartTime = $t0.ToLocalTime().AddMinutes(-3) } -ErrorAction Stop
-    Say "Defender operational events in the 3 minutes before: $(@($events).Count)"
-    foreach ($e in $events) { Say ("  event $($e.Id) at $($e.TimeCreated.ToUniversalTime().ToString('HH:mm:ss.fff')): " + ($e.Message -replace '\s+', ' ').Substring(0, [Math]::Min(300, $e.Message.Length))) }
-} catch { Say "Defender events: $($_.Exception.Message)" }
