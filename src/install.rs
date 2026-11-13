@@ -390,18 +390,19 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     Ok(Removal(child))
 }
 
-/// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
+/// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone. On
+/// Windows never by the installed one: the removal deletes its directory, which it cannot while a binary in it runs
+/// (measured on CI: "Access is denied").
 fn rerun_uninstall(paths: &Paths) -> String {
+    if cfg!(windows) {
+        return format!(
+            "run `uninstall` in an elevated prompt with a `reverse-tunnel` binary from outside {}, such as the one              you downloaded (the removal deletes that directory, and cannot while a binary in it runs)",
+            paths.bin_dir.display()
+        );
+    }
     let exe = service::exe(paths);
-    let (sudo, elevated) = if cfg!(windows) {
-        ("", " in an elevated prompt")
-    } else {
-        ("sudo ", "")
-    };
     if exe.exists() {
-        format!("run `{sudo}{} uninstall`{elevated}", exe.display())
-    } else if cfg!(windows) {
-        "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)".to_string()
+        format!("run `sudo {} uninstall`", exe.display())
     } else {
         "run `uninstall` with `sudo` and any `reverse-tunnel` binary (the installed one is gone)".to_string()
     }
@@ -761,3 +762,7 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
 #[cfg(all(test, unix))]
 #[path = "install_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "install_windows_tests.rs"]
+mod windows_tests;
