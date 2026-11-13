@@ -4,76 +4,18 @@ on:
   pull_request:
 
 jobs:
-  flake2:
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-        include:
-          - shard: 13
-            keep: 1
-            rounds: 30
+  ident:
     runs-on: windows-latest
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - name: Build the platform tests
-        run: |
-          set -euo pipefail
-          cargo test --locked --test platform --no-run --message-format=json \
-              | jq -r 'select(.target.name == "platform" and .executable != null) | .executable' \
-              | tr -d '\r' > "$RUNNER_TEMP/platform-tests"
-      - name: Build the probe
+      - name: Who is provjobd
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path C:\probe-bin, C:\probe-out, C:\selftest -Force | Out-Null
-          & "$env:windir\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /platform:x64 /out:C:\probe-bin\probe.exe tests\probe\probe.cs
-          if ($LASTEXITCODE -ne 0) { throw 'csc failed' }
-          Set-Content C:\probe-bin\providers.txt -Value @('"Microsoft-Windows-Kernel-File" 0xFFFFFFFFFFFFFFFF 0xFF', '"Microsoft-Windows-Kernel-Process" 0x10 0xFF')
-      - name: Self-test the probe (an exited process whose handle is held, a held file, a live image)
-        shell: pwsh
-        run: |
-          Get-MpComputerStatus | Format-List AntivirusEnabled, RealTimeProtectionEnabled, IoavProtectionEnabled, OnAccessProtectionEnabled, BehaviorMonitorEnabled
-          # 1. an exited child whose process handle this script keeps open
-          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim1.exe
-          $p = Start-Process C:\selftest\victim1.exe -PassThru -Wait -WindowStyle Hidden
-          $null = $p.Handle
-          & C:\probe-bin\probe.exe C:\selftest\victim1.exe C:\probe-out st1
-          Write-Host "--- exited process, handle held:"; Get-Content C:\probe-out\rst1.log
-          $p.Dispose()
-          # 2. a file held open without delete sharing, released while the probe polls
-          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim2.exe
-          $fs = [IO.File]::Open('C:\selftest\victim2.exe', 'Open', 'Read', 'Read')
-          $probe = Start-Process C:\probe-bin\probe.exe -ArgumentList 'C:\selftest\victim2.exe C:\probe-out st2' -PassThru -WindowStyle Hidden
-          while (-not (Test-Path C:\probe-out\rst2.log)) { }
-          while (-not (Select-String -Path C:\probe-out\rst2.log -Pattern 'snapshot' -Quiet)) { }
-          $fs.Dispose()
-          $probe.WaitForExit()
-          Write-Host "--- file held, then released:"; Get-Content C:\probe-out\rst2.log
-          # 3. a live process with the image
-          Copy-Item "$env:SystemRoot\System32\ping.exe" C:\selftest\victim3.exe
-          $live = Start-Process C:\selftest\victim3.exe -ArgumentList '-n 6 127.0.0.1' -PassThru -WindowStyle Hidden
-          & C:\probe-bin\probe.exe C:\selftest\victim3.exe C:\probe-out st3
-          Write-Host "--- live image, then it ended:"; Get-Content C:\probe-out\rst3.log
-          Remove-Item C:\probe-out\* -Force
-      - name: Measure
-        timeout-minutes: 45
-        run: |
-          set -euxo pipefail
-          env RT_PLATFORM_TESTS=1 RT_FLAKE2_ROUNDS=${{ matrix.rounds || 200 }} RT_FLAKE2_KEEP=${{ matrix.keep }} RT_FLAKE2_SHARD=${{ matrix.shard }} \
-              RT_FLAKE2_PROBE="$(cygpath -w "$PWD/tests/probe/flake2.ps1")" \
-              "$(cat "$RUNNER_TEMP/platform-tests")" measure_flake2 --ignored --test-threads=1 --nocapture
-      - name: Show what the probe saw
-        if: always()
-        run: |
-          cd /c/probe-out || exit 0
-          echo "failing rounds: $(ls r*.log 2>/dev/null | wc -l)"
-          for f in r*.log; do echo "=== $f"; cat "$f"; echo "--- uninstall.log:"; cat "${f%.log}.uninstall.log"; done 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: probe-out-${{ matrix.shard }}
-          path: C:\probe-out
+          Get-Process -Name 'provjobd*' | Format-List Id, Name, Path, Company, Description, ProductVersion, FileVersion, StartTime
+          Get-CimInstance Win32_Process -Filter "Name like 'provjobd%'" | Format-List ProcessId, ParentProcessId, ExecutablePath, CommandLine, CreationDate
+          $ppid = (Get-CimInstance Win32_Process -Filter "Name like 'provjobd%'" | Select-Object -First 1).ParentProcessId
+          Get-CimInstance Win32_Process -Filter "ProcessId = $ppid" | Format-List ProcessId, Name, ExecutablePath, CommandLine
+          Get-Item (Get-Process -Name 'provjobd*' | Select-Object -First 1).Path | Format-List FullName, Length, CreationTime
+          (Get-Item (Get-Process -Name 'provjobd*' | Select-Object -First 1).Path).VersionInfo | Format-List *
+          Get-AuthenticodeSignature (Get-Process -Name 'provjobd*' | Select-Object -First 1).Path | Format-List Status, SignerCertificate
+          Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -eq (Get-Process -Name 'provjobd*' | Select-Object -First 1).Id } | Format-List Name, DisplayName, PathName
