@@ -199,10 +199,11 @@ and names the command to finish it; its log is `%ProgramFiles%\reverse-tunnel-un
 keeps one of the files `install` or `uninstall` deletes open without letting others delete it (an antivirus scan, a
 program that watches files, a shell whose working directory is in the install folder) makes them wait until it closes
 the file: they print one line that names the file, or the folder that holds it, and go on by themselves when it is
-closed. `install` prints the line on the console; `uninstall` shows only that it is removing, and the line goes to the
-removal log, whose path `uninstall` prints. The removal that `uninstall` starts waits the same way for its own copy of
-the binary and its directory, and also for a process that runs a file from that directory, which it cannot tell from a
-file held open: it waits for as long as that process runs, so stop it to let the removal finish.
+closed. `install` prints the line on the console, and so does `uninstall` when the folder an earlier removal left,
+`%ProgramFiles%\reverse-tunnel-uninstall`, is held; a line about the install folder is in the removal log, whose path
+`uninstall` prints. The removal that `uninstall` starts waits for that folder the same way and prints nothing: if it does
+not finish, look for a process that holds a file in that folder (one that runs a file from it holds it as long as it
+runs) and stop it.
 
 - On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
   unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.

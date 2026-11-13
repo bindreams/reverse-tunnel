@@ -253,15 +253,34 @@ pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers
 /// One loop of the removal script: `delete`, then `done`, which ends the loop (`exit /b 0`) when what `delete` deletes
 /// is gone, then a pause, and again, with no end otherwise. A `for /l` ends in no other way than `exit /b`, which ends
 /// the `cmd` it runs in, so the loop has a `cmd` of its own and the script goes on after it. The pause is `ping`, as
-/// `timeout` needs a console, which a task has none of.
+/// `timeout` needs a console, which a task has none of. `/d` keeps AutoRun commands out of the loop.
+///
+/// The loop is no quoted argument, which the outer `cmd` would parse with its quotes toggled by the paths' own. It is
+/// the loop's text with each `cmd` metacharacter that is outside double quotes escaped with `^`: the outer `cmd`
+/// passes it on unchanged, and a path, which stays inside its quotes, is read as it is by both.
 fn until_gone(delete: &str, done: &str) -> String {
-    format!(r#"cmd /s /c "for /l %i in (1,0,2) do (({delete} >nul 2>&1) & ({done}) & ping -n 2 127.0.0.1 >nul)""#)
+    let body = format!("for /l %i in (1,0,2) do (({delete} >nul 2>&1) & ({done}) & ping -n 2 127.0.0.1 >nul)");
+    let mut escaped = String::with_capacity(body.len());
+    let mut quoted = false;
+    for c in body.chars() {
+        quoted ^= c == '"';
+        if !quoted && "&|<>()^".contains(c) {
+            escaped.push('^');
+        }
+        escaped.push(c);
+    }
+    format!("cmd /d /c {escaped}")
+}
+
+/// What `cmd.exe` is given to run `script`: everything between the outer quotes is the command, whatever quotes it
+/// holds (`/s`).
+fn cmd_arguments(script: &str) -> String {
+    format!(r#"/s /c "{script}""#)
 }
 
 /// The definition of a task with no trigger that runs `script` as SYSTEM, however long it takes and whatever the power.
 fn task_xml(script: &str) -> String {
-    // `cmd /s /c "..."` takes everything between the outer quotes as the command, whatever quotes it holds.
-    let arguments = format!(r#"/s /c "{script}""#)
+    let arguments = cmd_arguments(script)
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;");

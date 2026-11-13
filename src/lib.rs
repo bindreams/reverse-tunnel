@@ -8,6 +8,7 @@ pub mod install;
 pub mod join;
 pub mod logfile;
 pub mod ops;
+pub mod output;
 pub mod paths;
 #[cfg(windows)]
 pub mod processes;

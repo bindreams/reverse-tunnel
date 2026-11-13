@@ -20,6 +20,7 @@ use crate::command;
 use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
 use crate::install::refuse_while_uninstalling;
+use crate::output::println_best_effort;
 use crate::paths::Paths;
 use crate::service;
 
@@ -191,21 +192,6 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
         }
         Err(err) => Err(err.into()),
     }
-}
-
-/// Prints a line reporting what is already done, and ignores a closed stdout rather than panicking: a command that
-/// stops the service over the tunnel ends the session that would read it.
-pub fn println_best_effort(message: &str) {
-    writeln_best_effort(&mut std::io::stdout(), message);
-}
-
-/// `println_best_effort` to stderr.
-pub fn eprintln_best_effort(message: &str) {
-    writeln_best_effort(&mut std::io::stderr(), message);
-}
-
-fn writeln_best_effort(out: &mut impl Write, message: &str) {
-    let _ = writeln!(out, "{message}");
 }
 
 /// Never prints a token.

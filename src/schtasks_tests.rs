@@ -1,4 +1,6 @@
 use std::ffi::OsStr;
+use std::fs;
+use std::process::Command;
 
 use windows::Win32::System::TaskScheduler::{TASK_STATE_DISABLED, TASK_STATE_READY};
 
@@ -28,10 +30,10 @@ fn the_script_runs_each_step_once_in_turn_and_each_deletion_until_its_target_is_
     // query. Only a failed `--finish` and a failed deletion of the task have exit codes.
     let expected = [
         r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1)"#,
-        r#"cmd /s /c "for /l %i in (1,0,2) do ((del /q "C:\d\x.exe" >nul 2>&1) & (if not exist "C:\d\x.exe" exit /b 0) & ping -n 2 127.0.0.1 >nul)""#,
-        r#"cmd /s /c "for /l %i in (1,0,2) do ((rmdir /s /q "C:\d" >nul 2>&1) & (if not exist "C:\d" exit /b 0) & ping -n 2 127.0.0.1 >nul)""#,
+        r#"cmd /d /c for /l %i in ^(1,0,2^) do ^(^(del /q "C:\d\x.exe" ^>nul 2^>^&1^) ^& ^(if not exist "C:\d\x.exe" exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
+        r#"cmd /d /c for /l %i in ^(1,0,2^) do ^(^(rmdir /s /q "C:\d" ^>nul 2^>^&1^) ^& ^(if not exist "C:\d" exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
         r#"(schtasks /Delete /F /TN task || exit /b 4)"#,
-        r#"cmd /s /c "for /l %i in (1,0,2) do ((del /f /q /a "C:\p\.reverse-tunnel.*" >nul 2>&1) & (dir /b /a:-d "C:\p\.reverse-tunnel.*" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)""#,
+        r#"cmd /d /c for /l %i in ^(1,0,2^) do ^(^(del /f /q /a "C:\p\.reverse-tunnel.*" ^>nul 2^>^&1^) ^& ^(dir /b /a:-d "C:\p\.reverse-tunnel.*" ^>nul 2^>^&1 ^|^| exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
     ];
     assert_eq!(script, expected.join(" & "));
 }
@@ -102,27 +104,23 @@ fn a_failed_read_is_gone_if_the_task_is_gone_when_looked_up_again_and_an_error_o
 }
 
 #[test]
-fn the_script_sweeps_the_leftover_images_after_the_task_itself_and_until_none_is_left() {
-    let script = removal_script(
-        Path::new(r"C:\d\x.exe"),
-        Path::new(r"C:\d\log"),
-        Path::new(r"C:\d"),
-        "task",
-        Path::new(r"C:\p"),
-    );
+fn a_loop_deletes_a_directory_whose_name_holds_the_metacharacters_of_cmd() {
+    use std::os::windows::process::CommandExt;
 
-    // The waiter holds its image until the task is gone, so the sweep comes after the task's deletion. `/f` deletes a
-    // read-only file and `/a` a hidden or system one, which `del` skips without it; the check counts files only
-    // (`/a:-d`), so a directory of the pattern, which `del` does not delete, does not keep the loop going.
-    let pattern = leftover_pattern(Path::new(r"C:\p")).display().to_string();
-    assert_eq!(pattern, r"C:\p\.reverse-tunnel.*");
-    let (_, sweep) = script.split_once("exit /b 4) & ").unwrap();
-    assert_eq!(
-        sweep,
-        format!(
-            r#"cmd /s /c "for /l %i in (1,0,2) do ((del /f /q /a "{pattern}" >nul 2>&1) & (dir /b /a:-d "{pattern}" >nul 2>&1 || exit /b 0) & ping -n 2 127.0.0.1 >nul)""#
-        )
+    // Each of these, outside quotes, would split or alter a line that the outer `cmd` parses.
+    let parent = tempfile::tempdir().unwrap();
+    let dir = parent.path().join("a & b ^ (c) d");
+    fs::create_dir(&dir).unwrap();
+    let dir_str = dir.display();
+
+    let script = until_gone(
+        &format!(r#"rmdir /s /q "{dir_str}""#),
+        &format!(r#"if not exist "{dir_str}" exit /b 0"#),
     );
+    let status = Command::new("cmd").raw_arg(cmd_arguments(&script)).status().unwrap();
+
+    assert!(status.success(), "{status}");
+    assert!(!dir.exists());
 }
 
 #[test]

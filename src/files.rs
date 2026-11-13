@@ -15,7 +15,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use anyhow::{Context, Result, ensure};
 
 use crate::account::Account;
-use crate::ops;
+use crate::output::eprintln_best_effort;
 #[cfg(windows)]
 use crate::security::{self, Descriptor, OWNED_BY_ADMINISTRATORS};
 
@@ -233,7 +233,7 @@ pub fn remove_entry(path: &Path) -> Result<()> {
         match removed {
             Err(err) if is_open_elsewhere(&err) => {
                 if !said {
-                    ops::eprintln_best_effort(&format!(
+                    eprintln_best_effort(&format!(
                         "{}: another process has it open; waiting until that process closes it",
                         path.display()
                     ));

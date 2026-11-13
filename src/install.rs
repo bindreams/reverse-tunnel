@@ -30,7 +30,7 @@ use crate::processes;
 use crate::schtasks::{self, TaskState};
 #[cfg(windows)]
 use crate::system_path;
-use crate::{download, ops, service, upgrade};
+use crate::{download, ops, output, service, upgrade};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -164,7 +164,7 @@ fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
     // `--finish` takes the lock itself; an `install` in between is refused by the marker.
     drop(lock);
     let removal = spawn_finish(exe, paths).with_context(|| not_started(&rerun_uninstall(paths)))?;
-    ops::println_best_effort("Removing. If this session ends, the removal continues.");
+    output::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
             "could not tell how the removal ended; its log is {}, and to finish it {}",
@@ -191,7 +191,7 @@ fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
             });
         }
     }
-    ops::println_best_effort("Removed.");
+    output::println_best_effort("Removed.");
     Ok(())
 }
 
@@ -648,10 +648,10 @@ fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     let original = path.file_name().context("the file has no name")?;
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
     fs::rename(path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
-    println!(
+    output::println_best_effort(&format!(
         "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
         to.display()
-    );
+    ));
     Ok(())
 }
 
