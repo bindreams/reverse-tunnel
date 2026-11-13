@@ -26,32 +26,33 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path C:\probe-bin, C:\probe-out, C:\selftest -Force | Out-Null
-          & "$env:windir\Microsoft.NET\Framework644.0.30319\csc.exe" /nologo /platform:x64 /out:C:\probe-bin\probe.exe tests\probe\probe.cs
+          & "$env:windir\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /platform:x64 /out:C:\probe-bin\probe.exe tests\probe\probe.cs
           if ($LASTEXITCODE -ne 0) { throw 'csc failed' }
       - name: Self-test the probe (an exited process whose handle is held, a held file, a live image)
         shell: pwsh
         run: |
           Get-MpComputerStatus | Format-List AntivirusEnabled, RealTimeProtectionEnabled, IoavProtectionEnabled, OnAccessProtectionEnabled, BehaviorMonitorEnabled
           # 1. an exited child whose process handle this script keeps open
-          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftestictim1.exe
-          $p = Start-Process C:\selftestictim1.exe -PassThru -Wait -WindowStyle Hidden
+          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim1.exe
+          $p = Start-Process C:\selftest\victim1.exe -PassThru -Wait -WindowStyle Hidden
           $null = $p.Handle
-          & C:\probe-bin\probe.exe C:\selftestictim1.exe C:\probe-out st1
-          Write-Host "--- exited process, handle held:"; Get-Content C:\probe-outst1.log
+          & C:\probe-bin\probe.exe C:\selftest\victim1.exe C:\probe-out st1
+          Write-Host "--- exited process, handle held:"; Get-Content C:\probe-out\rst1.log
           $p.Dispose()
-          # 2. a file held open without delete sharing, released by a timer
-          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftestictim2.exe
-          $fs = [IO.File]::Open('C:\selftestictim2.exe', 'Open', 'Read', 'Read')
-          $timer = [Timers.Timer]::new(1500); $timer.AutoReset = $false
-          Register-ObjectEvent $timer Elapsed -Action { $fs.Dispose() } | Out-Null
-          $timer.Start()
-          & C:\probe-bin\probe.exe C:\selftestictim2.exe C:\probe-out st2
-          Write-Host "--- file held:"; Get-Content C:\probe-outst2.log
+          # 2. a file held open without delete sharing, released while the probe polls
+          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim2.exe
+          $fs = [IO.File]::Open('C:\selftest\victim2.exe', 'Open', 'Read', 'Read')
+          $probe = Start-Process C:\probe-bin\probe.exe -ArgumentList 'C:\selftest\victim2.exe C:\probe-out st2' -PassThru -WindowStyle Hidden
+          while (-not (Test-Path C:\probe-out\rst2.log)) { }
+          while (-not (Select-String -Path C:\probe-out\rst2.log -Pattern 'snapshot' -Quiet)) { }
+          $fs.Dispose()
+          $probe.WaitForExit()
+          Write-Host "--- file held, then released:"; Get-Content C:\probe-out\rst2.log
           # 3. a live process with the image
-          Copy-Item "$env:SystemRoot\System32\ping.exe" C:\selftestictim3.exe
-          $live = Start-Process C:\selftestictim3.exe -ArgumentList '-n 4 127.0.0.1' -PassThru -WindowStyle Hidden
-          & C:\probe-bin\probe.exe C:\selftestictim3.exe C:\probe-out st3
-          Write-Host "--- live image:"; Get-Content C:\probe-outst3.log
+          Copy-Item "$env:SystemRoot\System32\ping.exe" C:\selftest\victim3.exe
+          $live = Start-Process C:\selftest\victim3.exe -ArgumentList '-n 6 127.0.0.1' -PassThru -WindowStyle Hidden
+          & C:\probe-bin\probe.exe C:\selftest\victim3.exe C:\probe-out st3
+          Write-Host "--- live image, then it ended:"; Get-Content C:\probe-out\rst3.log
           Remove-Item C:\probe-out\* -Force
       - name: Measure
         timeout-minutes: 45
