@@ -433,8 +433,9 @@ fn rerun_uninstall(paths: &Paths) -> String {
 /// copy. The removal deletes the installed one's directory, which it cannot while a binary in it runs, nor while a
 /// process has it as its working directory: the line starts in the system directory (`Set-Location` moves PowerShell's
 /// location, not the process's directory, which the copy and the removal inherit). Each step runs only if the one
-/// before succeeded (5.1 has no `&&`); the copy's directory is removed whatever happened, and the line exits with the
-/// copy's exit code, or 1 if the copy did not run. The paths are absolute, in single quotes, so that nothing expands.
+/// before succeeded (5.1 has no `&&`); the copy's directory is removed whatever happened, and the line leaves the copy's
+/// exit code in `$LASTEXITCODE` (1 if the copy did not run), without ending a session it is pasted into. The paths are absolute,
+/// in single quotes, so that nothing expands.
 #[cfg(windows)]
 fn copy_out_commands(paths: &Paths) -> String {
     let exe = service::exe(paths);
@@ -462,7 +463,7 @@ fn copy_out_commands(paths: &Paths) -> String {
         "Set-Location -LiteralPath $env:SystemRoot; [Environment]::CurrentDirectory = $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path {dir} > $null; \
          if ($?) {{ Copy-Item -Force -LiteralPath {exe} -Destination {copy}; \
          if ($?) {{ & {copy} uninstall; $code = $LASTEXITCODE }} }}; \
-         Remove-Item -Recurse -Force -LiteralPath {dir}; exit $code"
+         Remove-Item -Recurse -Force -LiteralPath {dir}; $global:LASTEXITCODE = $code"
     )
 }
 

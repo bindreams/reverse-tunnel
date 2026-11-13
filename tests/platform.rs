@@ -1350,8 +1350,14 @@ fn uninstall_run_by_the_installed_binary_refuses_and_its_copy_out_line_removes_t
     );
 
     // From inside the directory the removal deletes: the line moves out of it first.
+    // The line leaves the copy's exit code in $LASTEXITCODE and does not end the session; the process exit shows it.
     let ran = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", line])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("{line}; exit $LASTEXITCODE"),
+        ])
         .current_dir(&machine.paths.bin_dir)
         .output()
         .unwrap();

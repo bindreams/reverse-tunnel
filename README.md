@@ -193,8 +193,8 @@ Revoking does not cut the host's current connection; `ctl revoke` prints the com
 `uninstall` refuses when the installed binary runs it, or when your current directory is inside a folder it deletes,
 before it changes anything. For the binary it prints a PowerShell line to run instead (or run `uninstall` from the
 binary you downloaded). In an elevated PowerShell (over SSH, run `powershell` first), that line copies the installed
-binary to `%ProgramFiles%\reverse-tunnel-copy`, runs `uninstall` from the copy, deletes the copy, and exits with
-`uninstall`'s exit code. A failed removal's message prints the same line to finish it; its log is
+binary to `%ProgramFiles%\reverse-tunnel-copy`, runs `uninstall` from the copy, deletes the copy, and leaves
+`uninstall`'s exit code in `$LASTEXITCODE`. A failed removal's message prints the same line to finish it; its log is
 `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`.
 
 If your session ends mid-removal (an `uninstall` run through the host's own tunnel), the removal finishes, but

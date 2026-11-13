@@ -70,7 +70,7 @@ fn the_installed_binary_is_copied_out_run_and_the_copy_removed_by_one_powershell
 
     assert_eq!(
         copy_out_commands(&paths),
-        r"Set-Location -LiteralPath $env:SystemRoot; [Environment]::CurrentDirectory = $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path 'C:\host\reverse-tunnel-copy' > $null; if ($?) { Copy-Item -Force -LiteralPath 'C:\host\bin\reverse-tunnel.exe' -Destination 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe'; if ($?) { & 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe' uninstall; $code = $LASTEXITCODE } }; Remove-Item -Recurse -Force -LiteralPath 'C:\host\reverse-tunnel-copy'; exit $code"
+        r"Set-Location -LiteralPath $env:SystemRoot; [Environment]::CurrentDirectory = $env:SystemRoot; $code = 1; New-Item -ItemType Directory -Force -Path 'C:\host\reverse-tunnel-copy' > $null; if ($?) { Copy-Item -Force -LiteralPath 'C:\host\bin\reverse-tunnel.exe' -Destination 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe'; if ($?) { & 'C:\host\reverse-tunnel-copy\reverse-tunnel.exe' uninstall; $code = $LASTEXITCODE } }; Remove-Item -Recurse -Force -LiteralPath 'C:\host\reverse-tunnel-copy'; $global:LASTEXITCODE = $code"
     );
 }
 
