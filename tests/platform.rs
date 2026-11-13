@@ -1341,7 +1341,7 @@ fn uninstall_run_by_the_installed_binary_refuses_and_its_copy_out_line_removes_t
     let line = stderr
         .lines()
         .map(str::trim)
-        .find(|line| line.starts_with("New-Item -ItemType Directory"))
+        .find(|line| line.starts_with("Set-Location -LiteralPath"))
         .unwrap_or_else(|| panic!("the copy-out line is not in: {stderr}"));
     assert_eq!(machine.status().state, State::Running, "the service was touched");
     assert!(
