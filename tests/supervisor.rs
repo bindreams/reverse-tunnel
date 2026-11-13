@@ -59,7 +59,7 @@ fn check_renders_and_verifies_without_starting() {
     let host = Host::new("record 0 {record}", SSH);
     let (config_before, logs_before) = (names(&host.paths.config_dir), names(&host.paths.log_dir));
 
-    host.run(true).unwrap();
+    assert_eq!(host.run(true).unwrap(), std::process::ExitCode::SUCCESS);
 
     let args = recorded(&host, "ARG ");
     assert_eq!(&args[..2], ["verify", "-c"]);

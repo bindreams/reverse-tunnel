@@ -3,17 +3,17 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Where cargo put the stub, which it builds for `cargo test` and not for `cargo test --lib`.
+/// Where cargo put the stub, which it builds for `cargo test` and not for `cargo test --lib`: the profile directory,
+/// taken as the nearest ancestor of the test executable that holds `deps/`.
 fn built() -> PathBuf {
-    let stub = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("stub-frpc");
+    let exe = std::env::current_exe().unwrap();
+    let profile = exe
+        .ancestors()
+        .find(|dir| dir.join("deps").is_dir())
+        .unwrap_or_else(|| panic!("no cargo profile directory above {exe:?}"));
+    let stub = profile.join("stub-frpc");
     assert!(
-        stub.exists(),
+        stub.is_file(),
         "{stub:?} is missing: run `cargo test`, which builds the `stub-frpc` binary"
     );
     stub
