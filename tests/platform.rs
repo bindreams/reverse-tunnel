@@ -1696,7 +1696,7 @@ fn measure_flake2() {
             ran.status,
             started.elapsed().as_millis()
         );
-        if !held {
+        if !held && env::var("RT_FLAKE2_KEEP").unwrap_or_default().is_empty() {
             let _ = fs::remove_file(&etl);
         }
         if !ran.status.success() {

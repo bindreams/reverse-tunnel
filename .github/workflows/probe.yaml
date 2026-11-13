@@ -9,6 +9,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        include:
+          - shard: 13
+            keep: 1
+            rounds: 30
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -59,7 +63,7 @@ jobs:
         timeout-minutes: 45
         run: |
           set -euxo pipefail
-          env RT_PLATFORM_TESTS=1 RT_FLAKE2_ROUNDS=200 RT_FLAKE2_SHARD=${{ matrix.shard }} \
+          env RT_PLATFORM_TESTS=1 RT_FLAKE2_ROUNDS=${{ matrix.rounds || 200 }} RT_FLAKE2_KEEP=${{ matrix.keep }} RT_FLAKE2_SHARD=${{ matrix.shard }} \
               RT_FLAKE2_PROBE="$(cygpath -w "$PWD/tests/probe/flake2.ps1")" \
               "$(cat "$RUNNER_TEMP/platform-tests")" measure_flake2 --ignored --test-threads=1 --nocapture
       - name: Show what the probe saw

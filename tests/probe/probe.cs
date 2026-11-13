@@ -207,6 +207,8 @@ public static class Probe {
             last = sig; i++;
         }
         string sig2; Say("snapshot after the deletion " + Snap(copy, out sig2));
+        var psi = new ProcessStartInfo("tasklist.exe", "/svc /fo csv") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
+        using (var tl = Process.Start(psi)) { string o = tl.StandardOutput.ReadToEnd(); tl.WaitForExit(); Say("tasklist /svc:\n" + o); }
         return 0;
     }
 }
