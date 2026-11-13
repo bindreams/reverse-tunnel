@@ -1,0 +1,71 @@
+name: probe
+
+on:
+  pull_request:
+
+jobs:
+  flake2:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the platform tests
+        run: |
+          set -euo pipefail
+          cargo test --locked --test platform --no-run --message-format=json \
+              | jq -r 'select(.target.name == "platform" and .executable != null) | .executable' \
+              | tr -d '\r' > "$RUNNER_TEMP/platform-tests"
+      - name: Self-test the probe (a held process handle, a held file)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path C:\probe-out, C:\selftest -Force | Out-Null
+          $probe = (Resolve-Path tests\probe\flake2.ps1).Path
+          # 1. an exited child whose process handle this script keeps open
+          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim1.exe
+          $p = Start-Process C:\selftest\victim1.exe -PassThru -Wait -WindowStyle Hidden
+          $null = $p.Handle
+          New-Item -ItemType File -Path C:\probe-out\rst1.fail -Force | Out-Null
+          $job = Start-Job { param($probe) & powershell -NoProfile -ExecutionPolicy Bypass -File $probe -Copy C:\selftest\victim1.exe -Out C:\probe-out -Tag st1 } -ArgumentList $probe
+          Start-Sleep -Seconds 25
+          Write-Host "--- the held process handle was reported while it was held:"
+          Get-Content C:\probe-out\rst1.log
+          $p.Dispose()
+          $job | Wait-Job | Out-Null
+          Write-Host "--- after the handle was closed:"
+          Get-Content C:\probe-out\rst1.log
+          # 2. a file held open without delete sharing
+          Copy-Item "$env:SystemRoot\System32\whoami.exe" C:\selftest\victim2.exe
+          $fs = [IO.File]::Open('C:\selftest\victim2.exe', 'Open', 'Read', 'Read')
+          New-Item -ItemType File -Path C:\probe-out\rst2.fail -Force | Out-Null
+          $job = Start-Job { param($probe) & powershell -NoProfile -ExecutionPolicy Bypass -File $probe -Copy C:\selftest\victim2.exe -Out C:\probe-out -Tag st2 } -ArgumentList $probe
+          Start-Sleep -Seconds 25
+          Get-Content C:\probe-out\rst2.log
+          $fs.Dispose()
+          $job | Wait-Job | Out-Null
+          Write-Host "--- done"
+          Remove-Item C:\probe-out\* -Force
+      - name: Measure
+        timeout-minutes: 45
+        run: |
+          set -euxo pipefail
+          env RT_PLATFORM_TESTS=1 RT_FLAKE2_ROUNDS=150 RT_FLAKE2_SHARD=${{ matrix.shard }} \
+              RT_FLAKE2_PROBE="$(cygpath -w "$PWD/tests/probe/flake2.ps1")" \
+              "$(cat "$RUNNER_TEMP/platform-tests")" measure_flake2 --ignored --test-threads=1 --nocapture
+      - name: Show what the probe saw
+        if: always()
+        run: |
+          cd /c/probe-out || exit 0
+          echo "failing rounds: $(ls *.fail 2>/dev/null | wc -l)"
+          for f in *.fail; do echo "=== ${f%.fail}"; cat "${f%.fail}.log"; done 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-out-${{ matrix.shard }}
+          path: C:\probe-out

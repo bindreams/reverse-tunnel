@@ -1654,3 +1654,43 @@ fn install_puts_the_bin_dir_on_the_machine_path_once() {
 
     assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
 }
+
+/// THROWAWAY MEASUREMENT (flake 2): `RT_FLAKE2_ROUNDS` rounds of the failing test's scenario, with the probe in the
+/// removal's script (`RT_FLAKE2_PROBE`, see `tests/probe/flake2.ps1`).
+#[test]
+#[ignore = "measurement"]
+#[cfg(windows)]
+fn measure_flake2() {
+    let rounds: u32 = env::var("RT_FLAKE2_ROUNDS").unwrap().parse().unwrap();
+    let shard = env::var("RT_FLAKE2_SHARD").unwrap();
+    for round in 0..rounds {
+        let tag = format!("s{shard}-{round}");
+        let machine = Machine::begin();
+        machine.install(&join_code("tunnel.example.test"));
+        machine.wait_for_frpc();
+        let mut uninstall = Command::new(service::exe(&machine.paths));
+        uninstall
+            .arg("uninstall")
+            .current_dir(env::temp_dir())
+            .env("RT_FLAKE2_ROUND", &tag);
+        let started = std::time::Instant::now();
+        let ran = uninstall.output().unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let held = Path::new(&format!(r"C:\probe-out\r{tag}.fail")).exists();
+        eprintln!(
+            "ROUND {tag}: uninstall exit {} after {} ms; copy still there after del: {held}",
+            ran.status,
+            started.elapsed().as_millis()
+        );
+        if !ran.status.success() {
+            eprintln!("ROUND {tag} output: {said}");
+        }
+        assert!(ran.status.success(), "round {tag} failed: {said}");
+        assert_nothing_left(&machine, &said);
+        windows::wait_until_no_leftover_image_is_left(&machine);
+    }
+}
