@@ -72,7 +72,7 @@ fn the_line_names_each_process_to_wait_for_by_id_and_image() {
         image: image.into(),
     };
 
-    let line = waiting_line(&[process(12, "reverse-tunnel.exe"), process(34, "frpc.exe")]);
+    let line = waiting_line(ACCOUNT, &[process(12, "reverse-tunnel.exe"), process(34, "frpc.exe")]);
 
     assert_eq!(
         line,
@@ -82,7 +82,7 @@ fn the_line_names_each_process_to_wait_for_by_id_and_image() {
 
 #[test]
 fn the_line_says_process_for_one() {
-    let line = waiting_line(&[this_process()]);
+    let line = waiting_line(ACCOUNT, &[this_process()]);
 
     assert!(line.starts_with("waiting for 1 process of "), "{line}");
 }
@@ -98,7 +98,7 @@ fn a_listing_without_a_buffer_or_entries_is_empty() {
 fn a_listing_of_another_level_than_the_one_asked_for_is_refused() {
     let err = Buffer::new(null_mut(), 0, 0).err().expect("level 0 is not level 1");
 
-    assert!(err.to_string().contains("level 0"), "{err}");
+    assert_eq!(err.to_string(), "listing the processes gave level 0, not level 1");
 }
 
 /// A buffer is freed as the class of its level, and only for the two levels whose layout is known: freeing a buffer
@@ -114,7 +114,7 @@ fn a_buffer_is_freed_only_as_the_class_of_a_level_that_is_known() {
 fn a_listing_of_an_unknown_level_is_refused() {
     let err = Buffer::new(null_mut(), 0, 7).err().expect("level 7 is not level 1");
 
-    assert!(err.to_string().contains("level 7"), "{err}");
+    assert_eq!(err.to_string(), "listing the processes gave level 7, not level 1");
 }
 
 /// An image name is for the log line only, so it never fails the wait.
@@ -128,7 +128,7 @@ fn an_image_name_that_is_not_utf16_is_decoded_with_replacement_characters() {
 
 #[test]
 fn a_service_that_no_process_runs_as_has_no_process_to_wait_for() {
-    wait_until_none_runs_as(&Account::of_service("reverse-tunnel-no-such-service")).unwrap();
+    wait_until_none_runs_as(&nobody(), r"NT SERVICE\nobody").unwrap();
 }
 
 /// What the wait names is what it waits for: a process that cannot be waited for is not named.
@@ -139,8 +139,8 @@ fn only_the_processes_that_were_opened_are_waited_on() {
         image: "ended.exe".into(),
     };
 
-    let ours = open_all(&[ended, this_process()], &this_user()).unwrap();
-    let not_ours = open_all(&[this_process()], &nobody()).unwrap();
+    let ours = open_all(&[ended, this_process()], &this_user(), ACCOUNT).unwrap();
+    let not_ours = open_all(&[this_process()], &nobody(), ACCOUNT).unwrap();
 
     assert_eq!(ours.len(), 1);
     assert_eq!(ours[0].0.pid, std::process::id());
@@ -160,10 +160,15 @@ fn a_process_that_cannot_be_opened_and_is_no_longer_listed_is_skipped_and_said()
         image: "frpc.exe".into(),
     };
 
-    let said = skip_if_unlisted(anyhow!("access denied"), &process, &listing).unwrap();
+    let said = skip_if_unlisted(anyhow!("access denied"), &process, &listing, ACCOUNT).unwrap();
 
-    assert!(said.contains("4 (frpc.exe)"), "{said}");
-    assert!(said.contains("access denied"), "{said}");
+    assert_eq!(
+        said,
+        concat!(
+            r"not waiting for process 4 (frpc.exe), no longer listed under NT SERVICE\reverse-tunnel ",
+            "(it ended, or its id is another process's now): access denied"
+        )
+    );
 }
 
 #[test]
@@ -177,6 +182,7 @@ fn a_process_that_cannot_be_opened_and_is_still_listed_fails_with_the_error() {
         anyhow!("opening process 4 (frpc.exe): access denied"),
         &process,
         std::slice::from_ref(&process),
+        ACCOUNT,
     )
     .unwrap_err();
 

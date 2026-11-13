@@ -188,6 +188,12 @@ impl Sid {
         self.0.as_ptr().cast_mut().cast()
     }
 
+    /// The SID as `S-1-5-...`.
+    pub fn text(&self) -> io::Result<String> {
+        // SAFETY: `self` is a valid SID.
+        unsafe { string_of_sid(self.as_psid()) }
+    }
+
     /// Whether `other` is this SID; never for null.
     ///
     /// # Safety

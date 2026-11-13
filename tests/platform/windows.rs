@@ -78,7 +78,8 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
         assert_eq!(
             GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights),
             0,
-            "the rights of a SID on {}",
+            "the rights of {} on {}",
+            trustee_sid.text().unwrap(),
             path.display()
         );
         LocalFree(descriptor);
