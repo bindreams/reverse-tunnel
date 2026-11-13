@@ -1,3 +1,5 @@
+use std::ffi::OsStr;
+
 use windows::Win32::System::TaskScheduler::{TASK_STATE_DISABLED, TASK_STATE_READY};
 
 use super::*;
@@ -106,13 +108,52 @@ fn the_script_sweeps_the_leftover_images_after_the_task_itself_and_until_none_is
     );
 
     // The waiter holds its image until the task is gone, so the step comes after it; it repeats, with a pause between
-    // the checks, until no file of the pattern is there.
+    // the checks, until no file of the pattern is there. `/f` deletes a read-only file too.
     let pattern = leftover_pattern(Path::new(r"C:\p")).display().to_string();
-    assert_eq!(pattern, format!(r"C:\p\{LEFTOVER_PREFIX}*{LEFTOVER_SUFFIX}"));
+    assert_eq!(pattern, r"C:\p\.reverse-tunnel.*");
     assert!(
         script.ends_with(&format!(
-            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+            r#"(schtasks /Delete /F /TN task || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
         )),
         "{script}"
     );
+}
+
+#[test]
+fn a_leftover_keeps_the_name_of_the_file_it_was() {
+    let name = leftover_name("ab12", OsStr::new("frpc-0.1.exe"));
+
+    assert_eq!(name, ".reverse-tunnel.ab12.frpc-0.1.exe");
+}
+
+#[test]
+fn a_leftover_is_what_the_pattern_matches_whatever_the_case() {
+    let name = leftover_name("ab12", OsStr::new("frpc-0.1.exe"))
+        .to_string_lossy()
+        .into_owned();
+
+    assert!(is_leftover(&name));
+    assert!(is_leftover(&name.to_uppercase()));
+    assert!(!is_leftover("reverse-tunnel.exe"));
+    assert!(!is_leftover("x.reverse-tunnel.ab12.exe"));
+}
+
+#[test]
+fn a_leftover_is_of_a_file_by_the_name_it_kept_whatever_the_case() {
+    let ours = leftover_name("ab12", OsStr::new("reverse-tunnel.exe"))
+        .to_string_lossy()
+        .into_owned();
+    let frpc = leftover_name("ab12", OsStr::new("frpc-0.1.exe"))
+        .to_string_lossy()
+        .into_owned();
+
+    assert!(is_leftover_of(&ours, "reverse-tunnel.exe"));
+    assert!(is_leftover_of(&ours.to_uppercase(), "reverse-tunnel.exe"));
+    assert!(!is_leftover_of(&frpc, "reverse-tunnel.exe"));
+    // A name that only ends like the original is another file.
+    let longer = leftover_name("ab12", OsStr::new("old-reverse-tunnel.exe"))
+        .to_string_lossy()
+        .into_owned();
+    assert!(!is_leftover_of(&longer, "reverse-tunnel.exe"));
+    assert!(!is_leftover_of("reverse-tunnel.exe", "reverse-tunnel.exe"));
 }

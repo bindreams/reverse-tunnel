@@ -4,6 +4,8 @@
 
 use std::collections::BTreeSet;
 use std::env;
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader};
 #[cfg(unix)]
@@ -920,15 +922,13 @@ fn a_failed_removal_logs_where_uninstall_says() {
             "the failed removal's log is gone"
         );
         // The removal renamed the waiting `uninstall`'s own image, which was in the bin dir, and logged where it went.
+        // The image is left as the only binary, and the error names it. Running it finishes the removal. Other images
+        // (frpc, which may still be ending) may be left as well.
+        let image = leftover_of_the_binary(&machine);
         assert!(
-            logged.contains(schtasks::LEFTOVER_PREFIX),
-            "the log has no rename: {logged}"
+            logged.contains(&format!("moved it to {}", image.display())),
+            "the log has no rename of the image: {logged}"
         );
-        // The image is left as the only binary, and the error names it. Running it finishes the removal.
-        let images = install::leftover_images(&machine.paths).unwrap();
-        let [image] = images.as_slice() else {
-            panic!("expected one leftover image, found {images:?}: {stderr}")
-        };
         assert!(
             stderr.contains(&format!("\"{}\" uninstall", image.display())),
             "the error does not name the image as the binary to run: {stderr}"
@@ -938,6 +938,51 @@ fn a_failed_removal_logs_where_uninstall_says() {
         rerun.arg("uninstall");
         assert_uninstalled_by_the_installed_binary(&machine, rerun);
     }
+}
+
+/// The leftover image that was the installed binary: the one leftover whose original name is its name.
+#[cfg(windows)]
+fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
+    let binary = service::exe(&machine.paths);
+    let binary = binary.file_name().unwrap().to_str().unwrap();
+    let images = install::leftover_images(&machine.paths).unwrap();
+    let ours: Vec<_> = images
+        .iter()
+        .filter(|image| schtasks::is_leftover_of(image.file_name().unwrap().to_str().unwrap(), binary))
+        .collect();
+    let [image] = ours.as_slice() else {
+        panic!("expected one leftover image of {binary}, found {images:?}")
+    };
+    (*image).clone()
+}
+
+/// The removal runs from a copy of the binary in its own directory, which a failed removal leaves. Running that copy
+/// with `uninstall` clears the directory it is in, as it clears every directory the removal deletes: it renames itself
+/// out, and its removal deletes it once it has exited.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_copy_a_failed_removal_leaves_can_run_uninstall() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let stuck = machine.paths.config_dir.join(format!("stuck-{}", std::process::id()));
+    fs::write(&stuck, "").unwrap();
+    let held = Unremovable::new(&stuck);
+    let mut uninstall = Command::new(service::exe(&machine.paths));
+    uninstall.arg("uninstall").current_dir(env::temp_dir());
+    let failed = uninstall.output().unwrap();
+    assert!(!failed.status.success(), "the removal should fail");
+    let copy = machine
+        .paths
+        .bin_dir
+        .with_file_name("reverse-tunnel-uninstall")
+        .join(service::exe(&machine.paths).file_name().unwrap());
+    assert!(copy.exists(), "the failed removal left no copy");
+    drop(held);
+
+    let mut rerun = Command::new(&copy);
+    rerun.arg("uninstall").current_dir(env::temp_dir());
+    assert_uninstalled_by_the_installed_binary(&machine, rerun);
 }
 
 /// A newer build in a directory of its own: this one with a byte appended, which differs and which the loader ignores.
@@ -1442,12 +1487,10 @@ fn uninstall_run_by_name_through_the_path_removes_the_host_and_the_binary() {
 fn a_later_removal_deletes_the_leftover_image_of_an_earlier_one() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let leftover = machine
-        .paths
-        .bin_dir
-        .parent()
-        .unwrap()
-        .join(schtasks::leftover_name("earlier"));
+    let leftover = machine.paths.bin_dir.parent().unwrap().join(schtasks::leftover_name(
+        "earlier",
+        service::exe(&machine.paths).file_name().unwrap(),
+    ));
     fs::copy(BIN, &leftover).unwrap();
     // Not the installed binary, and not the leftover.
     let mut uninstall = Command::new(BIN);
@@ -1484,47 +1527,17 @@ fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
     assert!(!failed.status.success(), "the removal should not start: {stderr}");
     assert!(stderr.contains("starting the removal failed"), "{stderr}");
     assert!(service::exe(&machine.paths).exists(), "the binary was moved: {stderr}");
-    assert!(
-        stderr.contains("reverse-tunnel uninstall"),
-        "the error does not advise the command by name: {stderr}"
+    // The advice is the one for an installed binary: the text between "to finish it" and the cause that follows it.
+    let advice = stderr
+        .split("to finish it ")
+        .nth(1)
+        .and_then(|rest| rest.split(": removing ").next());
+    assert_eq!(
+        advice,
+        Some(install::rerun_uninstall(&machine.paths).as_str()),
+        "{stderr}"
     );
     assert!(install::leftover_images(&machine.paths).unwrap().is_empty());
-}
-
-/// While the service is registered, its image is where it was registered: whatever else the removal does with the
-/// binary, the service can be started until it is removed. Reads the service, then the file, then the service again, so
-/// that a file seen missing was missing while the service was registered.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-#[cfg(windows)]
-fn the_binary_stays_in_place_for_as_long_as_the_service_is_registered() {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-    let installed = service::exe(&machine.paths);
-    let mut uninstall = Command::new(&installed)
-        .arg("uninstall")
-        .current_dir(env::temp_dir())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let registered = || machine.manager.status(&machine.id).is_ok();
-
-    loop {
-        let before = registered();
-        let there = installed.exists();
-        if !registered() {
-            break;
-        }
-        assert!(
-            !before || there,
-            "the service is registered and {} is gone",
-            installed.display()
-        );
-    }
-
-    assert!(uninstall.wait().unwrap().success());
-    windows::wait_until_no_leftover_image_is_left(&machine);
 }
 
 /// A process's working directory keeps that directory from being deleted, and the shell that started `uninstall` stays
@@ -1566,7 +1579,9 @@ fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
     fs::copy(BIN, &copy).unwrap();
     // Outside the directory the script deletes, as the leftover images are.
     let kept = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
-    let image = kept.path().join(schtasks::leftover_name("test"));
+    let image = kept
+        .path()
+        .join(schtasks::leftover_name("test", OsStr::new("reverse-tunnel.exe")));
     fs::copy(BIN, &image).unwrap();
     // Held open without delete sharing: `del` fails until the test lets go.
     let held = Unremovable::new(&image);

@@ -1,10 +1,14 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::*;
 
+/// Where the leftover images go, in these tests.
+const LEFTOVERS: &str = r"C:\";
+
 fn failure_of(state: TaskState, dir_present: bool) -> String {
-    match removal_outcome(state, Path::new(r"C:\removal"), dir_present) {
+    match removal_outcome(state, Path::new(r"C:\removal"), dir_present, Path::new(LEFTOVERS)) {
         Some(WaitOutcome::Failed(why)) => why,
         _ => panic!("the removal should have failed"),
     }
@@ -12,13 +16,13 @@ fn failure_of(state: TaskState, dir_present: bool) -> String {
 
 #[test]
 fn a_removal_task_that_runs_is_waited_for() {
-    assert!(removal_outcome(TaskState::Running, Path::new(r"C:\removal"), true).is_none());
+    assert!(removal_outcome(TaskState::Running, Path::new(r"C:\removal"), true, Path::new(LEFTOVERS)).is_none());
 }
 
 #[test]
 fn a_task_that_deleted_itself_after_the_directory_is_a_removal_that_succeeded() {
     assert!(matches!(
-        removal_outcome(TaskState::Gone, Path::new(r"C:\removal"), false),
+        removal_outcome(TaskState::Gone, Path::new(r"C:\removal"), false, Path::new(LEFTOVERS)),
         Some(WaitOutcome::Ended)
     ));
 }
@@ -42,14 +46,20 @@ fn each_failed_step_of_the_removal_has_its_own_message() {
 
 #[test]
 fn a_removal_that_left_only_its_task_is_done_and_says_how_to_delete_it() {
-    let Some(WaitOutcome::LeftBehind(why)) = removal_outcome(TaskState::Ended(4), Path::new(r"C:\removal"), false)
-    else {
+    // The task did not reach its last step, which deletes the leftover images.
+    let Some(WaitOutcome::LeftBehind(why)) = removal_outcome(
+        TaskState::Ended(4),
+        Path::new(r"C:\removal"),
+        false,
+        Path::new(LEFTOVERS),
+    ) else {
         panic!("the removal's task is left, but the removal is not a failure");
     };
-    assert!(why.contains("schtasks /Delete /TN reverse-tunnel-uninstall"), "{why}");
-    // The task did not reach its last step, which deletes the leftover images.
-    assert!(why.contains(r"C:\.reverse-tunnel.*.exe"), "{why}");
-    assert!(!why.contains("failed") && !why.contains("log"), "{why}");
+
+    assert_eq!(
+        why,
+        r"the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN reverse-tunnel-uninstall`, and the files C:\.reverse-tunnel.* by hand"
+    );
 }
 
 #[test]
@@ -76,6 +86,11 @@ fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_
     );
 }
 
+/// The leftover file in `dir` that renamed a file called `original`, called `id`.
+fn leftover_in(dir: &Path, id: &str, original: &str) -> PathBuf {
+    dir.join(schtasks::leftover_name(id, OsStr::new(original)))
+}
+
 #[test]
 fn once_the_installed_binary_is_gone_the_rerun_advice_names_the_leftover_images_as_binaries_to_run() {
     let (dir, paths) = installed();
@@ -85,8 +100,8 @@ fn once_the_installed_binary_is_gone_the_rerun_advice_names_the_leftover_images_
         "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
     );
     let images = [
-        dir.path().join(schtasks::leftover_name("a")),
-        dir.path().join(schtasks::leftover_name("b")),
+        leftover_in(dir.path(), "a", "reverse-tunnel.exe"),
+        leftover_in(dir.path(), "b", "reverse-tunnel.exe"),
     ];
     for image in &images {
         fs::write(image, "").unwrap();
@@ -100,6 +115,29 @@ fn once_the_installed_binary_is_gone_the_rerun_advice_names_the_leftover_images_
         format!(
             "run {} in an elevated prompt (the installed binary is gone)",
             images.iter().map(by_image).collect::<Vec<_>>().join(" or ")
+        )
+    );
+}
+
+#[test]
+fn the_rerun_advice_does_not_name_a_leftover_that_was_another_program() {
+    let (dir, paths) = installed();
+    fs::remove_file(service::exe(&paths)).unwrap();
+    // frpc is renamed by the same removal, and running it with `uninstall` would not uninstall anything.
+    fs::write(leftover_in(dir.path(), "a", "frpc-0.1.exe"), "").unwrap();
+
+    assert_eq!(
+        rerun_uninstall(&paths),
+        "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
+    );
+
+    let ours = leftover_in(dir.path(), "b", "REVERSE-TUNNEL.EXE");
+    fs::write(&ours, "").unwrap();
+    assert_eq!(
+        rerun_uninstall(&paths),
+        format!(
+            "run `\"{}\" uninstall` in an elevated prompt (the installed binary is gone)",
+            ours.display()
         )
     );
 }
@@ -252,7 +290,7 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
     let _running = running(&paths.bin_dir.join("frpc-0.1.exe"));
     fs::write(paths.bin_dir.join("upgrade-1.exe"), "").unwrap();
 
-    remove_bin_dir(&paths).unwrap();
+    remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
 
     assert!(!paths.bin_dir.exists());
     let images = leftover_images(&paths).unwrap();
@@ -261,10 +299,42 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
     };
     assert_eq!(image.parent(), Some(dir.path()));
     let name = image.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(
-        name.starts_with(schtasks::LEFTOVER_PREFIX) && name.ends_with(schtasks::LEFTOVER_SUFFIX),
-        "{name}"
-    );
+    assert!(schtasks::is_leftover_of(&name, "frpc-0.1.exe"), "{name}");
+}
+
+#[test]
+fn a_running_image_in_any_directory_the_removal_deletes_is_renamed() {
+    let (dir, paths) = installed();
+    for removed in [&paths.config_dir, &paths.log_dir] {
+        fs::create_dir_all(removed).unwrap();
+    }
+    fs::write(uninstalling_file(&paths), "").unwrap();
+    let _running = [
+        running(&paths.bin_dir.join("a.exe")),
+        running(&paths.config_dir.join("b.exe")),
+        running(&paths.log_dir.join("c.exe")),
+    ];
+
+    remove_files(&paths).unwrap();
+
+    for left in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
+        assert!(!left.exists(), "{}", left.display());
+    }
+    let images = leftover_images(&paths).unwrap();
+    let names: Vec<_> = images
+        .iter()
+        .map(|image| {
+            assert_eq!(image.parent(), Some(dir.path()));
+            image.file_name().unwrap().to_string_lossy().into_owned()
+        })
+        .collect();
+    for original in ["a.exe", "b.exe", "c.exe"] {
+        let renamed = names
+            .iter()
+            .filter(|name| schtasks::is_leftover_of(name, original))
+            .count();
+        assert_eq!(renamed, 1, "{original}: {names:?}");
+    }
 }
 
 #[test]
@@ -272,7 +342,7 @@ fn nothing_is_renamed_when_everything_can_be_deleted() {
     let (_dir, paths) = installed();
     fs::write(paths.bin_dir.join("frpc-0.1.exe"), "").unwrap();
 
-    remove_bin_dir(&paths).unwrap();
+    remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
 
     assert!(!paths.bin_dir.exists());
     assert!(leftover_images(&paths).unwrap().is_empty());
@@ -283,7 +353,7 @@ fn a_bin_dir_that_is_gone_is_removed() {
     let (_dir, paths) = installed();
     fs::remove_dir_all(&paths.bin_dir).unwrap();
 
-    remove_bin_dir(&paths).unwrap();
+    remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
 }
 
 #[test]
@@ -292,7 +362,10 @@ fn a_file_that_can_be_neither_deleted_nor_renamed_fails_the_removal_naming_both(
     let stuck = paths.bin_dir.join("frpc-0.1.exe");
     let _held = held(&stuck);
 
-    let err = format!("{:#}", remove_bin_dir(&paths).unwrap_err());
+    let err = format!(
+        "{:#}",
+        remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
+    );
 
     assert!(err.contains("frpc-0.1.exe"), "{err}");
     assert!(err.contains("moving it to"), "{err}");
@@ -307,7 +380,10 @@ fn a_directory_that_cannot_be_deleted_fails_the_removal_and_is_not_renamed() {
     fs::create_dir_all(&sub).unwrap();
     let _running = running(&sub.join("frpc-0.1.exe"));
 
-    let err = format!("{:#}", remove_bin_dir(&paths).unwrap_err());
+    let err = format!(
+        "{:#}",
+        remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
+    );
 
     assert!(err.contains("old"), "{err}");
     assert!(sub.exists());

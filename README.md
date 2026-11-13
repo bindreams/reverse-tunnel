@@ -193,7 +193,7 @@ Revoking does not cut the host's current connection; `ctl revoke` prints the com
 
 **Windows**: `uninstall` also takes `%ProgramFiles%\reverse-tunnel` off the system `PATH`. `uninstall` refuses to run in a
 shell whose working directory is inside a folder it deletes: change to another directory first. A removal that cannot
-delete a running copy of the binary moves it to `%ProgramFiles%\.reverse-tunnel.*.exe` and deletes it once it has
+delete a running file (the binary, say) moves it to `%ProgramFiles%\.reverse-tunnel.*` and deletes it once it has
 exited; after a failed removal those files are deleted by the next successful one. A failed removal's message says why
 and names the command to finish it; its log is `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. Another shell or
 program with its working directory in the install folder holds it: the removal then fails and says so, and running

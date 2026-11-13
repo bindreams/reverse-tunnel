@@ -1,5 +1,6 @@
 //! The one-time task that finishes an `uninstall` on Windows, through Task Scheduler's COM API.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
@@ -176,20 +177,40 @@ fn connect() -> Result<ITaskFolder> {
     }
 }
 
-/// The name of a file that a removal could not delete, which it renamed (see `install::remove_bin_dir`) so that its
-/// folder can go: `.reverse-tunnel.<id>.exe`, in the folder that holds the bin dir. The removal task's last step deletes
-/// every such file once it can (see `removal_script`).
-pub const LEFTOVER_PREFIX: &str = ".reverse-tunnel.";
-pub const LEFTOVER_SUFFIX: &str = ".exe";
+/// What a leftover's name starts with. A leftover is a file that a removal could not delete, which it renamed (see
+/// `install::remove_or_rename`) so that its folder can go: `.reverse-tunnel.<id>.<the name it had>`, in the folder that
+/// holds the bin dir. The removal task's last step deletes every such file once it can (see `removal_script`).
+const LEFTOVER_PREFIX: &str = ".reverse-tunnel.";
 
-/// The leftover file called `id`.
-pub fn leftover_name(id: &str) -> String {
-    format!("{LEFTOVER_PREFIX}{id}{LEFTOVER_SUFFIX}")
+/// The leftover file that renames the file called `original`, called `id`.
+pub fn leftover_name(id: &str, original: &OsStr) -> OsString {
+    let mut name = OsString::from(format!("{LEFTOVER_PREFIX}{id}."));
+    name.push(original);
+    name
 }
 
 /// The pattern that every leftover file in `dir` matches, for `cmd`.
 pub fn leftover_pattern(dir: &Path) -> PathBuf {
-    dir.join(format!("{LEFTOVER_PREFIX}*{LEFTOVER_SUFFIX}"))
+    dir.join(format!("{LEFTOVER_PREFIX}*"))
+}
+
+/// What follows `LEFTOVER_PREFIX` in `name`, which `cmd` matches whatever the case.
+fn after_prefix(name: &str) -> Option<&str> {
+    let (prefix, rest) = (name.get(..LEFTOVER_PREFIX.len())?, name.get(LEFTOVER_PREFIX.len()..)?);
+    prefix.eq_ignore_ascii_case(LEFTOVER_PREFIX).then_some(rest)
+}
+
+/// Whether the file called `name` is a leftover: whether `leftover_pattern` matches it.
+pub fn is_leftover(name: &str) -> bool {
+    after_prefix(name).is_some()
+}
+
+/// Whether the file called `name` is a leftover of a file that was called `original`.
+pub fn is_leftover_of(name: &str, original: &str) -> bool {
+    // The id is hex, so the first dot ends it.
+    after_prefix(name)
+        .and_then(|rest| rest.split_once('.'))
+        .is_some_and(|(_id, kept)| kept.eq_ignore_ascii_case(original))
 }
 
 /// What `cmd` runs for the removal task: `uninstall --finish` from `copy`, the copy's deletion, then the directory
@@ -198,16 +219,17 @@ pub fn leftover_pattern(dir: &Path) -> PathBuf {
 /// 2 the copy, 3 the directory, 4 the task. A program is judged by its exit code, a builtin by what it left, since
 /// `del` and `rmdir` report a file that something holds only in their message.
 ///
-/// A last step deletes the leftover files in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`),
-/// and checks that none is left, and pauses and tries again until none is. It comes after the task's own deletion:
-/// until then `uninstall`'s waiter is alive and may be running a leftover, and the waiter ends once the task is gone.
+/// A last step deletes the leftover files, read-only ones too, in `leftovers`, the folder that holds the bin dir (see
+/// `leftover_pattern`), and checks that none is left, and pauses and tries again until none is. It comes after the
+/// task's own deletion: until then `uninstall`'s waiter is alive and may be running a leftover, and the waiter ends
+/// once the task is gone.
 /// `ping` is the pause between two checks, as `timeout` needs a console, which a task has none of.
 pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
     let pattern = leftover_pattern(leftovers);
     let pattern = pattern.display();
     format!(
-        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4) & for /l %i in (1,0,2) do ((del /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
+        r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1) & del /q "{copy}" >> "{log}" 2>&1 & (if exist "{copy}" exit /b 2) & rmdir /s /q "{dir}" & (if exist "{dir}" exit /b 3) & (schtasks /Delete /F /TN {name} || exit /b 4) & for /l %i in (1,0,2) do ((del /f /q "{pattern}" >nul 2>&1) & (if not exist "{pattern}" exit /b 0) & ping -n 2 127.0.0.1 >nul)"#
     )
 }
 
