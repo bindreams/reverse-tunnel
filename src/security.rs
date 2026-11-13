@@ -157,19 +157,6 @@ unsafe fn string_of_sid(sid: PSID) -> io::Result<String> {
 pub struct Sid(Vec<u32>);
 
 impl Sid {
-    /// The SID of the NT authority (`S-1-5-`) with these sub-authorities.
-    pub fn nt(sub_authorities: &[u32]) -> Sid {
-        debug_assert!(sub_authorities.len() <= 15, "a SID has at most 15 sub-authorities");
-        // Revision 1 and the count; then the rest of the six bytes of the authority (5, big-endian); then the
-        // sub-authorities. Each is a word of memory, which is how Windows reads them.
-        let mut words = vec![
-            u32::from_ne_bytes([1, sub_authorities.len() as u8, 0, 0]),
-            u32::from_ne_bytes([0, 0, 0, 5]),
-        ];
-        words.extend_from_slice(sub_authorities);
-        Sid(words)
-    }
-
     /// The SID that `text` (`S-1-5-...`) spells.
     pub fn parse(text: &str) -> io::Result<Sid> {
         let text: Vec<u16> = text.encode_utf16().chain([0]).collect();

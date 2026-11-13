@@ -72,10 +72,7 @@ fn the_line_names_each_process_to_wait_for_by_id_and_image() {
         image: image.into(),
     };
 
-    let line = waiting_line(
-        "reverse-tunnel",
-        &[process(12, "reverse-tunnel.exe"), process(34, "frpc.exe")],
-    );
+    let line = waiting_line(&[process(12, "reverse-tunnel.exe"), process(34, "frpc.exe")]);
 
     assert_eq!(
         line,
@@ -85,7 +82,7 @@ fn the_line_names_each_process_to_wait_for_by_id_and_image() {
 
 #[test]
 fn the_line_says_process_for_one() {
-    let line = waiting_line("x", &[this_process()]);
+    let line = waiting_line(&[this_process()]);
 
     assert!(line.starts_with("waiting for 1 process of "), "{line}");
 }
@@ -104,13 +101,20 @@ fn a_listing_of_another_level_than_the_one_asked_for_is_refused() {
     assert!(err.to_string().contains("level 0"), "{err}");
 }
 
-/// A buffer is freed as the class of the level it came back with; for a level that is none of the two, as the class
-/// that was asked for.
+/// A buffer is freed as the class of its level, and only for the two levels whose layout is known: freeing a buffer
+/// of another layout risks the heap.
 #[test]
-fn a_buffer_is_freed_as_the_class_of_its_level_or_else_as_the_one_asked_for() {
-    assert_eq!(class_of(0), WTSTypeProcessInfoLevel0);
-    assert_eq!(class_of(1), WTSTypeProcessInfoLevel1);
-    assert_eq!(class_of(7), WTSTypeProcessInfoLevel1);
+fn a_buffer_is_freed_only_as_the_class_of_a_level_that_is_known() {
+    assert_eq!(class_of(0), Some(WTSTypeProcessInfoLevel0));
+    assert_eq!(class_of(1), Some(WTSTypeProcessInfoLevel1));
+    assert_eq!(class_of(7), None);
+}
+
+#[test]
+fn a_listing_of_an_unknown_level_is_refused() {
+    let err = Buffer::new(null_mut(), 0, 7).err().expect("level 7 is not level 1");
+
+    assert!(err.to_string().contains("level 7"), "{err}");
 }
 
 /// An image name is for the log line only, so it never fails the wait.
@@ -124,7 +128,7 @@ fn an_image_name_that_is_not_utf16_is_decoded_with_replacement_characters() {
 
 #[test]
 fn a_service_that_no_process_runs_as_has_no_process_to_wait_for() {
-    wait_until_none_runs_as("reverse-tunnel-no-such-service").unwrap();
+    wait_until_none_runs_as(&Account::of_service("reverse-tunnel-no-such-service")).unwrap();
 }
 
 /// What the wait names is what it waits for: a process that cannot be waited for is not named.
@@ -143,25 +147,38 @@ fn only_the_processes_that_were_opened_are_waited_on() {
     assert!(not_ours.is_empty());
 }
 
-/// A reused id that cannot be opened is not ours, once the listing no longer has it under the service's SID.
+/// A reused id that cannot be opened is not ours, once the listing no longer has it under the service's SID; what is
+/// skipped is said, with the process and the error.
 #[test]
-fn a_process_that_cannot_be_opened_and_is_no_longer_listed_is_skipped() {
+fn a_process_that_cannot_be_opened_and_is_no_longer_listed_is_skipped_and_said() {
     let listing = [Listed {
         pid: 8,
         image: "other.exe".into(),
     }];
+    let process = Listed {
+        pid: 4,
+        image: "frpc.exe".into(),
+    };
 
-    assert!(skip_if_unlisted(anyhow!("access denied"), 4, &listing).is_ok());
+    let said = skip_if_unlisted(anyhow!("access denied"), &process, &listing).unwrap();
+
+    assert!(said.contains("4 (frpc.exe)"), "{said}");
+    assert!(said.contains("access denied"), "{said}");
 }
 
 #[test]
 fn a_process_that_cannot_be_opened_and_is_still_listed_fails_with_the_error() {
-    let listing = [Listed {
+    let process = Listed {
         pid: 4,
         image: "frpc.exe".into(),
-    }];
+    };
 
-    let err = skip_if_unlisted(anyhow!("opening process 4 (frpc.exe): access denied"), 4, &listing).unwrap_err();
+    let err = skip_if_unlisted(
+        anyhow!("opening process 4 (frpc.exe): access denied"),
+        &process,
+        std::slice::from_ref(&process),
+    )
+    .unwrap_err();
 
     assert!(
         err.to_string().contains("opening process 4 (frpc.exe): access denied"),

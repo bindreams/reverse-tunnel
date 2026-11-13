@@ -1243,6 +1243,7 @@ fn install_refuses_a_data_directory_someone_else_made() {
 #[cfg(windows)]
 fn install_removes_a_stray_ace_from_secrets() {
     let machine = Machine::begin();
+    let everyone = windows::sid("S-1-1-0");
     let code = join_code("tunnel.example.test");
     machine.install(&code);
     // An Administrator's hand edit: Everyone may read the tokens.
@@ -1250,7 +1251,7 @@ fn install_removes_a_stray_ace_from_secrets() {
     output_of("icacls", &[&secrets, "/grant", "*S-1-1-0:(OI)(CI)R"]);
     let token = machine.secrets().join("host.token");
     assert_ne!(
-        windows::effective_rights(&token, "S-1-1-0"),
+        windows::effective_rights(&token, &everyone),
         0,
         "the stray ACE did not reach the token"
     );
@@ -1258,11 +1259,11 @@ fn install_removes_a_stray_ace_from_secrets() {
     machine.install(&code);
 
     assert_eq!(
-        windows::effective_rights(&machine.paths.secrets_dir, "S-1-1-0"),
+        windows::effective_rights(&machine.paths.secrets_dir, &everyone),
         0,
         "Everyone has secrets/"
     );
-    assert_eq!(windows::effective_rights(&token, "S-1-1-0"), 0, "Everyone has a token");
+    assert_eq!(windows::effective_rights(&token, &everyone), 0, "Everyone has a token");
 }
 
 #[test]

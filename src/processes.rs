@@ -19,6 +19,7 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::account::Account;
 use crate::security::Sid;
+use crate::service::ACCOUNT;
 
 /// `WTSEnumerateProcessesExW`'s session id for every session.
 const WTS_ANY_SESSION: u32 = 0xFFFF_FFFE;
@@ -34,17 +35,16 @@ struct Listed {
     image: String,
 }
 
-/// Waits, with no cap, until no process runs as the virtual account of the service `service`
-/// (`NT SERVICE\<service>`): the system lists the processes with their users, and each one of the account is waited
-/// for, until a listing finds none. Each round that waits says for which. Only the processes of the account are
+/// Waits, with no cap, until no process runs as `account`, the virtual account of the service: the system lists the
+/// processes with their users, and each one of the account is waited for, until a listing finds none. Each round that waits says for which. Only the processes of the account are
 /// opened: one that has ended since the listing is gone, one whose id another process took is not ours, and one that
 /// cannot be opened or read for any other reason is not ours if a new listing no longer has it, and fails the wait if
 /// it does.
 ///
 /// goetia's `uninstall` returns while the service's processes are still ending (goetia#241), and Windows will not
 /// delete the image of a process that runs, or a file that it holds open. Delete this when goetia#241 is fixed.
-pub fn wait_until_none_runs_as(service: &str) -> Result<()> {
-    let sid = Account::of_service(service).to_sid();
+pub fn wait_until_none_runs_as(account: &Account) -> Result<()> {
+    let sid = Sid::parse(&account.sid()).context("the service account's SID")?;
     loop {
         let running = running_as(&sid).context("listing the processes of the service's account")?;
         if running.is_empty() {
@@ -54,7 +54,7 @@ pub fn wait_until_none_runs_as(service: &str) -> Result<()> {
         if handles.is_empty() {
             continue;
         }
-        println!("{}", waiting_line(service, &waited_on));
+        println!("{}", waiting_line(&waited_on));
         wait_for_exit(&handles).context("waiting for the service's processes to end")?;
     }
 }
@@ -67,32 +67,35 @@ fn open_all(running: &[Listed], sid: &Sid) -> Result<Vec<(Listed, OwnedHandle)>>
             Ok(handle) => opened.extend(handle.map(|handle| (process.clone(), handle))),
             Err(failure) => {
                 let listing = running_as(sid).context("listing the processes again after one could not be opened")?;
-                skip_if_unlisted(failure, process.pid, &listing)?;
+                println!("{}", skip_if_unlisted(failure, process, &listing)?);
             }
         }
     }
     Ok(opened)
 }
 
-/// Whether to go on without the process `pid`, which could not be opened or read (`failure`): its id may be a
-/// stranger's that took it since the first listing, so it is skipped if the `listing` made after the failure no longer
-/// has it under the service's SID, and the failure stands if it does.
-fn skip_if_unlisted(failure: anyhow::Error, pid: u32, listing: &[Listed]) -> Result<()> {
-    if listing.iter().any(|process| process.pid == pid) {
+/// Whether to go on without `process`, which could not be opened or read (`failure`): its id may be a stranger's that
+/// took it since the first listing, so it is skipped if the `listing` made after the failure no longer has it under
+/// the service's SID, and the failure stands if it does. A skip is returned as the line that says it.
+fn skip_if_unlisted(failure: anyhow::Error, process: &Listed, listing: &[Listed]) -> Result<String> {
+    if listing.iter().any(|listed| listed.pid == process.pid) {
         return Err(failure);
     }
-    Ok(())
+    Ok(format!(
+        "not waiting for process {} ({}), which is no longer one of the account's: {failure:#}",
+        process.pid, process.image
+    ))
 }
 
-/// What is said before waiting for `processes` of the account of the service `service`.
-fn waiting_line(service: &str, processes: &[Listed]) -> String {
+/// What is said before waiting for `processes` of the service's account.
+fn waiting_line(processes: &[Listed]) -> String {
     let each: Vec<String> = processes
         .iter()
         .map(|process| format!("{} {}", process.pid, process.image))
         .collect();
     let noun = if processes.len() == 1 { "process" } else { "processes" };
     format!(
-        r"waiting for {} {noun} of NT SERVICE\{service} to end: {}",
+        "waiting for {} {noun} of {ACCOUNT} to end: {}",
         processes.len(),
         each.join(", ")
     )
@@ -127,12 +130,12 @@ unsafe fn image_name(name: PCWSTR) -> String {
     String::from_utf16_lossy(unsafe { name.as_wide() })
 }
 
-/// The class that frees a buffer of `level`: its own, or, for a level that is neither, the one the call was asked for.
-fn class_of(level: u32) -> WTS_TYPE_CLASS {
+/// The class that frees a buffer of `level`; none for a level whose layout is not known.
+fn class_of(level: u32) -> Option<WTS_TYPE_CLASS> {
     match level {
-        0 => WTSTypeProcessInfoLevel0,
-        1 => WTSTypeProcessInfoLevel1,
-        _ => WTSTypeProcessInfoLevel1,
+        0 => Some(WTSTypeProcessInfoLevel0),
+        1 => Some(WTSTypeProcessInfoLevel1),
+        _ => None,
     }
 }
 
@@ -165,14 +168,16 @@ impl Buffer {
         Buffer::new(first, count, level)
     }
 
-    /// What the enumeration returned. It is freed as the class of the level that it returned, whether or not that is
-    /// the level asked for, which is an error.
+    /// What the enumeration returned. A level that is not the one asked for is an error, and the buffer is freed as the
+    /// class of its level, except for a level whose layout is not known: that buffer is leaked, because freeing it as
+    /// a layout it does not have risks the heap.
     fn new(first: *mut u16, count: u32, level: u32) -> io::Result<Buffer> {
-        let buffer = Buffer {
-            first,
-            count,
-            class: class_of(level),
+        let Some(class) = class_of(level) else {
+            return Err(io::Error::other(format!(
+                "listing the processes gave level {level}, not level {LEVEL}"
+            )));
         };
+        let buffer = Buffer { first, count, class };
         if level != LEVEL {
             return Err(io::Error::other(format!(
                 "listing the processes gave level {level}, not level {LEVEL}"

@@ -18,10 +18,3 @@ fn ensure_takes_the_service_from_the_account_name() {
         "a name outside NT SERVICE is not a virtual account"
     );
 }
-
-#[test]
-fn the_binary_sid_of_a_service_is_the_one_its_text_spells() {
-    let known = crate::security::Sid::parse(TRUSTED_INSTALLER).unwrap();
-
-    assert!(Account::of_service("TrustedInstaller").to_sid() == known);
-}

@@ -41,13 +41,17 @@ const READ_EXECUTE: u32 = 0x1200a9;
 const MODIFY: u32 = 0x1301bf;
 const WRITE: u32 = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000;
 
-/// The rights `path`'s DACL gives the SID `sid`, as Windows works them out from every ACE that names it.
-pub fn effective_rights(path: &Path, sid: &str) -> u32 {
+/// The SID that `text` spells.
+pub fn sid(text: &str) -> Sid {
+    Sid::parse(text).unwrap_or_else(|err| panic!("{text} is not a SID: {err}"))
+}
+
+/// The rights `path`'s DACL gives the SID `trustee_sid`, as Windows works them out from every ACE that names it.
+pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
     let wide = |text: &std::ffi::OsStr| -> Vec<u16> {
         use std::os::windows::ffi::OsStrExt;
         text.encode_wide().chain([0]).collect()
     };
-    let trustee_sid = Sid::parse(sid).unwrap_or_else(|err| panic!("{sid} is not a SID: {err}"));
     let (mut dacl, mut descriptor) = (null_mut(), null_mut());
     let mut rights = 0;
     // SAFETY: the strings are NUL-terminated, the out pointers are live, and what Windows allocated is freed below.
@@ -74,7 +78,7 @@ pub fn effective_rights(path: &Path, sid: &str) -> u32 {
         assert_eq!(
             GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights),
             0,
-            "{sid} on {}",
+            "the rights of a SID on {}",
             path.display()
         );
         LocalFree(descriptor);
@@ -87,7 +91,8 @@ pub fn effective_rights(path: &Path, sid: &str) -> u32 {
 pub fn assert_installed_as_specified(machine: &Machine) {
     let paths = &machine.paths;
     let service_sid = account::ensure(service::ACCOUNT).unwrap().sid();
-    let rights = |path: &Path, sid: &str| effective_rights(path, sid);
+    // The text names the SID in a failure; the rights are asked of its binary form.
+    let rights = |path: &Path, text: &str| effective_rights(path, &sid(text));
     let is = |path: &Path, sid: &str, wanted: u32| {
         assert_eq!(
             rights(path, sid) & wanted,
