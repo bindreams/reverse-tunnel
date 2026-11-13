@@ -9,14 +9,15 @@ use windows::core::PCWSTR;
 use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, HANDLE, WAIT_OBJECT_0};
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::RemoteDesktop::{
-    WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFO_EXW, WTSEnumerateProcessesExW, WTSFreeMemoryExW,
+    WTS_CURRENT_SERVER_HANDLE, WTS_PROCESS_INFO_EXW, WTS_TYPE_CLASS, WTSEnumerateProcessesExW, WTSFreeMemoryExW,
+    WTSTypeProcessInfoLevel0, WTSTypeProcessInfoLevel1,
 };
 use windows_sys::Win32::System::Threading::{
     INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     WaitForSingleObject,
 };
 
-use crate::account;
+use crate::account::Account;
 use crate::security::Sid;
 
 /// `WTSEnumerateProcessesExW`'s session id for every session.
@@ -33,39 +34,65 @@ struct Listed {
     image: String,
 }
 
-/// Waits, with no cap, until no process runs as the virtual account `account` (`NT SERVICE\<service>`): the system
-/// lists the processes with their users, and each one of the account is waited for, until a listing finds none. Each
-/// round that finds some says which. Only the processes of the account are opened: one that has ended since the
-/// listing is gone, one whose id another process took is not ours, and one that cannot be opened or read for any other
-/// reason fails the wait.
+/// Waits, with no cap, until no process runs as the virtual account of the service `service`
+/// (`NT SERVICE\<service>`): the system lists the processes with their users, and each one of the account is waited
+/// for, until a listing finds none. Each round that waits says for which. Only the processes of the account are
+/// opened: one that has ended since the listing is gone, one whose id another process took is not ours, and one that
+/// cannot be opened or read for any other reason is not ours if a new listing no longer has it, and fails the wait if
+/// it does.
 ///
 /// goetia's `uninstall` returns while the service's processes are still ending (goetia#241), and Windows will not
 /// delete the image of a process that runs, or a file that it holds open. Delete this when goetia#241 is fixed.
-pub fn wait_until_none_runs_as(account: &str) -> Result<()> {
-    let sid = Sid::parse(&account::ensure(account)?.sid()).context("the SID of the account")?;
+pub fn wait_until_none_runs_as(service: &str) -> Result<()> {
+    let sid = Account::of_service(service).to_sid();
     loop {
         let running = running_as(&sid).context("listing the processes of the service's account")?;
         if running.is_empty() {
             return Ok(());
         }
-        println!("{}", waiting_line(account, &running));
-        let mut handles = Vec::new();
-        for process in &running {
-            handles.extend(open(process, &sid)?);
+        let (waited_on, handles): (Vec<Listed>, Vec<OwnedHandle>) = open_all(&running, &sid)?.into_iter().unzip();
+        if handles.is_empty() {
+            continue;
         }
+        println!("{}", waiting_line(service, &waited_on));
         wait_for_exit(&handles).context("waiting for the service's processes to end")?;
     }
 }
 
-/// What is said before waiting for `processes` of the account `name`.
-fn waiting_line(name: &str, processes: &[Listed]) -> String {
+/// Each of `running` that is `sid`'s, opened to wait for it.
+fn open_all(running: &[Listed], sid: &Sid) -> Result<Vec<(Listed, OwnedHandle)>> {
+    let mut opened = Vec::new();
+    for process in running {
+        match open(process, sid) {
+            Ok(handle) => opened.extend(handle.map(|handle| (process.clone(), handle))),
+            Err(failure) => {
+                let listing = running_as(sid).context("listing the processes again after one could not be opened")?;
+                skip_if_unlisted(failure, process.pid, &listing)?;
+            }
+        }
+    }
+    Ok(opened)
+}
+
+/// Whether to go on without the process `pid`, which could not be opened or read (`failure`): its id may be a
+/// stranger's that took it since the first listing, so it is skipped if the `listing` made after the failure no longer
+/// has it under the service's SID, and the failure stands if it does.
+fn skip_if_unlisted(failure: anyhow::Error, pid: u32, listing: &[Listed]) -> Result<()> {
+    if listing.iter().any(|process| process.pid == pid) {
+        return Err(failure);
+    }
+    Ok(())
+}
+
+/// What is said before waiting for `processes` of the account of the service `service`.
+fn waiting_line(service: &str, processes: &[Listed]) -> String {
     let each: Vec<String> = processes
         .iter()
         .map(|process| format!("{} {}", process.pid, process.image))
         .collect();
     let noun = if processes.len() == 1 { "process" } else { "processes" };
     format!(
-        "waiting for {} {noun} of {name} to end: {}",
+        r"waiting for {} {noun} of NT SERVICE\{service} to end: {}",
         processes.len(),
         each.join(", ")
     )
@@ -73,30 +100,48 @@ fn waiting_line(name: &str, processes: &[Listed]) -> String {
 
 /// The processes that run as the user `sid`. The system lists each process's user in one call, and only the
 /// processes of `sid` are read further.
-fn running_as(sid: &Sid) -> Result<Vec<Listed>> {
+fn running_as(sid: &Sid) -> io::Result<Vec<Listed>> {
     let buffer = Buffer::list()?;
-    buffer
+    Ok(buffer
         .entries()
         .iter()
         // SAFETY: the user is null or a SID that Windows wrote, which `buffer` keeps.
         .filter(|entry| unsafe { sid.is(entry.pUserSid) })
-        .map(|entry| {
+        .map(|entry| Listed {
+            pid: entry.ProcessId,
             // SAFETY: Windows wrote a NUL-terminated name, which `buffer` keeps.
-            let image = unsafe { PCWSTR(entry.pProcessName).to_string() }
-                .with_context(|| format!("the image name of process {}", entry.ProcessId))?;
-            Ok(Listed {
-                pid: entry.ProcessId,
-                image,
-            })
+            image: unsafe { image_name(PCWSTR(entry.pProcessName)) },
         })
-        .collect()
+        .collect())
+}
+
+/// The image name `name`. It is for the log line only, so what is not UTF-16 is replaced, not an error.
+///
+/// # Safety
+/// `name` is null or NUL-terminated.
+unsafe fn image_name(name: PCWSTR) -> String {
+    if name.is_null() {
+        return String::new();
+    }
+    // SAFETY: the caller's promise.
+    String::from_utf16_lossy(unsafe { name.as_wide() })
+}
+
+/// The class that frees a buffer of `level`: its own, or, for a level that is neither, the one the call was asked for.
+fn class_of(level: u32) -> WTS_TYPE_CLASS {
+    match level {
+        0 => WTSTypeProcessInfoLevel0,
+        1 => WTSTypeProcessInfoLevel1,
+        _ => WTSTypeProcessInfoLevel1,
+    }
 }
 
 /// The buffer of `WTSEnumerateProcessesExW`, freed when it drops.
 struct Buffer {
     first: *mut u16,
     count: u32,
-    level: u32,
+    /// The class to free it as.
+    class: WTS_TYPE_CLASS,
 }
 
 impl Buffer {
@@ -120,10 +165,14 @@ impl Buffer {
         Buffer::new(first, count, level)
     }
 
-    /// What the enumeration returned. It is freed with the level that it returned, whether or not that is the level
-    /// asked for, which is an error.
+    /// What the enumeration returned. It is freed as the class of the level that it returned, whether or not that is
+    /// the level asked for, which is an error.
     fn new(first: *mut u16, count: u32, level: u32) -> io::Result<Buffer> {
-        let buffer = Buffer { first, count, level };
+        let buffer = Buffer {
+            first,
+            count,
+            class: class_of(level),
+        };
         if level != LEVEL {
             return Err(io::Error::other(format!(
                 "listing the processes gave level {level}, not level {LEVEL}"
@@ -145,8 +194,9 @@ impl Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         if !self.first.is_null() {
-            // SAFETY: the buffer, its entry count and its level are what the enumeration returned, and it is freed once.
-            unsafe { WTSFreeMemoryExW(self.level as i32, self.first.cast(), self.count) };
+            // SAFETY: the buffer, its entry count and its class are what the enumeration returned, and it is freed
+            // once.
+            unsafe { WTSFreeMemoryExW(self.class, self.first.cast(), self.count) };
         }
     }
 }

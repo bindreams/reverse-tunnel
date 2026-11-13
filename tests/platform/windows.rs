@@ -12,12 +12,12 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use reverse_tunnel::account;
 use reverse_tunnel::install;
-use reverse_tunnel::security::owner_of;
+use reverse_tunnel::security::{Sid, owner_of};
 use reverse_tunnel::system_path;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT,
-    TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID,
+    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::System::JobObjects::{
@@ -47,15 +47,11 @@ pub fn effective_rights(path: &Path, sid: &str) -> u32 {
         use std::os::windows::ffi::OsStrExt;
         text.encode_wide().chain([0]).collect()
     };
-    let (mut psid, mut dacl, mut descriptor) = (null_mut(), null_mut(), null_mut());
+    let trustee_sid = Sid::parse(sid).unwrap_or_else(|err| panic!("{sid} is not a SID: {err}"));
+    let (mut dacl, mut descriptor) = (null_mut(), null_mut());
     let mut rights = 0;
     // SAFETY: the strings are NUL-terminated, the out pointers are live, and what Windows allocated is freed below.
     unsafe {
-        assert_ne!(
-            ConvertStringSidToSidW(wide(sid.as_ref()).as_ptr(), &mut psid),
-            0,
-            "{sid} is not a SID"
-        );
         let path_text = wide(path.as_os_str());
         let found = GetNamedSecurityInfoW(
             path_text.as_ptr(),
@@ -73,7 +69,7 @@ pub fn effective_rights(path: &Path, sid: &str) -> u32 {
             MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
             TrusteeForm: TRUSTEE_IS_SID,
             TrusteeType: TRUSTEE_IS_UNKNOWN,
-            ptstrName: psid.cast(),
+            ptstrName: trustee_sid.as_psid().cast(),
         };
         assert_eq!(
             GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights),
@@ -82,7 +78,6 @@ pub fn effective_rights(path: &Path, sid: &str) -> u32 {
             path.display()
         );
         LocalFree(descriptor);
-        LocalFree(psid);
     }
     rights
 }

@@ -22,3 +22,9 @@ fn no_sid_is_a_null_sid() {
     // SAFETY: null is allowed.
     assert!(!unsafe { system.is(null_mut()) });
 }
+
+#[test]
+fn a_sid_of_the_nt_authority_is_built_from_its_sub_authorities() {
+    assert!(Sid::nt(&[32, 544]) == Sid::parse("S-1-5-32-544").unwrap());
+    assert!(Sid::nt(&[18]) != Sid::parse("S-1-5-32-544").unwrap());
+}

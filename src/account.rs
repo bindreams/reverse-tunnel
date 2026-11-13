@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 
 #[cfg(unix)]
 use crate::command::run;
+#[cfg(windows)]
+use crate::security::Sid;
 
 /// The ids of the account.
 #[cfg(unix)]
@@ -59,6 +61,12 @@ impl Account {
     pub fn sid(&self) -> String {
         let [a, b, c, d, e] = self.hash;
         format!("S-1-5-80-{a}-{b}-{c}-{d}-{e}")
+    }
+
+    /// The same SID in its binary form.
+    pub fn to_sid(&self) -> Sid {
+        let [a, b, c, d, e] = self.hash;
+        Sid::nt(&[80, a, b, c, d, e])
     }
 }
 
