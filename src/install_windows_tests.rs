@@ -572,3 +572,20 @@ fn a_binary_placed_with_no_pending_paths_needs_no_restart() {
     assert!(place_binary(Some(&paths), &exe, b"for the service", Replace::Always).unwrap());
     assert!(pending_file(&paths).exists());
 }
+
+#[test]
+fn without_a_terminal_the_advice_runs_the_binary_in_an_elevated_prompt_with_the_flags_still_missing() {
+    let err = format!(
+        "{:#}",
+        ensure_can_ask(false, true, Some("myhost"), true, false).unwrap_err()
+    );
+    let exe = env::current_exe().unwrap();
+    assert!(
+        err.ends_with(&format!(
+            "so a join code must be given: run `{} install --host myhost --join CODE` in an elevated prompt",
+            exe.display()
+        )),
+        "{err}"
+    );
+    ensure_can_ask(true, true, None, true, false).unwrap();
+}

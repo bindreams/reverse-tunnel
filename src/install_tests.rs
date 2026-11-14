@@ -19,7 +19,7 @@ fn code_for(domain: &str, token: &str, cert: &str) -> String {
     format!("rt1:{}", URL_SAFE_NO_PAD.encode(json.to_string()))
 }
 
-/// A dialog that is not a terminal and has nothing to read: for runs that must fail before they ask.
+/// For runs that must fail before they ask.
 fn no_dialog() -> Dialog<Cursor<&'static str>, Vec<u8>, Vec<u8>> {
     Dialog::new(Cursor::new(""), Vec::new(), Vec::new(), false)
 }
@@ -263,6 +263,77 @@ fn host_is_checked_before_the_join_code_is_asked_for() {
 }
 
 #[test]
+fn a_host_that_differs_from_the_config_is_refused() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let err = format!("{:#}", ensure_same_host(&machine.config(), "otherhost").unwrap_err());
+    assert_eq!(
+        err,
+        format!(
+            "--host \"otherhost\" differs from this host's name \"myhost\" in {}: `install` does not rename a \
+             host. To rename it, uninstall it and install it again with --host otherhost",
+            machine.config().display()
+        )
+    );
+    ensure_same_host(&machine.config(), "myhost").unwrap();
+}
+
+/// What `install` says when it must ask, cannot, and was given `host` and `join` as flags, on a machine whose
+/// `config.yaml` exists or not.
+fn no_terminal_error(machine: &Machine, host: Option<&str>, join: Option<&str>) -> String {
+    let opts = InstallOpts {
+        host: host.map(str::to_string),
+        join: join.map(str::to_string),
+        paths: machine.paths.clone(),
+    };
+    format!("{:#}", install(opts, &mut no_dialog()).unwrap_err())
+}
+
+#[test]
+fn a_new_host_without_a_terminal_names_both_missing_flags_in_a_command_that_runs() {
+    let exe = env::current_exe().unwrap();
+    let err = no_terminal_error(&Machine::new(), None, None);
+    assert!(
+        err.ends_with(&format!(
+            "so a host name and a join code must be given: run `sudo {} install --host NAME --join CODE`",
+            exe.display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_command_for_a_host_without_a_terminal_keeps_the_flags_already_given() {
+    let exe = env::current_exe().unwrap();
+    let err = no_terminal_error(&Machine::new(), Some("myhost"), None);
+    assert!(
+        err.ends_with(&format!(
+            "so a join code must be given: run `sudo {} install --host myhost --join CODE`",
+            exe.display()
+        )),
+        "{err}"
+    );
+    let err = no_terminal_error(&Machine::new(), None, Some(CODE));
+    assert!(
+        err.ends_with(&format!(
+            "so a host name must be given: run `sudo {} install --host NAME --join CODE`",
+            exe.display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_configured_host_without_its_bridge_files_asks_only_for_the_join_code() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    fs::remove_file(machine.paths.bridge_pem()).unwrap();
+    let err = no_terminal_error(&machine, None, None);
+    assert!(err.contains("so a join code must be given: run `sudo"), "{err}");
+    assert!(err.ends_with(" install --join CODE`"), "{err}");
+}
+
+#[test]
 fn join_code_never_stored() {
     let machine = Machine::new();
     let code = code_for("tunnel.example.test", "shared-token", CERT);
@@ -471,7 +542,7 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     manager.install(&outgoing, false).unwrap();
 
     let new = Binary::read(&machine.paths, &new).unwrap();
-    let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
+    let err = set_up(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
     // The outgoing binary is not executable: it is the new one's check that failed.
     let text = format!("{err:#}");
@@ -497,7 +568,7 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     let join = join::decode(CODE).unwrap();
     let manager = Fake::default();
 
-    let err = apply(
+    let err = set_up(
         &manager,
         &machine.account,
         &machine.paths,
@@ -530,7 +601,7 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
         .unwrap();
     let new = Binary::read(&machine.paths, &new).unwrap();
 
-    apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
+    set_up(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
 
     assert!(machine.dir.path().join("expected-env.ran").exists(), "the check ran");
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), new.bytes);

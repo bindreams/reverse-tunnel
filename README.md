@@ -32,7 +32,8 @@ chmod +x reverse-tunnel
 sudo ./reverse-tunnel install
 ```
 
-`install` asks two things, and prints where the config is saved and, at the end, what to run on the bridge:
+`install` asks for the host name and the join code, and prints where the config is saved and, at the end, what to run on
+the bridge:
 
 ```
 $ sudo ./reverse-tunnel install
@@ -44,16 +45,17 @@ Host is ready! Run this command on the bridge to accept the host:
   uv run ctl add minicooper sha256:...
 ```
 
-Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The
-questions go to stderr, and the rest (the line for the bridge, the `ssh` block) to stdout. The join code may be pasted wrapped over several lines.
-On a host that already has a `config.yaml`, `install` shows its host name and asks neither question, and it asks for
-the join code only if the bridge's files are missing. A host keeps its name: `--host` with another name fails; to
-rename, uninstall and install again, accept the new name and revoke the old. For such a host the closing line reads "If
-the bridge does not know this host yet, run:", since the bridge may know it already.
+Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The join
+code may be pasted wrapped over several lines. On a host that already has a `config.yaml`, `install` asks no host name
+and prints neither the "Setting up" lines nor `Hostname:`; it asks for the join code only if the bridge's files are
+missing. A host keeps its name: `--host` with another name fails; to rename, uninstall and install again, accept the
+new name and revoke the old. For such a host the closing line reads "If the bridge does not know this host yet, run:",
+since the bridge may know it already.
 
-For a script, pass `--host NAME` and `--join CODE`: a value given is not asked for. With stdin not a terminal, a value
-that is needed and missing is an error naming its flag, and `install` does not wait for input. It installs and starts
-the service, and after the line prints the block for reaching the host (see [Set up a client](#set-up-a-client)).
+For a script, pass `--host NAME` and `--join CODE`: a value given is not asked for. `install` asks only if stdin and
+stderr are both terminals; otherwise a value that is needed and missing is an error that names the flags and gives the
+command to run, and `install` does not wait for input. It installs and starts the service, and after the line prints the
+block for reaching the host (see [Set up a client](#set-up-a-client)).
 
 Run that line in the bridge folder; it accepts the host, and [Set up a client](#set-up-a-client) is the next
 step. Until you do, the host is refused ("host not registered" in its `frpc.log`) and
@@ -208,9 +210,10 @@ Each log is rotated at 10 MB to `<name>.1`, replacing the previous one; `logs` s
 
 `sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: your session
 ends when the service restarts, and the host reconnects on the new version. Before it replaces anything it checks the
-new version against this host's settings, and a failure leaves the old version running. It prints the line for the bridge
-again, and the `ssh` block when the host publishes SSH; the host is already registered, so ignore the line. A
-version that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.
+new version against this host's settings, and a failure leaves the old version running. It runs `install`, which on a
+host that is set up asks nothing and prints only "If the bridge does not know this host yet, run:" with the line for the
+bridge, then the `ssh` block when the host publishes SSH; the host is already registered, so ignore the line. A version
+that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.
 
 **Windows**: run `reverse-tunnel upgrade` from an elevated prompt, without `sudo`. Windows will not overwrite or delete a
 running program, so each build is installed as a file of its own, `%ProgramFiles%\reverse-tunnel\reverse-tunnel-<SHA-256

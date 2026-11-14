@@ -1,4 +1,4 @@
-//! What the unit tests of more than one module share: a join code and a host's directories.
+//! Fixtures shared by unit tests of several modules.
 
 use std::fs;
 
