@@ -241,7 +241,11 @@ fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_o
 
     assert!(!staged.exists());
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
-    assert_eq!(delete_leftovers(&paths).unwrap().len(), 1, "it still runs");
+    let kept = delete_leftovers(&paths).unwrap();
+    let [why] = kept.as_slice() else {
+        panic!("it still runs: {kept:?}")
+    };
+    assert!(format!("{why:#}").contains("may still run"), "{why:#}");
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
     drop(running);
     assert!(delete_leftovers(&paths).unwrap().is_empty());
@@ -257,11 +261,14 @@ fn a_leftover_that_is_not_a_regular_file_is_reported_and_never_deleted() {
 
     let kept = delete_leftovers(&paths).unwrap();
 
-    let [(image, why)] = kept.as_slice() else {
+    let [why] = kept.as_slice() else {
         panic!("expected the directory to be reported: {kept:?}")
     };
-    assert_eq!(image, &impostor);
-    assert!(format!("{why:#}").contains(&impostor.display().to_string()), "{why:#}");
+    let why = format!("{why:#}");
+    assert!(
+        why.contains(&impostor.display().to_string()) && why.contains("not a regular file"),
+        "{why}"
+    );
     assert!(impostor.join("inside").exists());
 }
 

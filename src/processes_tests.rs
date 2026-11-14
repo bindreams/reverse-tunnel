@@ -191,3 +191,18 @@ fn a_process_that_cannot_be_opened_and_is_still_listed_fails_with_the_error() {
         "{err}"
     );
 }
+
+#[test]
+fn an_image_runs_while_its_process_does_and_not_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("x.exe");
+    let other = dir.path().join("other.exe");
+
+    let running = crate::held::running(&image);
+    fs::copy(&image, &other).unwrap();
+    assert!(runs_image(&image).unwrap());
+    assert!(!runs_image(&other).unwrap(), "a copy of a running image does not run");
+
+    drop(running);
+    assert!(!runs_image(&image).unwrap());
+}

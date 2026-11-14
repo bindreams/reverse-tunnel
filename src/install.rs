@@ -531,15 +531,16 @@ fn refuse_deleted_working_directory(paths: &Paths, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Windows: the folder that holds the bin dir, `%ProgramFiles%`, where a removal puts what it cannot delete (see
-/// `move_aside`). Only administrators can write to it, and the removal leaves it alone.
+/// Windows: the folder that holds the bin dir, `%ProgramFiles%`, where a removal, an `install` and an `upgrade` put what
+/// they cannot delete or replace because it runs (see `move_aside`). Only administrators can write to it, and the
+/// removal leaves it alone.
 #[cfg(windows)]
 fn leftover_dir(paths: &Paths) -> Result<&Path> {
     paths.bin_dir.parent().context("the bin dir has no parent")
 }
 
-/// Windows: the leftover files that earlier removals renamed (see `move_aside`), which a removal's task deletes
-/// once they can be.
+/// Windows: the leftover files that earlier removals, installs and upgrades renamed (see `move_aside`), which the next
+/// `install` or `upgrade`, or a removal's task, deletes once they can be.
 #[cfg(windows)]
 pub fn leftover_images(paths: &Paths) -> Result<Vec<PathBuf>> {
     let dir = leftover_dir(paths)?;
@@ -710,16 +711,18 @@ fn remove_file_that_may_run(paths: &Paths, path: &Path) -> Result<()> {
     }
 }
 
-/// Windows: deletes the leftover files (see `move_aside`) whose process has exited. Returns, with why, those that were
-/// not deleted: one that still runs or that its ACL protects, and anything that is not a regular file, which is never
-/// deleted.
+/// Windows: deletes the leftover files (see `move_aside`) whose process has exited. Returns, one error for each, those
+/// that were not deleted: one that still runs or that its ACL protects, and anything that is not a regular file, which is
+/// never deleted. Each says which it is, and names the file.
 #[cfg(windows)]
-fn delete_leftovers(paths: &Paths) -> Result<Vec<(PathBuf, anyhow::Error)>> {
+fn delete_leftovers(paths: &Paths) -> Result<Vec<anyhow::Error>> {
     let mut kept = Vec::new();
     for image in leftover_images(paths)? {
         if !fs::symlink_metadata(&image).is_ok_and(|entry| entry.is_file()) {
-            let not_a_file = anyhow!("{} is not a regular file, so it is not deleted", image.display());
-            kept.push((image, not_a_file));
+            kept.push(anyhow!(
+                "{} is not a regular file, so it is never deleted",
+                image.display()
+            ));
             continue;
         }
         let Err(err) = remove_entry(&image) else { continue };
@@ -729,7 +732,7 @@ fn delete_leftovers(paths: &Paths) -> Result<Vec<(PathBuf, anyhow::Error)>> {
         if !refused {
             return Err(err);
         }
-        kept.push((image, err));
+        kept.push(err.context("it may still run, or its ACL forbids deleting it; each `install` tries again"));
     }
     Ok(kept)
 }
@@ -983,10 +986,8 @@ fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     // Before this run moves anything aside: what is left then is not this run's.
     #[cfg(windows)]
-    for (_image, err) in delete_leftovers(paths)? {
-        output::eprintln_best_effort(&format!(
-            "{err:#}: it stays, and each `install` tries again (it may still run, or its ACL forbids deleting it)"
-        ));
+    for kept in delete_leftovers(paths)? {
+        output::eprintln_best_effort(&format!("{kept:#}"));
     }
     // Windows will not overwrite a running image, which the service host is, and lets it be renamed.
     #[cfg(windows)]

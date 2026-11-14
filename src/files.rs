@@ -2,7 +2,7 @@
 //! handle before any content exists, whatever the umask.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{self, ErrorKind, Write};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -16,6 +16,8 @@ use anyhow::{Context, Result, ensure};
 
 use crate::account::Account;
 use crate::output::eprintln_best_effort;
+#[cfg(windows)]
+use crate::processes;
 #[cfg(windows)]
 use crate::schtasks;
 #[cfg(windows)]
@@ -255,9 +257,9 @@ pub fn make_missing_dirs(path: &Path, perm: Perm) -> Result<()> {
 ///
 /// On Windows a process that keeps `path`, or a file in it, open without delete sharing (an antivirus scan, a program
 /// that watches files) makes the removal wait until it closes it: the removal is tried again, with no limit, and the
-/// first time says on stderr that it waits. Every other failure is an error.
+/// first time says on stderr that it waits (see `OpenElsewhere`). Every other failure is an error.
 pub fn remove_entry(path: &Path) -> Result<()> {
-    let mut said = false;
+    let mut wait = OpenElsewhere::default();
     loop {
         let removed = match fs::symlink_metadata(path) {
             Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
@@ -265,16 +267,7 @@ pub fn remove_entry(path: &Path) -> Result<()> {
             Err(err) => Err(err),
         };
         match removed {
-            Err(err) if is_open_elsewhere(&err) => {
-                if !said {
-                    eprintln_best_effort(&format!(
-                        "{}: another process has it open; waiting until that process closes it",
-                        path.display()
-                    ));
-                    said = true;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
+            Err(err) if wait.waited_for(path, &err) => {}
             Err(err) if err.kind() != ErrorKind::NotFound => {
                 return Err(err).with_context(|| format!("removing {}", path.display()));
             }
@@ -283,17 +276,68 @@ pub fn remove_entry(path: &Path) -> Result<()> {
     }
 }
 
-/// Whether `err` is Windows refusing to delete a file that another process has open without delete sharing
-/// (ERROR_SHARING_VIOLATION). It is no other platform's error: 32 is `EPIPE` on Unix.
-fn is_open_elsewhere(err: &std::io::Error) -> bool {
-    cfg!(windows) && err.raw_os_error() == Some(32)
+/// What follows the path in the line that says a wait (see `OpenElsewhere`).
+pub const OPEN_ELSEWHERE_LINE: &str = ": another process has it open; waiting until that process closes it";
+
+/// The wait that every delete, replace and move of a file shares. Windows refuses to delete, replace or rename a file
+/// that another process has open without delete sharing (an antivirus scan, a program that watches files); the
+/// operation is tried again, with no limit, until that process closes it. Every other failure is the caller's. The first
+/// wait is said on stderr.
+#[derive(Default)]
+struct OpenElsewhere {
+    said: bool,
+}
+
+impl OpenElsewhere {
+    /// Whether `err`, the failure of an operation on `path`, is that refusal. If it is, this has waited, and the
+    /// operation is to be tried again.
+    fn waited_for(&mut self, path: &Path, err: &io::Error) -> bool {
+        if !is_refused_for_an_open_file(path, err) {
+            return false;
+        }
+        if !self.said {
+            eprintln_best_effort(&format!("{}{OPEN_ELSEWHERE_LINE}", path.display()));
+            self.said = true;
+        }
+        thread::sleep(Duration::from_millis(50));
+        true
+    }
+}
+
+/// Whether `err`, the failure of an operation on `path`, is Windows refusing it because another process has `path` open
+/// without delete sharing: ERROR_SHARING_VIOLATION (32), which a delete and a rename give. A replace gives "access
+/// denied", as it does for a running image, a read-only file and an ACL that forbids it; asking to open `path` with
+/// delete access, which only the first of them refuses with 32, says which it is. Nothing else is that refusal, and
+/// 32 is `EPIPE` on Unix.
+#[cfg(windows)]
+fn is_refused_for_an_open_file(path: &Path, err: &io::Error) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const DELETE: u32 = 0x1_0000;
+    const SHARE_ALL: u32 = 7;
+    const SHARING_VIOLATION: i32 = 32;
+    match err.raw_os_error() {
+        Some(SHARING_VIOLATION) => true,
+        _ if err.kind() == ErrorKind::PermissionDenied => OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(SHARE_ALL)
+            .open(path)
+            .is_err_and(|opened| opened.raw_os_error() == Some(SHARING_VIOLATION)),
+        _ => false,
+    }
+}
+
+#[cfg(not(windows))]
+fn is_refused_for_an_open_file(_path: &Path, _err: &io::Error) -> bool {
+    false
 }
 
 /// Writes `data` to `dest` through a temp file in the same directory, which has `perm` before it gets any data, so
-/// `dest` is never partial and never briefly readable by others. The data and then the directory are synced.
+/// `dest` is never partial and never briefly readable by others. The data and then the directory are synced. A `dest`
+/// that another process holds open waits until it is closed (see `OpenElsewhere`).
 ///
-/// With `Replace::OrMoveAside`, the old `dest` is moved aside only once the new one is written and synced, and put back
-/// if the new one cannot be put in its place.
+/// With `Replace::OrMoveAside`, the old `dest` is moved aside only once the new one is written and synced, and only when
+/// it is a regular file that a process runs (see `processes::runs_image`); it is put back if the new one cannot be put
+/// in its place.
 pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> Result<WriteOutcome> {
     let dir = dest.parent().expect("dest is inside a directory");
     let mut file = tempfile::NamedTempFile::new_in(dir)
@@ -301,28 +345,18 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
     apply(file.as_file(), perm)?;
     file.write_all(data)?;
     file.as_file().sync_all()?;
-    let persisted = match replace {
-        Replace::Always | Replace::OrMoveAside(_) => file.persist(dest),
-        Replace::Never => file.persist_noclobber(dest),
-    };
-    match persisted {
-        Err(err) if replace == Replace::Never && err.error.kind() == ErrorKind::AlreadyExists => {
+    match (replace, persist_waiting(file, dest, replace == Replace::Never)) {
+        (Replace::Never, Err(err)) if err.error.kind() == ErrorKind::AlreadyExists => {
             return Ok(WriteOutcome::Existed);
         }
-        // A directory is refused the same way, and is not moved.
         #[cfg(windows)]
-        Err(err)
-            if matches!(replace, Replace::OrMoveAside(_))
-                && err.error.kind() == ErrorKind::PermissionDenied
-                && fs::symlink_metadata(dest).is_ok_and(|entry| entry.is_file()) =>
+        (Replace::OrMoveAside(leftovers), Err(err))
+            if err.error.kind() == ErrorKind::PermissionDenied && runs_as_a_file(dest)? =>
         {
-            let Replace::OrMoveAside(leftovers) = replace else {
-                unreachable!()
-            };
             persist_over_running(err.file, dest, leftovers)?;
         }
-        Err(err) => return Err(err).with_context(|| format!("writing {}", dest.display())),
-        Ok(_) => {}
+        (_, Err(err)) => return Err(err).with_context(|| format!("writing {}", dest.display())),
+        (_, Ok(())) => {}
     }
     #[cfg(unix)]
     File::open(dir)
@@ -331,13 +365,45 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
     Ok(WriteOutcome::Written)
 }
 
+/// Puts `file` at `dest`, replacing what is there unless `keep_existing`, once no other process holds `dest` open (see
+/// `OpenElsewhere`).
+fn persist_waiting(
+    mut file: tempfile::NamedTempFile,
+    dest: &Path,
+    keep_existing: bool,
+) -> Result<(), tempfile::PersistError> {
+    let mut wait = OpenElsewhere::default();
+    loop {
+        let persisted = if keep_existing {
+            file.persist_noclobber(dest)
+        } else {
+            file.persist(dest)
+        };
+        match persisted {
+            Err(err) if wait.waited_for(dest, &err.error) => file = err.file,
+            done => return done.map(drop),
+        }
+    }
+}
+
+/// Windows: whether `dest` is a regular file that a process runs, which is what makes Windows refuse to replace it. A
+/// directory, a read-only file and an ACL that denies it are refused the same way, and none of them is moved.
+#[cfg(windows)]
+fn runs_as_a_file(dest: &Path) -> Result<bool> {
+    let is_file = fs::symlink_metadata(dest).is_ok_and(|entry| entry.is_file());
+    Ok(is_file && processes::runs_image(dest)?)
+}
+
 /// Windows: moves the file `dest`, which runs, into `leftovers` and puts `file` in its place. If that fails, `dest` is
-/// put back.
+/// put back. Between the two renames there is no file at `dest`, and a service start then fails (a replacing rename is
+/// refused even with POSIX semantics, see `files_tests`).
 #[cfg(windows)]
 fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
     let writing = || format!("writing {}", dest.display());
     let aside = move_aside(dest, leftovers).with_context(writing)?;
-    let Err(err) = file.persist(dest) else { return Ok(()) };
+    let Err(err) = persist_waiting(file, dest, false) else {
+        return Ok(());
+    };
     let failure = anyhow::anyhow!(err.error).context(writing());
     match fs::rename(&aside, dest) {
         Ok(()) => Err(failure),
@@ -351,12 +417,18 @@ fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &
 
 /// Windows: renames the file `path` into `leftovers`, keeping its name (see `schtasks::leftover_name`), and returns the
 /// new path. Windows will not delete a running image, and lets it be renamed. A file there is deleted once it can be:
-/// by the next `install`, or by a removal.
+/// by the next `install` or `upgrade`, or by a removal. A `path` that another process holds open waits (see
+/// `OpenElsewhere`).
 #[cfg(windows)]
 pub fn move_aside(path: &Path, leftovers: &Path) -> Result<std::path::PathBuf> {
     let original = path.file_name().context("the file has no name")?;
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
-    fs::rename(path, &to).with_context(|| format!("moving it to {}", to.display()))?;
+    let mut wait = OpenElsewhere::default();
+    while let Err(err) = fs::rename(path, &to) {
+        if !wait.waited_for(path, &err) {
+            return Err(err).with_context(|| format!("moving it to {}", to.display()));
+        }
+    }
     Ok(to)
 }
 

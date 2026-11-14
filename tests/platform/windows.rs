@@ -15,7 +15,7 @@ use reverse_tunnel::account;
 use reverse_tunnel::install;
 use reverse_tunnel::security::{Sid, owner_of};
 use reverse_tunnel::system_path;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, LocalFree, WAIT_OBJECT_0};
 use windows_sys::Win32::Security::Authorization::{
     GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID,
     TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
@@ -29,7 +29,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
-use windows_sys::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::System::Threading::{
+    INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    WaitForSingleObject,
+};
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, RegType};
 
@@ -93,6 +96,31 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
         LocalFree(descriptor);
     }
     rights
+}
+
+/// A handle to a process, opened while it runs. Unlike the process's id or image name, which the system reuses, it never
+/// stands for another process, so waiting on it waits for that process alone.
+pub struct Watched(OwnedHandle);
+
+pub fn watch(pid: u32) -> Watched {
+    // SAFETY: a plain call; the handle is owned from here on.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(
+        !handle.is_null(),
+        "opening process {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: a handle that nothing else owns.
+    Watched(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+impl Watched {
+    /// Waits, with no cap, until the process has exited.
+    pub fn wait_until_exited(&self) {
+        // SAFETY: a live handle, opened with `SYNCHRONIZE`.
+        let waited = unsafe { WaitForSingleObject(self.0.as_raw_handle(), INFINITE) };
+        assert_eq!(waited, WAIT_OBJECT_0, "{}", std::io::Error::last_os_error());
+    }
 }
 
 /// What `class` says of the token of process `pid`.

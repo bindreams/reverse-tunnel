@@ -1,7 +1,11 @@
-//! Windows: the processes of a service, which `install`'s removal waits for.
+//! Windows: the processes of a service, which `install`'s removal waits for, and which process runs an image.
 
+use std::ffi::OsString;
+use std::fs;
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 
 use anyhow::{Context, Result, anyhow};
@@ -14,7 +18,7 @@ use windows_sys::Win32::System::RemoteDesktop::{
 };
 use windows_sys::Win32::System::Threading::{
     INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    WaitForSingleObject,
+    QueryFullProcessImageNameW, WaitForSingleObject,
 };
 
 use crate::account;
@@ -262,6 +266,40 @@ fn user_of(process: HANDLE) -> io::Result<Sid> {
     }
     // SAFETY: Windows wrote a `TOKEN_USER` whose SID points into `buffer`.
     Ok(unsafe { Sid::copy_of((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) })
+}
+
+/// Whether any process runs the image `path`, which Windows will not overwrite or delete while it does. The images are
+/// compared as files (the same path, whatever the case or the short names). A process that cannot be opened, or whose
+/// image cannot be read, is not counted: those are the protected processes of the system, which do not run a file of this
+/// installation.
+pub fn runs_image(path: &Path) -> Result<bool> {
+    let image = fs::canonicalize(path).with_context(|| format!("looking at {}", path.display()))?;
+    let buffer = Buffer::list().context("listing the processes")?;
+    Ok(buffer
+        .entries()
+        .iter()
+        .any(|entry| image_of(entry.ProcessId).is_some_and(|runs| runs == image)))
+}
+
+/// The file that process `pid` runs, as `fs::canonicalize` gives it; none if the process has ended, cannot be opened or
+/// read, or its image is gone.
+fn image_of(pid: u32) -> Option<PathBuf> {
+    // SAFETY: a plain call.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    // SAFETY: a handle that this function owns.
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    // The longest path Windows has.
+    let mut name = vec![0u16; 32_768];
+    let mut length = name.len() as u32;
+    // SAFETY: `name` has room for `length` units, which Windows lowers to what it wrote.
+    let read = unsafe { QueryFullProcessImageNameW(process.as_raw_handle(), 0, name.as_mut_ptr(), &mut length) };
+    if read == 0 {
+        return None;
+    }
+    fs::canonicalize(OsString::from_wide(&name[..length as usize])).ok()
 }
 
 /// Waits, with no cap, until every one of `processes` has ended.

@@ -1141,18 +1141,20 @@ fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_ol
     machine.install(&join_code("tunnel.example.test"));
     let supervisor = machine.status().pid.expect("a running service has a pid");
     let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
-    // Every process that runs the old image: the service host and what it runs.
+    // Every process that runs the old image: the service host and what it runs. Each is held by a handle opened now,
+    // which no other process can come to have.
     let old_image = service::exe(&machine.paths)
         .file_name()
         .unwrap()
         .to_string_lossy()
         .to_string();
-    let old_processes: Vec<u32> = processes()
+    let old_pids: Vec<u32> = processes()
         .iter()
         .filter(|process| process.owner == service_owner() && process.args == old_image)
         .map(|process| process.pid)
         .collect();
-    assert!(old_processes.contains(&supervisor), "{old_processes:?}");
+    assert!(old_pids.contains(&supervisor), "{old_pids:?}");
+    let old_processes: Vec<windows::Watched> = old_pids.into_iter().map(windows::watch).collect();
     let (_scratch, path) = newer_build();
     let newer = fs::read(&path).unwrap();
 
@@ -1166,12 +1168,9 @@ fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_ol
     });
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
     assert_eq!(fs::read(leftover_of_the_binary(&machine)).unwrap(), outgoing);
-    // By the image too: the system reuses a process id.
-    wait_until("the old image no longer runs", || {
-        !processes()
-            .iter()
-            .any(|process| process.args == old_image && old_processes.contains(&process.pid))
-    });
+    for process in &old_processes {
+        process.wait_until_exited();
+    }
     let mut sweep = Command::new(service::exe(&machine.paths));
     sweep.arg("install");
     machine.run_ok(sweep);
@@ -1192,8 +1191,12 @@ fn the_install_run_from_the_staged_download_leaves_nothing_after_the_next_instal
     let out = Command::new(&staged).arg("install").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // Not empty: waiting for a process that holds a file open is said on stderr.
-    assert!(out.status.success() && !stderr.contains("safe to delete"), "{stderr}");
+    // Waiting for a process that holds a file open is said on stderr; nothing else is.
+    let said: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.ends_with(reverse_tunnel::files::OPEN_ELSEWHERE_LINE))
+        .collect();
+    assert!(out.status.success() && said.is_empty(), "{stderr}");
     assert!(!staged.exists(), "{} is still in the bin dir", staged.display());
     let mut sweep = Command::new(service::exe(&machine.paths));
     sweep.arg("install");
@@ -1572,45 +1575,90 @@ impl Drop for TaskGuard {
     }
 }
 
-/// A delete of a file that another process holds open without delete sharing waits until that process lets go, and says
-/// so once. The delete runs in a child, which is this test run again with the path in `CHILD`: its stderr is what shows
-/// that the delete was refused, so the handle is closed only after that.
-#[test]
-#[ignore = "run by CI's platform job"]
+/// Runs `operation` on a file that this process holds open without delete sharing, in a child that is this test run
+/// again (`test` is its name; the path comes in `CHILD`). The operation waits until the handle is closed, and says so
+/// once: the child's stderr is what shows that it was refused, so the handle is closed only after that. Then
+/// `finished` says what the operation was to do.
 #[cfg(windows)]
-fn a_delete_waits_for_the_process_that_holds_the_file_open() {
-    const CHILD: &str = "RT_DELETE_THIS";
+fn operation_waits_for_the_process_that_holds_the_file_open(
+    test: &str,
+    operation: fn(&Path),
+    finished: fn(&Path) -> bool,
+) {
+    const CHILD: &str = "RT_OPERATE_ON_THIS";
     if let Some(path) = env::var_os(CHILD) {
-        reverse_tunnel::files::remove_entry(Path::new(&path)).unwrap();
+        operation(Path::new(&path));
         return;
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("held.txt");
-    fs::write(&path, "").unwrap();
+    fs::write(&path, "old").unwrap();
     let held = held::open_held(&path);
     let mut child = Command::new(env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "--nocapture"])
-        .arg("a_delete_waits_for_the_process_that_holds_the_file_open")
+        .args(["--ignored", "--exact", "--nocapture", test])
         .env(CHILD, &path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let named = path.display().to_string();
+    let mut said = Vec::new();
     let refused = BufReader::new(child.stderr.take().unwrap())
         .lines()
         .map_while(Result::ok)
+        .inspect(|line| said.push(line.clone()))
         .any(|line| line.contains(&named) && line.contains("waiting until"));
-    assert!(refused, "the delete did not say that it waits");
-    assert!(path.exists(), "the delete took the file while it was held open");
+    assert!(refused, "the operation did not say that it waits: {said:?}");
+    assert!(
+        !finished(&path) && fs::read(&path).unwrap() == b"old",
+        "the operation went on while the file was held open"
+    );
 
     drop(held);
 
     assert!(
         child.wait().unwrap().success(),
-        "the delete failed after the file was let go"
+        "the operation failed after the file was let go"
     );
-    assert!(!path.exists(), "the file is still there");
+    assert!(finished(&path), "the operation did not finish");
+}
+
+#[test]
+#[ignore = "run by CI's platform job"]
+#[cfg(windows)]
+fn a_delete_waits_for_the_process_that_holds_the_file_open() {
+    operation_waits_for_the_process_that_holds_the_file_open(
+        "a_delete_waits_for_the_process_that_holds_the_file_open",
+        |path| reverse_tunnel::files::remove_entry(path).unwrap(),
+        |path| !path.exists(),
+    );
+}
+
+#[test]
+#[ignore = "run by CI's platform job"]
+#[cfg(windows)]
+fn a_replace_waits_for_the_process_that_holds_the_file_open() {
+    use reverse_tunnel::files::{Perm, Replace, write_atomic};
+    operation_waits_for_the_process_that_holds_the_file_open(
+        "a_replace_waits_for_the_process_that_holds_the_file_open",
+        |path| {
+            write_atomic(path, b"new", Perm::new(0o600), Replace::Always).unwrap();
+        },
+        |path| fs::read(path).is_ok_and(|content| content == b"new"),
+    );
+}
+
+#[test]
+#[ignore = "run by CI's platform job"]
+#[cfg(windows)]
+fn a_move_aside_waits_for_the_process_that_holds_the_file_open() {
+    operation_waits_for_the_process_that_holds_the_file_open(
+        "a_move_aside_waits_for_the_process_that_holds_the_file_open",
+        |path| {
+            reverse_tunnel::files::move_aside(path, path.parent().unwrap()).unwrap();
+        },
+        |path| !path.exists(),
+    );
 }
 
 /// The removal's task is registered as SYSTEM: `whoami` in it says so.
