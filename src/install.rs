@@ -48,9 +48,9 @@ pub struct InstallOpts {
 }
 
 /// Holds the exclusive lock until the guard is dropped. `install` and `uninstall --finish` take it for their whole
-/// run; a second one waits.
+/// run; a second run waits or, on Windows while the removal's task holds it, may fail to open it.
 pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
-    // On Windows `paths.lock` names a global mutex, which only administrators and SYSTEM can open.
+    // On Windows `paths.lock` names a global mutex, which has its creator's default access.
     #[cfg(windows)]
     let lock = NamedLock::create(paths.lock.to_str().context("the lock's name is not Unicode")?);
     // Made here, owner-only: named-lock would use the umask's mode, and whoever can open the file can hold the lock.
@@ -121,10 +121,9 @@ fn apply(
 ) -> Result<()> {
     let spec = service::spec(paths)?;
     let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
-    // The check reads the settings (as the account, except on Windows), so they are written first (a new join code's
-    // or host's settings stay even if the binary is rejected); the binary and the unit come after it, so a rejected
-    // binary leaves both as they were. The binary is in place before the unit: on Windows it is the unit's host, which
-    // the manager looks at.
+    // The check reads the settings (as the account, except on Windows), so they are written first; the binary and the
+    // unit come after it, so a rejected binary leaves both as they were. The binary is in place before the unit: on
+    // Windows it is the unit's host, which the manager looks at.
     changed |= write_settings(paths, account, host, join)?;
     verify_tools(paths, &binary, Some(*account))?;
     changed |= place_binaries(paths, &binary)?;
@@ -502,8 +501,12 @@ fn deleted_dir_holding(paths: &Paths, dir: &Path) -> Result<Option<PathBuf>> {
     };
     let dir = canonical(dir)?;
     for deleted in deleted_dirs(paths) {
-        if deleted.try_exists()? && dir.starts_with(canonical(&deleted)?) {
-            return Ok(Some(deleted));
+        match fs::canonicalize(&deleted) {
+            Ok(resolved) if dir.starts_with(&resolved) => return Ok(Some(deleted)),
+            Ok(_) => {}
+            // A directory that is not there holds nothing.
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("resolving {}", deleted.display())),
         }
     }
     Ok(None)
@@ -570,8 +573,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     {
         return Err(err).context("removing the service");
     }
-    // goetia returns while the service's own processes (the host, frpc) are still ending, and they hold their images in
-    // the bin dir and their logs in `logs/`.
+    // goetia's `uninstall` returns before the service's processes end (see `processes`).
     #[cfg(windows)]
     processes::wait_until_none_runs_as_the_service()?;
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
@@ -606,16 +608,11 @@ fn remove_link(paths: &Paths) -> Result<()> {
     }
 }
 
-/// Windows: removes `path`, a file or a directory with what is in it (see `remove_entry`). Windows will not delete the
-/// image of a process that runs, and one may: the waiting `uninstall`'s own binary, or anything the operator runs from
-/// the bin dir (the service's own processes have ended by now, see `finish_uninstall`). So the process that deletes
-/// such a directory owns what in it cannot be deleted: a regular file directly in `path` that cannot be deleted is
-/// renamed, which Windows allows for a running image, to a leftover file in `leftovers` that keeps its name (see
-/// `schtasks::leftover_name`), and the removal's task deletes it once it has exited (see `schtasks::removal_script`).
-/// The rename is logged. A file that can be neither deleted nor renamed fails the removal, naming both errors. A
-/// directory, junction or link that cannot be deleted is never renamed, since the task's `del` could not delete it.
-/// Only the bin dir and the removal's own directory go by this rule: what the service held in the other directories
-/// has been released.
+/// Windows: removes `path` (see `remove_entry`). A running image cannot be deleted, so a regular file directly in `path`
+/// that cannot be is renamed into `leftovers` keeping its name (see `schtasks::leftover_name`); the removal's task
+/// deletes it once it exits, and if the machine restarts first, the system does. A file that can be neither deleted nor
+/// renamed fails the removal naming both errors; directories, junctions and links are never renamed, since the task's
+/// `del` could not delete them.
 #[cfg(windows)]
 fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     if !fs::symlink_metadata(path).is_ok_and(|entry| entry.is_dir()) {
@@ -632,6 +629,20 @@ fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     remove_entry(path)
 }
 
+/// Windows: has the system delete the file `path` at its next boot.
+#[cfg(windows)]
+fn delete_at_reboot(path: &Path) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+
+    let wide = crate::security::wide(path);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; a null new name means deletion.
+    if unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) } == 0 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("scheduling the deletion of {} at the next boot", path.display()));
+    }
+    Ok(())
+}
+
 /// What the removal says, before where, when it renamed a file that it could not delete.
 #[cfg(windows)]
 pub const MOVED_IT_TO: &str = "moved it to";
@@ -642,12 +653,18 @@ fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     let Err(refused) = remove_entry(path) else {
         return Ok(());
     };
-    if !fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file()) {
-        return Err(refused.context("it is not a regular file, so it is not renamed"));
+    match fs::symlink_metadata(path) {
+        Ok(entry) if entry.is_file() => {}
+        Ok(_) => return Err(refused.context("it is not a regular file, so it is not renamed")),
+        Err(stat) => return Err(refused.context(format!("it is not renamed, since reading what it is failed: {stat}"))),
     }
     let original = path.file_name().context("the file has no name")?;
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
     fs::rename(path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
+    // The task deletes itself before its sweep of the leftovers, so a reboot before it ends leaves nothing else to do it.
+    if let Err(err) = delete_at_reboot(&to) {
+        output::eprintln_best_effort(&format!("{err:#}"));
+    }
     output::println_best_effort(&format!(
         "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
         to.display()

@@ -24,10 +24,6 @@ fn the_script_runs_each_step_once_in_turn_and_each_deletion_until_its_target_is_
         "task",
         Path::new(r"C:\p"),
     );
-    // A program is judged by its exit code, a builtin (`del`, `rmdir`) by what it left, since it reports a held file
-    // only in its message. Each deletion is a `cmd` of its own that repeats, with a pause, and ends when its target is
-    // gone (a `for /l` ends in no other way); the steps follow one another, and the task is deleted once, with no
-    // query. Only a failed `--finish` and a failed deletion of the task have exit codes.
     let expected = [
         r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1)"#,
         r#"cmd /d /e:on /v:off /c for /l %i in ^(1,0,2^) do ^(^(del /q "C:\d\x.exe" ^>nul 2^>^&1^) ^& ^(if not exist "C:\d\x.exe" exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,

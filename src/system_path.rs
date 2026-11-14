@@ -1,10 +1,9 @@
 //! The machine's `Path` on Windows, which `install` adds the bin dir to and `uninstall` removes it from, as rustup does
 //! to the user's `Path`: edited in the registry, then every program is told to read the environment again.
 //!
-//! The edit is a read, a change and a write, like every installer's: another program that edits the machine's `Path`
-//! at the same moment can lose one of the two edits, and running that program's installer again restores its entry.
+//! The edit is a read, a change and a write: a concurrent edit by another program can lose one of the two.
 
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -36,7 +35,7 @@ pub fn remove(dir: &Path) -> Result<()> {
 
 /// Replaces the `Path` by what `change` makes of it, if it makes anything, keeping the value's type, then tells the
 /// programs that run to read their environment again.
-fn edit(dir: &Path, change: fn(&str, &str) -> Option<String>) -> Result<()> {
+fn edit(dir: &Path, change: fn(&str, &str) -> Result<Option<String>>) -> Result<()> {
     let dir = dir.to_str().context("the directory is not Unicode")?;
     let key = winreg::RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey_with_flags(KEY, KEY_READ | KEY_WRITE)
@@ -49,7 +48,7 @@ fn edit(dir: &Path, change: fn(&str, &str) -> Option<String>) -> Result<()> {
     if !matches!(vtype, REG_SZ | REG_EXPAND_SZ) {
         bail!("{VALUE} is not a string, so it was not changed");
     }
-    let Some(changed) = change(&current, dir) else {
+    let Some(changed) = change(&current, dir)? else {
         return Ok(());
     };
     key.set_raw_value(
@@ -84,49 +83,63 @@ pub fn broadcast() {
 }
 
 /// `text` with its `%NAME%` environment variables expanded, as a process that reads the `Path` would; one that is not
-/// set stays as it is.
-pub fn expand(text: &str) -> String {
+/// set stays as it is. Fails with the OS error if the expansion cannot be made.
+pub fn expand(text: &str) -> Result<String> {
     let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
     // SAFETY: `wide` is NUL-terminated; the buffer has the length that is passed, and it is read up to what is written.
     unsafe {
         let needed = ExpandEnvironmentStringsW(wide.as_ptr(), std::ptr::null_mut(), 0);
+        if needed == 0 {
+            return Err(io::Error::last_os_error()).with_context(|| format!("expanding the variables in {text}"));
+        }
         let mut expanded = vec![0u16; needed as usize];
         let written = ExpandEnvironmentStringsW(wide.as_ptr(), expanded.as_mut_ptr(), needed);
-        if needed == 0 || written == 0 || written > needed {
-            return text.to_string();
+        if written == 0 {
+            return Err(io::Error::last_os_error()).with_context(|| format!("expanding the variables in {text}"));
         }
-        String::from_utf16_lossy(&expanded[..written as usize - 1])
+        if written > needed {
+            bail!("expanding the variables in {text}: the result grew while it was made");
+        }
+        Ok(String::from_utf16_lossy(&expanded[..written as usize - 1]))
     }
 }
 
 /// Whether the `Path` entry `entry` names the directory `dir`: once its variables are expanded, by whatever case, with
 /// or without surrounding whitespace and quotes and a trailing backslash.
-pub fn names(entry: &str, dir: &str) -> bool {
-    let bare = |text: &str| {
-        let expanded = expand(text);
+pub fn names(entry: &str, dir: &str) -> Result<bool> {
+    let bare = |text: &str| -> Result<String> {
+        let expanded = expand(text)?;
         let trimmed = expanded.trim_matches(|c: char| c.is_whitespace() || c == '"');
-        trimmed.trim_end_matches('\\').to_lowercase()
+        Ok(trimmed.trim_end_matches('\\').to_lowercase())
     };
-    bare(entry) == bare(dir)
+    Ok(bare(entry)? == bare(dir)?)
 }
 
 /// `path` with `dir` appended, or none if an entry names it already.
-fn with_entry(path: &str, dir: &str) -> Option<String> {
-    if path.split(';').any(|entry| names(entry, dir)) {
-        None
-    } else if path.is_empty() || path.ends_with(';') {
-        Some(format!("{path}{dir}"))
-    } else {
-        Some(format!("{path};{dir}"))
+fn with_entry(path: &str, dir: &str) -> Result<Option<String>> {
+    for entry in path.split(';') {
+        if names(entry, dir)? {
+            return Ok(None);
+        }
     }
+    Ok(Some(if path.is_empty() || path.ends_with(';') {
+        format!("{path}{dir}")
+    } else {
+        format!("{path};{dir}")
+    }))
 }
 
 /// `path` without the entries that name `dir`, each with its separator; none if no entry does. Other entries, empty
 /// ones too, are as they were.
-fn without_entry(path: &str, dir: &str) -> Option<String> {
-    let kept: Vec<&str> = path.split(';').filter(|entry| !names(entry, dir)).collect();
+fn without_entry(path: &str, dir: &str) -> Result<Option<String>> {
+    let mut kept = Vec::new();
+    for entry in path.split(';') {
+        if !names(entry, dir)? {
+            kept.push(entry);
+        }
+    }
     let changed = kept.join(";");
-    (changed != path).then_some(changed)
+    Ok((changed != path).then_some(changed))
 }
 
 /// The text of a registry string: UTF-16 with its terminating NULs.

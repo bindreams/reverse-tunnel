@@ -176,6 +176,9 @@ struct Machine {
     paths: Paths,
     manager: Box<dyn ServiceManager>,
     id: Id,
+    /// Windows: the machine's `Path` as stored, before the test.
+    #[cfg(windows)]
+    path_before: (Vec<u8>, winreg::enums::RegType),
 }
 
 impl Machine {
@@ -220,7 +223,13 @@ impl Machine {
                 link.display()
             );
         }
-        Machine { paths, manager, id }
+        Machine {
+            paths,
+            manager,
+            id,
+            #[cfg(windows)]
+            path_before: windows::raw_machine_path(),
+        }
     }
 
     fn install_command(&self, code: &str) -> Command {
@@ -1426,6 +1435,11 @@ fn assert_nothing_left(machine: &Machine, said: &str) {
         windows::path_entries_naming(&machine.paths.bin_dir),
         0,
         "the Path entry is left"
+    );
+    assert_eq!(
+        windows::raw_machine_path(),
+        machine.path_before,
+        "the machine's Path is not as it was before install"
     );
 }
 

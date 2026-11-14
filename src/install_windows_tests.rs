@@ -265,6 +265,19 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
     assert_eq!(image.parent(), Some(dir.path()));
     let name = image.file_name().unwrap().to_string_lossy().into_owned();
     assert!(schtasks::is_leftover_of(&name, "frpc-0.1.exe"), "{name}");
+    assert!(
+        deletions_at_reboot().contains(&format!(r"\??\{}", image.display()).to_lowercase()),
+        "the renamed image is not scheduled for deletion at the next boot"
+    );
+}
+
+/// The files that the system deletes at its next boot, lower-cased, as `\??\<path>`.
+fn deletions_at_reboot() -> Vec<String> {
+    let session = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager")
+        .unwrap();
+    let pending: Vec<String> = session.get_value("PendingFileRenameOperations").unwrap_or_default();
+    pending.iter().map(|entry| entry.to_lowercase()).collect()
 }
 
 #[test]
@@ -281,8 +294,7 @@ fn only_the_bin_dir_has_a_running_image_renamed() {
 
     let err = format!("{:#}", remove_files(&paths).unwrap_err());
 
-    // The service's own processes are waited for before the removal, so only an image that is not the service's can
-    // be running in the bin dir; anything running from the config dir is the operator's, and fails the removal.
+    // Anything running from the config dir is the operator's, and fails the removal.
     assert!(err.contains("b.exe"), "{err}");
     assert!(paths.config_dir.join("b.exe").exists());
     assert!(!paths.bin_dir.exists());

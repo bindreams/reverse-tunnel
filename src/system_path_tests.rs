@@ -2,6 +2,14 @@ use super::*;
 
 const DIR: &str = r"C:\Program Files\reverse-tunnel";
 
+fn with_entry(path: &str, dir: &str) -> Option<String> {
+    super::with_entry(path, dir).unwrap()
+}
+
+fn without_entry(path: &str, dir: &str) -> Option<String> {
+    super::without_entry(path, dir).unwrap()
+}
+
 #[test]
 fn a_directory_is_appended_after_the_entries_there() {
     assert_eq!(

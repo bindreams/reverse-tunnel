@@ -25,7 +25,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use winreg::RegKey;
-use winreg::enums::HKEY_LOCAL_MACHINE;
+use winreg::enums::{HKEY_LOCAL_MACHINE, RegType};
 
 use super::{Machine, output_of, service, service_owner, wait_until};
 
@@ -287,23 +287,32 @@ fn machine_path() -> String {
         .unwrap()
 }
 
+/// The machine's `Path` as stored, byte for byte, with its registry type.
+pub fn raw_machine_path() -> (Vec<u8>, RegType) {
+    let value = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        .unwrap()
+        .get_raw_value("Path")
+        .unwrap();
+    (value.bytes.to_vec(), value.vtype)
+}
+
 /// How many entries of the machine's `Path` name `dir`, as the product decides it.
 pub fn path_entries_naming(dir: &Path) -> usize {
     let dir = dir.to_str().unwrap();
     machine_path()
         .split(';')
-        .filter(|entry| system_path::names(entry, dir))
+        .filter(|entry| system_path::names(entry, dir).unwrap())
         .count()
 }
 
 /// The machine's `Path` as a process started now would have it, each `%NAME%` expanded: the environment of a shell
 /// opened after `install`, unlike this process's own.
 pub fn fresh_path() -> String {
-    system_path::expand(&machine_path())
+    system_path::expand(&machine_path()).unwrap()
 }
 
-/// Waits, with no cap, until the removal's task has deleted every leftover image: the files a removal renamed because
-/// it could not delete them, which are named by `schtasks::leftover_pattern`.
+/// Waits, with no cap, until the removal's task has deleted every file matching `schtasks::leftover_pattern`.
 pub fn wait_until_no_leftover_image_is_left(machine: &Machine) {
     wait_until("the leftover images are deleted", || {
         install::leftover_images(&machine.paths).unwrap().is_empty()

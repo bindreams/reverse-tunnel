@@ -213,20 +213,11 @@ pub fn is_leftover_of(name: &str, original: &str) -> bool {
         .is_some_and(|(_id, kept)| kept.eq_ignore_ascii_case(original))
 }
 
-/// What `cmd` runs for the removal task, each step once and in order: `uninstall --finish` from `copy`, the copy's
-/// deletion, the deletion of the directory `dir` that holds the copy and the log `log`, the task `name`'s own deletion,
-/// and the deletion of the leftover files. `--finish` that fails ends `cmd` with code 1 (`exit /b` ends `cmd`, and with
-/// it the rest), and the task carries it as its last result; a program is judged by its exit code. So is the task's
-/// deletion, which fails with code 4, and is not preceded by a query that could hide its failure.
-///
-/// A builtin is judged by what it left, since `del` and `rmdir` report a file that something holds only in their
-/// message, and what holds it (a scan, a program that watches files, a process that runs a file from `dir`) lets go in
-/// time or never: each of the three deletions repeats with no end (see `until_gone`), and the next step waits for it.
-/// The leftover files are the ones in `leftovers`, the folder that holds the bin dir (see `leftover_pattern`), deleted
-/// whatever their attributes (`del /f /a`: read-only, hidden and system ones too). The check counts files only
-/// (`dir /a:-d`): a directory of the pattern is not deleted by `del`, and must not keep the loop going. The leftovers
-/// come after the task's own deletion: until then `uninstall`'s waiter is alive and may be running a leftover, and the
-/// waiter ends once the task is gone.
+/// What `cmd` runs for the removal task, in order: `uninstall --finish` from `copy` (failure ends `cmd` with code 1, the
+/// task's last result), then the deletion of `copy` and `dir`, the task `name`'s own deletion (code 4 on failure), and
+/// the leftover files in `leftovers`. `del` and `rmdir` report a held file only in their message, so each is repeated
+/// until its target is gone (see `until_gone`). The leftovers go after the task's own deletion because until then
+/// `uninstall`'s waiter is alive and may be running one.
 pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
     let pattern = leftover_pattern(leftovers);
@@ -255,9 +246,8 @@ pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers
 /// the `cmd` it runs in, so the loop has a `cmd` of its own and the script goes on after it. The pause is `ping`, as
 /// `timeout` needs a console, which a task has none of. Its `cmd` takes `SWITCHES`, as the task's own does.
 ///
-/// The loop is no quoted argument, which the outer `cmd` would parse with its quotes toggled by the paths' own. It is
-/// the loop's text with each `cmd` metacharacter that is outside double quotes escaped with `^`: the outer `cmd`
-/// passes it on unchanged, and a path, which stays inside its quotes, is read as it is by both.
+/// The loop text is escaped with `^` outside double quotes so the outer `cmd` passes it on unchanged; paths stay inside
+/// their quotes.
 fn until_gone(delete: &str, done: &str) -> String {
     let body = format!("for /l %i in (1,0,2) do (({delete} >nul 2>&1) & ({done}) & ping -n 2 127.0.0.1 >nul)");
     let mut escaped = String::with_capacity(body.len());

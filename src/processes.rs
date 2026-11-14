@@ -45,11 +45,8 @@ pub fn wait_until_none_runs_as_the_service() -> Result<()> {
     wait_until_none_runs_as(&sid, ACCOUNT)
 }
 
-/// Waits, with no cap, until no process runs as `sid`, the account named `name` in what is printed: the system lists
-/// the processes with their users, and each one of the account is waited for, until a listing finds none. Each round
-/// that waits says for which. Only the processes of the account are opened: one that has ended since the listing
-/// is gone, one whose id another process took is not ours, and one that cannot be opened or read for any other reason
-/// is not ours if a new listing no longer has it, and fails the wait if it does.
+/// Waits, with no cap, until no process runs as `sid` (the account `name`, for the log lines), listing again each round.
+/// A process that cannot be opened or read fails the wait unless a new listing no longer has it under `sid`.
 fn wait_until_none_runs_as(sid: &Sid, name: &str) -> Result<()> {
     loop {
         let running = running_as(sid).with_context(|| format!("listing the processes of {name}"))?;
@@ -80,9 +77,8 @@ fn open_all(running: &[Listed], sid: &Sid, name: &str) -> Result<Vec<(Listed, Ow
     Ok(opened)
 }
 
-/// Whether to go on without `process`, which could not be opened or read (`failure`): its id may be a stranger's that
-/// took it since the first listing, so it is skipped if the `listing` made after the failure no longer has it under
-/// `name`, and the failure stands if it does. A skip is returned as the line that says it.
+/// Whether to go on without `process`, which could not be opened or read (`failure`): it is skipped if the `listing`
+/// made after the failure no longer has it under `name`. A skip is returned as the line that says it.
 fn skip_if_unlisted(failure: anyhow::Error, process: &Listed, listing: &[Listed], name: &str) -> Result<String> {
     if listing.iter().any(|listed| listed.pid == process.pid) {
         return Err(failure);

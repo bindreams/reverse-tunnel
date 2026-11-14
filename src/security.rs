@@ -32,7 +32,7 @@ impl Drop for Local {
     }
 }
 
-fn wide(path: &Path) -> Vec<u16> {
+pub(crate) fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain([0]).collect()
 }
 
