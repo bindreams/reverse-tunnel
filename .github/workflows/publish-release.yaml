@@ -113,7 +113,7 @@ jobs:
               exit 1
             fi
             if [ "$EXISTING" != "$SHA" ]; then
-              echo "::error::Tag $TAG exists on $EXISTING, not on the draft's $SHA. Delete the tag or recreate the draft."
+              echo "::error::Tag $TAG exists on $EXISTING, not on the draft's $SHA. If no published release uses the tag, delete it; otherwise draft a new version."
               exit 1
             fi
           fi
@@ -127,7 +127,7 @@ jobs:
           fi
 
           if [ "$PUBLISHED" != "$SHA" ]; then
-            echo "::error::Release $TAG points at $PUBLISHED, not at $SHA. Delete the release and its tag, then re-run Draft Release."
+            echo "::error::Release $TAG points at $PUBLISHED, not at $SHA. The release is public and immutable: draft and publish a new version."
             exit 1
           fi
 
