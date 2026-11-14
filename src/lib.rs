@@ -35,4 +35,6 @@ pub mod supervisor;
 pub mod system_path;
 #[cfg(all(test, unix))]
 mod test_stub;
+#[cfg(test)]
+mod test_support;
 pub mod upgrade;

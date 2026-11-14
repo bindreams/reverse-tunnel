@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -9,8 +10,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::Kind;
+use crate::test_support::{CODE, host_dirs, wrapped};
 
-const CODE: &str = include_str!("../server/testdata/join-code.txt");
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
 fn code_for(domain: &str, token: &str, cert: &str) -> String {
@@ -18,14 +19,9 @@ fn code_for(domain: &str, token: &str, cert: &str) -> String {
     format!("rt1:{}", URL_SAFE_NO_PAD.encode(json.to_string()))
 }
 
-/// `code` as a chat client wraps it: lines of 40 characters, indented, with Windows line ends.
-fn wrapped(code: &str) -> String {
-    let lines: Vec<&str> = code
-        .as_bytes()
-        .chunks(40)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap())
-        .collect();
-    format!("  {}\r\n", lines.join("\r\n  "))
+/// A dialog that is not a terminal and has nothing to read: for runs that must fail before they ask.
+fn no_dialog() -> Dialog<Cursor<&'static str>, Vec<u8>, Vec<u8>> {
+    Dialog::new(Cursor::new(""), Vec::new(), Vec::new(), false)
 }
 
 /// A host's directories in a temp dir, with the current user as the service account.
@@ -37,10 +33,7 @@ struct Machine {
 
 impl Machine {
     fn new() -> Machine {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let paths = Paths::testing(root);
-        fs::create_dir(&paths.config_dir).unwrap();
+        let (dir, paths) = host_dirs();
         let account = Account {
             uid: uzers::get_current_uid(),
             gid: uzers::get_current_gid(),
@@ -135,7 +128,7 @@ Host myhost
     ProxyCommand websocat --binary wss://%h/
 "
     );
-    assert_eq!(registration(&machine.paths).unwrap(), expected);
+    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
 }
 
 #[test]
@@ -154,7 +147,15 @@ services:
   uv run ctl add myhost {ZERO_TOKEN_HASH}
 "
     );
-    assert_eq!(registration(&machine.paths).unwrap(), expected);
+    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
+}
+
+#[test]
+fn registration_of_an_existing_config_does_not_claim_the_host_is_new() {
+    let machine = machine_with("host: myhost\nbridge: tunnel.example.test\nservices: {}\n");
+    let expected =
+        format!("If the bridge does not know this host yet, run:\n  uv run ctl add myhost {ZERO_TOKEN_HASH}\n");
+    assert_eq!(registration(&machine.paths, false).unwrap(), expected);
 }
 
 #[test]
@@ -235,7 +236,7 @@ fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
         join: None,
         paths: machine.paths.clone(),
     };
-    let err = format!("{:#}", install(opts).unwrap_err());
+    let err = format!("{:#}", install(opts, &mut no_dialog()).unwrap_err());
     assert!(err.contains(&rerun_uninstall(&machine.paths)), "{err}");
     assert!(err.contains("`uninstall` with `sudo` and any"), "{err}");
 
@@ -257,7 +258,7 @@ fn host_is_checked_before_the_join_code_is_asked_for() {
         join: None,
         paths: machine.paths.clone(),
     };
-    let err = format!("{:#}", install(opts).unwrap_err());
+    let err = format!("{:#}", install(opts, &mut no_dialog()).unwrap_err());
     assert!(err.contains("differs from this host's name"), "{err}");
 }
 

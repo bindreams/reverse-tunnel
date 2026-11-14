@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 #[cfg(windows)]
 use std::io;
-use std::io::ErrorKind;
+use std::io::{BufRead, ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ use crate::client;
 #[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::Config;
-use crate::dialog::Dialog;
+use crate::dialog::{self, Dialog};
 #[cfg(windows)]
 use crate::files::is_access_denied;
 use crate::files::{
@@ -92,17 +92,18 @@ pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
 }
 
 /// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything `install`
-/// writes changed. Prints the line that registers the host on the bridge.
-pub fn install(opts: InstallOpts) -> Result<()> {
+/// writes changed. Asks what it needs through `dialog`, after checking the flags, and prints the line that accepts the
+/// host on the bridge.
+pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut Dialog<I, O, P>) -> Result<()> {
     let paths = &opts.paths;
-    let mut dialog = Dialog::terminal();
+    let (host, join) = dialog::flags(opts.host.as_deref(), opts.join.as_deref())?;
     dialog.intro(paths)?;
     let _lock = lock(paths)?;
     refuse_while_uninstalling(paths)?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
-    let host = dialog.host(paths, opts.host.as_deref())?;
-    let join = dialog.join(paths, opts.join.as_deref())?;
+    let host = dialog.host(paths, host)?;
+    let join = dialog.join(paths, join)?;
 
     let account = account::ensure(service::ACCOUNT)?;
     let new = Binary::read(paths, &env::current_exe().context("finding this binary")?)?;
@@ -163,7 +164,9 @@ fn apply(
         say_kept(sweep_old_images(paths, &new.image));
     }
 
-    print!("{}", registration(paths)?);
+    // Before the restart: an upgrade over the tunnel can cut the session there, and this is what its operator needs.
+    // `host` is only given for a config that is new.
+    print!("{}", registration(paths, host.is_some())?);
     manager.enable(&spec.id)?;
     pick_up(manager, &spec.id, paths, changed)
 }
@@ -1036,14 +1039,20 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
     symlink(target, link).with_context(|| format!("linking {}", link.display()))
 }
 
-/// What `install` prints once the host is set up: the line that accepts it on the bridge, then, if the host
-/// publishes ssh, how to reach it. It ends in a newline.
-fn registration(paths: &Paths) -> Result<String> {
+/// What `install` prints once the host is set up: the line that accepts it on the bridge (for a `new` config, a host the
+/// bridge cannot know yet; otherwise it may already), then, if the host publishes ssh, how to reach it. It ends in a
+/// newline.
+fn registration(paths: &Paths, new: bool) -> Result<String> {
     let cfg = Config::load(&paths.config_file())?;
     let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
     let line = registration_line(&cfg.host, token.trim());
-    let mut text = format!("Host is ready! Run this command on the bridge to accept the host:\n  {line}\n");
+    let intro = if new {
+        "Host is ready! Run this command on the bridge to accept the host:"
+    } else {
+        "If the bridge does not know this host yet, run:"
+    };
+    let mut text = format!("{intro}\n  {line}\n");
     if let Some(client) = client::instructions(&cfg) {
         text.push('\n');
         text.push_str(&client);

@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use reverse_tunnel::dialog::Dialog;
 use reverse_tunnel::download::tools;
 use reverse_tunnel::install::{self, InstallOpts};
 use reverse_tunnel::logs;
@@ -106,7 +107,7 @@ fn run() -> Result<ExitCode> {
         Command::Run { check } => supervisor::run(&paths, &tools(&paths), check),
         Command::Install { host, join } => {
             require_root()?;
-            install::install(InstallOpts { host, join, paths })?;
+            install::install(InstallOpts { host, join, paths }, &mut Dialog::terminal())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Uninstall { finish } => {
