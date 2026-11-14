@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use reverse_tunnel::dialog::Dialog;
 use reverse_tunnel::download::tools;
 use reverse_tunnel::install::{self, InstallOpts};
 use reverse_tunnel::logs;
@@ -34,13 +35,17 @@ enum Command {
     },
     /// Installs the service and starts it, or restarts it if anything `install` writes changed. Needs root.
     ///
+    /// On a terminal it asks for the host name and the join code, unless they are given or already known; without one
+    /// a missing value is an error.
+    ///
     /// A hand edit of config.yaml is not noticed; apply it with `restart`.
     Install {
-        /// The name for a new config.yaml (default: this machine's name). With an existing one, a different name is an
-        /// error.
+        /// The name for a new config.yaml, which is otherwise asked for, with this machine's name as the default. With
+        /// an existing one, a different name is an error.
         #[arg(long)]
         host: Option<String>,
-        /// The bridge's join code; asked for if missing and needed.
+        /// The bridge's join code; asked for if needed and not given. Without a terminal to ask on, it is required
+        /// then.
         #[arg(long)]
         join: Option<String>,
     },
@@ -102,7 +107,7 @@ fn run() -> Result<ExitCode> {
         Command::Run { check } => supervisor::run(&paths, &tools(&paths), check),
         Command::Install { host, join } => {
             require_root()?;
-            install::install(InstallOpts { host, join, paths })?;
+            install::install(InstallOpts { host, join, paths }, &mut Dialog::terminal())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Uninstall { finish } => {

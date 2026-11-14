@@ -5,7 +5,9 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, ErrorKind, Write};
+#[cfg(windows)]
+use std::io;
+use std::io::{BufRead, ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -20,7 +22,8 @@ use crate::account::{self, Account};
 use crate::client;
 #[cfg(target_os = "linux")]
 use crate::command;
-use crate::config::{Config, valid_label};
+use crate::config::Config;
+use crate::dialog::{self, Dialog};
 #[cfg(windows)]
 use crate::files::is_access_denied;
 use crate::files::{
@@ -89,30 +92,114 @@ pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
 }
 
 /// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything `install`
-/// writes changed. Prints the line that registers the host on the bridge.
-pub fn install(opts: InstallOpts) -> Result<()> {
+/// writes changed. Asks what it needs through `dialog`, after checking the flags, and prints the line that accepts the
+/// host on the bridge.
+pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut Dialog<I, O, P>) -> Result<()> {
     let paths = &opts.paths;
+    let (host, join) = dialog::flags(opts.host.as_deref(), opts.join.as_deref())?;
     let _lock = lock(paths)?;
     refuse_while_uninstalling(paths)?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
-    let host = configured_host(paths, opts.host.as_deref())?;
-    let join = match opts.join.as_deref() {
-        Some(code) => Some(join::decode(code)?),
-        None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
-        None => None,
+
+    let config = paths.config_file();
+    let new_config = !config.try_exists()?;
+    if let (false, Some(asked)) = (new_config, host) {
+        ensure_same_host(&config, asked)?;
+    }
+    let needs_join = join.is_none() && !bridge_files_exist(paths)?;
+    ensure_can_ask(dialog.interactive(), new_config, host, needs_join, join.is_some())?;
+
+    let host = if new_config {
+        dialog.intro(paths)?;
+        Some(match host {
+            Some(host) => {
+                dialog.show_host(host)?;
+                host.to_string()
+            }
+            None => dialog.ask_host(dialog::default_host().as_deref())?,
+        })
+    } else {
+        None
+    };
+    let join = match join {
+        None if needs_join => Some(dialog.ask_join()?),
+        join => join,
     };
 
     let account = account::ensure(service::ACCOUNT)?;
     let new = Binary::read(paths, &env::current_exe().context("finding this binary")?)?;
-    apply(
-        &*service::registering_manager(&new.image)?,
+    let manager = service::registering_manager(&new.image)?;
+    let (id, changed) = set_up(
+        &*manager,
         &account,
         paths,
         &new,
         host.as_deref(),
         join.as_ref(),
         changed,
+    )?;
+    // Before the restart: an upgrade over the tunnel can cut the session there, and this is what its operator needs.
+    dialog.ready(&registration(paths, new_config)?)?;
+    manager.enable(&id)?;
+    pick_up(&*manager, &id, paths, changed)
+}
+
+/// A host keeps its name: `asked`, from `--host`, must be the name in `config`.
+fn ensure_same_host(config: &Path, asked: &str) -> Result<()> {
+    let current = Config::load(config)?.host;
+    ensure!(
+        asked == current,
+        "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a host. To rename \
+         it, uninstall it and install it again with --host {asked}",
+        config.display()
+    );
+    Ok(())
+}
+
+/// Whether the files a join code provides are all there.
+fn bridge_files_exist(paths: &Paths) -> Result<bool> {
+    for file in [paths.config_file(), paths.bridge_pem(), paths.bridge_token()] {
+        if !file.try_exists()? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Fails if `install` must ask for a host name (`new_config` without `host`) or a join code (`needs_join`) and the
+/// person cannot be asked, naming the command that gives them: `host` and a given join code (`has_join`) stay in it.
+fn ensure_can_ask(
+    interactive: bool,
+    new_config: bool,
+    host: Option<&str>,
+    needs_join: bool,
+    has_join: bool,
+) -> Result<()> {
+    let needs_host = new_config && host.is_none();
+    if interactive || !(needs_host || needs_join) {
+        return Ok(());
+    }
+    let mut needed = Vec::new();
+    let mut flags = Vec::new();
+    match host {
+        Some(host) => flags.push(format!("--host {host}")),
+        None if needs_host => {
+            needed.push("a host name");
+            flags.push("--host NAME".to_string());
+        }
+        None => {}
+    }
+    if needs_join {
+        needed.push("a join code");
+    }
+    if needs_join || has_join {
+        flags.push("--join CODE".to_string());
+    }
+    bail!(
+        "there is no terminal to ask on (stdin and stderr must both be terminals), so {} must be given: {}",
+        needed.join(" and "),
+        rerun_install(&env::current_exe().context("finding this binary")?, &flags)
     )
 }
 
@@ -133,10 +220,10 @@ impl Binary {
     }
 }
 
-/// What `install` does once it holds the lock and knows its inputs. `new` is the binary being installed, which
-/// `manager` registers as the service's host. `changed`: an earlier run changed something that has not been restarted
-/// yet.
-fn apply(
+/// What `install` does once it holds the lock and knows its inputs, up to registering the service: its id, and whether
+/// anything changed. `new` is the binary being installed, which `manager` registers as the service's host. `changed`:
+/// an earlier run changed something that has not been restarted yet.
+fn set_up(
     manager: &dyn ServiceManager,
     account: &Account,
     paths: &Paths,
@@ -144,7 +231,7 @@ fn apply(
     host: Option<&str>,
     join: Option<&JoinInfo>,
     mut changed: bool,
-) -> Result<()> {
+) -> Result<(Id, bool)> {
     let spec = service::spec(&new.image)?;
     // The check reads the settings (as the account, except on Windows), so they are written first; the binary and the
     // unit come after it, so a rejected binary leaves both as they were. The image goes in before the unit: on
@@ -161,10 +248,7 @@ fn apply(
         system_path::add(&paths.bin_dir)?;
         say_kept(sweep_old_images(paths, &new.image));
     }
-
-    print!("{}", registration(paths)?);
-    manager.enable(&spec.id)?;
-    pick_up(manager, &spec.id, paths, changed)
+    Ok((spec.id.clone(), changed))
 }
 
 /// Runs the removal: see `hand_off`. On Windows it first checks that its working directory is not one the removal
@@ -462,6 +546,22 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
         .process_group(0)
         .spawn()?;
     Ok(Removal(child))
+}
+
+/// How to run `install` again with `flags`: by `exe`, the binary being run, with `sudo`.
+#[cfg(not(windows))]
+fn rerun_install(exe: &Path, flags: &[String]) -> String {
+    format!("run `sudo {} install {}`", exe.display(), flags.join(" "))
+}
+
+/// How to run `install` again with `flags`: by `exe`, the binary being run, in an elevated prompt.
+#[cfg(windows)]
+fn rerun_install(exe: &Path, flags: &[String]) -> String {
+    format!(
+        "run `{} install {}` in an elevated prompt",
+        exe.display(),
+        flags.join(" ")
+    )
 }
 
 /// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
@@ -775,82 +875,6 @@ fn remove_files(paths: &Paths) -> Result<()> {
     remove_entry(&paths.log_dir)
 }
 
-/// Whether a join code is needed: some file it provides is missing.
-fn needs_join(paths: &Paths) -> Result<bool> {
-    let files = [paths.config_file(), paths.bridge_pem(), paths.bridge_token()];
-    for file in files {
-        if !file.try_exists()? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// The name for a new `config.yaml`, or none when one exists. Refuses an explicit name that differs from the existing
-/// config's.
-fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<String>> {
-    let config = paths.config_file();
-    if !config.try_exists()? {
-        return host_name(explicit).map(Some);
-    }
-    if let Some(asked) = explicit {
-        let asked = host_name(Some(asked))?;
-        let current = Config::load(&config)?.host;
-        ensure!(
-            asked == current,
-            "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a host. \
-             To rename it, uninstall it and install it again with --host {asked}",
-            config.display()
-        );
-    }
-    Ok(None)
-}
-
-/// The host name for a new `config.yaml`.
-fn host_name(explicit: Option<&str>) -> Result<String> {
-    match explicit {
-        Some(host) => {
-            ensure!(
-                valid_label(host),
-                "--host {host:?} is not a valid name: one DNS label of lowercase letters, digits and hyphens"
-            );
-            Ok(host.to_string())
-        }
-        None => normalize_host(&gethostname::gethostname().to_string_lossy()),
-    }
-}
-
-/// A machine name as a host name: lowercased, and it must then be one valid DNS label.
-fn normalize_host(machine: &str) -> Result<String> {
-    let host = machine.to_lowercase();
-    ensure!(
-        valid_label(&host),
-        "this machine's name {machine:?} is not a valid host name (one DNS label); pass --host"
-    );
-    Ok(host)
-}
-
-/// Reads lines until they form a join code, which may be wrapped over several. A blank line, or the end of the input,
-/// gives up.
-fn prompt_join(input: &mut impl BufRead, prompt: &mut impl Write) -> Result<JoinInfo> {
-    writeln!(
-        prompt,
-        "Paste the join code (`uv run ctl join-code` on the bridge) and press Enter; a blank line gives up:"
-    )?;
-    let mut code = String::new();
-    loop {
-        let mut line = String::new();
-        input.read_line(&mut line)?;
-        code += &line;
-        if line.trim().is_empty() {
-            return join::decode(&code).context("no complete join code was entered");
-        }
-        if let Ok(info) = join::decode(&code) {
-            return Ok(info);
-        }
-    }
-}
-
 /// Registers the service without starting it. Whether it was created or changed.
 fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> Result<bool> {
     if manager.preview_install(spec)? != Outcome::UpToDate {
@@ -1111,14 +1135,19 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
     symlink(target, link).with_context(|| format!("linking {}", link.display()))
 }
 
-/// What `install` prints once the host is set up: the line that registers it on the bridge, then, if the host
-/// publishes ssh, how to reach it. It ends in a newline.
-fn registration(paths: &Paths) -> Result<String> {
+/// What `install` prints once the host is set up: the line that accepts it on the bridge, then, if the host publishes
+/// ssh, how to reach it. `new`: the config was just created. Ends in a newline.
+fn registration(paths: &Paths, new: bool) -> Result<String> {
     let cfg = Config::load(&paths.config_file())?;
     let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
     let line = registration_line(&cfg.host, token.trim());
-    let mut text = format!("Register this host on the bridge by running:\n    {line}\n");
+    let intro = if new {
+        "Host is ready! Run this command on the bridge to accept the host:"
+    } else {
+        "If the bridge does not know this host yet, run:"
+    };
+    let mut text = format!("{intro}\n  {line}\n");
     if let Some(client) = client::instructions(&cfg) {
         text.push('\n');
         text.push_str(&client);
