@@ -20,6 +20,7 @@ hex = "0.4.3"
 # tz-system: the system zone (/etc/localtime on Unix, the Win32 API on Windows).
 # tzdb-bundle-platform: Windows has no zoneinfo to resolve the zone's name against; a no-op elsewhere.
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform"] }
+named-lock = "0.4.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
@@ -39,7 +40,6 @@ libsearch-guard = "0.1.1"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"
-named-lock = "0.4.1"
 uzers = "0.12.2"
 # Resolves a TZ=Region/City variable from /usr/share/zoneinfo.
 jiff = { version = "0.2.38", default-features = false, features = ["tzdb-zoneinfo"] }
@@ -49,6 +49,20 @@ rustix = { version = "1", default-features = false, features = ["process"] }
 
 [target."cfg(windows)".dependencies]
 known-folders = "1.4.2"
+# The machine's `Path` (src/system_path.rs).
+winreg = "0.56.0"
+# The virtual account's SID is the SHA-1 of its name.
+sha1 = "0.11.0"
+# Security descriptors from SDDL strings (src/security.rs), the expansion of `Path` entries, the broadcast that it changed,
+# and the processes that run as an account (src/processes.rs).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# Task Scheduler's COM API, for the removal's task (src/schtasks.rs): the modules it imports. `RegisterTask` takes VARIANTs,
+# and is gated on Ole and Variant.
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
+
+[target."cfg(windows)".dev-dependencies]
+# tests/platform.rs: a job object that ends a session, and a DACL's effective rights.
+windows-sys = { version = "0.61.2", features = ["Win32_System_JobObjects"] }
 
 # Stands in for frpc in tests/, and for a binary's `run --check` in src/ops_tests.rs and src/install_tests.rs.
 [[bin]]

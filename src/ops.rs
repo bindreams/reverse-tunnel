@@ -15,11 +15,12 @@ use goetia::manager::{Budget, ServiceManager, State};
 use goetia::spec::Id;
 use sha2::{Digest, Sha256};
 
-#[cfg(unix)]
 use crate::account;
 use crate::command;
 use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
+use crate::install::refuse_while_uninstalling;
+use crate::output::println_best_effort;
 use crate::paths::Paths;
 use crate::service;
 
@@ -38,8 +39,7 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 /// Has the service read its configuration again, after the installed binary has checked it as the service account: a
 /// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
 pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
-    #[cfg(unix)]
-    crate::install::refuse_while_uninstalling(paths)?;
+    refuse_while_uninstalling(paths)?;
     // Decided from the binary: the account database can answer for an account that has just been removed.
     ensure!(service::exe(paths).try_exists()?, "the service is not installed");
     check_and_restart_as(manager, paths, service_identity()?)
@@ -75,10 +75,23 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
 /// install's and open to the account by contract.
 pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
+    // Windows runs the check as the caller, whoever is asked for.
+    #[cfg(windows)]
+    let run_as: Option<RunAs> = {
+        let _ = run_as;
+        None
+    };
     let spec = service::spec(paths)?;
     let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
     check.args(args).arg("--check").env_clear().envs(&spec.env);
+    // Windows cannot find its known folders (`Paths::system()`) without these, which every service has.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "SystemDrive"] {
+        if let Some(value) = std::env::var_os(name) {
+            check.env(name, value);
+        }
+    }
     #[cfg(unix)]
     {
         debug_assert!(spec.cwd.is_none(), "the service starts in /, and so does the check");
@@ -112,11 +125,8 @@ fn drop_to(root: bool, uid: u32, gid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Who the check runs as: the service's account on Linux and macOS; on Windows, the caller.
-#[cfg(unix)]
+/// Who the check runs as: the service's account on Linux and macOS; on Windows, always the caller.
 pub(crate) type RunAs = account::Account;
-#[cfg(not(unix))]
-pub(crate) type RunAs = std::convert::Infallible;
 
 #[cfg(unix)]
 fn service_identity() -> Result<Option<RunAs>> {
@@ -182,12 +192,6 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
         }
         Err(err) => Err(err.into()),
     }
-}
-
-/// Prints a line reporting what is already done, and ignores a closed stdout rather than panicking: a command that
-/// stops the service over the tunnel ends the session that would read it.
-pub fn println_best_effort(message: &str) {
-    let _ = writeln!(std::io::stdout(), "{message}");
 }
 
 /// Never prints a token.
