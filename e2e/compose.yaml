@@ -1,4 +1,4 @@
-# The edge of the end-to-end test: Pebble (an ACME server) and Traefik, as voyager's Traefik is for the bridge.
+# The edge of the end-to-end test: Pebble (an ACME server) and Traefik, as a real bridge's Traefik is.
 name: rt-e2e-edge
 
 services:

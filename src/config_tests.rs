@@ -1,7 +1,7 @@
 use super::*;
 
 const OK: &str = "\
-host: mothership
+host: myhost
 bridge: tunnel.example.test
 default: ssh
 services:
@@ -50,7 +50,7 @@ fn config_rejects_bad_service_name() {
 
 #[test]
 fn config_rejects_bad_host_name() {
-    assert!(error(&OK.replace("mothership", "DESKTOP-7Q2X")).contains("DESKTOP-7Q2X"));
+    assert!(error(&OK.replace("myhost", "DESKTOP-7Q2X")).contains("DESKTOP-7Q2X"));
 }
 
 #[test]

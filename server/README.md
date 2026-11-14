@@ -13,15 +13,21 @@ wildcards).
 
 All commands run in this folder.
 
-1. DNS: `tunnel.binarydreams.me` (your tunnel domain, `T` below) and `*.T` point at this server. Open `7000/tcp` and
-   `7000/udp` in its firewall.
-2. `cp .env.example .env`, and set `TUNNEL_DOMAIN` if it is not `tunnel.binarydreams.me`.
+1. DNS: your tunnel domain (`tunnel.example.com` in the examples, `T` below) and `*.T` point at this server. Open
+   `7000/tcp` and `7000/udp` in its firewall.
+2. `cp .env.example .env`, and edit its `TUNNEL_DOMAIN` line to your tunnel domain (the template's is a placeholder).
 3. `uv run ctl init` checks the network and DNS, creates the token, the certificate (`tls/`) and the registries
-   (`state/`), and prints the join code. `uv run ctl join-code` prints it again.
-4. `docker compose up -d --build`.
+   (`state/`), builds and starts the bridge, and prints the join code last.
+   `uv run ctl join-code` prints it again. Every other `ctl` command also starts whatever of the bridge is not running.
+   None of them recreates a running `reverse-tunnel-frps`, which would drop every tunnel; `init` says so when it
+   leaves one running. To apply a change to its image, `compose.yaml` or `.env` on purpose, run
+   `docker compose up -d --build reverse-tunnel-frps` (`docker compose restart` applies none of these).
 
 Joining a host and publishing a service: see the main README. The commands are `uv run ctl add`, `revoke`, `alias`,
-`unalias`, `list`.
+`unalias`, `list`; `uv run ctl <command> --help` says what each takes.
+
+After `uv run ctl add`, the host is registered; the next step is to reach it from your own machine: see
+[Set up a client](../README.md#set-up-a-client) in the main README.
 
 ## Verify
 

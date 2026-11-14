@@ -6,7 +6,9 @@ import secrets
 import socket
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 from dotenv import dotenv_values
 
@@ -119,15 +121,69 @@ def _join_code(args, hosts, aliases, env):
     return encode_join(env["TUNNEL_DOMAIN"], env["FRPS_TOKEN"], (TLS / "trust.pem").read_text())
 
 
-# A handler edits the registries in place and returns text to print after the reload.
+def _init_report(args, hosts, aliases, env):
+    return (
+        "Join code for this bridge. Paste it into `reverse-tunnel install` on each host (the same code works for\n"
+        "every host); `uv run ctl join-code` shows it again:\n" + _join_code(args, hosts, aliases, env)
+    )
+
+
+FRPS_KEPT = (
+    "reverse-tunnel-frps was left running. To apply a change to its image, compose.yaml or .env, which drops every "
+    "tunnel once, run `docker compose up -d --build reverse-tunnel-frps`."
+)
+
+
+class Command(NamedTuple):
+    # Edits the registries in place and returns text to print: before the bring-up, or after it for `bootstrap`.
+    handler: Callable
+    help: str
+    arguments: dict[str, str]
+    # True for `init`: runs in a folder with no `state/`, and its text prints after the bring-up.
+    bootstrap: bool = False
+
+
 COMMANDS = {
-    "init": (_join_code, []),
-    "add": (_add, ["host", "hash"]),
-    "revoke": (_revoke, ["host"]),
-    "alias": (_alias, ["public", "backend"]),
-    "unalias": (_unalias, ["public"]),
-    "list": (_list, []),
-    "join-code": (_join_code, []),
+    "init": Command(
+        _init_report,
+        "Check this folder, create what is missing (the token, the certificate, the registries), start the bridge, "
+        "and print the join code. Safe to run again.",
+        {},
+        bootstrap=True,
+    ),
+    "add": Command(
+        _add,
+        "Register a host, so the bridge lets it in. Run the line that `reverse-tunnel install` printed on the host.",
+        {
+            "host": "the host's name, the first word after `ctl add` in the line `reverse-tunnel install` printed",
+            "hash": "the host's token hash, `sha256:` and 64 hex digits, the last word of the same line",
+        },
+    ),
+    "revoke": Command(
+        _revoke,
+        "Stop letting a host in: remove it from the registry. Its current session lasts until it reconnects.",
+        {"host": "the name of a registered host, as `ctl list` shows it"},
+    ),
+    "alias": Command(
+        _alias,
+        "Give an HTTP service a public name of your own, for what a host publishes under the tunnel domain.",
+        {
+            "public": "the name to serve, outside the tunnel domain, whose DNS points at this server",
+            "backend": "the published name it forwards to, `<service>.<host>.<tunnel domain>`; the host's config.yaml "
+            "lists its services",
+        },
+    ),
+    "unalias": Command(
+        _unalias,
+        "Remove a public name that `ctl alias` made.",
+        {"public": "the public name, as `ctl list` shows it after `alias`"},
+    ),
+    "list": Command(_list, "Show the registered hosts and the aliases.", {}),
+    "join-code": Command(
+        _join_code,
+        "Print the join code, which every host needs once: paste it into `reverse-tunnel install` on the host.",
+        {},
+    ),
 }
 
 
@@ -139,7 +195,8 @@ def _registry(call, path, *args):
 
 
 def _run(args) -> None:
-    if args.command == "init":
+    command = COMMANDS[args.command]
+    if command.bootstrap:
         if not ENV.is_file():
             raise CtlError(f"no {ENV} here: run from the bridge folder, with .env.example copied to .env")
         with contextlib.suppress(FileExistsError):
@@ -154,37 +211,51 @@ def _run(args) -> None:
             raise CtlError("TUNNEL_DOMAIN is not set in .env")
         if not valid_domain(domain):
             raise CtlError(f"TUNNEL_DOMAIN {domain!r} is not a valid tunnel domain")
-        if args.command == "init":
+        if command.bootstrap:
             _init(env)
             env = dotenv_values(ENV)
         hosts = _registry(read_hosts, STATE / "hosts.yaml")
         aliases = _registry(read_aliases, STATE / "aliases.yaml", domain)
         old_hosts = dict(hosts)
         old_aliases = dict(aliases)
-        out = COMMANDS[args.command][0](args, hosts, aliases, env)
+        out = command.handler(args, hosts, aliases, env)
         if hosts != old_hosts:
             _registry(write_hosts, STATE / "hosts.yaml", hosts)
         if aliases != old_aliases:
             _registry(write_aliases, STATE / "aliases.yaml", aliases, domain)
-        if out:
+        if out and not command.bootstrap:
             print(out)  # after the write, which may fail; before the reload, which may too
         try:
             atomic_write(GENERATED, render_compose(hosts, aliases, domain).encode(), 0o644)
-            compose.compose_up_plugin(Path.cwd())
+            frps_kept = compose.compose_up(Path.cwd(), build=command.bootstrap)
         except (OSError, ValueError, subprocess.CalledProcessError) as e:
             updated = "the registry is updated but " if (hosts, aliases) != (old_hosts, old_aliases) else ""
-            raise CtlError(f"{updated}the plugin was not reloaded ({e}); rerun any ctl command to retry") from e
+            retry = (
+                "rerun `uv run ctl init` to retry, then it prints the join code"
+                if command.bootstrap
+                else "rerun any ctl command to retry"
+            )
+            raise CtlError(f"{updated}the bridge was not brought up ({e}); {retry}") from e
+        if command.bootstrap:
+            if frps_kept:
+                print(FRPS_KEPT)
+            if out:
+                print(out)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ctl", description="Manage the reverse-tunnel bridge.")
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="command")
+    for name, command in COMMANDS.items():
+        subparser = subparsers.add_parser(name, help=command.help, description=command.help)
+        for argument, argument_help in command.arguments.items():
+            subparser.add_argument(argument, help=argument_help)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ctl", description="Manage the reverse-tunnel bridge.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    for name, (_, arguments) in COMMANDS.items():
-        subparser = subparsers.add_parser(name)
-        for argument in arguments:
-            subparser.add_argument(argument)
     try:
-        _run(parser.parse_args(argv))
+        _run(build_parser().parse_args(argv))
     except (CtlError, OSError) as e:
         print(f"ctl: {e}", file=sys.stderr)
         return 1

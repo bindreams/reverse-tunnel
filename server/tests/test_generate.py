@@ -5,8 +5,8 @@ from ctl.generate import alias_key, render_compose
 
 T = "t.test"
 H = "sha256:" + "1" * 64
-MOVIES = "movies.binarydreams.me"
-MUSIC = "music.binarydreams.me"
+MOVIES = "movies.yourdomain.tld"
+MUSIC = "music.yourdomain.tld"
 CERTS = "traefik.http.routers.reverse-tunnel-certs"
 
 
@@ -24,7 +24,7 @@ def labels_of(hosts, aliases):
 
 def test_alias_key_literal():
     assert alias_key(MOVIES) == (
-        "reverse-tunnel-alias-2e16768fd3cf05f6d44e668a44198e739d3aebb009fb110cc9c1f823f0b78cb5"
+        "reverse-tunnel-alias-31f20efd13442f9d278d2323de575d704a1ed2b9efd3fb3ea5647731621b0eb6"
     )
 
 
