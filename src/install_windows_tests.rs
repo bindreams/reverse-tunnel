@@ -266,7 +266,8 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
     let name = image.file_name().unwrap().to_string_lossy().into_owned();
     assert!(schtasks::is_leftover_of(&name, "frpc-0.1.exe"), "{name}");
     let pending = deletions_at_reboot();
-    let scheduled = format!(r"\??\{}", image.display()).to_lowercase();
+    // The system writes the long form of the directory, and its own prefix, so only the file's name is compared.
+    let scheduled = name.to_lowercase();
     assert!(
         pending.contains(&scheduled),
         "{scheduled} is not scheduled for deletion at the next boot: {pending}"
