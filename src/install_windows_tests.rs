@@ -458,10 +458,10 @@ impl<'a> Acl<'a> {
 
 impl Drop for Acl<'_> {
     fn drop(&mut self) {
-        crate::security::Descriptor::parse(self.restored)
-            .unwrap()
-            .apply(self.path)
-            .unwrap();
+        // Not a panic: one in a drop during a failed assertion aborts the whole test run.
+        if let Ok(restored) = crate::security::Descriptor::parse(self.restored) {
+            let _ = restored.apply(self.path);
+        }
     }
 }
 

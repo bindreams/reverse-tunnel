@@ -1172,7 +1172,18 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     assert_eq!(fs::read(&new_image).unwrap(), newer);
     let running = machine.status().pid.expect("a running service has a pid");
     assert_eq!(windows::image_of(running), fs::canonicalize(&new_image).unwrap());
-    assert_eq!(fs::read(&old_image).unwrap(), outgoing);
+    // The old image ran when the sweep tried to delete it: it was renamed, and is a leftover until the old processes exit.
+    assert!(!old_image.exists(), "{} is still there", old_image.display());
+    let old_name = old_image.file_name().unwrap().to_string_lossy().into_owned();
+    let renamed: Vec<_> = install::leftover_images(&machine.paths)
+        .unwrap()
+        .into_iter()
+        .filter(|image| schtasks::is_leftover_of(&image.file_name().unwrap().to_string_lossy(), &old_name))
+        .collect();
+    let [renamed] = renamed.as_slice() else {
+        panic!("expected one leftover of the old image, found {renamed:?}")
+    };
+    assert_eq!(fs::read(renamed).unwrap(), outgoing);
     assert_eq!(fs::read(leftover_of_the_binary(&machine)).unwrap(), outgoing);
     for process in &old_processes {
         process.wait_until_exited();
@@ -1181,7 +1192,6 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     sweep.arg("install");
     machine.run_ok(sweep);
     assert_eq!(upgrade_remnants(&machine), Vec::<PathBuf>::new());
-    assert!(!old_image.exists(), "{} is still there", old_image.display());
 }
 
 /// Windows: has goetia register the running service again with `image`, a copy of this build in the bin dir, as its host
