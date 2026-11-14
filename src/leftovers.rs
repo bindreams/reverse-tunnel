@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::files::{
-    OpenElsewhere, hex_of_random_bytes, is_access_denied, is_not_found, remove_file, require_regular_file, same_name,
-    strip_prefix,
+    OpenElsewhere, hex_of_random_bytes, is_access_denied, is_not_found, name_of, remove_file, require_regular_file,
+    same_path, strip_prefix,
 };
 use crate::paths::Paths;
 use crate::service;
@@ -39,7 +39,7 @@ pub fn is_leftover(name: &str) -> bool {
 
 /// Whether the file called `name` is a leftover of a file that was called `original`.
 pub fn is_leftover_of(name: &str, original: &str) -> bool {
-    kept_name(name).is_some_and(|kept| same_name(kept, original))
+    kept_name(name).is_some_and(|kept| same_path(Path::new(kept), Path::new(original)))
 }
 
 /// The name that the leftover called `name` had, if it is a leftover.
@@ -94,10 +94,10 @@ pub fn images(paths: &Paths) -> Result<Vec<PathBuf>> {
 /// have left it as the only copy.
 pub fn images_of_the_binary(paths: &Paths) -> Result<Vec<PathBuf>> {
     let binary = service::exe(paths);
-    let binary = binary.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let binary = name_of(&binary);
     let (mut of_binary, mut of_images) = (Vec::new(), Vec::new());
     for image in images(paths)? {
-        let name = image.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        let name = name_of(&image);
         if is_leftover_of(name, binary) {
             of_binary.push(image);
         } else if kept_name(name).is_some_and(service::is_image) {

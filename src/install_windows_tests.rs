@@ -283,6 +283,20 @@ fn the_sweep_and_the_clean_keep_a_file_whose_name_differs_from_the_wanted_one_on
 }
 
 #[test]
+fn a_failed_removal_keeps_the_marker_whatever_the_case_of_its_name() {
+    let (_dir, paths) = installed();
+    fs::create_dir_all(&paths.config_dir).unwrap();
+    let marker = paths.config_dir.join("UNINSTALLING");
+    fs::write(&marker, "").unwrap();
+    // It sorts after the marker, so the removal reaches the marker first.
+    let _running = running(&paths.config_dir.join("z.exe"));
+
+    remove_files(&paths).unwrap_err();
+
+    assert!(marker.exists());
+}
+
+#[test]
 fn the_sweep_goes_on_past_an_image_it_cannot_delete() {
     let (_dir, paths) = installed();
     let registered = service::image(&paths, b"registered");

@@ -221,3 +221,15 @@ fn a_file_renamed_over_has_exactly_the_name_it_was_given_whatever_the_length() {
     found.sort();
     assert_eq!(found, names);
 }
+
+#[test]
+fn paths_are_the_same_by_the_case_rule_of_the_platform() {
+    let (lower, upper) = (Path::new("bin/frpc-1.exe"), Path::new("BIN/FRPC-1.EXE"));
+
+    assert_eq!(same_path(lower, upper), cfg!(windows));
+    assert_eq!(strip_prefix("FRPC-1.exe", "frpc-"), cfg!(windows).then_some("1.exe"));
+    assert_eq!(strip_suffix("frpc-1.EXE", ".exe"), cfg!(windows).then_some("frpc-1"));
+    assert!(same_path(lower, lower) && !same_path(lower, Path::new("bin/frpc-2.exe")));
+    assert_eq!(strip_prefix("frpc-1.exe", "frpc-"), Some("1.exe"));
+    assert_eq!(strip_prefix("x", "frpc-"), None);
+}

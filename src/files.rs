@@ -288,22 +288,51 @@ pub fn is_access_denied(err: &anyhow::Error) -> bool {
     has_kind(err, ErrorKind::PermissionDenied)
 }
 
-/// Whether `a` and `b` are the same Windows file name, which ignores ASCII case.
-pub fn same_name(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b)
+/// Whether `a` and `b` are the same path. On Windows ASCII case is folded and nothing else (the file system folds all of
+/// Unicode, so a name that differs in a non-ASCII letter's case is the same file there and is not the same here); on
+/// Unix the comparison is exact. The one rule for whether a listed entry is the expected one.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        let folded = |path: &Path| -> Vec<Vec<u16>> {
+            path.components()
+                .map(|part| {
+                    part.as_os_str()
+                        .encode_wide()
+                        .map(|unit| match u8::try_from(unit) {
+                            Ok(byte) => u16::from(byte.to_ascii_lowercase()),
+                            Err(_) => unit,
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        folded(a) == folded(b)
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
 }
 
-/// `name` without the start `prefix`, if it has it, whatever the ASCII case (see `same_name`).
+/// The file name of `path`, or "" if it has none or is not UTF-8.
+pub fn name_of(path: &Path) -> &str {
+    path.file_name().and_then(|name| name.to_str()).unwrap_or_default()
+}
+
+/// `name` without the start `prefix`, if it has it, by the rule of `same_path`.
 pub fn strip_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     let (start, rest) = (name.get(..prefix.len())?, name.get(prefix.len()..)?);
-    same_name(start, prefix).then_some(rest)
+    same_path(Path::new(start), Path::new(prefix)).then_some(rest)
 }
 
-/// `name` without the end `suffix`, if it has it, whatever the ASCII case (see `same_name`).
+/// `name` without the end `suffix`, if it has it, by the rule of `same_path`.
 pub fn strip_suffix<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
     let at = name.len().checked_sub(suffix.len())?;
     let (rest, end) = (name.get(..at)?, name.get(at..)?);
-    same_name(end, suffix).then_some(rest)
+    same_path(Path::new(end), Path::new(suffix)).then_some(rest)
 }
 
 /// Whether `err`, or the `io::Error` it wraps, is the OS saying that the path is not there.
