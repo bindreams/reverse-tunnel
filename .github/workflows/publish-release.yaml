@@ -63,7 +63,7 @@ jobs:
 
           TARGET="$(jq -r '.targetCommitish' <<<"$RELEASE_JSON")"
           if ! [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Draft release target '$TARGET' is not a 40-char commit SHA. Recreate the draft via the Draft Release workflow."
+            echo "::error::Draft release target '$TARGET' is not a 40-char commit SHA. Delete the draft, then re-run the Draft Release workflow."
             exit 1
           fi
           echo "commit_sha=$TARGET" >> "$GITHUB_OUTPUT"
@@ -106,14 +106,14 @@ jobs:
 
           # The tag is created here, on $SHA, so the release never binds to a tag that appeared since the draft. If the
           # tag exists, it must already be on $SHA: then it is this release's own, from a publish that failed after
-          # creating it, and re-running the publish finishes it.
+          # creating it, and re-running the publish finishes it (until the release is public).
           if ! gh api -X POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" -f "sha=${SHA}" >/dev/null; then
             if ! EXISTING="$(tag_object)"; then
               echo "::error::Could not create tag $TAG, and it does not exist: see the errors above."
               exit 1
             fi
             if [ "$EXISTING" != "$SHA" ]; then
-              echo "::error::Tag $TAG exists on $EXISTING, not on the draft's $SHA. Delete the tag or recreate the draft."
+              echo "::error::Tag $TAG exists on $EXISTING, not on the draft's $SHA. Delete the tag if GitHub allows it; a tag an immutable release has used cannot be, so then bump the version in Cargo.toml on main and draft that version."
               exit 1
             fi
           fi
@@ -122,12 +122,12 @@ jobs:
 
           # Read the tag back: `targetCommitish` is only the stored input from release creation and would echo $SHA.
           if ! PUBLISHED="$(tag_object)"; then
-            echo "::error::Could not resolve tag $TAG after publishing. The release is public; verify by hand that $TAG points at $SHA."
+            echo "::error::Could not resolve tag $TAG after publishing. The release is public; verify by hand that $TAG points at $SHA, then dispatch the Mirror workflow with $TAG."
             exit 1
           fi
 
           if [ "$PUBLISHED" != "$SHA" ]; then
-            echo "::error::Release $TAG points at $PUBLISHED, not at $SHA. Delete the release and its tag, then re-run Draft Release."
+            echo "::error::Release $TAG points at $PUBLISHED, not at $SHA. The release is public and, with immutable releases, cannot be changed: mark the previous release latest, then bump the version in Cargo.toml on main and draft that version."
             exit 1
           fi
 
