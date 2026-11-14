@@ -3,12 +3,12 @@
 
 use std::io::Write;
 
-/// Prints a line reporting what is already done (see the module).
+/// Prints a line on stdout (a report, a wait) whose write failure is ignored (see the module).
 pub fn println_best_effort(message: &str) {
     writeln_best_effort(&mut std::io::stdout(), message);
 }
 
-/// `println_best_effort` to stderr.
+/// Prints a line on stderr (a warning, a wait, an error) whose write failure is ignored (see the module).
 pub fn eprintln_best_effort(message: &str) {
     writeln_best_effort(&mut std::io::stderr(), message);
 }

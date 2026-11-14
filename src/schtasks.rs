@@ -273,9 +273,9 @@ fn until_gone(delete: &str, done: &str) -> String {
 }
 
 /// What `cmd.exe` is given to run `script`: everything between the outer quotes is the command, whatever quotes it
-/// holds (`/s`).
+/// holds (`/s`), and no AutoRun command runs as SYSTEM (`/d`).
 fn cmd_arguments(script: &str) -> String {
-    format!(r#"/s /c "{script}""#)
+    format!(r#"/d /s /c "{script}""#)
 }
 
 /// The definition of a task with no trigger that runs `script` as SYSTEM, however long it takes and whatever the power.

@@ -39,12 +39,21 @@ impl Paths {
         }
     }
 
-    /// The system's paths. Fails if one is not valid Unicode, so later code may rely on that.
+    /// The system's paths. Fails if one is not valid Unicode, so later code may rely on that, and on Windows if the
+    /// bin dir contains `%`, which `cmd` and the system `PATH` read as a variable.
     pub fn system() -> Result<Paths> {
         let (bin_dir, config_dir, log_dir, lock, link) = layout()?;
         for dir in [&bin_dir, &config_dir, &log_dir] {
             ensure!(dir.to_str().is_some(), "{} is not valid Unicode", dir.display());
         }
+        #[cfg(windows)]
+        ensure!(
+            !bin_dir.to_str().is_some_and(|dir| dir.contains('%')),
+            "{} contains `%`. Windows reads `%NAME%` as a variable in the commands that finish `uninstall` and in the \
+             system `PATH`, so reverse-tunnel cannot be installed while the system's Program Files folder has `%` in \
+             its path.",
+            bin_dir.display()
+        );
         Ok(Paths {
             secrets_dir: config_dir.join("secrets"),
             bin_dir,
@@ -56,8 +65,7 @@ impl Paths {
     }
 }
 
-/// The install, config and log directories and the link, from the system's known folders (not
-/// `%ProgramFiles%`, which the installing user's environment can override).
+/// The install, config and log directories and the link, from the system's known folders, not from the environment.
 #[cfg(windows)]
 fn layout() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     use anyhow::Context;

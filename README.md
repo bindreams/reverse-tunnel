@@ -53,7 +53,9 @@ changes only what differs.
 `%ProgramData%\reverse-tunnel`, and `install` puts `%ProgramFiles%\reverse-tunnel` on the system `PATH`: open a new shell
 to run `reverse-tunnel` (on the desktop, sign out and in; an SSH session sees it at once). `install` edits the `PATH` as
 every installer does, by reading it and writing it back: another program that edits it at the same moment can lose one of
-the two edits, and running that program's installer again restores its entry. `restart` and `install` check `config.yaml`
+the two edits, and running that program's installer again restores its entry. `install` refuses a Program Files folder
+whose path contains `%`, which Windows reads as a variable in the commands that finish `uninstall` and in the system
+`PATH`. `restart` and `install` check `config.yaml`
 as the caller, not as the service account. `upgrade` is not available yet: to change the binary, uninstall and install again.
 
 ```powershell
@@ -194,7 +196,8 @@ Revoking does not cut the host's current connection; `ctl revoke` prints the com
 **Windows**: `uninstall` also takes `%ProgramFiles%\reverse-tunnel` off the system `PATH`. `uninstall` refuses to run in a
 shell whose working directory is inside a folder it deletes: change to another directory first. A removal that cannot
 delete a running file (the binary, say) moves it to `%ProgramFiles%\.reverse-tunnel.*` and deletes it once it has
-exited; after a failed removal those files are deleted by the next successful one. A failed removal's message says why
+exited; after a failed removal those files are deleted by the next successful one. The removal task, once it has
+deleted itself, stays until those files have exited and been deleted. A failed removal's message says why
 and names the command to finish it; its log is `%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. A process that
 keeps one of the files `install` or `uninstall` deletes open without letting others delete it (an antivirus scan, a
 program that watches files, a shell whose working directory is in the install folder) makes them wait until it closes
