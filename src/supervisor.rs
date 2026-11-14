@@ -67,14 +67,14 @@ pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
 
 /// `run` with the WebSocket listener bound to `listen`.
 pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAddr) -> Result<ExitCode> {
-    let config = paths.config_dir.join("config.yaml");
+    let config = paths.config_file();
     let setup = Setup {
         cfg: Config::load(&config)?,
         paths,
         tools,
         tokens: [
-            ("RT_BRIDGE_TOKEN", token(&paths.secrets_dir.join("bridge.token"))?),
-            ("RT_HOST_TOKEN", token(&paths.secrets_dir.join("host.token"))?),
+            ("RT_BRIDGE_TOKEN", token(&paths.bridge_token())?),
+            ("RT_HOST_TOKEN", token(&paths.host_token())?),
         ],
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;

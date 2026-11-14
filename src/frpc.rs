@@ -8,7 +8,7 @@ use crate::paths::Paths;
 pub fn render(cfg: &Config, ws_port: u16, paths: &Paths) -> String {
     let (host, bridge) = (&cfg.host, &cfg.bridge);
     // `Paths::system()` guarantees Unicode, and a Windows backslash escapes alike in JSON and TOML basic strings.
-    let ca = serde_json::to_string(paths.config_dir.join("bridge.pem").to_str().unwrap()).unwrap();
+    let ca = serde_json::to_string(paths.bridge_pem().to_str().unwrap()).unwrap();
     let mut out = format!(
         r#"serverAddr = "{bridge}"
 serverPort = {CONTROL_PORT}

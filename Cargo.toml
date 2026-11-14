@@ -53,9 +53,9 @@ known-folders = "1.4.2"
 winreg = "0.56.0"
 # The virtual account's SID is the SHA-1 of its name.
 sha1 = "0.11.0"
-# Security descriptors from SDDL strings (src/security.rs), the expansion of `Path` entries, the broadcast that it changed,
-# and the processes that run as an account (src/processes.rs).
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# Security descriptors from SDDL strings and DACLs' ACEs (src/security.rs), the expansion of `Path` entries, the
+# broadcast that it changed, and the processes that run as an account (src/processes.rs).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 # Task Scheduler's COM API, for the removal's task (src/schtasks.rs): the modules it imports. `RegisterTask` takes VARIANTs,
 # and is gated on Ole and Variant.
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }

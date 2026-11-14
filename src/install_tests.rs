@@ -160,7 +160,7 @@ fn host_that_differs_from_the_config_is_refused() {
     machine.settings(Some("mothership"), Some(CODE));
 
     let err = format!("{:#}", configured_host(&machine.paths, Some("flagship")).unwrap_err());
-    let config = config_file(&machine.paths).display().to_string();
+    let config = machine.paths.config_file().display().to_string();
     assert_eq!(
         err,
         format!(

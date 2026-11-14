@@ -270,8 +270,8 @@ impl Machine {
         config
     }
 
-    /// Has `config.yaml` hold what no binary accepts. Returns its path. (On Windows the check runs as the caller, so a
-    /// file only the service account cannot read is not caught.)
+    /// Has `config.yaml` hold what no binary accepts. Returns its path. (On Windows the check runs as the caller; a file
+    /// only the service account cannot read is caught by its ACL, see `restart_refuses_a_config_the_service_account_cannot_read`.)
     #[cfg(windows)]
     fn break_config(&self) -> PathBuf {
         let config = self.paths.config_dir.join("config.yaml");
@@ -1128,6 +1128,64 @@ fn restart_checks_the_configuration_as_the_service_account() {
     );
     let status = machine.status();
     assert_eq!((status.state, status.pid), (State::Running, running));
+}
+
+/// What `access::check` credits the service with is in the token of the running service, enabled: a group missing from
+/// the token would let `restart` pass a file that only that group may read.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_groups_the_check_credits_are_enabled_in_the_services_token() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let enabled = windows::enabled_groups(machine.wait_for_frpc()[0].pid);
+
+    for (sid, name) in reverse_tunnel::access::CREDITED {
+        assert!(
+            enabled.iter().any(|held| held == sid),
+            "{name} ({sid}) is not enabled in the service's token: {enabled:?}"
+        );
+    }
+}
+
+/// An administrator reads what the service account cannot, so `restart`'s check as the caller passes `config.yaml`:
+/// the DACLs are what refuse it, naming the file, and the service is left running as it was.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn restart_refuses_a_config_the_service_account_cannot_read() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let before = machine.status();
+    let config = machine.paths.config_file();
+    let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
+    for (acl, says) in [
+        (
+            format!("D:P(D;;FR;;;{service})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)"),
+            "denies",
+        ),
+        ("D:P(A;;FA;;;SY)(A;;FA;;;BA)".to_string(), "no ACE"),
+    ] {
+        reverse_tunnel::security::Descriptor::parse(&acl)
+            .unwrap()
+            .apply(&config)
+            .unwrap();
+
+        let failed = Command::new(BIN).arg("restart").output().unwrap();
+
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            !failed.status.success()
+                && stderr.contains(&config.display().to_string())
+                && stderr.contains(service::ACCOUNT)
+                && stderr.contains(says),
+            "restart should refuse {} ({says}): {stderr}",
+            config.display()
+        );
+        let after = machine.status();
+        assert_eq!((after.state, after.pid), (before.state, before.pid));
+    }
 }
 
 #[test]

@@ -721,17 +721,9 @@ fn hex_of_random_bytes<const N: usize>() -> Result<String> {
     Ok(hex::encode(random))
 }
 
-fn config_file(paths: &Paths) -> PathBuf {
-    paths.config_dir.join("config.yaml")
-}
-
 /// Whether a join code is needed: some file it provides is missing.
 fn needs_join(paths: &Paths) -> Result<bool> {
-    let files = [
-        config_file(paths),
-        paths.config_dir.join("bridge.pem"),
-        paths.secrets_dir.join("bridge.token"),
-    ];
+    let files = [paths.config_file(), paths.bridge_pem(), paths.bridge_token()];
     for file in files {
         if !file.try_exists()? {
             return Ok(true);
@@ -743,7 +735,7 @@ fn needs_join(paths: &Paths) -> Result<bool> {
 /// The name for a new `config.yaml`, or none when one exists. Refuses an explicit name that differs from the existing
 /// config's.
 fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<String>> {
-    let config = config_file(paths);
+    let config = paths.config_file();
     if !config.try_exists()? {
         return host_name(explicit).map(Some);
     }
@@ -825,7 +817,7 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
     make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
     make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))?;
 
-    let config = config_file(paths);
+    let config = paths.config_file();
     let created = !config.try_exists()? && create_config(paths, host, join)?;
     let mut changed = created;
     if let Some(join) = join {
@@ -833,20 +825,20 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
             let text = fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?;
             changed |= replace_if_changed(paths, &config, with_bridge(&text, &join.domain, &config)?, PUBLIC_FILE)?;
         }
-        changed |= replace_if_changed(paths, &paths.config_dir.join("bridge.pem"), &join.cert_pem, PUBLIC_FILE)?;
+        changed |= replace_if_changed(paths, &paths.bridge_pem(), &join.cert_pem, PUBLIC_FILE)?;
         let token = format!("{}\n", join.token);
-        changed |= replace_if_changed(paths, &paths.secrets_dir.join("bridge.token"), token, secret)?;
+        changed |= replace_if_changed(paths, &paths.bridge_token(), token, secret)?;
     }
 
-    let host_token = paths.secrets_dir.join("host.token");
+    let host_token = paths.host_token();
     if !host_token.try_exists()? {
         let token = format!("{}\n", hex_of_random_bytes::<32>()?);
         mark_pending(paths)?;
         changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
     }
     // A file left by an earlier account keeps that account's group, whatever its content.
-    for name in ["host.token", "bridge.token"] {
-        open_file(&paths.secrets_dir.join(name), secret, false)?;
+    for file in [paths.host_token(), paths.bridge_token()] {
+        open_file(&file, secret, false)?;
     }
     Ok(changed)
 }
@@ -860,7 +852,7 @@ fn create_config(paths: &Paths, host: Option<&str>, join: Option<&JoinInfo>) -> 
         join.domain
     );
     mark_pending(paths)?;
-    let written = write_atomic(&config_file(paths), text.as_bytes(), PUBLIC_FILE, Replace::Never)?;
+    let written = write_atomic(&paths.config_file(), text.as_bytes(), PUBLIC_FILE, Replace::Never)?;
     Ok(written == WriteOutcome::Written)
 }
 
@@ -981,8 +973,8 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
 }
 
 fn registration(paths: &Paths) -> Result<String> {
-    let host = Config::load(&config_file(paths))?.host;
-    let token_file = paths.secrets_dir.join("host.token");
+    let host = Config::load(&paths.config_file())?.host;
+    let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
     Ok(registration_line(&host, token.trim()))
 }
@@ -992,7 +984,10 @@ fn registration_line(host: &str, token: &str) -> String {
 }
 
 fn revoke_line(paths: &Paths) -> Result<String> {
-    Ok(format!("uv run ctl revoke {}", Config::load(&config_file(paths))?.host))
+    Ok(format!(
+        "uv run ctl revoke {}",
+        Config::load(&paths.config_file())?.host
+    ))
 }
 
 /// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is

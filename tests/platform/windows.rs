@@ -4,7 +4,7 @@
 use std::cell::Cell;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
@@ -20,11 +20,15 @@ use windows_sys::Win32::Security::Authorization::{
     GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID,
     TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
-use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+use windows_sys::Win32::Security::{
+    DACL_SECURITY_INFORMATION, GetTokenInformation, TOKEN_GROUPS, TOKEN_QUERY, TokenGroups,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
+use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
+use windows_sys::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, RegType};
 
@@ -88,6 +92,55 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
         LocalFree(descriptor);
     }
     rights
+}
+
+/// The SIDs of the groups in the token of process `pid` that are enabled and not deny-only.
+pub fn enabled_groups(pid: u32) -> Vec<String> {
+    // SAFETY: plain calls with live pointers; each handle is owned, so it is closed once; the buffer is 8-aligned and as
+    // large as Windows said, and the `TOKEN_GROUPS` that it wrote points into it.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        assert!(
+            !process.is_null(),
+            "opening process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let process = OwnedHandle::from_raw_handle(process);
+        let mut token = null_mut();
+        let opened = OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut token);
+        assert_ne!(
+            opened,
+            0,
+            "opening the token of process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let token = OwnedHandle::from_raw_handle(token);
+        let mut size = 0;
+        GetTokenInformation(token.as_raw_handle(), TokenGroups, null_mut(), 0, &mut size);
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let read = GetTokenInformation(
+            token.as_raw_handle(),
+            TokenGroups,
+            buffer.as_mut_ptr().cast(),
+            size,
+            &mut size,
+        );
+        assert_ne!(
+            read,
+            0,
+            "reading the groups of process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let groups = buffer.as_ptr().cast::<TOKEN_GROUPS>();
+        std::slice::from_raw_parts((*groups).Groups.as_ptr(), (*groups).GroupCount as usize)
+            .iter()
+            .filter(|group| {
+                group.Attributes & SE_GROUP_ENABLED as u32 != 0
+                    && group.Attributes & SE_GROUP_USE_FOR_DENY_ONLY as u32 == 0
+            })
+            .map(|group| Sid::copy_of(group.Sid).text().unwrap())
+            .collect()
+    }
 }
 
 /// The ACLs and owners the installation is specified to give; the service account's own access is shown by frpc

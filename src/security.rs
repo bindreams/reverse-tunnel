@@ -14,10 +14,12 @@ use windows_sys::Win32::Security::Authorization::{
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    DACL_SECURITY_INFORMATION, EqualSid, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, EqualSid,
+    GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, INHERIT_ONLY_ACE,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
 };
-use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
+use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 
 /// A descriptor that names only an owner: Administrators.
 pub const OWNED_BY_ADMINISTRATORS: &str = "O:BA";
@@ -136,6 +138,85 @@ pub fn owner_of(path: &Path) -> io::Result<String> {
     let _descriptor = Local(descriptor);
     // SAFETY: `owner` points into the descriptor, which is live.
     unsafe { string_of_sid(owner) }
+}
+
+/// An allow or deny ACE of a DACL.
+pub struct Ace {
+    pub allows: bool,
+    /// Applies to what the object contains, not to the object.
+    pub inherit_only: bool,
+    pub mask: u32,
+    pub sid: Sid,
+}
+
+/// The allow and deny ACEs of `path`'s DACL, inherited ones included; ACEs of other kinds are left out. A path with no
+/// DACL gives everyone full access, so it has one ACE: Everyone's.
+pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
+    let (mut dacl, mut descriptor) = (null_mut(), null_mut());
+    // SAFETY: the path is NUL-terminated, and the out pointers are live.
+    let code = unsafe {
+        GetNamedSecurityInfoW(
+            wide(path).as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    if code != 0 {
+        return Err(os_error(code));
+    }
+    let _descriptor = Local(descriptor);
+    if dacl.is_null() {
+        return Ok(vec![Ace {
+            allows: true,
+            inherit_only: false,
+            mask: FILE_ALL_ACCESS,
+            sid: Sid::parse("S-1-1-0")?,
+        }]);
+    }
+    let mut info = ACL_SIZE_INFORMATION::default();
+    // SAFETY: `dacl` points into the live descriptor, and `info` is the size that the call is told.
+    let read = unsafe {
+        GetAclInformation(
+            dacl,
+            (&raw mut info).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut aces = Vec::new();
+    for at in 0..info.AceCount {
+        let mut ace = null_mut();
+        // SAFETY: `at` is below the ACL's count, and the out pointer is live.
+        if unsafe { GetAce(dacl, at, &mut ace) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `ace` points into the live descriptor at an ACE, which starts with its header.
+        let header = unsafe { *ace.cast::<ACE_HEADER>() };
+        if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8 && header.AceType != ACCESS_DENIED_ACE_TYPE as u8 {
+            continue;
+        }
+        // SAFETY: an allow and a deny ACE have this layout: the header, the mask and the SID, which starts at
+        // `SidStart` and is valid for as long as the descriptor is.
+        let (mask, sid) = unsafe {
+            let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+            (ace.Mask, Sid::copy_of((&raw const ace.SidStart).cast_mut().cast()))
+        };
+        aces.push(Ace {
+            allows: header.AceType == ACCESS_ALLOWED_ACE_TYPE as u8,
+            inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0,
+            mask,
+            sid,
+        });
+    }
+    Ok(aces)
 }
 
 /// The text of the SID that `sid` points to, as `S-1-5-...`.
