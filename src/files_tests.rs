@@ -202,3 +202,20 @@ fn a_file_held_open_without_delete_sharing_is_refused_with_a_sharing_violation()
     persist_over(refused.file, &dest).unwrap();
     assert_eq!(fs::read(&dest).unwrap(), b"");
 }
+
+#[test]
+fn a_file_replaced_by_a_rename_has_exactly_the_name_it_was_given_whatever_the_length() {
+    let (_dir, bin) = bin();
+    // The name's length decides how the rename's argument ends, which the system reads up to its terminator.
+    let names: Vec<String> = (1..=8).map(|len| "n".repeat(len)).collect();
+    for name in &names {
+        write_atomic(&bin.join(name), b"x", Perm::executable(), Replace::Always).unwrap();
+    }
+
+    let mut found: Vec<_> = fs::read_dir(&bin)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    found.sort();
+    assert_eq!(found, names);
+}

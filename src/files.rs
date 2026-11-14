@@ -371,14 +371,7 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
             return Ok(WriteOutcome::Written);
         }
         (_, Err(err)) => return Err(err).with_context(|| format!("writing {}", dest.display())),
-        (_, Ok(())) => {
-            eprintln!(
-                "DIAG {} wrote {} bytes, file now {:?}",
-                dest.display(),
-                data.len(),
-                fs::metadata(dest).map(|m| m.len())
-            );
-        }
+        (_, Ok(())) => {}
     }
     #[cfg(unix)]
     File::open(dir)
@@ -419,14 +412,6 @@ fn persist_over(file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfi
 fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfile::PersistError> {
     match rename_over(file.as_file(), file.path(), dest) {
         Ok(()) => {
-            let names: Vec<_> = fs::read_dir(dest.parent().unwrap())
-                .map(|d| d.flatten().map(|e| e.file_name()).collect())
-                .unwrap_or_default();
-            eprintln!(
-                "DIAG2 renamed to {}: before drop {:?}, dir {names:?}",
-                dest.display(),
-                fs::metadata(dest).map(|m| m.len())
-            );
             // The temp file's name is gone: `file` must not delete whatever is at it later.
             file.disable_cleanup(true);
             Ok(())
@@ -443,7 +428,6 @@ fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), te
 fn rename_over(file: &File, from: &Path, to: &Path) -> io::Result<()> {
     use std::ffi::c_void;
     use std::mem::offset_of;
-    use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -475,17 +459,18 @@ fn rename_over(file: &File, from: &Path, to: &Path) -> io::Result<()> {
     // SAFETY: `handle` is a handle this call owns.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle as _) };
 
-    let to: Vec<u16> = std::path::absolute(to)?.as_os_str().encode_wide().collect();
-    let name_bytes = to.len() * size_of::<u16>();
-    let size = offset_of!(FILE_RENAME_INFO, FileName) + name_bytes;
+    // The system reads the name up to a terminator that `FileNameLength` does not count.
+    let to = security::wide(&std::path::absolute(to)?);
+    let name_bytes = (to.len() - 1) * size_of::<u16>();
+    let size = offset_of!(FILE_RENAME_INFO, FileName) + to.len() * size_of::<u16>();
     // The struct ends in the name; a `u64` buffer is aligned for it.
     let mut buffer = vec![
         0u64;
         size.div_ceil(size_of::<u64>())
-            .max(size_of::<FILE_RENAME_INFO>().div_ceil(8))
+            .max(size_of::<FILE_RENAME_INFO>().div_ceil(size_of::<u64>()))
     ];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    // SAFETY: `buffer` holds a `FILE_RENAME_INFO` and the `name_bytes` of its name after `FileName`.
+    // SAFETY: `buffer` holds a `FILE_RENAME_INFO` and, after `FileName`, the name and its terminator.
     unsafe {
         (*info).Anonymous.Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
         (*info).FileNameLength = name_bytes as u32;
