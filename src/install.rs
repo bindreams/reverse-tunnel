@@ -903,9 +903,9 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
-/// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
-/// the outcome. It has the access the installed binary is given (`place_binaries`), so what is checked is what the
+/// Makes the bin dir, fetches the pinned frpc if it is missing or gives it the access a new one has, and has a copy of
+/// `binary`, the new one, staged in the bin dir where `run_as` can run it, check the settings as `run_as` (see
+/// `ops::check`). The copy is removed whatever the outcome. It has the access the installed binary is given (`place_binaries`), so what is checked is what the
 /// service will run. A fetch needs no restart: a new frpc version only arrives with a new binary, which
 /// `place_binaries` marks.
 fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
@@ -919,22 +919,23 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     if !download::tools(paths).frpc.try_exists()? {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
+    // A frpc that was there gets the access a new one has, as the unchanged binary does in `place_binaries`: the check
+    // below is of what the service will run.
+    restore(&download::tools(paths).frpc, Perm::EXECUTABLE)?;
     let staged = upgrade::stage(paths, binary)?;
     let checked = ops::check(paths, &staged, run_as, "the new binary's `run --check`");
     upgrade::discard(&staged);
     checked
 }
 
-/// Puts the binary `binary` and the symlink in place. Whether the binary changed. Each binary kept (the one that did
-/// not change, and the pinned frpc that `verify_tools` leaves if it is there) gets the access a new one has
-/// (`files::restore`), so a hand-edited ACL, mode or owner does not outlive a reinstall.
+/// Puts the binary `binary` and the symlink in place. Whether the binary changed. A binary that did not change gets the
+/// access a new one has (`files::restore`), so a hand-edited ACL, mode or owner does not outlive a reinstall.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     if !changed {
         restore(&exe, Perm::EXECUTABLE)?;
     }
-    restore(&download::tools(paths).frpc, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     #[cfg(windows)]
     for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {
