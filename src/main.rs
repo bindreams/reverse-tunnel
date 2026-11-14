@@ -46,9 +46,8 @@ enum Command {
     ///
     /// The release is staged in the bin directory as `upgrade-<...>`. A successful upgrade's download is removed by the
     /// `install` it runs, a failed one by `upgrade`. `install` removes its own check copy, also `upgrade-<...>`, and
-    /// sweeps any left behind. On Windows each build is a service image of its own, which the next `install` deletes
-    /// once it has exited; a copy or the binary on the `PATH` that Windows refuses to delete or replace (it still
-    /// runs) is renamed to `.reverse-tunnel.*` beside the bin directory, and the next `install` deletes it too.
+    /// sweeps any left behind. On Windows, builds that still run are renamed to `.reverse-tunnel.*` beside the bin
+    /// directory and deleted by the next `install`.
     Upgrade {
         /// Install this binary instead of downloading one.
         #[arg(long)]

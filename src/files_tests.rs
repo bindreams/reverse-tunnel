@@ -1,4 +1,3 @@
-use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -70,7 +69,7 @@ fn leftovers_in(dir: &Path) -> Vec<String> {
     let names = fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name());
     names
         .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| schtasks::is_leftover(name))
+        .filter(|name| leftovers::is_leftover(name))
         .collect()
 }
 
@@ -87,7 +86,7 @@ fn a_running_file_is_moved_aside_once_the_new_one_is_written() {
     assert_eq!(fs::read(&dest).unwrap(), b"new");
     let aside = leftovers_in(dir.path());
     assert!(
-        aside.len() == 1 && schtasks::is_leftover_of(&aside[0], "x.exe"),
+        aside.len() == 1 && leftovers::is_leftover_of(&aside[0], "x.exe"),
         "{aside:?}"
     );
     assert_eq!(fs::read(dir.path().join(&aside[0])).unwrap(), old);
@@ -113,8 +112,9 @@ fn a_running_file_is_not_moved_aside_unless_the_write_says_so() {
     let _running = held::running(&dest);
     let old = fs::read(&dest).unwrap();
 
-    write_atomic(&dest, b"new", Perm::executable(), Replace::Always).unwrap_err();
+    let err = write_atomic(&dest, b"new", Perm::executable(), Replace::Always).unwrap_err();
 
+    assert!(format!("{err:#}").contains("(os error 5)"), "{err:#}");
     assert_eq!(fs::read(&dest).unwrap(), old);
 }
 
@@ -139,7 +139,6 @@ fn a_running_file_stays_where_it_is_when_it_cannot_be_moved_aside() {
     // The replace's answer (access denied) and the rename's (no such path).
     assert!(err.contains("(os error 5)") && err.contains("(os error 3)"), "{err}");
     assert_eq!(fs::read(&dest).unwrap(), old);
-    // No temp file is left beside it.
     assert_eq!(fs::read_dir(&bin).unwrap().count(), 1);
 }
 
@@ -173,28 +172,33 @@ fn removing_a_file_leaves_a_directory_at_its_path_alone() {
 }
 
 #[test]
-fn only_a_file_held_open_without_delete_sharing_is_refused_for_an_open_file() {
+fn a_file_held_open_with_delete_sharing_is_replaced_in_place_and_not_moved_aside() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let (dir, bin) = bin();
+    let dest = bin.join("x.exe");
+    fs::write(&dest, "old").unwrap();
+    // As an indexer or a scanner opens it.
+    let _held = fs::OpenOptions::new().read(true).share_mode(7).open(&dest).unwrap();
+
+    write_atomic(&dest, b"new", Perm::executable(), Replace::OrMoveAside(dir.path())).unwrap();
+
+    assert_eq!(fs::read(&dest).unwrap(), b"new");
+    assert_eq!(leftovers_in(dir.path()), Vec::<String>::new());
+}
+
+#[test]
+fn a_file_held_open_without_delete_sharing_is_refused_with_a_sharing_violation() {
     let (_dir, bin) = bin();
-    let denied = || io::Error::from(ErrorKind::PermissionDenied);
-    let held = bin.join("held.txt");
-    fs::write(&held, "").unwrap();
-    let open = held::open_held(&held);
-    assert!(is_refused_for_an_open_file(&held, &denied()));
-    drop(open);
-    assert!(!is_refused_for_an_open_file(&held, &denied()), "closed");
+    let dest = bin.join("x.txt");
+    fs::write(&dest, "old").unwrap();
+    let held = held::open_held(&dest);
+    let temp = tempfile::NamedTempFile::new_in(&bin).unwrap();
 
-    let running = bin.join("running.exe");
-    let _running = held::running(&running);
-    assert!(!is_refused_for_an_open_file(&running, &denied()), "a running image");
+    let refused = persist_over(temp, &dest).unwrap_err();
 
-    let readonly = bin.join("readonly.txt");
-    fs::write(&readonly, "").unwrap();
-    let mut permissions = fs::metadata(&readonly).unwrap().permissions();
-    permissions.set_readonly(true);
-    fs::set_permissions(&readonly, permissions).unwrap();
-    assert!(!is_refused_for_an_open_file(&readonly, &denied()), "a read-only file");
-    assert!(
-        !is_refused_for_an_open_file(&held, &io::Error::from_raw_os_error(2)),
-        "not found"
-    );
+    assert!(is_sharing_violation(&refused.error), "{}", refused.error);
+    drop(held);
+    persist_over(refused.file, &dest).unwrap();
+    assert_eq!(fs::read(&dest).unwrap(), b"");
 }

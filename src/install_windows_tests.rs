@@ -80,7 +80,7 @@ fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_
 
 /// The leftover file in `dir` that renamed a file called `original`, called `id`.
 fn leftover_in(dir: &Path, id: &str, original: &str) -> PathBuf {
-    dir.join(schtasks::leftover_name(id, OsStr::new(original)))
+    dir.join(leftovers::name(id, OsStr::new(original)))
 }
 
 #[test]
@@ -224,10 +224,10 @@ use crate::held::running;
 
 /// The leftovers in `paths`' leftover folder, by the name each kept.
 fn kept_names(paths: &Paths) -> Vec<String> {
-    let images = leftover_images(paths).unwrap();
+    let images = leftovers::images(paths).unwrap();
     let names = images.iter().map(|image| image.file_name().unwrap().to_string_lossy());
     names
-        .map(|name| schtasks::kept_name(&name).unwrap().to_string())
+        .map(|name| leftovers::kept_name(&name).unwrap().to_string())
         .collect()
 }
 
@@ -241,14 +241,14 @@ fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_o
 
     assert!(!staged.exists());
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
-    let kept = delete_what_can_be(leftover_images(&paths).unwrap());
+    let kept = leftovers::delete_what_can_be(leftovers::images(&paths).unwrap());
     let [why] = kept.as_slice() else {
         panic!("it still runs: {kept:?}")
     };
     assert!(format!("{why:#}").contains("each `install` tries again"), "{why:#}");
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
     drop(running);
-    assert!(delete_what_can_be(leftover_images(&paths).unwrap()).is_empty());
+    assert!(leftovers::delete_what_can_be(leftovers::images(&paths).unwrap()).is_empty());
     assert_eq!(kept_names(&paths), Vec::<String>::new());
 }
 
@@ -263,7 +263,7 @@ fn the_sweep_keeps_the_registered_image_and_deletes_the_other_old_images_or_rena
     }
     let running = running(&previous);
 
-    sweep_old_images(&paths, &registered);
+    assert!(sweep_old_images(&paths, &registered).is_empty());
 
     assert_eq!([&registered, &other].map(|file| file.exists()), [true; 2]);
     assert!(!old.exists() && !previous.exists());
@@ -273,7 +273,7 @@ fn the_sweep_keeps_the_registered_image_and_deletes_the_other_old_images_or_rena
         [previous.file_name().unwrap().to_string_lossy().into_owned()]
     );
     drop(running);
-    assert!(delete_what_can_be(leftover_images(&paths).unwrap()).is_empty());
+    assert!(leftovers::delete_what_can_be(leftovers::images(&paths).unwrap()).is_empty());
     assert_eq!(kept_names(&paths), Vec::<String>::new());
 }
 
@@ -285,29 +285,34 @@ fn the_sweep_goes_on_past_an_image_it_cannot_delete() {
     fs::create_dir(&stuck).unwrap();
     fs::write(&old, "").unwrap();
 
-    sweep_old_images(&paths, &registered);
+    let kept = sweep_old_images(&paths, &registered);
 
+    let [why] = kept.as_slice() else {
+        panic!("expected only the directory to be reported: {kept:?}")
+    };
+    let why = format!("{why:#}");
+    assert!(
+        why.contains(&stuck.display().to_string()) && why.contains("not a regular file"),
+        "{why}"
+    );
     assert!(stuck.exists() && !old.exists());
 }
 
 #[test]
-fn a_leftover_that_is_not_a_regular_file_is_reported_and_never_deleted() {
-    let (dir, paths) = installed();
-    let impostor = leftover_in(dir.path(), "a", "frpc-0.1.exe");
-    fs::create_dir(&impostor).unwrap();
-    fs::write(impostor.join("inside"), "").unwrap();
+fn a_sweep_of_a_bin_dir_that_cannot_be_read_says_so() {
+    let (_dir, paths) = installed();
+    fs::remove_dir_all(&paths.bin_dir).unwrap();
 
-    let kept = delete_what_can_be(leftover_images(&paths).unwrap());
+    let kept = sweep_old_images(&paths, &service::image(&paths, b"registered"));
 
     let [why] = kept.as_slice() else {
-        panic!("expected the directory to be reported: {kept:?}")
+        panic!("expected one error: {kept:?}")
     };
     let why = format!("{why:#}");
     assert!(
-        why.contains(&impostor.display().to_string()) && why.contains("not a regular file"),
+        why.starts_with(&format!("reading {}", paths.bin_dir.display())),
         "{why}"
     );
-    assert!(impostor.join("inside").exists());
 }
 
 #[test]
@@ -328,16 +333,16 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
     let _running = running(&paths.bin_dir.join("frpc-0.1.exe"));
     fs::write(paths.bin_dir.join("upgrade-1.exe"), "").unwrap();
 
-    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftovers::dir(&paths).unwrap()).unwrap();
 
     assert!(!paths.bin_dir.exists());
-    let images = leftover_images(&paths).unwrap();
+    let images = leftovers::images(&paths).unwrap();
     let [image] = images.as_slice() else {
         panic!("expected one image: {images:?}")
     };
     assert_eq!(image.parent(), Some(dir.path()));
     let name = image.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(schtasks::is_leftover_of(&name, "frpc-0.1.exe"), "{name}");
+    assert!(leftovers::is_leftover_of(&name, "frpc-0.1.exe"), "{name}");
 }
 
 #[test]
@@ -358,7 +363,7 @@ fn only_the_bin_dir_has_a_running_image_renamed() {
     assert!(err.contains("b.exe"), "{err}");
     assert!(paths.config_dir.join("b.exe").exists());
     assert!(!paths.bin_dir.exists());
-    let names: Vec<_> = leftover_images(&paths)
+    let names: Vec<_> = leftovers::images(&paths)
         .unwrap()
         .iter()
         .map(|image| {
@@ -367,28 +372,9 @@ fn only_the_bin_dir_has_a_running_image_renamed() {
         })
         .collect();
     assert!(
-        names.len() == 1 && schtasks::is_leftover_of(&names[0], "a.exe"),
+        names.len() == 1 && leftovers::is_leftover_of(&names[0], "a.exe"),
         "{names:?}"
     );
-}
-
-#[test]
-fn the_leftover_images_of_the_binary_are_those_that_kept_its_name() {
-    let (dir, paths) = installed();
-    fs::remove_file(service::exe(&paths)).unwrap();
-    let ours = [
-        leftover_in(dir.path(), "a", "reverse-tunnel.exe"),
-        leftover_in(dir.path(), "b", "REVERSE-TUNNEL.EXE"),
-    ];
-    let others = [
-        leftover_in(dir.path(), "c", "frpc-0.1.exe"),
-        leftover_in(dir.path(), "d", "old-reverse-tunnel.exe"),
-    ];
-    for image in ours.iter().chain(&others) {
-        fs::write(image, "").unwrap();
-    }
-
-    assert_eq!(leftover_images_of_the_binary(&paths).unwrap(), ours);
 }
 
 #[test]
@@ -396,10 +382,10 @@ fn nothing_is_renamed_when_everything_can_be_deleted() {
     let (_dir, paths) = installed();
     fs::write(paths.bin_dir.join("frpc-0.1.exe"), "").unwrap();
 
-    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftovers::dir(&paths).unwrap()).unwrap();
 
     assert!(!paths.bin_dir.exists());
-    assert!(leftover_images(&paths).unwrap().is_empty());
+    assert!(leftovers::images(&paths).unwrap().is_empty());
 }
 
 #[test]
@@ -407,7 +393,7 @@ fn a_bin_dir_that_is_gone_is_removed() {
     let (_dir, paths) = installed();
     fs::remove_dir_all(&paths.bin_dir).unwrap();
 
-    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftovers::dir(&paths).unwrap()).unwrap();
 }
 
 #[test]
@@ -427,7 +413,7 @@ fn a_running_file_that_cannot_be_renamed_fails_the_removal_naming_it() {
     // The delete's answer (access denied) and the rename's (no such path).
     assert!(err.contains("(os error 5)") && err.contains("(os error 3)"), "{err}");
     assert!(stuck.exists());
-    assert!(leftover_images(&paths).unwrap().is_empty());
+    assert!(leftovers::images(&paths).unwrap().is_empty());
 }
 
 #[test]
@@ -439,10 +425,10 @@ fn a_read_only_file_is_deleted_and_nothing_is_left() {
     readonly.set_readonly(true);
     fs::set_permissions(&file, readonly).unwrap();
 
-    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftovers::dir(&paths).unwrap()).unwrap();
 
     assert!(!paths.bin_dir.exists());
-    assert!(leftover_images(&paths).unwrap().is_empty());
+    assert!(leftovers::images(&paths).unwrap().is_empty());
 }
 
 /// Gives `path` the protected DACL `sddl` until it drops, which restores `restored`.
@@ -467,9 +453,8 @@ impl Drop for Acl<'_> {
     }
 }
 
-/// Measured on CI, where the removal runs as an elevated administrator: a file whose ACL denies DELETE on it, in a
-/// directory whose ACL denies FILE_DELETE_CHILD, is refused both a delete and a rename. The removal fails with an
-/// error that names the file and both answers, the file stays, and no leftover is made.
+/// A file whose ACL denies DELETE, in a directory whose ACL denies FILE_DELETE_CHILD, is refused both a delete and a
+/// rename: the removal fails naming the file and both answers, and makes no leftover.
 #[test]
 fn a_file_that_its_acl_will_neither_delete_nor_rename_fails_the_removal_naming_both_refusals() {
     let (_dir, paths) = installed();
@@ -481,7 +466,7 @@ fn a_file_that_its_acl_will_neither_delete_nor_rename_fails_the_removal_naming_b
 
     let err = format!(
         "{:#}",
-        remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
+        remove_saying_what_it_moved_aside(&paths.bin_dir, leftovers::dir(&paths).unwrap()).unwrap_err()
     );
 
     assert!(err.contains("frpc-0.1.exe") && err.contains("moving it to"), "{err}");
@@ -491,7 +476,7 @@ fn a_file_that_its_acl_will_neither_delete_nor_rename_fails_the_removal_naming_b
         "the delete's and the rename's: {err}"
     );
     assert!(stuck.exists());
-    assert!(leftover_images(&paths).unwrap().is_empty());
+    assert!(leftovers::images(&paths).unwrap().is_empty());
 }
 
 #[test]
@@ -503,7 +488,7 @@ fn a_file_whose_delete_was_refused_and_is_gone_when_looked_at_is_deleted() {
     let moved = delete_or_move_aside(&gone, dir.path(), refused).unwrap();
 
     assert_eq!(moved, None);
-    assert!(leftover_images(&paths).unwrap().is_empty());
+    assert!(leftovers::images(&paths).unwrap().is_empty());
 }
 
 #[test]
@@ -520,6 +505,24 @@ fn a_refused_delete_and_a_refused_move_keep_the_refusal_as_the_cause() {
 }
 
 #[test]
+fn a_directory_that_cannot_be_deleted_fails_the_removal_and_is_not_renamed() {
+    let (_dir, paths) = installed();
+    let sub = paths.bin_dir.join("old");
+    fs::create_dir_all(&sub).unwrap();
+    let _running = running(&sub.join("frpc-0.1.exe"));
+
+    let err = format!(
+        "{:#}",
+        remove_saying_what_it_moved_aside(&paths.bin_dir, leftovers::dir(&paths).unwrap()).unwrap_err()
+    );
+
+    assert!(err.contains("old"), "{err}");
+    assert!(err.contains("not moved"), "{err}");
+    assert!(sub.exists());
+    assert!(leftovers::images(&paths).unwrap().is_empty());
+}
+
+#[test]
 fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
     let (_dir, paths) = installed();
     let stale = paths.bin_dir.join("frpc-0.0.1");
@@ -529,29 +532,4 @@ fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
     clean_bin_dir(&paths).unwrap_err();
 
     assert!(stale.join("inside").exists());
-}
-
-#[test]
-fn a_leftover_that_is_gone_is_deleted_not_kept() {
-    let (dir, _paths) = installed();
-
-    assert!(delete_what_can_be(vec![dir.path().join("gone.exe")]).is_empty());
-}
-
-#[test]
-fn a_directory_that_cannot_be_deleted_fails_the_removal_and_is_not_renamed() {
-    let (_dir, paths) = installed();
-    let sub = paths.bin_dir.join("old");
-    fs::create_dir_all(&sub).unwrap();
-    let _running = running(&sub.join("frpc-0.1.exe"));
-
-    let err = format!(
-        "{:#}",
-        remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
-    );
-
-    assert!(err.contains("old"), "{err}");
-    assert!(err.contains("not moved"), "{err}");
-    assert!(sub.exists());
-    assert!(leftover_images(&paths).unwrap().is_empty());
 }

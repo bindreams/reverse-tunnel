@@ -15,9 +15,9 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use anyhow::{Context, Result, ensure};
 
 use crate::account::Account;
-use crate::output::eprintln_best_effort;
 #[cfg(windows)]
-use crate::schtasks;
+use crate::leftovers;
+use crate::output::eprintln_best_effort;
 #[cfg(windows)]
 use crate::security::{self, Descriptor, OWNED_BY_ADMINISTRATORS};
 
@@ -114,7 +114,7 @@ pub enum Replace<'a> {
     Always,
     Never,
     /// Like `Always`, and on Windows a `dest` that Windows refuses to overwrite (access denied) and lets be renamed is
-    /// renamed into this directory as a leftover (see `move_aside`) first. On Unix it is replaced like any other.
+    /// renamed into this directory as a leftover (see `leftovers`) first. On Unix it is replaced like any other.
     OrMoveAside(&'a Path),
 }
 
@@ -320,15 +320,15 @@ pub const OPEN_ELSEWHERE_LINE: &str = ": another process has it open; waiting un
 /// operation is tried again, with no limit, until that process closes it. Every other failure is the caller's. The first
 /// wait is said on stderr.
 #[derive(Default)]
-struct OpenElsewhere {
+pub(crate) struct OpenElsewhere {
     said: bool,
 }
 
 impl OpenElsewhere {
     /// Whether `err`, the failure of an operation on `path`, is that refusal. If it is, this has waited, and the
     /// operation is to be tried again.
-    fn waited_for(&mut self, path: &Path, err: &io::Error) -> bool {
-        if !is_refused_for_an_open_file(path, err) {
+    pub(crate) fn waited_for(&mut self, path: &Path, err: &io::Error) -> bool {
+        if !is_sharing_violation(err) {
             return false;
         }
         if !self.said {
@@ -340,36 +340,15 @@ impl OpenElsewhere {
     }
 }
 
-/// Whether `err`, the failure of an operation on `path`, is Windows refusing it because another process has `path` open
-/// without delete sharing: ERROR_SHARING_VIOLATION (32), which a delete and a rename give. A replace gives "access
-/// denied", as it does for a running image, a read-only file and an ACL that forbids it; asking to open `path` with
-/// delete access, which only the first of them refuses with 32, says which it is. Nothing else is that refusal, and
-/// 32 is `EPIPE` on Unix.
-#[cfg(windows)]
-fn is_refused_for_an_open_file(path: &Path, err: &io::Error) -> bool {
-    use std::os::windows::fs::OpenOptionsExt;
-    const DELETE: u32 = 0x1_0000;
-    const SHARE_ALL: u32 = 7;
-    const SHARING_VIOLATION: i32 = 32;
-    match err.raw_os_error() {
-        Some(SHARING_VIOLATION) => true,
-        _ if err.kind() == ErrorKind::PermissionDenied => OpenOptions::new()
-            .access_mode(DELETE)
-            .share_mode(SHARE_ALL)
-            .open(path)
-            .is_err_and(|opened| opened.raw_os_error() == Some(SHARING_VIOLATION)),
-        _ => false,
-    }
-}
-
-#[cfg(not(windows))]
-fn is_refused_for_an_open_file(_path: &Path, _err: &io::Error) -> bool {
-    false
+/// Whether `err` is ERROR_SHARING_VIOLATION (32): another process has the file open without delete sharing, which a
+/// delete, a rename and a replace (see `rename_over`) all give. Not `EPIPE`, which is 32 on Unix.
+fn is_sharing_violation(err: &io::Error) -> bool {
+    cfg!(windows) && err.raw_os_error() == Some(32)
 }
 
 /// Writes `data` to `dest` through a temp file in the same directory, which has `perm` before it gets any data, so
-/// `dest` is never partial and never briefly readable by others. The data and then the directory are synced. A `dest`
-/// that another process holds open waits until it is closed (see `OpenElsewhere`).
+/// `dest` is never partial and never briefly readable by others. A `dest` that another process holds open waits until
+/// it is closed (see `OpenElsewhere`).
 ///
 /// With `Replace::OrMoveAside`, a replace that Windows refuses with access denied, and not because another process has
 /// `dest` open (that waits, as above), is answered by moving the old `dest` aside (see `persist_over_refused`) once the
@@ -387,8 +366,8 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
             return Ok(WriteOutcome::Existed);
         }
         #[cfg(windows)]
-        (Replace::OrMoveAside(leftovers), Err(err)) if err.error.kind() == ErrorKind::PermissionDenied => {
-            persist_over_refused(err.file, dest, leftovers, err.error)?;
+        (Replace::OrMoveAside(leftovers_dir), Err(err)) if err.error.kind() == ErrorKind::PermissionDenied => {
+            persist_over_refused(err.file, dest, leftovers_dir, err.error)?;
             return Ok(WriteOutcome::Written);
         }
         (_, Err(err)) => return Err(err).with_context(|| format!("writing {}", dest.display())),
@@ -411,32 +390,122 @@ fn persist_waiting(
     let mut wait = OpenElsewhere::default();
     loop {
         let persisted = if keep_existing {
-            file.persist_noclobber(dest)
+            file.persist_noclobber(dest).map(drop)
         } else {
-            file.persist(dest)
+            persist_over(file, dest)
         };
         match persisted {
             Err(err) if wait.waited_for(dest, &err.error) => file = err.file,
-            done => return done.map(drop),
+            done => return done,
         }
     }
 }
 
-/// Windows: moves the file `dest`, which Windows refused to replace with `refused`, into `leftovers` and puts `file` in
-/// its place. If that fails, `dest` is put back. Between the two renames there is no file at `dest`, so it is only for a
-/// file that no service start needs, like the binary on the `PATH`. Two renames, because Windows refuses to replace or
-/// delete a running image even with a POSIX-semantics rename (error 5), and allows renaming it. A refused move is an
-/// error that has both answers.
+/// Puts `file` at `dest`, replacing what is there.
+#[cfg(not(windows))]
+fn persist_over(file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfile::PersistError> {
+    file.persist(dest).map(drop)
+}
+
+/// Puts `file` at `dest`, replacing what is there, by `rename_over`.
+#[cfg(windows)]
+fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfile::PersistError> {
+    match rename_over(file.as_file(), file.path(), dest) {
+        Ok(()) => {
+            // The temp file's name is gone: `file` must not delete whatever is at it later.
+            file.disable_cleanup(true);
+            Ok(())
+        }
+        Err(error) => Err(tempfile::PersistError { error, file }),
+    }
+}
+
+/// Windows: renames `from`, which `file` has open, to `to`, replacing `to` as a POSIX rename does: a `to` that another
+/// process has open with delete sharing (an indexer, a scanner) does not stop it, where `MoveFileExW` would be refused.
+/// A `to` that is open without delete sharing gives ERROR_SHARING_VIOLATION (see `OpenElsewhere`), and one that is a
+/// running image, or that the ACL or the read-only attribute protects, gives access denied.
+#[cfg(windows)]
+fn rename_over(file: &File, from: &Path, to: &Path) -> io::Result<()> {
+    use std::ffi::c_void;
+    use std::mem::offset_of;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileRenameInfoEx, ReOpenFile, SYNCHRONIZE, SetFileAttributesW, SetFileInformationByHandle,
+    };
+    const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
+    const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
+
+    // Like `tempfile`'s own persist: the file is no longer a temporary one.
+    let wide_from = security::wide(from);
+    // SAFETY: `wide_from` is NUL-terminated and outlives the call.
+    if unsafe { SetFileAttributesW(wide_from.as_ptr(), FILE_ATTRIBUTE_NORMAL) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A rename needs DELETE access, which the temp file's handle does not have, and the handle's sharing allows.
+    // SAFETY: `file` is an open handle.
+    let handle = unsafe {
+        ReOpenFile(
+            file.as_raw_handle() as HANDLE,
+            DELETE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            0,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `handle` is a handle this call owns.
+    let handle = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+
+    let to: Vec<u16> = std::path::absolute(to)?.as_os_str().encode_wide().collect();
+    let name_bytes = to.len() * size_of::<u16>();
+    let size = offset_of!(FILE_RENAME_INFO, FileName) + name_bytes;
+    // The struct ends in the name; a `u64` buffer is aligned for it.
+    let mut buffer = vec![
+        0u64;
+        size.div_ceil(size_of::<u64>())
+            .max(size_of::<FILE_RENAME_INFO>().div_ceil(8))
+    ];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: `buffer` holds a `FILE_RENAME_INFO` and the `name_bytes` of its name after `FileName`.
+    unsafe {
+        (*info).Anonymous.Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        (*info).FileNameLength = name_bytes as u32;
+        std::ptr::copy_nonoverlapping(to.as_ptr(), (*info).FileName.as_mut_ptr(), to.len());
+    }
+    // SAFETY: `info` points to `size` bytes that `FileRenameInfoEx` takes, and `handle` is open.
+    let renamed = unsafe {
+        SetFileInformationByHandle(
+            handle.as_raw_handle() as HANDLE,
+            FileRenameInfoEx,
+            info as *const c_void,
+            size as u32,
+        )
+    };
+    if renamed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Windows: moves the file `dest`, which Windows refused to replace with `refused`, into `leftovers_dir` (see
+/// `leftovers`) and puts `file` in its place. If that fails, `dest` is put back. Between the two renames there is no
+/// file at `dest`, so it is only for a file that no service start needs, like the binary on the `PATH`. Two renames,
+/// because Windows refuses to replace or delete a running image even with a POSIX-semantics rename (error 5), and
+/// allows renaming it.
 #[cfg(windows)]
 fn persist_over_refused(
     file: tempfile::NamedTempFile,
     dest: &Path,
-    leftovers: &Path,
+    leftovers_dir: &Path,
     refused: io::Error,
 ) -> Result<()> {
     let writing = || format!("writing {}", dest.display());
-    let aside = move_aside(dest, leftovers)
-        .map_err(|moving| refused_and_not_moved(anyhow::Error::new(refused).context(writing()), &moving))?;
+    let aside = leftovers::move_aside(dest, leftovers_dir)
+        .map_err(|moving| leftovers::refused_and_not_moved(anyhow::Error::new(refused).context(writing()), &moving))?;
     let Err(err) = persist_waiting(file, dest, false) else {
         return Ok(());
     };
@@ -451,38 +520,16 @@ fn persist_over_refused(
     }
 }
 
-/// Windows: renames the file `path` into `leftovers`, keeping its name (see `schtasks::leftover_name`), and returns the
-/// new path. Windows refuses to delete a running image, and lets it be renamed. A file there is deleted once it can be:
-/// by the next `install` or `upgrade`, or by a removal. Only a regular file is moved aside, since only a file is an
-/// image and the leftover sweeps never delete anything else: any other `path` is an error naming it, and nothing is
-/// moved. A `path` that another process holds open waits (see `OpenElsewhere`).
-#[cfg(windows)]
-pub fn move_aside(path: &Path, leftovers: &Path) -> Result<std::path::PathBuf> {
-    require_regular_file(path, "not moved aside")?;
-    let original = path.file_name().context("the file has no name")?;
-    let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
-    let mut wait = OpenElsewhere::default();
-    while let Err(err) = fs::rename(path, &to) {
-        if !wait.waited_for(path, &err) {
-            return Err(err).with_context(|| format!("moving it to {}", to.display()));
-        }
-    }
-    Ok(to)
-}
-
-/// Windows: the error for a delete or replace that Windows `refused` and whose move aside (`moving`) failed too. It has
-/// both OS answers, and `refused` stays the source, so `is_access_denied` and `root_cause` still reach it.
-#[cfg(windows)]
-pub fn refused_and_not_moved(refused: anyhow::Error, moving: &anyhow::Error) -> anyhow::Error {
-    refused.context(format!("moving it aside failed ({moving:#}), after this refusal"))
-}
-
 /// The hex digits of `N` random bytes from the OS.
 pub fn hex_of_random_bytes<const N: usize>() -> Result<String> {
     let mut random = [0u8; N];
     getrandom::fill(&mut random).context("reading random bytes from the OS")?;
     Ok(hex::encode(random))
 }
+
+#[cfg(test)]
+#[path = "files_replace_tests.rs"]
+mod replace_tests;
 
 #[cfg(all(test, windows))]
 #[path = "files_tests.rs"]

@@ -27,6 +27,8 @@ use reverse_tunnel::command;
 #[cfg(windows)]
 use reverse_tunnel::files;
 use reverse_tunnel::install;
+#[cfg(windows)]
+use reverse_tunnel::leftovers;
 use reverse_tunnel::paths::Paths;
 #[cfg(windows)]
 use reverse_tunnel::schtasks::{self, TaskState};
@@ -332,7 +334,7 @@ impl Drop for Machine {
         {
             let _ = schtasks::delete(schtasks::REMOVAL);
             let _ = fs::remove_dir_all(self.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"));
-            for image in install::leftover_images(&self.paths).unwrap_or_default() {
+            for image in leftovers::images(&self.paths).unwrap_or_default() {
                 let _ = fs::remove_file(image);
             }
         }
@@ -1010,7 +1012,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
 /// The leftover image that was the installed binary: the one leftover whose original name is its name.
 #[cfg(windows)]
 fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
-    let images = install::leftover_images_of_the_binary(&machine.paths).unwrap();
+    let images = leftovers::images_of_the_binary(&machine.paths).unwrap();
     let [image] = images.as_slice() else {
         panic!("expected one leftover image of the binary, found {images:?}")
     };
@@ -1127,7 +1129,7 @@ fn upgrade_remnants(machine: &Machine) -> Vec<PathBuf> {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(upgrade::STAGED));
-    install::leftover_images(&machine.paths)
+    leftovers::images(&machine.paths)
         .unwrap()
         .into_iter()
         .chain(staged)
@@ -1146,8 +1148,7 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     let supervisor = machine.status().pid.expect("a running service has a pid");
     let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
     let old_image = machine.image();
-    // Every process of the service, which runs the old image: held by a handle opened now, which no other process can
-    // come to have.
+    // Handles to every service process (running the old image), so waiting on them waits on those processes alone.
     let old_pids: Vec<u32> = processes()
         .iter()
         .filter(|process| process.owner == service_owner())
@@ -1172,13 +1173,12 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     assert_eq!(fs::read(&new_image).unwrap(), newer);
     let running = machine.status().pid.expect("a running service has a pid");
     assert_eq!(windows::image_of(running), fs::canonicalize(&new_image).unwrap());
-    // The old image ran when the sweep tried to delete it: it was renamed, and is a leftover until the old processes exit.
     assert!(!old_image.exists(), "{} is still there", old_image.display());
     let old_name = old_image.file_name().unwrap().to_string_lossy().into_owned();
-    let renamed: Vec<_> = install::leftover_images(&machine.paths)
+    let renamed: Vec<_> = leftovers::images(&machine.paths)
         .unwrap()
         .into_iter()
-        .filter(|image| schtasks::is_leftover_of(&image.file_name().unwrap().to_string_lossy(), &old_name))
+        .filter(|image| leftovers::is_leftover_of(&image.file_name().unwrap().to_string_lossy(), &old_name))
         .collect();
     let [renamed] = renamed.as_slice() else {
         panic!("expected one leftover of the old image, found {renamed:?}")
@@ -1250,8 +1250,7 @@ fn the_kill_after_a_changed_command_has_the_manager_start_the_new_host() {
 }
 
 /// Windows: the `install` that `upgrade` runs from its download cannot delete the download, which it is running: it
-/// moves it aside without a warning about it, and the next `install` deletes it. The download is the installed build, so no
-/// old image is left running to delay that.
+/// moves it aside without a warning about it, and the next `install` deletes it.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1644,10 +1643,9 @@ impl Drop for TaskGuard {
     }
 }
 
-/// Runs `operation` on a file that this process holds open without delete sharing, in a child that is this test run
-/// again (`test` is its name; the path comes in `CHILD`). The operation waits until the handle is closed, and says so
-/// once: the child's stderr is what shows that it was refused, so the handle is closed only after that. Then
-/// `finished` says what the operation was to do.
+/// Runs `operation` in a child (this test run again, named `test`; path in `CHILD`) on a file this process holds open
+/// without delete sharing. The handle is closed only after the child's stderr shows it was refused, then `finished`
+/// says what the operation was to do.
 #[cfg(windows)]
 fn operation_waits_for_the_process_that_holds_the_file_open(
     test: &str,
@@ -1724,7 +1722,7 @@ fn a_move_aside_waits_for_the_process_that_holds_the_file_open() {
     operation_waits_for_the_process_that_holds_the_file_open(
         "a_move_aside_waits_for_the_process_that_holds_the_file_open",
         |path| {
-            reverse_tunnel::files::move_aside(path, path.parent().unwrap()).unwrap();
+            reverse_tunnel::leftovers::move_aside(path, path.parent().unwrap()).unwrap();
         },
         |path| !path.exists(),
     );
@@ -1833,7 +1831,7 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
     assert!(
         windows::names_scheduled_at_reboot()
             .iter()
-            .any(|scheduled| schtasks::is_leftover_of(scheduled, name) && !scheduled_before.contains(scheduled)),
+            .any(|scheduled| leftovers::is_leftover_of(scheduled, name) && !scheduled_before.contains(scheduled)),
         "the renamed image is not scheduled for deletion at the next boot"
     );
 }
@@ -1886,7 +1884,7 @@ fn uninstall_run_by_name_through_the_path_removes_the_host_and_the_binary() {
 fn a_later_removal_deletes_the_leftover_image_of_an_earlier_one() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let leftover = machine.paths.bin_dir.parent().unwrap().join(schtasks::leftover_name(
+    let leftover = machine.paths.bin_dir.parent().unwrap().join(leftovers::name(
         "earlier",
         service::exe(&machine.paths).file_name().unwrap(),
     ));
@@ -1936,7 +1934,7 @@ fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
         Some(install::rerun_uninstall(&machine.paths).as_str()),
         "{stderr}"
     );
-    assert!(install::leftover_images(&machine.paths).unwrap().is_empty());
+    assert!(leftovers::images(&machine.paths).unwrap().is_empty());
 }
 
 /// A process's working directory keeps that directory from being deleted, and the shell that started `uninstall` stays
@@ -1980,12 +1978,10 @@ fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
     let kept = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
     let image = kept
         .path()
-        .join(schtasks::leftover_name("test", OsStr::new("reverse-tunnel.exe")));
+        .join(leftovers::name("test", OsStr::new("reverse-tunnel.exe")));
     fs::copy(BIN, &image).unwrap();
     // Hidden, system and read-only: `del` skips such a file unless it is told to ignore attributes.
-    let hidden = kept
-        .path()
-        .join(schtasks::leftover_name("hidden", OsStr::new("frpc-0.1.exe")));
+    let hidden = kept.path().join(leftovers::name("hidden", OsStr::new("frpc-0.1.exe")));
     fs::write(&hidden, "").unwrap();
     output_of("attrib", &["+h", "+s", "+r", hidden.to_str().unwrap()]);
     // A running image: `del` fails until the test lets go.

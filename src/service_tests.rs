@@ -105,3 +105,22 @@ fn the_installed_image_is_the_registered_one_unless_an_unreadable_entry_may_be_t
     manager.install(&spec(&image).unwrap(), false).unwrap();
     assert_eq!(installed_image(&manager, &paths).unwrap(), image);
 }
+
+#[cfg(windows)]
+#[test]
+fn a_service_entry_that_cannot_be_read_is_an_error_only_when_it_is_named_as_the_service() {
+    use goetia::manager::fake::Fake;
+
+    let paths = Paths::testing("C:/root");
+    let manager = Fake::default();
+    manager.seed_unusable("another");
+    assert_eq!(
+        installed_image(&manager, &paths).unwrap_err().to_string(),
+        "the service is not installed"
+    );
+
+    manager.seed_unusable(ID);
+
+    let err = installed_image(&manager, &paths).unwrap_err().to_string();
+    assert!(err.starts_with("the service is installed, but cannot be read"), "{err}");
+}

@@ -14,7 +14,7 @@ use std::ptr::{null, null_mut};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use reverse_tunnel::account;
-use reverse_tunnel::install;
+use reverse_tunnel::leftovers;
 use reverse_tunnel::security::{Sid, owner_of};
 use reverse_tunnel::system_path;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, LocalFree, WAIT_OBJECT_0};
@@ -485,9 +485,9 @@ pub fn fresh_path() -> String {
     system_path::expand(&machine_path()).unwrap()
 }
 
-/// Waits, with no cap, until the removal's task has deleted every file matching `schtasks::leftover_pattern`.
+/// Waits, with no cap, until the removal's task has deleted every file matching `leftovers::pattern`.
 pub fn wait_until_no_leftover_image_is_left(machine: &Machine) {
     wait_until("the leftover images are deleted", || {
-        install::leftover_images(&machine.paths).unwrap().is_empty()
+        leftovers::images(&machine.paths).unwrap().is_empty()
     });
 }

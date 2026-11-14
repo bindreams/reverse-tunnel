@@ -13,6 +13,8 @@ pub mod frpc;
 mod held;
 pub mod install;
 pub mod join;
+#[cfg(windows)]
+pub mod leftovers;
 pub mod logfile;
 pub mod ops;
 pub mod output;

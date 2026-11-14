@@ -39,8 +39,7 @@ const IMAGE_PREFIX: &str = concat!(name!(), "-");
 ///
 /// On Unix that is `exe`, whatever the binary: the unit never changes, and an upgrade replaces the file and restarts the
 /// service. Windows will not replace a running image, so there each build is a file of its own, named by the digest of
-/// its content, and the service is moved onto it (`install` registers it before the restart). The same content is the
-/// same file, which an install that changed nothing else keeps.
+/// its content, and the service is moved onto it (`install` registers it before the restart).
 pub fn image(paths: &Paths, binary: &[u8]) -> PathBuf {
     #[cfg(windows)]
     {

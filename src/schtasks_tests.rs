@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::fs;
 use std::process::Command;
 
@@ -117,53 +116,4 @@ fn a_loop_deletes_a_directory_whose_name_holds_the_metacharacters_of_cmd() {
 
     assert!(status.success(), "{status}");
     assert!(!dir.exists());
-}
-
-#[test]
-fn a_leftover_keeps_the_name_of_the_file_it_was() {
-    let name = leftover_name("ab12", OsStr::new("frpc-0.1.exe"));
-
-    assert_eq!(name, ".reverse-tunnel.ab12.frpc-0.1.exe");
-}
-
-#[test]
-fn a_leftover_is_what_the_pattern_matches_whatever_the_case() {
-    let name = leftover_name("ab12", OsStr::new("frpc-0.1.exe"))
-        .to_string_lossy()
-        .into_owned();
-
-    assert!(is_leftover(&name));
-    assert!(is_leftover(&name.to_uppercase()));
-    assert!(!is_leftover("reverse-tunnel.exe"));
-    assert!(!is_leftover("x.reverse-tunnel.ab12.exe"));
-}
-
-#[test]
-fn a_leftover_gives_back_the_name_it_kept() {
-    let name = leftover_name("ab12", OsStr::new("a.b.exe"))
-        .to_string_lossy()
-        .into_owned();
-
-    assert_eq!(kept_name(&name), Some("a.b.exe"));
-    assert_eq!(kept_name("a.b.exe"), None);
-}
-
-#[test]
-fn a_leftover_is_of_a_file_by_the_name_it_kept_whatever_the_case() {
-    let ours = leftover_name("ab12", OsStr::new("reverse-tunnel.exe"))
-        .to_string_lossy()
-        .into_owned();
-    let frpc = leftover_name("ab12", OsStr::new("frpc-0.1.exe"))
-        .to_string_lossy()
-        .into_owned();
-
-    assert!(is_leftover_of(&ours, "reverse-tunnel.exe"));
-    assert!(is_leftover_of(&ours.to_uppercase(), "reverse-tunnel.exe"));
-    assert!(!is_leftover_of(&frpc, "reverse-tunnel.exe"));
-    // A name that only ends like the original is another file.
-    let longer = leftover_name("ab12", OsStr::new("old-reverse-tunnel.exe"))
-        .to_string_lossy()
-        .into_owned();
-    assert!(!is_leftover_of(&longer, "reverse-tunnel.exe"));
-    assert!(!is_leftover_of("reverse-tunnel.exe", "reverse-tunnel.exe"));
 }

@@ -1,7 +1,6 @@
 //! The one-time task that finishes an `uninstall` on Windows, through Task Scheduler's COM API.
 
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
@@ -14,6 +13,8 @@ use windows::Win32::System::TaskScheduler::{
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{BSTR, HRESULT};
+
+use crate::leftovers;
 
 /// The task's name.
 pub const REMOVAL: &str = "reverse-tunnel-uninstall";
@@ -177,54 +178,14 @@ fn connect() -> Result<ITaskFolder> {
     }
 }
 
-/// What a leftover's name starts with. A leftover is a file that Windows refused to delete (a removal) or replace (an
-/// `install` or `upgrade`), as it does a running one, and so renamed (see `files::move_aside`):
-/// `.reverse-tunnel.<id>.<the name it had>`, in the folder that holds the bin dir. The next `install` or
-/// `upgrade` deletes it once it can, and the removal task's last step deletes every such file (see `removal_script`).
-const LEFTOVER_PREFIX: &str = ".reverse-tunnel.";
-
-/// The leftover file that renames the file called `original`, called `id`.
-pub fn leftover_name(id: &str, original: &OsStr) -> OsString {
-    let mut name = OsString::from(format!("{LEFTOVER_PREFIX}{id}."));
-    name.push(original);
-    name
-}
-
-/// The pattern that every leftover file in `dir` matches, for `cmd`.
-pub fn leftover_pattern(dir: &Path) -> PathBuf {
-    dir.join(format!("{LEFTOVER_PREFIX}*"))
-}
-
-/// What follows `LEFTOVER_PREFIX` in `name`, which `cmd` matches whatever the case.
-fn after_prefix(name: &str) -> Option<&str> {
-    let (prefix, rest) = (name.get(..LEFTOVER_PREFIX.len())?, name.get(LEFTOVER_PREFIX.len()..)?);
-    prefix.eq_ignore_ascii_case(LEFTOVER_PREFIX).then_some(rest)
-}
-
-/// Whether the file called `name` is a leftover: whether `leftover_pattern` matches it.
-pub fn is_leftover(name: &str) -> bool {
-    after_prefix(name).is_some()
-}
-
-/// Whether the file called `name` is a leftover of a file that was called `original`.
-pub fn is_leftover_of(name: &str, original: &str) -> bool {
-    kept_name(name).is_some_and(|kept| kept.eq_ignore_ascii_case(original))
-}
-
-/// The name that the leftover file called `name` had, if it is a leftover.
-pub fn kept_name(name: &str) -> Option<&str> {
-    // The id is hex, so the first dot ends it.
-    after_prefix(name)?.split_once('.').map(|(_id, kept)| kept)
-}
-
 /// What `cmd` runs for the removal task, in order: `uninstall --finish` from `copy` (failure ends `cmd` with code 1, the
 /// task's last result), then the deletion of `copy` and `dir`, the task `name`'s own deletion (code 4 on failure), and
-/// the leftover files in `leftovers`. `del` and `rmdir` report a held file only in their message, so each is repeated
+/// the leftovers in `leftover_dir` (see `leftovers`). `del` and `rmdir` report a held file only in their message, so each is repeated
 /// until its target is gone (see `until_gone`). The leftovers go after the task's own deletion because until then
 /// `uninstall`'s waiter is alive and may be running one.
-pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers: &Path) -> String {
+pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftover_dir: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
-    let pattern = leftover_pattern(leftovers);
+    let pattern = leftovers::pattern(leftover_dir);
     let pattern = pattern.display();
     [
         format!(r#"("{copy}" uninstall --finish > "{log}" 2>&1 || exit /b 1)"#),
