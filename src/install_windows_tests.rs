@@ -50,7 +50,7 @@ fn a_removal_that_left_only_its_task_is_done_and_says_how_to_delete_it() {
 
     assert_eq!(
         why,
-        r"the removal is done, and Windows is asked to delete the files that remain (C:\.reverse-tunnel.*) at the next boot, but its task is still registered: delete it with `schtasks /Delete /TN reverse-tunnel-uninstall`"
+        r"the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN reverse-tunnel-uninstall`. The files that remain (C:\.reverse-tunnel.*) are no longer running and can be deleted by hand now"
     );
 }
 

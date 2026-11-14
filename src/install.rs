@@ -315,10 +315,10 @@ fn removal_outcome(state: TaskState, dir_present: bool, leftovers: &Path) -> Opt
         TaskState::Gone => Some(WaitOutcome::Ended),
         TaskState::Ended(1) => failed("the removal's `uninstall --finish` failed".to_string()),
         TaskState::Ended(4) => Some(WaitOutcome::LeftBehind(format!(
-            "the removal is done, and Windows is asked to delete the files that remain ({}) at the next boot, but its \
-             task is still registered: delete it with `schtasks /Delete /TN {}`",
-            leftovers.display(),
-            schtasks::REMOVAL
+            "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`. The files \
+             that remain ({}) are no longer running and can be deleted by hand now",
+            schtasks::REMOVAL,
+            leftovers.display()
         ))),
         TaskState::Ended(code) => failed(format!("the removal's task ended with {code:#x}")),
     }

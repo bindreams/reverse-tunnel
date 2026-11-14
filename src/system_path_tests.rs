@@ -101,8 +101,8 @@ fn a_path_value_survives_being_stored_and_read_back() {
     let bytes = encode(text);
 
     assert_eq!(bytes.len(), (text.encode_utf16().count() + 1) * 2, "one NUL ends it");
-    assert_eq!(decode(&bytes).unwrap(), text);
-    assert!(decode(&bytes[1..]).is_err(), "half a code unit is not text");
+    assert_eq!(decode_path(&bytes).unwrap(), text);
+    assert!(decode_path(&bytes[1..]).is_err(), "half a code unit is not text");
 }
 
 #[test]

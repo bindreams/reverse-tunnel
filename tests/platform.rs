@@ -943,14 +943,15 @@ fn a_failed_removal_logs_where_uninstall_says() {
             stderr.contains(&format!("\"{}\" uninstall", image.display())),
             "the error does not name the image as the binary to run: {stderr}"
         );
-        // A removal that failed schedules nothing: after a reboot the image must still be there to run.
-        let name = image.file_name().unwrap();
-        assert!(
-            !windows::deletions_at_reboot()
-                .iter()
-                .any(|file| file.file_name() == Some(name)),
-            "the failed removal's image is scheduled for deletion at the next boot"
-        );
+        // A removal that failed schedules none of its leftovers: after a reboot the image must still be there to run.
+        let scheduled = windows::deletions_at_reboot();
+        for leftover in install::leftover_images(&machine.paths).unwrap() {
+            assert!(
+                !scheduled.iter().any(|file| file.file_name() == leftover.file_name()),
+                "the failed removal's {} is scheduled for deletion at the next boot",
+                leftover.display()
+            );
+        }
         drop(stuck);
         let mut rerun = Command::new(image);
         rerun.arg("uninstall");
@@ -1466,17 +1467,17 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
     assert_uninstalled_by_the_installed_binary(&machine, uninstall);
 
     // The removal succeeded, so the system is to delete, at the next boot, the image it renamed. The entries stay after
-    // the files are deleted, and earlier removals' are there too: look at what this one added.
+    // the files are deleted, and earlier removals' are there too: the image's name is unique by its random id, so it
+    // is a leftover of the binary that was not among the deletions before.
     let name = binary.file_name().unwrap().to_str().unwrap();
-    let scheduled = windows::deletions_at_reboot()
-        .into_iter()
-        .skip(scheduled_before.len())
-        .any(|file| {
-            let leftover = file.file_name().and_then(|file| file.to_str());
-            leftover.is_some_and(|file| schtasks::is_leftover_of(file, name))
-        });
+    let is_leftover_of_the_binary = |file: &PathBuf| {
+        let leftover = file.file_name().and_then(|file| file.to_str());
+        leftover.is_some_and(|file| schtasks::is_leftover_of(file, name))
+    };
     assert!(
-        scheduled,
+        windows::deletions_at_reboot()
+            .iter()
+            .any(|file| is_leftover_of_the_binary(file) && !scheduled_before.contains(file)),
         "the renamed image is not scheduled for deletion at the next boot"
     );
 }

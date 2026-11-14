@@ -16,8 +16,11 @@ use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, REG_
 
 const KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
 const NAME: &str = "Path";
-/// The value, as an error names it.
-const VALUE: &str = r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\Path";
+
+/// The `Path` value, as an error names it.
+fn value() -> String {
+    format!(r"HKLM\{KEY}\{NAME}")
+}
 
 /// How long a window that does not answer the notification is waited for, in milliseconds. The windows are other
 /// programs', which may hang; the notification is a courtesy, and the edit is already made.
@@ -41,12 +44,12 @@ fn edit(dir: &Path, change: fn(&str, &str) -> Result<Option<String>>) -> Result<
         .open_subkey_with_flags(KEY, KEY_READ | KEY_WRITE)
         .with_context(|| format!("opening HKLM\\{KEY}"))?;
     let (current, vtype) = match key.get_raw_value(NAME) {
-        Ok(value) => (decode(&value.bytes)?, value.vtype),
+        Ok(value) => (decode_path(&value.bytes)?, value.vtype),
         Err(err) if err.kind() == ErrorKind::NotFound => (String::new(), REG_EXPAND_SZ),
-        Err(err) => return Err(err).with_context(|| format!("reading {VALUE}")),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", value())),
     };
     if !matches!(vtype, REG_SZ | REG_EXPAND_SZ) {
-        bail!("{VALUE} is not a string, so it was not changed");
+        bail!("{} is not a string, so it was not changed", value());
     }
     let Some(changed) = change(&current, dir)? else {
         return Ok(());
@@ -58,7 +61,7 @@ fn edit(dir: &Path, change: fn(&str, &str) -> Result<Option<String>>) -> Result<
             vtype,
         },
     )
-    .with_context(|| format!("writing {VALUE}"))?;
+    .with_context(|| format!("writing {}", value()))?;
     broadcast();
     Ok(())
 }
@@ -163,14 +166,15 @@ fn without_entry(path: &str, dir: &str) -> Result<Option<String>> {
     Ok((changed != path).then_some(changed))
 }
 
-/// The text of a registry string: UTF-16 with its terminating NULs.
-fn decode(bytes: &[u8]) -> Result<String> {
+/// The text of the machine `Path` value, a registry string: UTF-16 with its terminating NULs. Its errors name that
+/// value.
+fn decode_path(bytes: &[u8]) -> Result<String> {
     let (units, rest) = bytes.as_chunks::<2>();
     if !rest.is_empty() {
-        return Err(anyhow!("{VALUE} is not UTF-16"));
+        return Err(anyhow!("{} is not UTF-16", value()));
     }
     let units: Vec<u16> = units.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-    let text = String::from_utf16(&units).with_context(|| format!("{VALUE} is not valid UTF-16"))?;
+    let text = String::from_utf16(&units).with_context(|| format!("{} is not valid UTF-16", value()))?;
     Ok(text.trim_end_matches('\0').to_string())
 }
 

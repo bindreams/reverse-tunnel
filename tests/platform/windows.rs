@@ -301,13 +301,15 @@ fn environment() -> RegKey {
         .unwrap()
 }
 
-/// The machine's `Path` as stored, unexpanded and without its terminating NULs, with its registry type.
+/// The machine's `Path` as stored, unexpanded and without its terminating NULs, with its registry type. The product
+/// writes this value, so text that is not UTF-16 fails the test.
 pub fn machine_path_and_type() -> (String, RegType) {
     let value = environment().get_raw_value("Path").unwrap();
-    (
-        registry_text(&value.bytes).trim_end_matches('\0').to_string(),
-        value.vtype,
-    )
+    let (units, rest) = value.bytes.as_chunks::<2>();
+    assert!(rest.is_empty(), "the machine's Path is not UTF-16");
+    let units: Vec<u16> = units.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    let text = String::from_utf16(&units).expect("the machine's Path is not valid UTF-16");
+    (text.trim_end_matches('\0').to_string(), value.vtype)
 }
 
 /// The machine's `Path`, as stored: unexpanded.
@@ -334,18 +336,15 @@ pub fn deletions_at_reboot() -> Vec<PathBuf> {
         Err(err) => panic!("reading PendingFileRenameOperations: {err}"),
     };
     let text = registry_text(&value.bytes);
-    // Each string ends in a NUL, and the list in one more.
-    let strings: Vec<&str> = text
-        .strip_suffix('\0')
-        .unwrap_or(&text)
-        .split_terminator('\0')
-        .collect();
-    let (pairs, _) = strings.as_chunks::<2>();
-    pairs
-        .iter()
-        .filter(|[_, target]| target.is_empty())
-        .map(|[source, _]| PathBuf::from(nt_path_of(source)))
-        .collect()
+    // Walk the strings from the start in (source, target) pairs, to the end of the data, whatever NULs end the value.
+    let mut strings = text.split('\0');
+    let mut deletions = Vec::new();
+    while let (Some(source), Some(target)) = (strings.next(), strings.next()) {
+        if !source.is_empty() && target.is_empty() {
+            deletions.push(PathBuf::from(nt_path_of(source)));
+        }
+    }
+    deletions
 }
 
 /// How many entries of the machine's `Path` name `dir`, as the product decides it.
