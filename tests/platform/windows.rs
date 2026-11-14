@@ -248,7 +248,8 @@ pub fn assert_installed_as_specified(machine: &Machine) {
             has_no_access(secret, sid);
         }
     }
-    for binary in [&paths.bin_dir, &service::exe(paths)] {
+    let image = machine.image();
+    for binary in [&paths.bin_dir, &service::exe(paths), &image] {
         is(binary, ADMINISTRATORS, FULL);
         is(binary, EVERYONE, READ_EXECUTE);
         for sid in [EVERYONE, USERS, AUTHENTICATED_USERS, &service_sid] {
@@ -262,6 +263,7 @@ pub fn assert_installed_as_specified(machine: &Machine) {
         &paths.log_dir,
         &paths.bin_dir,
         &service::exe(paths),
+        &image,
         &frpc,
     ] {
         assert_eq!(owner_of(owned).unwrap(), ADMINISTRATORS, "owner of {}", owned.display());

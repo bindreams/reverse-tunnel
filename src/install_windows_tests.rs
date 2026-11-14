@@ -241,15 +241,38 @@ fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_o
 
     assert!(!staged.exists());
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
-    let kept = delete_leftovers(&paths).unwrap();
+    let kept = delete_what_can_be(leftover_images(&paths).unwrap()).unwrap();
     let [why] = kept.as_slice() else {
         panic!("it still runs: {kept:?}")
     };
     assert!(format!("{why:#}").contains("may still run"), "{why:#}");
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
     drop(running);
-    assert!(delete_leftovers(&paths).unwrap().is_empty());
+    assert!(delete_what_can_be(leftover_images(&paths).unwrap()).unwrap().is_empty());
     assert_eq!(kept_names(&paths), Vec::<String>::new());
+}
+
+#[test]
+fn the_sweep_keeps_the_registered_image_and_the_running_one_and_deletes_the_other_old_images() {
+    let (_dir, paths) = installed();
+    let image = |binary: &[u8]| service::image(&paths, binary);
+    let (registered, old, previous) = (image(b"registered"), image(b"old"), image(b"previous"));
+    let other = paths.bin_dir.join("frpc-0.1.exe");
+    for file in [&registered, &old, &other] {
+        fs::write(file, "").unwrap();
+    }
+    let running = running(&previous);
+
+    sweep_old_images(&paths, &registered).unwrap();
+
+    assert_eq!([&registered, &previous, &other].map(|file| file.exists()), [true; 3]);
+    assert!(!old.exists());
+    drop(running);
+    sweep_old_images(&paths, &registered).unwrap();
+    assert_eq!(
+        [&registered, &previous, &other].map(|file| file.exists()),
+        [true, false, true]
+    );
 }
 
 #[test]
@@ -259,7 +282,7 @@ fn a_leftover_that_is_not_a_regular_file_is_reported_and_never_deleted() {
     fs::create_dir(&impostor).unwrap();
     fs::write(impostor.join("inside"), "").unwrap();
 
-    let kept = delete_leftovers(&paths).unwrap();
+    let kept = delete_what_can_be(leftover_images(&paths).unwrap()).unwrap();
 
     let [why] = kept.as_slice() else {
         panic!("expected the directory to be reported: {kept:?}")
@@ -403,6 +426,7 @@ fn a_directory_that_cannot_be_deleted_fails_the_removal_and_is_not_renamed() {
     );
 
     assert!(err.contains("old"), "{err}");
+    assert!(err.contains("not moved"), "{err}");
     assert!(sub.exists());
     assert!(leftover_images(&paths).unwrap().is_empty());
 }

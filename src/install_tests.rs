@@ -305,7 +305,7 @@ fn bin_dir_loses_old_versions_and_temp_files() {
 #[test]
 fn unchanged_install_leaves_a_running_service_alone() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths).unwrap();
+    let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
@@ -318,7 +318,7 @@ fn unchanged_install_leaves_a_running_service_alone() {
 #[test]
 fn kill_not_running_starts() {
     let machine = Machine::new();
-    let spec = service::spec(&machine.paths).unwrap();
+    let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
 
@@ -399,11 +399,12 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     let new = new_binary(&machine, "fail");
     let (config, manager) = (fs::read(machine.config()).unwrap(), Fake::default());
     // Not the unit the new binary would register.
-    let mut outgoing = service::spec(&machine.paths).unwrap().into_fields();
+    let mut outgoing = service::spec(&service::exe(&machine.paths)).unwrap().into_fields();
     outgoing.command.push("--outgoing".into());
     let outgoing = DaemonSpec::new(outgoing).unwrap();
     manager.install(&outgoing, false).unwrap();
 
+    let new = Binary::read(&machine.paths, &new).unwrap();
     let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
     // The outgoing binary is not executable: it is the new one's check that failed.
@@ -426,6 +427,7 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     fs::create_dir(&machine.paths.bin_dir).unwrap();
     fs::write(download::tools(&machine.paths).frpc, b"frpc").unwrap();
     let new = new_binary(&machine, "fail");
+    let new = Binary::read(&machine.paths, &new).unwrap();
     let join = join::decode(CODE).unwrap();
     let manager = Fake::default();
 
@@ -444,7 +446,7 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     // Not registered: no unit points at a binary that was never placed.
     assert_eq!(
         manager
-            .preview_install(&service::spec(&machine.paths).unwrap())
+            .preview_install(&service::spec(&service::exe(&machine.paths)).unwrap())
             .unwrap(),
         Outcome::Create
     );
@@ -457,12 +459,15 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
     let machine = installed_machine();
     let new = new_binary(&machine, "pass");
     let manager = Fake::default();
-    manager.install(&service::spec(&machine.paths).unwrap(), false).unwrap();
+    manager
+        .install(&service::spec(&service::exe(&machine.paths)).unwrap(), false)
+        .unwrap();
+    let new = Binary::read(&machine.paths, &new).unwrap();
 
     apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
 
     assert!(machine.dir.path().join("expected-env.ran").exists(), "the check ran");
-    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), fs::read(&new).unwrap());
+    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), new.bytes);
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }
 

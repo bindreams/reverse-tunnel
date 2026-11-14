@@ -41,16 +41,15 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     refuse_while_uninstalling(paths)?;
     // Decided from the binary: the account database can answer for an account that has just been removed.
-    ensure!(service::exe(paths).try_exists()?, "the service is not installed");
-    check_and_restart_as(manager, paths, service_identity()?)
+    let exe = service::installed_image(manager, paths)?;
+    ensure!(exe.try_exists()?, "the service is not installed");
+    check_and_restart_as(manager, paths, &exe, service_identity()?)
 }
 
-/// `check_and_restart`, with the check run as `run_as` (`None`: as the caller).
-fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Option<RunAs>) -> Result<()> {
-    let exe = service::exe(paths);
+/// `check_and_restart`, with the check run as `run_as` (`None`: as the caller), of the installed binary `exe`.
+fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, exe: &Path, run_as: Option<RunAs>) -> Result<()> {
     check(
-        paths,
-        &exe,
+        exe,
         run_as,
         &format!("the installed binary `{}`'s `run --check`", exe.display()),
     )?;
@@ -77,14 +76,14 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 ///
 /// On Windows it runs as the caller, whom a file the account cannot read does not stop, so `run --check` also judges
 /// the DACLs for the account (`access::check`).
-pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
+pub(crate) fn check(exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
     // Windows runs the check as the caller, whoever is asked for.
     #[cfg(windows)]
     let run_as: Option<RunAs> = {
         let _ = run_as;
         None
     };
-    let spec = service::spec(paths)?;
+    let spec = service::spec(exe)?;
     let args = spec.command.split_first().expect("the service has a command").1;
     let mut check = process::Command::new(exe);
     check.args(args).arg("--check").env_clear().envs(&spec.env);

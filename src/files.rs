@@ -386,17 +386,18 @@ fn persist_waiting(
     }
 }
 
-/// Windows: whether `dest` is a regular file that a process runs, which is what makes Windows refuse to replace it. A
-/// directory, a read-only file and an ACL that denies it are refused the same way, and none of them is moved.
+/// Windows: whether `dest` is a regular file that a process runs, which is what makes Windows refuse to replace or
+/// delete it, and the only file that is moved aside instead (see `move_aside`). A directory, a read-only file and an ACL
+/// that denies it are refused the same way, and none of them is moved.
 #[cfg(windows)]
-fn runs_as_a_file(dest: &Path) -> Result<bool> {
+pub fn runs_as_a_file(dest: &Path) -> Result<bool> {
     let is_file = fs::symlink_metadata(dest).is_ok_and(|entry| entry.is_file());
     Ok(is_file && processes::runs_image(dest)?)
 }
 
 /// Windows: moves the file `dest`, which runs, into `leftovers` and puts `file` in its place. If that fails, `dest` is
-/// put back. Between the two renames there is no file at `dest`, and a service start then fails (a replacing rename is
-/// refused even with POSIX semantics, see `files_tests`).
+/// put back. Between the two renames there is no file at `dest` (a replacing rename is refused even with POSIX
+/// semantics), so it is only for a file that no service start needs, like the binary on the `PATH`.
 #[cfg(windows)]
 fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
     let writing = || format!("writing {}", dest.display());

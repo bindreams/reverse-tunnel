@@ -46,8 +46,9 @@ enum Command {
     ///
     /// The release is staged in the bin directory as `upgrade-<...>`. A successful upgrade's download is removed by the
     /// `install` it runs, a failed one by `upgrade`. `install` removes its own check copy, also `upgrade-<...>`, and
-    /// sweeps any left behind. On Windows a copy or binary that still runs is renamed to `.reverse-tunnel.*` beside
-    /// the bin directory, and the next `install` deletes it once it has exited.
+    /// sweeps any left behind. On Windows each build is a service image of its own, which the next `install` deletes
+    /// once it has exited; a copy or the binary on the `PATH` that still runs is renamed to `.reverse-tunnel.*` beside
+    /// the bin directory, and the next `install` deletes it too.
     Upgrade {
         /// Install this binary instead of downloading one.
         #[arg(long)]
@@ -108,21 +109,25 @@ fn run() -> Result<ExitCode> {
         }
         Command::Start => {
             require_root()?;
-            ops::start(&*service::manager(&paths)?)?;
+            ops::start(&*service::manager(&service::exe(&paths))?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Stop => {
             require_root()?;
-            ops::stop(&*service::manager(&paths)?)?;
+            ops::stop(&*service::manager(&service::exe(&paths))?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Restart => {
             require_root()?;
-            ops::check_and_restart(&*service::manager(&paths)?, &paths)?;
+            ops::check_and_restart(&*service::manager(&service::exe(&paths))?, &paths)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {
-            ops::status(&*service::manager(&paths)?, &paths, &mut io::stdout().lock())?;
+            ops::status(
+                &*service::manager(&service::exe(&paths))?,
+                &paths,
+                &mut io::stdout().lock(),
+            )?;
             Ok(ExitCode::SUCCESS)
         }
     }

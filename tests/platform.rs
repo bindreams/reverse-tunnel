@@ -24,6 +24,8 @@ use goetia::spec::Id;
 #[cfg(unix)]
 use reverse_tunnel::account::{self, Account};
 use reverse_tunnel::command;
+#[cfg(windows)]
+use reverse_tunnel::files;
 use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
 #[cfg(windows)]
@@ -194,7 +196,7 @@ impl Machine {
         );
         let paths = Paths::system().unwrap();
         let id = service::id();
-        let manager = service::manager(&paths).unwrap();
+        let manager = service::manager(&service::exe(&paths)).unwrap();
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());
         }
@@ -254,6 +256,11 @@ impl Machine {
 
     fn status(&self) -> Status {
         self.manager.status(&self.id).unwrap()
+    }
+
+    /// The file the installed service runs: on Windows the one the service manager has it registered on.
+    fn image(&self) -> PathBuf {
+        service::installed_image(&*self.manager, &self.paths).unwrap()
     }
 
     /// Has root write `config.yaml` anew, readable by root only: a check run as root would pass it, and the service
@@ -584,10 +591,7 @@ fn reinstall_puts_the_installed_binarys_access_back() {
     let machine = Machine::begin();
     let code = join_code("tunnel.example.test");
     machine.install(&code);
-    let binaries = [
-        service::exe(&machine.paths),
-        reverse_tunnel::download::tools(&machine.paths).frpc,
-    ];
+    let binaries = [machine.image(), reverse_tunnel::download::tools(&machine.paths).frpc];
     #[cfg(unix)]
     for binary in &binaries {
         let meta = fs::metadata(binary).unwrap();
@@ -666,7 +670,7 @@ fn uninstall_survives(mut session: Command, begin: impl FnOnce(&mut Child), end:
     let removed = !account_names().contains(service::ACCOUNT);
     #[cfg(windows)]
     let removed = matches!(
-        service::manager(&Paths::system().unwrap()).unwrap().status(&service::id()),
+        service::manager(&service::exe(&Paths::system().unwrap())).unwrap().status(&service::id()),
         Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
     );
     assert!(removed, "the removal died with the session");
@@ -1115,8 +1119,8 @@ fn upgrade_from_local_build() {
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
 }
 
-/// Windows: the images that were the installed binary, and the copies `upgrade` ran from, which a running process kept
-/// from being deleted, so they were renamed aside: every leftover and every `upgrade-*` file in the bin dir.
+/// Windows: the images that were the binary on the `PATH`, and the copies `upgrade` ran from, which a running process
+/// kept from being deleted, so they were renamed aside: every leftover and every `upgrade-*` file in the bin dir.
 #[cfg(windows)]
 fn upgrade_remnants(machine: &Machine) -> Vec<PathBuf> {
     let staged = fs::read_dir(&machine.paths.bin_dir)
@@ -1130,27 +1134,23 @@ fn upgrade_remnants(machine: &Machine) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Windows: `upgrade` replaces the binary that the running service host is, which Windows will not overwrite: the old
-/// image is renamed aside, the service restarts on the new one, and the next `install`, once the old image has
-/// exited, deletes it.
+/// Windows: `upgrade` writes the new build as an image of its own, moves the service onto it and restarts it, and the
+/// next `install`, once the old image has exited, deletes the old one. Run by the binary on the `PATH`, which is the
+/// one thing `upgrade` replaces that runs: it is renamed aside, and the next `install` deletes that too.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
-fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_old_one() {
+fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the_old_one() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let supervisor = machine.status().pid.expect("a running service has a pid");
     let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
-    // Every process that runs the old image: the service host and what it runs. Each is held by a handle opened now,
-    // which no other process can come to have.
-    let old_image = service::exe(&machine.paths)
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    let old_image = machine.image();
+    // Every process of the service, which runs the old image: held by a handle opened now, which no other process can
+    // come to have.
     let old_pids: Vec<u32> = processes()
         .iter()
-        .filter(|process| process.owner == service_owner() && process.args == old_image)
+        .filter(|process| process.owner == service_owner())
         .map(|process| process.pid)
         .collect();
     assert!(old_pids.contains(&supervisor), "{old_pids:?}");
@@ -1158,7 +1158,7 @@ fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_ol
     let (_scratch, path) = newer_build();
     let newer = fs::read(&path).unwrap();
 
-    let mut upgrade = Command::new(BIN);
+    let mut upgrade = Command::new(service::exe(&machine.paths));
     upgrade.arg("upgrade").arg("--from").arg(&path);
     machine.run_ok(upgrade);
 
@@ -1167,6 +1167,11 @@ fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_ol
         status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
     });
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
+    let new_image = machine.image();
+    assert_eq!(new_image, service::image(&machine.paths, &newer));
+    assert_eq!(fs::read(&new_image).unwrap(), newer);
+    assert!(reverse_tunnel::processes::runs_image(&new_image).unwrap());
+    assert_eq!(fs::read(&old_image).unwrap(), outgoing);
     assert_eq!(fs::read(leftover_of_the_binary(&machine)).unwrap(), outgoing);
     for process in &old_processes {
         process.wait_until_exited();
@@ -1175,6 +1180,61 @@ fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_ol
     sweep.arg("install");
     machine.run_ok(sweep);
     assert_eq!(upgrade_remnants(&machine), Vec::<PathBuf>::new());
+    assert!(!old_image.exists(), "{} is still there", old_image.display());
+}
+
+/// Windows: has goetia register the running service again with `image`, a copy of this build in the bin dir, as its host
+/// and in its command, as an `install` of another binary does. Returns the image.
+#[cfg(windows)]
+fn move_the_service_onto_a_copy(machine: &Machine) -> PathBuf {
+    let image = machine.paths.bin_dir.join("reverse-tunnel-copy.exe");
+    let (data, perm) = (fs::read(BIN).unwrap(), files::Perm::executable());
+    files::write_atomic(&image, &data, perm, files::Replace::Always).unwrap();
+    files::own_by_administrators(&image).unwrap();
+    let outcome = service::manager(&image)
+        .unwrap()
+        .install(&service::spec(&image).unwrap(), false)
+        .unwrap();
+    assert!(matches!(outcome, goetia::decide::Outcome::Update { .. }), "{outcome:?}");
+    image
+}
+
+/// Windows: goetia's `install` with a changed command (another host path) on a running service changes the host the
+/// service manager has, and does not stop the service. `upgrade` relies on it: the new binary is a new image.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn a_changed_command_moves_a_running_service_onto_another_host_without_stopping_it() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+
+    let image = move_the_service_onto_a_copy(&machine);
+
+    let status = machine.status();
+    assert_eq!((status.state, status.pid), (State::Running, Some(supervisor)));
+    let registered = output_of("sc.exe", &["qc", service::ID]);
+    assert!(registered.contains(image.to_str().unwrap()), "{registered}");
+}
+
+/// Windows: the kill that `restart` does makes the service manager start the host that a changed command moved the
+/// service onto.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_kill_after_a_changed_command_has_the_manager_start_the_new_host() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+    let image = move_the_service_onto_a_copy(&machine);
+
+    machine.manager.kill(&machine.id).unwrap();
+
+    wait_until("the manager runs a new host", || {
+        let status = machine.status();
+        status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
+    });
+    assert!(reverse_tunnel::processes::runs_image(&image).unwrap());
 }
 
 /// Windows: the `install` that `upgrade` runs from its download cannot delete the download, which it is running: it
@@ -1310,10 +1370,7 @@ fn restart_checks_every_path_run_opens() {
     }
     let mut broken = Vec::new();
 
-    let (exe, frpc) = (
-        service::exe(&machine.paths),
-        reverse_tunnel::download::tools(&machine.paths).frpc,
-    );
+    let (exe, frpc) = (machine.image(), reverse_tunnel::download::tools(&machine.paths).frpc);
     for need in reverse_tunnel::access::opens(&machine.paths, &exe, &frpc) {
         assert!(need.path.exists(), "{} is missing", need.path.display());
         no_service.apply(&need.path).unwrap();
@@ -1861,7 +1918,7 @@ fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
     let advice = stderr
         .split("to finish it ")
         .nth(1)
-        .and_then(|rest| rest.split(": it is not a regular file").next());
+        .and_then(|rest| rest.split(": it is not a running file").next());
     assert_eq!(
         advice,
         Some(install::rerun_uninstall(&machine.paths).as_str()),

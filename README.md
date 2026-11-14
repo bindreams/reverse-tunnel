@@ -190,9 +190,12 @@ line again; the host is already registered, so ignore it. A version that passes 
 tunnel-only host out until someone is at the machine.
 
 **Windows**: run `reverse-tunnel upgrade` from an elevated prompt, without `sudo`. Windows will not overwrite or delete a
-running program but lets it be renamed, so `install` renames the old binary, and the downloaded copy it runs from, to
-`%ProgramFiles%\.reverse-tunnel.*`; the restart then runs the new binary, and the next `install` or `upgrade` deletes
-those files once the processes that run them have exited. `uninstall` deletes them too.
+running program, so each build is installed as a file of its own, `%ProgramFiles%\reverse-tunnel\reverse-tunnel-<SHA-256
+of the build>.exe`; `install` moves the service onto the new one and the restart runs it. The next `install` or `upgrade`
+deletes the earlier builds' files once the processes that run them have exited. The command you ran, on the `PATH`
+(`reverse-tunnel.exe`), and the downloaded copy `install` runs from, may be running too: Windows lets a running program
+be renamed, so they are renamed to `%ProgramFiles%\.reverse-tunnel.*` and deleted the same way. `uninstall` deletes all
+of them.
 
 ### Uninstall
 

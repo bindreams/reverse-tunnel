@@ -168,63 +168,6 @@ fn a_file_that_is_refused_for_another_reason_is_not_moved_aside() {
     assert_eq!(leftovers_in(dir.path()), Vec::<String>::new());
 }
 
-/// Renames `from` over `to` with POSIX semantics (`FileRenameInfoEx` with `FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
-/// FILE_RENAME_FLAG_POSIX_SEMANTICS`), which lets a file that is open elsewhere be replaced and go on being used.
-fn posix_rename_over(from: &Path, to: &Path) -> io::Result<()> {
-    use std::mem::offset_of;
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{FILE_RENAME_INFO, FileRenameInfoEx, SetFileInformationByHandle};
-
-    const DELETE: u32 = 0x1_0000;
-    const SHARE_ALL: u32 = 7;
-    const REPLACE_IF_EXISTS_AND_POSIX_SEMANTICS: u32 = 1 | 2;
-
-    let file = OpenOptions::new()
-        .access_mode(DELETE)
-        .share_mode(SHARE_ALL)
-        .open(from)?;
-    let name: Vec<u16> = std::path::absolute(to)?.as_os_str().encode_wide().collect();
-    let name_at = offset_of!(FILE_RENAME_INFO, FileName);
-    let bytes = name_at + name.len() * 2;
-    // Eight bytes to a word keeps the header aligned.
-    let mut buffer = vec![0u64; bytes.div_ceil(8)];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    // SAFETY: `buffer` is aligned for FILE_RENAME_INFO and holds the header and the name after it.
-    let renamed = unsafe {
-        (*info).Anonymous.Flags = REPLACE_IF_EXISTS_AND_POSIX_SEMANTICS;
-        (*info).FileNameLength = (name.len() * 2) as u32;
-        std::ptr::copy_nonoverlapping(name.as_ptr(), info.cast::<u8>().add(name_at).cast(), name.len());
-        SetFileInformationByHandle(file.as_raw_handle(), FileRenameInfoEx, info.cast(), bytes as u32)
-    };
-    if renamed == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-/// Measured on 2026-11-14 (build 26100): replacing a running image takes two renames (see `write_atomic`), as even a
-/// rename with POSIX semantics is refused. Fails if Windows starts to allow it, when one rename will do and the moment
-/// without a file at `dest` can go.
-#[test]
-fn a_running_image_cannot_be_replaced_in_one_step_even_with_posix_semantics() {
-    let (_dir, bin) = bin();
-    let dest = bin.join("x.exe");
-    let _running = held::running(&dest);
-    let new = bin.join("new.exe");
-    fs::write(&new, "new").unwrap();
-    let plain = bin.join("plain.exe");
-    fs::write(&plain, "old").unwrap();
-    posix_rename_over(&new, &plain).expect("the same call replaces a file that does not run");
-    fs::write(&new, "new").unwrap();
-
-    let err = posix_rename_over(&new, &dest).unwrap_err();
-
-    assert_eq!(err.kind(), ErrorKind::PermissionDenied, "{err:?}");
-}
-
 #[test]
 fn only_a_file_held_open_without_delete_sharing_is_refused_for_an_open_file() {
     let (_dir, bin) = bin();
