@@ -533,3 +533,21 @@ fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
 
     assert!(stale.join("inside").exists());
 }
+
+#[test]
+fn zz_probe_write_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::testing(dir.path());
+    make_dir(&paths.config_dir, PUBLIC_DIR).unwrap();
+    let account = Account::of_service("reverse-tunnel");
+    let join = JoinInfo {
+        domain: "d.example".into(),
+        token: "tok".into(),
+        cert_pem: "PEM\n".into(),
+    };
+    for round in 0..2 {
+        write_settings(&paths, &account, Some("h"), Some(&join)).unwrap_or_else(|e| panic!("round {round}: {e:#}"));
+        assert_eq!(fs::read(paths.bridge_token()).unwrap(), b"tok\n", "round {round}");
+        assert_eq!(fs::read(paths.bridge_pem()).unwrap(), b"PEM\n", "round {round}");
+    }
+}
