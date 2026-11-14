@@ -241,14 +241,14 @@ fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_o
 
     assert!(!staged.exists());
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
-    let kept = delete_what_can_be(leftover_images(&paths).unwrap()).unwrap();
+    let kept = delete_what_can_be(leftover_images(&paths).unwrap());
     let [why] = kept.as_slice() else {
         panic!("it still runs: {kept:?}")
     };
     assert!(format!("{why:#}").contains("may still run"), "{why:#}");
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
     drop(running);
-    assert!(delete_what_can_be(leftover_images(&paths).unwrap()).unwrap().is_empty());
+    assert!(delete_what_can_be(leftover_images(&paths).unwrap()).is_empty());
     assert_eq!(kept_names(&paths), Vec::<String>::new());
 }
 
@@ -295,7 +295,7 @@ fn a_leftover_that_is_not_a_regular_file_is_reported_and_never_deleted() {
     fs::create_dir(&impostor).unwrap();
     fs::write(impostor.join("inside"), "").unwrap();
 
-    let kept = delete_what_can_be(leftover_images(&paths).unwrap()).unwrap();
+    let kept = delete_what_can_be(leftover_images(&paths).unwrap());
 
     let [why] = kept.as_slice() else {
         panic!("expected the directory to be reported: {kept:?}")
@@ -409,7 +409,7 @@ fn a_bin_dir_that_is_gone_is_removed() {
 }
 
 #[test]
-fn a_file_that_can_be_neither_deleted_nor_renamed_fails_the_removal_naming_both() {
+fn a_running_file_that_cannot_be_renamed_fails_the_removal_naming_it() {
     let (dir, paths) = installed();
     let stuck = paths.bin_dir.join("frpc-0.1.exe");
     let _running = running(&stuck);

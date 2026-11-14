@@ -345,15 +345,18 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
     apply(file.as_file(), perm)?;
     file.write_all(data)?;
     file.as_file().sync_all()?;
+    // Whether `dest` runs is looked at once, before anything is tried: a refusal is then an error, not a prompt to look
+    // again.
+    #[cfg(windows)]
+    if let Replace::OrMoveAside(leftovers) = replace
+        && runs_as_a_file(dest)?
+    {
+        persist_over_running(file, dest, leftovers)?;
+        return Ok(WriteOutcome::Written);
+    }
     match (replace, persist_waiting(file, dest, replace == Replace::Never)) {
         (Replace::Never, Err(err)) if err.error.kind() == ErrorKind::AlreadyExists => {
             return Ok(WriteOutcome::Existed);
-        }
-        #[cfg(windows)]
-        (Replace::OrMoveAside(leftovers), Err(err))
-            if err.error.kind() == ErrorKind::PermissionDenied && runs_as_a_file(dest)? =>
-        {
-            persist_over_running(err.file, dest, leftovers)?;
         }
         (_, Err(err)) => return Err(err).with_context(|| format!("writing {}", dest.display())),
         (_, Ok(())) => {}
@@ -397,9 +400,8 @@ pub fn runs_as_a_file(dest: &Path) -> Result<bool> {
 
 /// Windows: moves the file `dest`, which runs, into `leftovers` and puts `file` in its place. If that fails, `dest` is
 /// put back. Between the two renames there is no file at `dest`, so it is only for a file that no service start needs,
-/// like the binary on the `PATH`. Two renames, because Windows refuses to replace or delete a running image even with
-/// POSIX-semantics rename (error 5) and allows renaming it: measured 2026-11-14 on CI and locally, recorded in
-/// `td-63c-1.md` (the tech-debt deputy's question for PR #84, in the project's `.superpowers/sdd/2026-10-28-gen4/`).
+/// like the binary on the `PATH`. Two renames, because Windows refuses to replace or delete a running image even with a
+/// POSIX-semantics rename (error 5), and allows renaming it.
 #[cfg(windows)]
 fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
     let writing = || format!("writing {}", dest.display());

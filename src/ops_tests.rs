@@ -188,7 +188,7 @@ fn restart_names_the_registered_image_that_is_missing() {
             image.display()
         )
     );
-    assert_eq!(manager.calls().iter().filter(|(verb, _)| *verb != "install").count(), 0);
+    assert_eq!(manager.calls(), []);
 }
 
 /// A restart during a removal would restart, or write the restart marker into, what the removal is deleting.

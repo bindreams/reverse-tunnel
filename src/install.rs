@@ -637,17 +637,18 @@ fn remove_link(paths: &Paths) -> Result<()> {
 }
 
 /// Windows: removes `path` (see `remove_entry`). A running image cannot be deleted, so a file directly in `path` that
-/// cannot be, and runs, is moved aside into `leftovers` (see `delete_or_move_aside`) and said so on stdout; the removal's
-/// task deletes it once it exits (a removal that succeeds also asks for it to be deleted at the next boot, see
-/// `delete_leftover_images_at_reboot`). A file that can be neither deleted nor moved fails the removal naming both
-/// errors, and so does one that cannot be deleted and does not run; directories, junctions and links are never moved,
-/// since the task's `del` could not delete them.
+/// runs is moved aside into `leftovers` (see `delete_or_move_aside`) and said so on stdout; the removal's task deletes
+/// it once it exits (a removal that succeeds also asks for it to be deleted at the next boot, see
+/// `delete_leftover_images_at_reboot`). A file that runs and cannot be moved fails the removal, and so does one that
+/// does not run and cannot be deleted; directories, junctions and links are never moved, since the task's `del` could
+/// not delete them.
 #[cfg(windows)]
 fn remove_saying_what_it_moved_aside(path: &Path, leftovers: &Path) -> Result<()> {
     let delete = |file: &Path| -> Result<()> {
-        if let Some((to, refused)) = delete_or_move_aside(file, leftovers)? {
+        if let Some(to) = delete_or_move_aside(file, leftovers)? {
             output::println_best_effort(&format!(
-                "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
+                "{} runs, so it cannot be deleted: {MOVED_IT_TO} {}, where the removal's task deletes it",
+                file.display(),
                 to.display()
             ));
         }
@@ -704,29 +705,19 @@ fn delete_at_reboot(path: &Path) -> Result<()> {
 #[cfg(windows)]
 pub const MOVED_IT_TO: &str = "moved it to";
 
-/// Windows: deletes the file `path` (see `remove_entry`), or if it cannot be because it runs (see `runs_as_a_file`),
-/// moves it aside into `leftovers` (see `move_aside`) without saying so. Returns where it went and why it could not be
-/// deleted, or nothing if it was deleted. Anything else that cannot be deleted, which a rename would not help, is an
-/// error naming it.
-///
-/// A refusal is not itself proof that the file runs: the process may have exited before the check. So a file that is
-/// refused and does not run is deleted again; a refusal that follows a check that nothing runs it is the error.
+/// Windows: moves the file `path` aside into `leftovers` (see `move_aside`) if it runs (see `runs_as_a_file`), and
+/// returns where it went; any other `path` is deleted (see `remove_entry`), and a refusal, which a rename would not
+/// help, is an error naming it. Whether it runs is looked at once, before anything is tried, and decides: a process
+/// that starts that very file in between is the user's own concurrent action.
 #[cfg(windows)]
-fn delete_or_move_aside(path: &Path, leftovers: &Path) -> Result<Option<(PathBuf, anyhow::Error)>> {
-    let Err(mut refused) = remove_entry(path) else {
-        return Ok(None);
-    };
-    if !runs_as_a_file(path)? {
-        refused = match remove_entry(path) {
-            Ok(()) => return Ok(None),
-            Err(refused) => refused,
-        };
-        if !runs_as_a_file(path)? {
-            return Err(refused.context("it is not a running file, so it is not moved"));
-        }
+fn delete_or_move_aside(path: &Path, leftovers: &Path) -> Result<Option<PathBuf>> {
+    if runs_as_a_file(path)? {
+        let to = move_aside(path, leftovers).with_context(|| format!("{} runs, so it is moved", path.display()))?;
+        return Ok(Some(to));
     }
-    let to = move_aside(path, leftovers).map_err(|err| anyhow!("{refused:#}; {err:#}"))?;
-    Ok(Some((to, refused)))
+    remove_entry(path)
+        .context("it is not a running file, so it is not moved")
+        .map(|()| None)
 }
 
 /// Removes the file `path`, which the service or this run may be running: on Windows one that cannot be deleted because
@@ -742,11 +733,12 @@ fn remove_file_that_may_run(paths: &Paths, path: &Path) -> Result<()> {
     }
 }
 
-/// Windows: deletes the files `images` (leftovers, see `move_aside`, or old service images, see `sweep_old_images`) whose
-/// process has exited. Returns, one error for each, those that were not deleted: one that still runs or that its ACL
-/// protects, and anything that is not a regular file, which is never deleted. Each says which it is, and names the file.
+/// Windows: deletes the files `images` (leftovers, see `move_aside`, or old service images, see `sweep_old_images`),
+/// all of them whatever happens to one. Returns, one error for each, those that were kept, with the path and the cause:
+/// anything that is not a regular file, which is never deleted (a link is not followed), one that still runs or that
+/// its ACL protects, and one that fails for another reason.
 #[cfg(windows)]
-fn delete_what_can_be(images: Vec<PathBuf>) -> Result<Vec<anyhow::Error>> {
+fn delete_what_can_be(images: Vec<PathBuf>) -> Vec<anyhow::Error> {
     let mut kept = Vec::new();
     for image in images {
         if !fs::symlink_metadata(&image).is_ok_and(|entry| entry.is_file()) {
@@ -760,19 +752,21 @@ fn delete_what_can_be(images: Vec<PathBuf>) -> Result<Vec<anyhow::Error>> {
         let refused = err
             .downcast_ref::<io::Error>()
             .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied);
-        if !refused {
-            return Err(err);
-        }
-        kept.push(err.context("it may still run, or its ACL forbids deleting it; each `install` tries again"));
+        kept.push(if refused {
+            err.context("it may still run, or its ACL forbids deleting it; each `install` tries again")
+        } else {
+            err
+        });
     }
-    Ok(kept)
+    kept
 }
 
 /// Windows: deletes the service images (see `service::image`) in the bin dir other than `registered`, the one that the
 /// service is registered on, once `register` has moved it there: nothing before that may delete the image it names. An
 /// image that runs (the previous build's, which the restart ends) stays for the next install, as does one that cannot be
 /// deleted. The sweep never fails `install`: whatever goes wrong is printed, with the path and the cause, and the rest
-/// goes on. What runs is asked of one listing of the processes.
+/// goes on, except that a failure to read the directory ends it. The processes are listed once, and only if there is
+/// an image to ask about.
 #[cfg(windows)]
 fn sweep_old_images(paths: &Paths, registered: &Path) {
     let say = |message: String| output::eprintln_best_effort(&message);
@@ -780,6 +774,24 @@ fn sweep_old_images(paths: &Paths, registered: &Path) {
         Ok(listing) => listing,
         Err(err) => return say(format!("reading {}: {err}", paths.bin_dir.display())),
     };
+    let mut old = Vec::new();
+    for entry in listing {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            // A listing that fails once can fail on every step after it.
+            Err(err) => return say(format!("reading {}: {err}", paths.bin_dir.display())),
+        };
+        let is_image = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(service::is_image);
+        if is_image && path != registered {
+            old.push(path);
+        }
+    }
+    if old.is_empty() {
+        return;
+    }
     let running = match processes::RunningImages::now() {
         Ok(running) => running,
         Err(err) => {
@@ -789,33 +801,17 @@ fn sweep_old_images(paths: &Paths, registered: &Path) {
             ));
         }
     };
-    for entry in listing {
-        let path = match entry {
-            Ok(entry) => entry.path(),
-            Err(err) => {
-                say(format!("reading {}: {err}", paths.bin_dir.display()));
-                continue;
-            }
-        };
-        let is_image = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(service::is_image);
-        if !is_image || path == registered {
-            continue;
-        }
-        match running.runs(&path) {
-            Ok(true) => continue,
-            Ok(false) => {}
-            Err(err) => {
+    // What is not a regular file is not looked at as an image: `delete_what_can_be` reports it.
+    old.retain(|path| {
+        let regular = fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file());
+        !regular
+            || !running.runs(path).unwrap_or_else(|err| {
                 say(format!("{err:#}"));
-                continue;
-            }
-        }
-        match delete_what_can_be(vec![path]) {
-            Ok(kept) => kept.iter().for_each(|kept| say(format!("{kept:#}"))),
-            Err(err) => say(format!("{err:#}")),
-        }
+                true
+            })
+    });
+    for kept in delete_what_can_be(old) {
+        say(format!("{kept:#}"));
     }
 }
 
@@ -1068,7 +1064,7 @@ fn place_binaries(paths: &Paths, new: &Binary) -> Result<bool> {
     let exe = service::exe(paths);
     // Before this run moves anything aside: what is left then is not this run's.
     #[cfg(windows)]
-    for kept in delete_what_can_be(leftover_images(paths)?)? {
+    for kept in delete_what_can_be(leftover_images(paths)?) {
         output::eprintln_best_effort(&format!("{kept:#}"));
     }
     // Windows will not overwrite a running image, and lets it be renamed. The one image the service runs is never

@@ -100,4 +100,8 @@ fn the_installed_image_is_the_registered_one_unless_an_unreadable_entry_may_be_t
         err.starts_with("could not tell whether the service is installed"),
         "{err}"
     );
+    // Once the service is registered, its image is the answer, whatever the unreadable entry.
+    let image = image(&paths, b"registered");
+    manager.install(&spec(&image).unwrap(), false).unwrap();
+    assert_eq!(installed_image(&manager, &paths).unwrap(), image);
 }

@@ -269,7 +269,7 @@ fn user_of(process: HANDLE) -> io::Result<Sid> {
 }
 
 /// The images that the processes of the system run, as of one listing: which of several files run is asked of one
-/// moment, not of as many as there are files.
+/// moment, not of as many as there are files. For one file, `runs_image` lists only if it has to.
 pub struct RunningImages(Vec<PathBuf>);
 
 impl RunningImages {
@@ -294,10 +294,16 @@ impl RunningImages {
     }
 }
 
-/// Whether any process runs the image `path` now, which Windows will not overwrite or delete while it does (see
-/// `RunningImages`).
+/// Whether any process runs the image `path`, which Windows will not overwrite or delete while it does. The images are
+/// compared as files (the same path, whatever the case or the short names). The processes are not listed for a `path`
+/// that cannot be looked at. For several files, see `RunningImages`.
 pub fn runs_image(path: &Path) -> Result<bool> {
-    RunningImages::now()?.runs(path)
+    let image = fs::canonicalize(path).with_context(|| format!("looking at {}", path.display()))?;
+    let buffer = Buffer::list().context("listing the processes")?;
+    Ok(buffer
+        .entries()
+        .iter()
+        .any(|entry| image_of(entry.ProcessId).is_some_and(|runs| runs == image)))
 }
 
 /// The file that process `pid` runs, as `fs::canonicalize` gives it; none if the process has ended, cannot be opened or

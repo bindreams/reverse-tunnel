@@ -72,7 +72,8 @@ enum Command {
 
 /// std prints the error, ignoring a closed stderr; it is handed the report, as std alone would drop goetia's details.
 fn main() -> Result<ExitCode> {
-    // SCM starts the installed binary as the service's host (see `service::registering_manager`): not a subcommand, before clap.
+    // SCM starts the installed binary as the service's host (see `service::registering_manager`): not a subcommand,
+    // before clap.
     if cfg!(windows)
         && env::args_os()
             .nth(1)
