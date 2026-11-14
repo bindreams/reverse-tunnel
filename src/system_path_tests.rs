@@ -24,8 +24,17 @@ fn a_directory_is_the_whole_path_when_there_was_none() {
 }
 
 #[test]
-fn a_directory_follows_a_trailing_separator_without_a_second_one() {
-    assert_eq!(with_entry(r"C:\Windows;", DIR).unwrap(), format!(r"C:\Windows;{DIR}"));
+fn a_directory_after_a_trailing_separator_keeps_the_separator_after_it() {
+    assert_eq!(with_entry(r"C:\Windows;", DIR).unwrap(), format!(r"C:\Windows;{DIR};"));
+}
+
+#[test]
+fn removing_the_directory_that_was_added_gives_the_path_back_exactly() {
+    for path in ["", "A", "A;B", "A;B;", "A;;B", ";"] {
+        let added = with_entry(path, DIR).unwrap();
+
+        assert_eq!(without_entry(&added, DIR).unwrap(), path, "{path:?} became {added:?}");
+    }
 }
 
 #[test]
@@ -112,6 +121,19 @@ fn an_entry_that_names_the_directory_through_an_environment_variable_names_it() 
         with_entry(r"%NoSuchVariableForReverseTunnel%\reverse-tunnel", &dir).unwrap(),
         format!(r"%NoSuchVariableForReverseTunnel%\reverse-tunnel;{dir}")
     );
+}
+
+#[test]
+fn an_entry_that_cannot_be_expanded_is_compared_as_written() {
+    let failed = || Err(anyhow!("expanding failed"));
+
+    assert_eq!(compared_entry(r#" "C:\Tools\" "#, failed()), r"c:\tools");
+    assert_eq!(
+        compared_entry(r"%A%\X", Ok(r"C:\Expanded\X".to_string())),
+        r"c:\expanded\x"
+    );
+    // The directory is written literally, so a literal compare finds it.
+    assert_eq!(compared_entry(DIR, failed()), compared_dir(DIR).unwrap());
 }
 
 #[test]

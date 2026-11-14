@@ -3,6 +3,7 @@
 
 use std::cell::Cell;
 use std::fs;
+use std::io::ErrorKind;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::process::{Child, Command, Output};
@@ -278,23 +279,41 @@ impl Drop for Probe {
     }
 }
 
-/// The machine's `Path`, as stored: unexpanded.
-fn machine_path() -> String {
+/// The key that holds the machine's `Path`.
+fn environment() -> RegKey {
     RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
-        .unwrap()
-        .get_value("Path")
+        .open_subkey(format!(r"{}\Environment", system_path::SESSION_MANAGER))
         .unwrap()
 }
 
-/// The machine's `Path` as stored, byte for byte, with its registry type.
-pub fn raw_machine_path() -> (Vec<u8>, RegType) {
-    let value = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
-        .unwrap()
-        .get_raw_value("Path")
+/// The machine's `Path` as stored, unexpanded and without its terminating NULs, with its registry type.
+pub fn machine_path_and_type() -> (String, RegType) {
+    let value = environment().get_raw_value("Path").unwrap();
+    (system_path::decode(&value.bytes).unwrap(), value.vtype)
+}
+
+/// The machine's `Path`, as stored: unexpanded.
+fn machine_path() -> String {
+    machine_path_and_type().0
+}
+
+/// The file names of what the system deletes at its next boot. The value is a multi-string of source and target
+/// pairs, each source `\??\<path>` (with a `*1` prefix for a long name), a target empty for a deletion.
+pub fn deletions_at_reboot() -> Vec<String> {
+    let session = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(system_path::SESSION_MANAGER)
         .unwrap();
-    (value.bytes.to_vec(), value.vtype)
+    let value = match session.get_raw_value("PendingFileRenameOperations") {
+        Ok(value) => value,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(err) => panic!("reading PendingFileRenameOperations: {err}"),
+    };
+    let text = system_path::decode(&value.bytes).unwrap();
+    text.split('\0')
+        .filter_map(|path| path.rsplit('\\').next())
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// How many entries of the machine's `Path` name `dir`, as the product decides it.

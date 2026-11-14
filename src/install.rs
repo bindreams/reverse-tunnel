@@ -492,21 +492,24 @@ fn deleted_dirs(paths: &Paths) -> [PathBuf; 4] {
 #[cfg(windows)]
 fn deleted_dir_holding(paths: &Paths, dir: &Path) -> Result<Option<PathBuf>> {
     let canonical = |path: &Path| {
-        fs::canonicalize(path).with_context(|| {
-            format!(
+        fs::canonicalize(path).map_err(|err| {
+            anyhow::Error::new(err).context(format!(
                 "resolving {} to check whether it is a directory the removal deletes",
                 path.display()
-            )
+            ))
         })
     };
     let dir = canonical(dir)?;
     for deleted in deleted_dirs(paths) {
-        match fs::canonicalize(&deleted) {
+        match canonical(&deleted) {
             Ok(resolved) if dir.starts_with(&resolved) => return Ok(Some(deleted)),
             Ok(_) => {}
             // A directory that is not there holds nothing.
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => return Err(err).with_context(|| format!("resolving {}", deleted.display())),
+            Err(err)
+                if err
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|io| io.kind() == ErrorKind::NotFound) => {}
+            Err(err) => return Err(err),
         }
     }
     Ok(None)
@@ -587,7 +590,10 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     remove_files(paths).with_context(|| rerun_uninstall(paths))?;
     // Last: until then the rerun that a failure advises is run by name, and the `PATH` finds it.
     #[cfg(windows)]
-    system_path::remove(&paths.bin_dir)?;
+    {
+        system_path::remove(&paths.bin_dir)?;
+        delete_leftovers_at_reboot(paths);
+    }
     Ok(())
 }
 
@@ -610,7 +616,8 @@ fn remove_link(paths: &Paths) -> Result<()> {
 
 /// Windows: removes `path` (see `remove_entry`). A running image cannot be deleted, so a regular file directly in `path`
 /// that cannot be is renamed into `leftovers` keeping its name (see `schtasks::leftover_name`); the removal's task
-/// deletes it once it exits, and if the machine restarts first, the system does. A file that can be neither deleted nor
+/// deletes it once it exits (a removal that succeeds also schedules it for deletion at the next boot, see
+/// `delete_leftovers_at_reboot`). A file that can be neither deleted nor
 /// renamed fails the removal naming both errors; directories, junctions and links are never renamed, since the task's
 /// `del` could not delete them.
 #[cfg(windows)]
@@ -627,6 +634,26 @@ fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
         delete_or_rename(&entry?.path(), leftovers)?;
     }
     remove_entry(path)
+}
+
+/// Windows: once the removal has succeeded, has the system delete every leftover file at its next boot (see
+/// `remove_or_rename`), in case a reboot comes before the task's sweep ends; scheduling it earlier would delete, after a
+/// failed removal, the renamed binary that the rerun advice names. A failure is printed and does not fail the removal.
+#[cfg(windows)]
+fn delete_leftovers_at_reboot(paths: &Paths) {
+    let images = leftover_images(paths).unwrap_or_else(|err| {
+        output::eprintln_best_effort(&format!(
+            "{err:#}: leftover files, if any, are not scheduled for deletion"
+        ));
+        Vec::new()
+    });
+    for image in images {
+        if let Err(err) = delete_at_reboot(&image) {
+            output::eprintln_best_effort(&format!(
+                "{err:#}: the file stays after a reboot until it is deleted by hand or by a later removal"
+            ));
+        }
+    }
 }
 
 /// Windows: has the system delete the file `path` at its next boot.
@@ -661,10 +688,6 @@ fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     let original = path.file_name().context("the file has no name")?;
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
     fs::rename(path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
-    // The task deletes itself before its sweep of the leftovers, so a reboot before it ends leaves nothing else to do it.
-    if let Err(err) = delete_at_reboot(&to) {
-        output::eprintln_best_effort(&format!("{err:#}"));
-    }
     output::println_best_effort(&format!(
         "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
         to.display()

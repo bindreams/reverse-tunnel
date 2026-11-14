@@ -178,7 +178,7 @@ struct Machine {
     id: Id,
     /// Windows: the machine's `Path` as stored, before the test.
     #[cfg(windows)]
-    path_before: (Vec<u8>, winreg::enums::RegType),
+    path_before: (String, winreg::enums::RegType),
 }
 
 impl Machine {
@@ -228,7 +228,7 @@ impl Machine {
             manager,
             id,
             #[cfg(windows)]
-            path_before: windows::raw_machine_path(),
+            path_before: windows::machine_path_and_type(),
         }
     }
 
@@ -1437,7 +1437,7 @@ fn assert_nothing_left(machine: &Machine, said: &str) {
         "the Path entry is left"
     );
     assert_eq!(
-        windows::raw_machine_path(),
+        windows::machine_path_and_type(),
         machine.path_before,
         "the machine's Path is not as it was before install"
     );
@@ -1450,10 +1450,23 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    let mut uninstall = Command::new(service::exe(&machine.paths));
+    let binary = service::exe(&machine.paths);
+    let mut uninstall = Command::new(&binary);
     uninstall.arg("uninstall").current_dir(env::temp_dir());
+    let scheduled_before = windows::deletions_at_reboot();
 
     assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+
+    // The removal succeeded, so the system is to delete the image it renamed at the next boot, even if the task's sweep
+    // has not. The entry stays after the file is deleted.
+    let name = binary.file_name().unwrap().to_str().unwrap();
+    let scheduled = windows::deletions_at_reboot();
+    assert!(
+        scheduled
+            .iter()
+            .any(|file| schtasks::is_leftover_of(file, name) && !scheduled_before.contains(file)),
+        "the renamed image is not scheduled for deletion at the next boot: {scheduled:?}"
+    );
 }
 
 /// `uninstall --finish` while the service and frpc run: goetia's `uninstall` returns while the host and frpc are still

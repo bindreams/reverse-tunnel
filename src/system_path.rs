@@ -14,10 +14,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use winreg::RegValue;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_EXPAND_SZ, REG_SZ};
 
-const KEY: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+/// The text of the Session Manager's key path, for the constants below.
+macro_rules! session_manager {
+    () => {
+        r"SYSTEM\CurrentControlSet\Control\Session Manager"
+    };
+}
+
+/// The key under `HKEY_LOCAL_MACHINE` that holds the system's boot-time settings.
+pub const SESSION_MANAGER: &str = session_manager!();
+const KEY: &str = concat!(session_manager!(), r"\Environment");
 const NAME: &str = "Path";
 /// The value, as an error names it.
-const VALUE: &str = r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment\Path";
+const VALUE: &str = concat!(r"HKLM\", session_manager!(), r"\Environment\Path");
 
 /// How long a window that does not answer the notification is waited for, in milliseconds. The windows are other
 /// programs', which may hang; the notification is a courtesy, and the edit is already made.
@@ -41,7 +50,10 @@ fn edit(dir: &Path, change: fn(&str, &str) -> Result<Option<String>>) -> Result<
         .open_subkey_with_flags(KEY, KEY_READ | KEY_WRITE)
         .with_context(|| format!("opening HKLM\\{KEY}"))?;
     let (current, vtype) = match key.get_raw_value(NAME) {
-        Ok(value) => (decode(&value.bytes)?, value.vtype),
+        Ok(value) => (
+            decode(&value.bytes).with_context(|| format!("reading {VALUE}"))?,
+            value.vtype,
+        ),
         Err(err) if err.kind() == ErrorKind::NotFound => (String::new(), REG_EXPAND_SZ),
         Err(err) => return Err(err).with_context(|| format!("reading {VALUE}")),
     };
@@ -104,26 +116,48 @@ pub fn expand(text: &str) -> Result<String> {
     }
 }
 
-/// Whether the `Path` entry `entry` names the directory `dir`: once its variables are expanded, by whatever case, with
-/// or without surrounding whitespace and quotes and a trailing backslash.
-pub fn names(entry: &str, dir: &str) -> Result<bool> {
-    let bare = |text: &str| -> Result<String> {
-        let expanded = expand(text)?;
-        let trimmed = expanded.trim_matches(|c: char| c.is_whitespace() || c == '"');
-        Ok(trimmed.trim_end_matches('\\').to_lowercase())
-    };
-    Ok(bare(entry)? == bare(dir)?)
+/// `text` as the entries of the `Path` are compared: without surrounding whitespace and quotes and a trailing
+/// backslash, by whatever case.
+fn bare(text: &str) -> String {
+    let trimmed = text.trim_matches(|c: char| c.is_whitespace() || c == '"');
+    trimmed.trim_end_matches('\\').to_lowercase()
 }
 
-/// `path` with `dir` appended, or none if an entry names it already.
+/// `dir` as entries are compared with it, once per edit. It has no `%` (see `Paths::system`), so an expansion that fails
+/// fails the edit.
+fn compared_dir(dir: &str) -> Result<String> {
+    Ok(bare(&expand(dir)?))
+}
+
+/// `entry` as it is compared: its `expanded` text, or as written if it could not be expanded. An unrelated entry that
+/// cannot be expanded must not fail the edit, and we write our entry literally, so a literal compare finds it.
+fn compared_entry(entry: &str, expanded: Result<String>) -> String {
+    bare(&expanded.unwrap_or_else(|_| entry.to_string()))
+}
+
+/// Whether the `Path` entry `entry` names `dir`, as `compared_dir` made it.
+fn names_compared(entry: &str, dir: &str) -> bool {
+    compared_entry(entry, expand(entry)) == dir
+}
+
+/// Whether the `Path` entry `entry` names the directory `dir`: once its variables are expanded, by whatever case, with
+/// or without surrounding whitespace and quotes and a trailing backslash. An entry that cannot be expanded is compared
+/// as written.
+pub fn names(entry: &str, dir: &str) -> Result<bool> {
+    Ok(names_compared(entry, &compared_dir(dir)?))
+}
+
+/// `path` with `dir` appended, or none if an entry names it already. A trailing separator is kept as it was, so that
+/// `without_entry` gives `path` back: `A;B;` becomes `A;B;dir;`, and `A;B` becomes `A;B;dir`.
 fn with_entry(path: &str, dir: &str) -> Result<Option<String>> {
-    for entry in path.split(';') {
-        if names(entry, dir)? {
-            return Ok(None);
-        }
+    let compared = compared_dir(dir)?;
+    if path.split(';').any(|entry| names_compared(entry, &compared)) {
+        return Ok(None);
     }
-    Ok(Some(if path.is_empty() || path.ends_with(';') {
-        format!("{path}{dir}")
+    Ok(Some(if path.is_empty() {
+        dir.to_string()
+    } else if path.ends_with(';') {
+        format!("{path}{dir};")
     } else {
         format!("{path};{dir}")
     }))
@@ -132,24 +166,23 @@ fn with_entry(path: &str, dir: &str) -> Result<Option<String>> {
 /// `path` without the entries that name `dir`, each with its separator; none if no entry does. Other entries, empty
 /// ones too, are as they were.
 fn without_entry(path: &str, dir: &str) -> Result<Option<String>> {
-    let mut kept = Vec::new();
-    for entry in path.split(';') {
-        if !names(entry, dir)? {
-            kept.push(entry);
-        }
-    }
+    let compared = compared_dir(dir)?;
+    let kept: Vec<&str> = path
+        .split(';')
+        .filter(|entry| !names_compared(entry, &compared))
+        .collect();
     let changed = kept.join(";");
     Ok((changed != path).then_some(changed))
 }
 
-/// The text of a registry string: UTF-16 with its terminating NULs.
-fn decode(bytes: &[u8]) -> Result<String> {
+/// The text of a registry string: UTF-16 with its terminating NULs. A multi-string keeps the NULs between its strings.
+pub fn decode(bytes: &[u8]) -> Result<String> {
     let (units, rest) = bytes.as_chunks::<2>();
     if !rest.is_empty() {
-        return Err(anyhow!("{VALUE} is not UTF-16"));
+        return Err(anyhow!("it is not UTF-16"));
     }
     let units: Vec<u16> = units.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
-    let text = String::from_utf16(&units).with_context(|| format!("{VALUE} is not valid UTF-16"))?;
+    let text = String::from_utf16(&units).context("it is not valid UTF-16")?;
     Ok(text.trim_end_matches('\0').to_string())
 }
 
