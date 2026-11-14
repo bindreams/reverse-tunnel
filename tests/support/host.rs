@@ -61,8 +61,9 @@ impl Host {
         }
     }
 
+    /// `run` without its Windows check of the service account's DACLs, which a temp dir is not set up for.
     pub fn run(&self, check_only: bool) -> Result<ExitCode> {
-        run(&self.paths, &self.tools(), check_only)
+        run_with(&self.paths, &self.tools(), check_only, (Ipv4Addr::LOCALHOST, 0).into())
     }
 
     /// `run` with the WebSocket listener on `listen`.
