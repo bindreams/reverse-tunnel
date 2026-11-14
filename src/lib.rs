@@ -4,6 +4,7 @@ pub mod account;
 pub mod client;
 pub mod command;
 pub mod config;
+pub mod dialog;
 pub mod download;
 pub mod files;
 pub mod frpc;
@@ -34,4 +35,6 @@ pub mod supervisor;
 pub mod system_path;
 #[cfg(all(test, unix))]
 mod test_stub;
+#[cfg(test)]
+mod test_support;
 pub mod upgrade;

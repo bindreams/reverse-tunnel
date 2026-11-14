@@ -10,8 +10,8 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::Kind;
+use crate::test_support::{CODE, host_dirs, wrapped};
 
-const CODE: &str = include_str!("../server/testdata/join-code.txt");
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
 fn code_for(domain: &str, token: &str, cert: &str) -> String {
@@ -19,14 +19,9 @@ fn code_for(domain: &str, token: &str, cert: &str) -> String {
     format!("rt1:{}", URL_SAFE_NO_PAD.encode(json.to_string()))
 }
 
-/// `code` as a chat client wraps it: lines of 40 characters, indented, with Windows line ends.
-fn wrapped(code: &str) -> String {
-    let lines: Vec<&str> = code
-        .as_bytes()
-        .chunks(40)
-        .map(|chunk| std::str::from_utf8(chunk).unwrap())
-        .collect();
-    format!("  {}\r\n", lines.join("\r\n  "))
+/// For runs that must fail before they ask.
+fn no_dialog() -> Dialog<Cursor<&'static str>, Vec<u8>, Vec<u8>> {
+    Dialog::new(Cursor::new(""), Vec::new(), Vec::new(), false)
 }
 
 /// A host's directories in a temp dir, with the current user as the service account.
@@ -38,10 +33,7 @@ struct Machine {
 
 impl Machine {
     fn new() -> Machine {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let paths = Paths::testing(root);
-        fs::create_dir(&paths.config_dir).unwrap();
+        let (dir, paths) = host_dirs();
         let account = Account {
             uid: uzers::get_current_uid(),
             gid: uzers::get_current_gid(),
@@ -72,36 +64,6 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
     }
     files.sort();
     files
-}
-
-#[test]
-fn hostname_normalization() {
-    assert_eq!(normalize_host("DESKTOP-7Q2X").unwrap(), "desktop-7q2x");
-    for machine in ["Annas-MacBook.local", "my_box"] {
-        let err = format!("{:#}", normalize_host(machine).unwrap_err());
-        assert!(err.contains("--host") && err.contains(machine), "{err}");
-    }
-    let long = "a".repeat(64);
-    for host in ["Desktop", "my_box", long.as_str(), ""] {
-        let err = format!("{:#}", host_name(Some(host)).unwrap_err());
-        assert!(err.contains("--host"), "{host:?}: {err}");
-    }
-}
-
-#[test]
-fn join_prompt_accepts_wrapped_code() {
-    let mut input = Cursor::new(wrapped(CODE.trim()));
-    let info = prompt_join(&mut input, &mut Vec::new()).unwrap();
-    assert_eq!(info.domain, "tunnel.example.test");
-}
-
-#[test]
-fn join_prompt_gives_up_at_a_blank_line_or_the_end_of_input() {
-    let half = &CODE[..CODE.len() / 2];
-    for input in [format!("{half}\n\nmore\n"), format!("{half}\n")] {
-        let err = prompt_join(&mut Cursor::new(input), &mut Vec::new()).unwrap_err();
-        assert!(format!("{err:#}").contains("join code"), "{err:#}");
-    }
 }
 
 #[test]
@@ -156,8 +118,8 @@ services:
 ",
     );
     let expected = format!(
-        "Register this host on the bridge by running:
-    uv run ctl add myhost {ZERO_TOKEN_HASH}
+        "Host is ready! Run this command on the bridge to accept the host:
+  uv run ctl add myhost {ZERO_TOKEN_HASH}
 
 To reach this host with ssh from another machine, add this to ~/.ssh/config there (it needs websocat; the README's \"Set up a client\" has the details: https://github.com/bindreams/reverse-tunnel#set-up-a-client):
 
@@ -166,7 +128,7 @@ Host myhost
     ProxyCommand websocat --binary wss://%h/
 "
     );
-    assert_eq!(registration(&machine.paths).unwrap(), expected);
+    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
 }
 
 #[test]
@@ -181,11 +143,19 @@ services:
 ",
     );
     let expected = format!(
-        "Register this host on the bridge by running:
-    uv run ctl add myhost {ZERO_TOKEN_HASH}
+        "Host is ready! Run this command on the bridge to accept the host:
+  uv run ctl add myhost {ZERO_TOKEN_HASH}
 "
     );
-    assert_eq!(registration(&machine.paths).unwrap(), expected);
+    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
+}
+
+#[test]
+fn registration_of_an_existing_config_does_not_claim_the_host_is_new() {
+    let machine = machine_with("host: myhost\nbridge: tunnel.example.test\nservices: {}\n");
+    let expected =
+        format!("If the bridge does not know this host yet, run:\n  uv run ctl add myhost {ZERO_TOKEN_HASH}\n");
+    assert_eq!(registration(&machine.paths, false).unwrap(), expected);
 }
 
 #[test]
@@ -258,32 +228,6 @@ fn uninstall_prints_revoke_line() {
 }
 
 #[test]
-fn host_that_differs_from_the_config_is_refused() {
-    let machine = Machine::new();
-    assert_eq!(
-        configured_host(&machine.paths, Some("myhost")).unwrap().as_deref(),
-        Some("myhost"),
-        "a first install takes the name"
-    );
-    machine.settings(Some("myhost"), Some(CODE));
-
-    let err = format!("{:#}", configured_host(&machine.paths, Some("otherhost")).unwrap_err());
-    let config = machine.paths.config_file().display().to_string();
-    assert_eq!(
-        err,
-        format!(
-            "--host \"otherhost\" differs from this host's name \"myhost\" in {config}: `install` does not rename \
-             a host. To rename it, uninstall it and install it again with --host otherhost"
-        )
-    );
-    let err = format!("{:#}", configured_host(&machine.paths, Some("Not_Valid")).unwrap_err());
-    assert!(err.contains("not a valid name"), "{err}");
-    for same in [Some("myhost"), None] {
-        assert_eq!(configured_host(&machine.paths, same).unwrap(), None);
-    }
-}
-
-#[test]
 fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
     let machine = Machine::new();
     fs::write(uninstalling_file(&machine.paths), "").unwrap();
@@ -292,7 +236,7 @@ fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
         join: None,
         paths: machine.paths.clone(),
     };
-    let err = format!("{:#}", install(opts).unwrap_err());
+    let err = format!("{:#}", install(opts, &mut no_dialog()).unwrap_err());
     assert!(err.contains(&rerun_uninstall(&machine.paths)), "{err}");
     assert!(err.contains("`uninstall` with `sudo` and any"), "{err}");
 
@@ -314,8 +258,79 @@ fn host_is_checked_before_the_join_code_is_asked_for() {
         join: None,
         paths: machine.paths.clone(),
     };
-    let err = format!("{:#}", install(opts).unwrap_err());
+    let err = format!("{:#}", install(opts, &mut no_dialog()).unwrap_err());
     assert!(err.contains("differs from this host's name"), "{err}");
+}
+
+#[test]
+fn a_host_that_differs_from_the_config_is_refused() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let err = format!("{:#}", ensure_same_host(&machine.config(), "otherhost").unwrap_err());
+    assert_eq!(
+        err,
+        format!(
+            "--host \"otherhost\" differs from this host's name \"myhost\" in {}: `install` does not rename a \
+             host. To rename it, uninstall it and install it again with --host otherhost",
+            machine.config().display()
+        )
+    );
+    ensure_same_host(&machine.config(), "myhost").unwrap();
+}
+
+/// What `install` says when it must ask, cannot, and was given `host` and `join` as flags, on a machine whose
+/// `config.yaml` exists or not.
+fn no_terminal_error(machine: &Machine, host: Option<&str>, join: Option<&str>) -> String {
+    let opts = InstallOpts {
+        host: host.map(str::to_string),
+        join: join.map(str::to_string),
+        paths: machine.paths.clone(),
+    };
+    format!("{:#}", install(opts, &mut no_dialog()).unwrap_err())
+}
+
+#[test]
+fn a_new_host_without_a_terminal_names_both_missing_flags_in_a_command_that_runs() {
+    let exe = env::current_exe().unwrap();
+    let err = no_terminal_error(&Machine::new(), None, None);
+    assert!(
+        err.ends_with(&format!(
+            "so a host name and a join code must be given: run `sudo {} install --host NAME --join CODE`",
+            exe.display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_command_for_a_host_without_a_terminal_keeps_the_flags_already_given() {
+    let exe = env::current_exe().unwrap();
+    let err = no_terminal_error(&Machine::new(), Some("myhost"), None);
+    assert!(
+        err.ends_with(&format!(
+            "so a join code must be given: run `sudo {} install --host myhost --join CODE`",
+            exe.display()
+        )),
+        "{err}"
+    );
+    let err = no_terminal_error(&Machine::new(), None, Some(CODE));
+    assert!(
+        err.ends_with(&format!(
+            "so a host name must be given: run `sudo {} install --host NAME --join CODE`",
+            exe.display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_configured_host_without_its_bridge_files_asks_only_for_the_join_code() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    fs::remove_file(machine.paths.bridge_pem()).unwrap();
+    let err = no_terminal_error(&machine, None, None);
+    assert!(err.contains("so a join code must be given: run `sudo"), "{err}");
+    assert!(err.ends_with(" install --join CODE`"), "{err}");
 }
 
 #[test]
@@ -527,7 +542,7 @@ fn upgrade_aborts_when_the_new_binary_rejects_the_settings() {
     manager.install(&outgoing, false).unwrap();
 
     let new = Binary::read(&machine.paths, &new).unwrap();
-    let err = apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
+    let err = set_up(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap_err();
 
     // The outgoing binary is not executable: it is the new one's check that failed.
     let text = format!("{err:#}");
@@ -553,7 +568,7 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
     let join = join::decode(CODE).unwrap();
     let manager = Fake::default();
 
-    let err = apply(
+    let err = set_up(
         &manager,
         &machine.account,
         &machine.paths,
@@ -586,7 +601,7 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
         .unwrap();
     let new = Binary::read(&machine.paths, &new).unwrap();
 
-    apply(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
+    set_up(&manager, &machine.account, &machine.paths, &new, None, None, false).unwrap();
 
     assert!(machine.dir.path().join("expected-env.ran").exists(), "the check ran");
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), new.bytes);
