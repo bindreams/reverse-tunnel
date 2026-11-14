@@ -1019,7 +1019,7 @@ fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
         .to_string_lossy()
         .into_owned();
     let mut images = leftovers::images_of_the_binary(&machine.paths).unwrap();
-    images.retain(|image| leftovers::is_leftover_of(&image.file_name().unwrap().to_string_lossy(), &name));
+    images.retain(|image| leftovers::is_leftover_of(image.file_name().unwrap(), &name));
     let [image] = images.as_slice() else {
         panic!("expected one leftover image of the binary, found {images:?}")
     };
@@ -1185,7 +1185,7 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     let renamed: Vec<_> = leftovers::images(&machine.paths)
         .unwrap()
         .into_iter()
-        .filter(|image| leftovers::is_leftover_of(&image.file_name().unwrap().to_string_lossy(), &old_name))
+        .filter(|image| leftovers::is_leftover_of(image.file_name().unwrap(), &old_name))
         .collect();
     let [renamed] = renamed.as_slice() else {
         panic!("expected one leftover of the old image, found {renamed:?}")

@@ -15,7 +15,7 @@ fn a_leftover_is_what_the_pattern_matches_whatever_the_case() {
     let name = name("ab12", OsStr::new("frpc-0.1.exe")).to_string_lossy().into_owned();
 
     assert!(is_leftover(&name));
-    assert!(is_leftover(&name.to_uppercase()));
+    assert!(is_leftover(name.to_uppercase()));
     assert!(!is_leftover("reverse-tunnel.exe"));
     assert!(!is_leftover("x.reverse-tunnel.ab12.exe"));
 }
@@ -24,8 +24,8 @@ fn a_leftover_is_what_the_pattern_matches_whatever_the_case() {
 fn a_leftover_gives_back_the_name_it_kept() {
     let name = name("ab12", OsStr::new("a.b.exe")).to_string_lossy().into_owned();
 
-    assert_eq!(kept_name(&name), Some("a.b.exe"));
-    assert_eq!(kept_name("a.b.exe"), None);
+    assert_eq!(kept_name(OsStr::new(&name)), Some(OsStr::new("a.b.exe")));
+    assert_eq!(kept_name(OsStr::new("a.b.exe")), None);
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn a_leftover_is_of_a_file_by_the_name_it_kept_whatever_the_case() {
     let frpc = name("ab12", OsStr::new("frpc-0.1.exe")).to_string_lossy().into_owned();
 
     assert!(is_leftover_of(&ours, "reverse-tunnel.exe"));
-    assert!(is_leftover_of(&ours.to_uppercase(), "reverse-tunnel.exe"));
+    assert!(is_leftover_of(ours.to_uppercase(), "reverse-tunnel.exe"));
     assert!(!is_leftover_of(&frpc, "reverse-tunnel.exe"));
     // A name that only ends like the original is another file.
     let longer = name("ab12", OsStr::new("old-reverse-tunnel.exe"))

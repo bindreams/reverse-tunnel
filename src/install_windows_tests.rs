@@ -211,9 +211,9 @@ use crate::held::running;
 /// The leftovers in `paths`' leftover folder, by the name each kept.
 fn kept_names(paths: &Paths) -> Vec<String> {
     let images = leftovers::images(paths).unwrap();
-    let names = images.iter().map(|image| image.file_name().unwrap().to_string_lossy());
+    let names = images.iter().map(|image| image.file_name().unwrap());
     names
-        .map(|name| leftovers::kept_name(&name).unwrap().to_string())
+        .map(|name| leftovers::kept_name(name).unwrap().to_string_lossy().into_owned())
         .collect()
 }
 
@@ -287,9 +287,18 @@ fn a_failed_removal_keeps_the_marker_whatever_the_case_of_its_name() {
     let (_dir, paths) = installed();
     fs::create_dir_all(&paths.config_dir).unwrap();
     let marker = paths.config_dir.join("UNINSTALLING");
-    fs::write(&marker, "").unwrap();
-    // It sorts after the marker, so the removal reaches the marker first.
-    let _running = running(&paths.config_dir.join("z.exe"));
+    let others = ["a.exe", "z.exe"].map(|name| paths.config_dir.join(name));
+    for path in others.iter().chain([&marker]) {
+        fs::write(path, "").unwrap();
+    }
+    // What fails is the first of these that the listing reaches after the marker, so the removal reaches the marker
+    // first, in whatever order the file system lists.
+    let listed: Vec<_> = fs::read_dir(&paths.config_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    let after = listed.iter().skip_while(|path| **path != marker).nth(1);
+    let _running = running(after.expect("the file system lists the marker last, so nothing follows it"));
 
     remove_files(&paths).unwrap_err();
 

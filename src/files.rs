@@ -1,6 +1,7 @@
 //! Files and directories are created the way an installation needs them: the final mode and owner are set on the open
 //! handle before any content exists, whatever the umask.
 
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
@@ -288,51 +289,67 @@ pub fn is_access_denied(err: &anyhow::Error) -> bool {
     has_kind(err, ErrorKind::PermissionDenied)
 }
 
-/// Whether `a` and `b` are the same path. On Windows ASCII case is folded and nothing else (the file system folds all of
-/// Unicode, so a name that differs in a non-ASCII letter's case is the same file there and is not the same here); on
-/// Unix the comparison is exact. The one rule for whether a listed entry is the expected one.
-pub fn same_path(a: &Path, b: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
+/// Whether `a` and `b` are the same name. On Windows ASCII case is folded and nothing else; on Unix the comparison is
+/// exact. The one rule for whether a listed entry is the expected one.
+pub fn same_name(a: &OsStr, b: &OsStr) -> bool {
+    same_bytes(a.as_encoded_bytes(), b.as_encoded_bytes())
+}
 
-        let folded = |path: &Path| -> Vec<Vec<u16>> {
-            path.components()
-                .map(|part| {
-                    part.as_os_str()
-                        .encode_wide()
-                        .map(|unit| match u8::try_from(unit) {
-                            Ok(byte) => u16::from(byte.to_ascii_lowercase()),
-                            Err(_) => unit,
-                        })
-                        .collect()
-                })
-                .collect()
-        };
-        folded(a) == folded(b)
-    }
-    #[cfg(not(windows))]
-    {
+/// The bytes of two names, by the rule of `same_name`. Windows names are WTF-8 here, where an ASCII byte is only ever an
+/// ASCII character, so folding bytes folds exactly the ASCII characters.
+fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
         a == b
     }
 }
 
-/// The file name of `path`, or "" if it has none or is not UTF-8.
-pub fn name_of(path: &Path) -> &str {
-    path.file_name().and_then(|name| name.to_str()).unwrap_or_default()
+/// Whether `a` and `b` are the same path: the same components, each the same name. As `components()` does, this ignores
+/// which separator is used and how many, and a trailing one.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let (mut a, mut b) = (a.components(), b.components());
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return true,
+            (Some(a), Some(b)) if same_name(a.as_os_str(), b.as_os_str()) => {}
+            _ => return false,
+        }
+    }
 }
 
-/// `name` without the start `prefix`, if it has it, by the rule of `same_path`.
-pub fn strip_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
-    let (start, rest) = (name.get(..prefix.len())?, name.get(prefix.len()..)?);
-    same_path(Path::new(start), Path::new(prefix)).then_some(rest)
+/// The last component of `path`: its file name, whatever the bytes of it, or an empty name if it has none.
+pub fn name_of(path: &Path) -> &OsStr {
+    path.file_name().unwrap_or_default()
 }
 
-/// `name` without the end `suffix`, if it has it, by the rule of `same_path`.
-pub fn strip_suffix<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
-    let at = name.len().checked_sub(suffix.len())?;
-    let (rest, end) = (name.get(..at)?, name.get(at..)?);
-    same_path(Path::new(end), Path::new(suffix)).then_some(rest)
+/// The name made of `part`, bytes of a name that the caller cut only next to text it matched with a `&str` or an ASCII
+/// character (so on a UTF-8 boundary).
+fn name_of_part(part: &[u8]) -> &OsStr {
+    // SAFETY: `from_encoded_bytes_unchecked` requires a cut of a name's bytes on a UTF-8 boundary, which is what the
+    // callers (`strip_prefix`, `strip_suffix`, `split_once`) make.
+    unsafe { OsStr::from_encoded_bytes_unchecked(part) }
+}
+
+/// `name` without the start `prefix`, if it has it, by the rule of `same_name`.
+pub fn strip_prefix<'a>(name: &'a OsStr, prefix: &str) -> Option<&'a OsStr> {
+    let (start, rest) = name.as_encoded_bytes().split_at_checked(prefix.len())?;
+    same_bytes(start, prefix.as_bytes()).then(|| name_of_part(rest))
+}
+
+/// `name` without the end `suffix`, if it has it, by the rule of `same_name`.
+pub fn strip_suffix<'a>(name: &'a OsStr, suffix: &str) -> Option<&'a OsStr> {
+    let bytes = name.as_encoded_bytes();
+    let (rest, end) = bytes.split_at_checked(bytes.len().checked_sub(suffix.len())?)?;
+    same_bytes(end, suffix.as_bytes()).then(|| name_of_part(rest))
+}
+
+/// `name` split at its first `sep`, an ASCII character, into what comes before and after it.
+pub fn split_once(name: &OsStr, sep: char) -> Option<(&OsStr, &OsStr)> {
+    debug_assert!(sep.is_ascii());
+    let bytes = name.as_encoded_bytes();
+    let at = bytes.iter().position(|&byte| byte == sep as u8)?;
+    Some((name_of_part(&bytes[..at]), name_of_part(&bytes[at + 1..])))
 }
 
 /// Whether `err`, or the `io::Error` it wraps, is the OS saying that the path is not there.

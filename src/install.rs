@@ -24,7 +24,7 @@ use crate::config::{Config, valid_label};
 use crate::files::is_access_denied;
 use crate::files::{
     Perm, Replace, WriteOutcome, hex_of_random_bytes, make_dir, make_missing_dirs, name_of, open_file, remove_entry,
-    remove_file, restore_binary, same_path, strip_prefix, write_atomic,
+    remove_file, restore_binary, same_name, strip_prefix, write_atomic,
 };
 use crate::join::{self, JoinInfo};
 #[cfg(windows)]
@@ -722,7 +722,8 @@ fn sweep_old_images(paths: &Paths, registered: &Path) -> Vec<anyhow::Error> {
             // A listing that fails once can fail on every step after it.
             Err(err) => return vec![anyhow::Error::new(err).context(reading())],
         };
-        if service::is_image(name_of(&path)) && !same_path(&path, registered) {
+        let name = name_of(&path);
+        if service::is_image(name) && !same_name(name, name_of(registered)) {
             old.push(path);
         }
     }
@@ -763,7 +764,7 @@ fn remove_files(paths: &Paths) -> Result<()> {
         Ok(entries) => {
             for entry in entries {
                 let path = entry?.path();
-                if !same_path(&path, &marker) {
+                if !same_name(name_of(&path), name_of(&marker)) {
                     remove_entry(&path)?;
                 }
             }
@@ -1055,7 +1056,7 @@ fn clean_bin_dir(paths: &Paths) -> Result<()> {
         let path = entry?.path();
         let name = name_of(&path);
         let starts = |prefix| strip_prefix(name, prefix).is_some();
-        let stale = !same_path(&path, &current) && (starts("frpc-") || starts(".tmp"));
+        let stale = !same_name(name, name_of(&current)) && (starts("frpc-") || starts(".tmp"));
         if starts(upgrade::STAGED) {
             upgrade::warn_if_kept(remove_file_that_may_run(paths, &path));
         } else if stale {

@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use super::*;
@@ -223,13 +224,60 @@ fn a_file_renamed_over_has_exactly_the_name_it_was_given_whatever_the_length() {
 }
 
 #[test]
-fn paths_are_the_same_by_the_case_rule_of_the_platform() {
+fn names_are_the_same_by_the_case_rule_of_the_platform() {
     let (lower, upper) = (Path::new("bin/frpc-1.exe"), Path::new("BIN/FRPC-1.EXE"));
+    let (name_lower, name_upper) = (OsStr::new("frpc-1.exe"), OsStr::new("FRPC-1.EXE"));
 
     assert_eq!(same_path(lower, upper), cfg!(windows));
-    assert_eq!(strip_prefix("FRPC-1.exe", "frpc-"), cfg!(windows).then_some("1.exe"));
-    assert_eq!(strip_suffix("frpc-1.EXE", ".exe"), cfg!(windows).then_some("frpc-1"));
+    assert_eq!(same_name(name_lower, name_upper), cfg!(windows));
+    assert_eq!(
+        strip_prefix(name_upper, "frpc-"),
+        cfg!(windows).then_some(OsStr::new("1.EXE"))
+    );
+    assert_eq!(
+        strip_suffix(name_upper, ".exe"),
+        cfg!(windows).then_some(OsStr::new("FRPC-1"))
+    );
     assert!(same_path(lower, lower) && !same_path(lower, Path::new("bin/frpc-2.exe")));
-    assert_eq!(strip_prefix("frpc-1.exe", "frpc-"), Some("1.exe"));
-    assert_eq!(strip_prefix("x", "frpc-"), None);
+    // `components()` ignores the separator, how many there are and a trailing one; more components are another path.
+    assert!(same_path(Path::new("bin/frpc.exe"), Path::new("bin//frpc.exe/")));
+    assert!(!same_path(Path::new("bin"), Path::new("bin/frpc.exe")));
+    assert_eq!(strip_prefix(name_lower, "frpc-"), Some(OsStr::new("1.exe")));
+    assert_eq!(strip_prefix(OsStr::new("x"), "frpc-"), None);
+    assert_eq!(strip_suffix(OsStr::new("x"), "frpc-"), None);
+    assert_eq!(
+        split_once(OsStr::new("ab12.a.b.exe"), '.'),
+        Some((OsStr::new("ab12"), OsStr::new("a.b.exe")))
+    );
+    assert_eq!(split_once(OsStr::new("ab12"), '.'), None);
+}
+
+#[test]
+fn only_ascii_case_is_folded() {
+    // Only ASCII case is folded, so these are different names everywhere.
+    assert!(!same_name(OsStr::new("\u{e9}.exe"), OsStr::new("\u{c9}.exe")));
+    assert!(same_name(OsStr::new("\u{e9}.exe"), OsStr::new("\u{e9}.exe")));
+}
+
+/// A name that is not UTF-8: "x", then a byte or unit that no text has, then `tail`.
+fn not_utf8(tail: &str) -> OsString {
+    #[cfg(unix)]
+    let mut name = <OsString as std::os::unix::ffi::OsStringExt>::from_vec(vec![b'x', 0xff]);
+    #[cfg(windows)]
+    let mut name = <OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[u16::from(b'x'), 0xd800]);
+    name.push(tail);
+    name
+}
+
+#[test]
+fn a_name_that_is_not_utf_8_is_compared_and_stripped_like_any_other() {
+    let name = not_utf8(".EXE");
+
+    assert!(same_name(&name, &name));
+    assert!(!same_name(&name, &not_utf8(".exe.bak")));
+    assert_eq!(strip_suffix(&name, ".exe").is_some(), cfg!(windows));
+    assert_eq!(strip_suffix(&name, ".EXE"), Some(not_utf8("").as_os_str()));
+    let rest = strip_prefix(&name, "x").unwrap();
+    assert!(rest.to_str().is_none() && rest.len() == name.len() - 1);
+    assert!(strip_prefix(&name, "y").is_none());
 }
