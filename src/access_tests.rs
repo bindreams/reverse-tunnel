@@ -139,15 +139,19 @@ fn a_missing_file_that_run_makes_is_no_problem() {
     assert!(problem(&Need::made(dir.path().join("supervisor.log"), LOG), &who()).is_none());
 }
 
-fn dacl(aces: Vec<Ace>, left_out: usize) -> io::Result<Dacl> {
-    Ok(Dacl { aces, left_out })
+/// A DACL of `aces` that left out the conditional and object allows of the SIDs `left_out`.
+fn dacl(aces: Vec<Ace>, left_out: &[&str]) -> io::Result<Dacl> {
+    Ok(Dacl {
+        aces,
+        left_out: left_out.iter().map(|sid| Sid::parse(sid).unwrap()).collect(),
+    })
 }
 
 #[test]
 fn a_denied_path_is_explained_by_the_principal_denied_and_the_remedy() {
     let aces = vec![ace(false, ADMINISTRATORS, 0x1), ace(true, EVERYONE, FILE_GENERIC_READ)];
 
-    let said = explain(&Need::of("config.yaml".into(), READ), &who(), dacl(aces, 0)).unwrap();
+    let said = explain(&Need::of("config.yaml".into(), READ), &who(), dacl(aces, &[])).unwrap();
 
     let by = Sid::parse(ADMINISTRATORS).unwrap().label();
     assert!(said.contains(&format!("denies access to {by}")), "{said}");
@@ -162,9 +166,10 @@ fn a_path_nothing_allows_is_explained_by_the_right_the_groups_and_any_ace_not_co
     let need = Need::of("config.yaml".into(), READ);
     let aces = || vec![ace(true, ADMINISTRATORS, FILE_GENERIC_READ)];
 
-    let plain = explain(&need, &who(), dacl(aces(), 0)).unwrap();
-    let one = explain(&need, &who(), dacl(aces(), 1)).unwrap();
-    let several = explain(&need, &who(), dacl(aces(), 3)).unwrap();
+    let plain = explain(&need, &who(), dacl(aces(), &[])).unwrap();
+    let one = explain(&need, &who(), dacl(aces(), &[SERVICE])).unwrap();
+    let several = explain(&need, &who(), dacl(aces(), &[SERVICE, EVERYONE, USERS])).unwrap();
+    let others = explain(&need, &who(), dacl(aces(), &[ADMINISTRATORS, FOREIGN_DOMAIN_ACCOUNT])).unwrap();
 
     // `who()` lists the groups after the first holder.
     assert!(
@@ -172,6 +177,8 @@ fn a_path_nothing_allows_is_explained_by_the_right_the_groups_and_any_ace_not_co
         "{plain}"
     );
     assert!(!plain.contains("not counted"), "{plain}");
+    // An allow for someone else is no ACE that could have counted.
+    assert!(!others.contains("not counted"), "{others}");
     assert!(
         one.contains("One conditional or object allow ACE was not counted."),
         "{one}"
@@ -190,8 +197,8 @@ fn a_directory_whose_files_would_not_be_allowed_is_explained_with_any_ace_not_co
     };
     let aces = || vec![ace(true, SERVICE, FILE_ADD_FILE)];
 
-    let plain = explain(&need, &who(), dacl(aces(), 0)).unwrap();
-    let left_out = explain(&need, &who(), dacl(aces(), 1)).unwrap();
+    let plain = explain(&need, &who(), dacl(aces(), &[])).unwrap();
+    let left_out = explain(&need, &who(), dacl(aces(), &[SERVICE])).unwrap();
 
     assert!(
         plain.contains("the files")
@@ -222,7 +229,7 @@ fn a_path_whose_acl_cannot_be_read_is_explained_by_the_error() {
 fn a_path_with_what_it_needs_is_no_problem() {
     let aces = vec![ace(true, SERVICE, FILE_GENERIC_READ)];
 
-    assert!(explain(&Need::of("config.yaml".into(), READ), &who(), dacl(aces, 0)).is_none());
+    assert!(explain(&Need::of("config.yaml".into(), READ), &who(), dacl(aces, &[])).is_none());
 }
 
 #[test]

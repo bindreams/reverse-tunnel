@@ -26,7 +26,8 @@ struct Cli {
 enum Command {
     /// The service's entry point; not for humans.
     Run {
-        /// Render the configuration, have frpc verify it, and exit.
+        /// Render the configuration, have frpc verify it, and exit. On Windows it first checks that the service
+        /// account has access to what `run` opens.
         #[arg(long)]
         check: bool,
     },

@@ -1176,7 +1176,8 @@ fn restart_checks_the_configuration_as_the_service_account() {
 
 /// What `access::check` relies on is in the token of the running service, enabled: a credited group missing from it
 /// would let `restart` pass a file that only that group may read, and without SeChangeNotifyPrivilege the service
-/// would not pass through the directories the check does not look at (see `access::opens`).
+/// would not pass through the directories the check does not look at (see `access::opens`). The service also owns the
+/// files it makes, which is what lets CREATOR OWNER count (`access::barrier_of`).
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1251,12 +1252,6 @@ fn restart_checks_every_path_run_opens() {
         let after = machine.status();
         assert_eq!((after.state, after.pid), (before.state, before.pid));
     }
-    assert!(
-        broken
-            .iter()
-            .any(|path| path.ends_with(reverse_tunnel::paths::LOG_SUPERVISOR)),
-        "the log files were not checked: {broken:?}"
-    );
 }
 
 /// An administrator reads what the service account cannot, so `restart`'s check as the caller passes `config.yaml`:

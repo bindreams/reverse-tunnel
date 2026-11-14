@@ -19,7 +19,8 @@ use crate::service;
 
 /// The groups, as (SID, name), that the token of the service always holds, enabled: the service is credited with what
 /// an ACE gives them. Measured on CI from the running service's token (`tests/platform.rs`, the test of this list), not
-/// from what an access check would do. Left out: `Users` (a nested membership that machine configuration can change).
+/// from what an access check would do. Left out: `Users` (a nested membership that machine configuration can change)
+/// and the groups that depend on the logon or the session, not on the service.
 pub const CREDITED: [(&str, &str); 5] = [
     ("S-1-1-0", "Everyone"),
     ("S-1-5-6", "SERVICE"),
@@ -28,7 +29,8 @@ pub const CREDITED: [(&str, &str); 5] = [
     ("S-1-5-80-0", "ALL SERVICES"),
 ];
 
-/// CREATOR OWNER: in an ACE that files inherit, whoever makes the file. The service owns what it makes.
+/// CREATOR OWNER: in an ACE that files inherit, whoever makes the file. The service owns what it makes, which the
+/// platform test of `CREDITED` asserts.
 const CREATOR_OWNER: &str = "S-1-3-0";
 static CREATOR_OWNER_SID: LazyLock<Sid> =
     LazyLock::new(|| Sid::parse(CREATOR_OWNER).expect("CREATOR_OWNER is a valid SID"));
@@ -37,10 +39,10 @@ static CREATOR_OWNER_SID: LazyLock<Sid> =
 pub type Right = (u32, &'static str);
 const READ: Right = (FILE_GENERIC_READ, "read");
 const RUN: Right = (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, "read and run");
-/// Of the log directory itself: `run` makes files there.
+/// Of the log directory itself: `run` makes files there, and renames a log there (rotation).
 const MAKE_FILES: Right = (FILE_ADD_FILE, "create files in");
 /// Of a file `run` makes in the log directory, which it gets by inheritance: `run` writes each, `frpc` reads
-/// `frpc.toml`, and rotation deletes a log.
+/// `frpc.toml`, and rotation renames a log over `<log>.1`, which needs DELETE on the log and on `<log>.1`.
 const NEW_FILE: Right = (
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
     "read, write and delete",
@@ -158,7 +160,12 @@ fn explain(need: &Need, who: &Principals, dacl: io::Result<Dacl>) -> Option<Stri
         let names: Vec<&str> = who.holders.iter().skip(1).map(|(_, name)| *name).collect();
         names.join(", ")
     };
-    let left_out = match dacl.left_out {
+    let left_out = match dacl
+        .left_out
+        .iter()
+        .filter(|sid| who.holders.iter().any(|(held, _)| held == *sid))
+        .count()
+    {
         0 => String::new(),
         1 => " One conditional or object allow ACE was not counted.".to_string(),
         n => format!(" {n} conditional or object allow ACEs were not counted."),

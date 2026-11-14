@@ -61,13 +61,17 @@ fn a_dacl_that_is_not_there_gives_everyone_full_access() {
 
 #[test]
 fn deny_aces_of_every_kind_are_read_with_their_own_sid_and_the_other_allows_are_left_out() {
-    // A plain deny, a callback deny and an object deny with both GUIDs, then a callback allow, which is left out.
+    // A plain deny, a callback deny and an object deny with both GUIDs, then a callback allow and an object allow,
+    // which are left out.
     let dacl = aces_after(
         "D:P(D;;0x1;;;WD)(XD;;0x2;;;BU;(Member_of{SID(BA)}))\
          (OD;;0x4;bf967aba-0de6-11d0-a285-00aa00c04fc1;bf967aba-0de6-11d0-a285-00aa00c04fc1;AU)\
-         (XA;;0x8;;;SY;(Member_of{SID(BA)}))(A;;0x10;;;BA)",
+         (XA;;0x8;;;SY;(Member_of{SID(BA)}))(OA;;0x20;bf967aba-0de6-11d0-a285-00aa00c04fc1;;WD)(A;;0x10;;;BA)",
     );
-    assert_eq!(dacl.left_out, 1);
+    assert_eq!(
+        dacl.left_out,
+        [Sid::parse("S-1-5-18").unwrap(), Sid::parse("S-1-1-0").unwrap()]
+    );
     let found = summary(dacl);
 
     assert_eq!(

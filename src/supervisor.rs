@@ -65,7 +65,11 @@ impl Setup<'_> {
 pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
     #[cfg(windows)]
     if check_only {
-        crate::access::check(paths, &std::env::current_exe()?, &tools.frpc)?;
+        crate::access::check(
+            paths,
+            &std::env::current_exe().context("finding this binary")?,
+            &tools.frpc,
+        )?;
     }
     run_with(paths, tools, check_only, (Ipv4Addr::LOCALHOST, 0).into())
 }
