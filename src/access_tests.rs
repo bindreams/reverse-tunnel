@@ -32,8 +32,7 @@ fn who() -> Principals {
     }
 }
 
-/// What the check finds for `aces`, with the service and the groups Everyone and Users credited, and no demand on the
-/// files made in the directory.
+/// `barrier_of` with no demand on files made in the directory.
 fn barrier(aces: &[Ace], needs: u32) -> Option<Barrier> {
     barrier_of(aces, &who(), needs, 0)
 }
@@ -140,6 +139,92 @@ fn a_missing_file_that_run_makes_is_no_problem() {
     assert!(problem(&Need::made(dir.path().join("supervisor.log"), LOG), &who()).is_none());
 }
 
+fn dacl(aces: Vec<Ace>, left_out: usize) -> io::Result<Dacl> {
+    Ok(Dacl { aces, left_out })
+}
+
+#[test]
+fn a_denied_path_is_explained_by_the_principal_denied_and_the_remedy() {
+    let aces = vec![ace(false, ADMINISTRATORS, 0x1), ace(true, EVERYONE, FILE_GENERIC_READ)];
+
+    let said = explain(&Need::of("config.yaml".into(), READ), &who(), dacl(aces, 0)).unwrap();
+
+    let by = Sid::parse(ADMINISTRATORS).unwrap().label();
+    assert!(said.contains(&format!("denies access to {by}")), "{said}");
+    assert!(
+        said.contains(&format!("{} must not be denied anything", service::ACCOUNT)),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_path_nothing_allows_is_explained_by_the_right_the_groups_and_any_ace_not_counted() {
+    let need = Need::of("config.yaml".into(), READ);
+    let aces = || vec![ace(true, ADMINISTRATORS, FILE_GENERIC_READ)];
+
+    let plain = explain(&need, &who(), dacl(aces(), 0)).unwrap();
+    let one = explain(&need, &who(), dacl(aces(), 1)).unwrap();
+    let several = explain(&need, &who(), dacl(aces(), 3)).unwrap();
+
+    // `who()` lists the groups after the first holder.
+    assert!(
+        plain.contains(&format!("{} cannot read it", service::ACCOUNT)) && plain.contains("(Users, the service)"),
+        "{plain}"
+    );
+    assert!(!plain.contains("not counted"), "{plain}");
+    assert!(
+        one.contains("One conditional or object allow ACE was not counted."),
+        "{one}"
+    );
+    assert!(
+        several.contains("3 conditional or object allow ACEs were not counted."),
+        "{several}"
+    );
+}
+
+#[test]
+fn a_directory_whose_files_would_not_be_allowed_is_explained_with_any_ace_not_counted() {
+    let need = Need {
+        files: Some(NEW_FILE),
+        ..Need::of("logs".into(), MAKE_FILES)
+    };
+    let aces = || vec![ace(true, SERVICE, FILE_ADD_FILE)];
+
+    let plain = explain(&need, &who(), dacl(aces(), 0)).unwrap();
+    let left_out = explain(&need, &who(), dacl(aces(), 1)).unwrap();
+
+    assert!(
+        plain.contains("the files")
+            && plain.contains("read, write and delete themselves")
+            && plain.contains("that files inherit"),
+        "{plain}"
+    );
+    assert!(!plain.contains("not counted"), "{plain}");
+    assert!(
+        left_out.contains("One conditional or object allow ACE was not counted."),
+        "{left_out}"
+    );
+}
+
+#[test]
+fn a_path_whose_acl_cannot_be_read_is_explained_by_the_error() {
+    let unreadable = Err(io::Error::new(ErrorKind::PermissionDenied, "access is denied"));
+
+    let said = explain(&Need::of("config.yaml".into(), READ), &who(), unreadable).unwrap();
+
+    assert!(
+        said.contains("its ACL cannot be read") && said.contains("access is denied"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_path_with_what_it_needs_is_no_problem() {
+    let aces = vec![ace(true, SERVICE, FILE_GENERIC_READ)];
+
+    assert!(explain(&Need::of("config.yaml".into(), READ), &who(), dacl(aces, 0)).is_none());
+}
+
 #[test]
 fn a_deny_is_reported_by_the_denied_principal_not_the_allowed_one() {
     let denied = |sid| match denied_by(sid, 0x1) {
@@ -147,7 +232,6 @@ fn a_deny_is_reported_by_the_denied_principal_not_the_allowed_one() {
         other => panic!("{other:?}"),
     };
 
-    // The allow in `denied_by` is for Everyone (Users where Everyone is denied), whose name is not any of these.
     assert_eq!(denied(SERVICE), SERVICE);
     // A domain account is not looked up: it is shown by its SID.
     assert_eq!(denied(FOREIGN_DOMAIN_ACCOUNT), FOREIGN_DOMAIN_ACCOUNT);

@@ -577,8 +577,7 @@ fn reinstall_changes_nothing() {
 }
 
 /// A hand edit of an installed binary's ACL (Windows) or mode and owner (Unix), the service's own and the pinned frpc,
-/// does not outlive a reinstall of the same binary: the service may run each again. On Unix a kept binary then has the
-/// owner and group that a new one has (the installing user's), as the first install's new ones show.
+/// does not outlive a reinstall of the same binary: the service may run each again.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn reinstall_puts_the_installed_binarys_access_back() {
@@ -617,9 +616,8 @@ fn reinstall_puts_the_installed_binarys_access_back() {
         let meta = fs::metadata(binary).unwrap();
         assert_eq!((meta.uid(), meta.gid()), (0, 0), "kept {}", binary.display());
     }
-    // What `run` opens includes both binaries; a failure names the one that is wrong.
     #[cfg(windows)]
-    reverse_tunnel::access::check(&machine.paths, &binaries[0]).unwrap();
+    reverse_tunnel::access::check(&machine.paths, &binaries[0], &binaries[1]).unwrap();
 }
 
 #[test]
@@ -1178,8 +1176,7 @@ fn restart_checks_the_configuration_as_the_service_account() {
 
 /// What `access::check` relies on is in the token of the running service, enabled: a credited group missing from it
 /// would let `restart` pass a file that only that group may read, and without SeChangeNotifyPrivilege the service
-/// would not pass through the directories the check does not look at (see `access::opens`); and the service owns the
-/// files it makes, which is what the CREATOR OWNER ACE of the log folder counts on.
+/// would not pass through the directories the check does not look at (see `access::opens`).
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1210,9 +1207,9 @@ fn the_services_token_holds_the_groups_and_the_privilege_the_check_relies_on() {
     );
 }
 
-/// Every path `run` opens (the product's list) is checked: with the service stopped, so that nothing it does with its
-/// files can change what is measured, each path's ACL is stripped of the service's access in turn, and `restart` fails
-/// naming it and every earlier one, and leaves the service stopped.
+/// `restart` refuses each path in `access::opens`, naming it and every earlier one broken, and leaves the service as it
+/// was. The service is stopped first so its own file activity cannot change what is measured, and the rotated logs,
+/// which `run` makes only when a log fills, are made so that their need is measured too.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1226,13 +1223,21 @@ fn restart_checks_every_path_run_opens() {
     let before = machine.status();
     assert_ne!(before.state, State::Running);
     let no_service = reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)").unwrap();
+    for log in [reverse_tunnel::paths::LOG_SUPERVISOR, reverse_tunnel::paths::LOG_FRPC] {
+        let rotated = machine
+            .paths
+            .log_dir
+            .join(format!("{log}{}", reverse_tunnel::logfile::ROTATED));
+        fs::write(rotated, "").unwrap();
+    }
     let mut broken = Vec::new();
 
-    for need in reverse_tunnel::access::opens(&machine.paths, &service::exe(&machine.paths)) {
-        // A file `run` makes is missing if it has not made it (a rotated log); any other path must be there.
-        if need.made_by_run && !need.path.exists() {
-            continue;
-        }
+    let (exe, frpc) = (
+        service::exe(&machine.paths),
+        reverse_tunnel::download::tools(&machine.paths).frpc,
+    );
+    for need in reverse_tunnel::access::opens(&machine.paths, &exe, &frpc) {
+        assert!(need.path.exists(), "{} is missing", need.path.display());
         no_service.apply(&need.path).unwrap();
         broken.push(need.path.display().to_string());
 
@@ -1266,7 +1271,6 @@ fn restart_refuses_a_config_the_service_account_cannot_read() {
     let before = machine.status();
     let config = machine.paths.config_file();
     let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
-    // A deny is named by the account's label, a missing allow by the product's name for it.
     let label = reverse_tunnel::security::Sid::parse(&service).unwrap().label();
     for (acl, says, named) in [
         (

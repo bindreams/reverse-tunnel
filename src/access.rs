@@ -1,6 +1,6 @@
 //! Windows: whether the service account has what `run` opens, judged from each path's DACL alone.
 
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -12,17 +12,14 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::account;
-use crate::download;
 use crate::logfile::ROTATED;
 use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
-use crate::security::{self, Ace, Sid};
+use crate::security::{self, Ace, Dacl, Sid};
 use crate::service;
 
 /// The groups, as (SID, name), that the token of the service always holds, enabled: the service is credited with what
 /// an ACE gives them. Measured on CI from the running service's token (`tests/platform.rs`, the test of this list), not
-/// from what an access check would do. Left out: `Users` (a nested membership that machine configuration can change),
-/// `This Organization` (which depends on the logon), the logon session's SID, CONSOLE LOGON, and the High mandatory
-/// label, which is no group an ACE names.
+/// from what an access check would do. Left out: `Users` (a nested membership that machine configuration can change).
 pub const CREDITED: [(&str, &str); 5] = [
     ("S-1-1-0", "Everyone"),
     ("S-1-5-6", "SERVICE"),
@@ -31,8 +28,7 @@ pub const CREDITED: [(&str, &str); 5] = [
     ("S-1-5-80-0", "ALL SERVICES"),
 ];
 
-/// CREATOR OWNER: in an ACE that files inherit, whoever makes the file. The service owns what it makes, which the
-/// platform test of `CREDITED` asserts of `supervisor.log`.
+/// CREATOR OWNER: in an ACE that files inherit, whoever makes the file. The service owns what it makes.
 const CREATOR_OWNER: &str = "S-1-3-0";
 static CREATOR_OWNER_SID: LazyLock<Sid> =
     LazyLock::new(|| Sid::parse(CREATOR_OWNER).expect("CREATOR_OWNER is a valid SID"));
@@ -41,10 +37,10 @@ static CREATOR_OWNER_SID: LazyLock<Sid> =
 pub type Right = (u32, &'static str);
 const READ: Right = (FILE_GENERIC_READ, "read");
 const RUN: Right = (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, "read and run");
-/// Of the log directory itself: `run` makes files there, and renames a log there (rotation).
+/// Of the log directory itself: `run` makes files there.
 const MAKE_FILES: Right = (FILE_ADD_FILE, "create files in");
-/// Of a file `run` makes in the log directory, which it gets from the directory: `run` writes each, `frpc` reads
-/// `frpc.toml`, and a rotation renames a log, which needs DELETE on it and on the old log it replaces.
+/// Of a file `run` makes in the log directory, which it gets by inheritance: `run` writes each, `frpc` reads
+/// `frpc.toml`, and rotation deletes a log.
 const NEW_FILE: Right = (
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
     "read, write and delete",
@@ -58,8 +54,9 @@ const LOG: Right = (
 const ROTATED_LOG: Right = (DELETE, "delete");
 const RENDERED: Right = (FILE_GENERIC_READ | FILE_GENERIC_WRITE, "read and write");
 
-/// The SIDs that count in a check: the service account first, then the groups it always belongs to, each with its name.
+/// The SIDs that count in a check.
 pub struct Principals {
+    /// `holders[0]` is the service account; the rest are the credited groups.
     pub holders: Vec<(Sid, &'static str)>,
 }
 
@@ -92,18 +89,15 @@ impl Need {
     }
 }
 
-/// Every path `run` opens, with what it needs of each; `exe` is the binary the service will run: the installed one, or,
-/// at an `install`, the staged copy, which gets the access that `install` gives the installed binary (it inherits the
-/// bin dir's ACL, as the installed one is made to). `run` lists no directory, and Windows lets a service through a
-/// directory it has no right to (SeChangeNotifyPrivilege, enabled in the service's token: asserted by the platform test
-/// of `CREDITED`), so a directory is here only where `run` makes files: the log directory, where it creates
-/// `supervisor.log`, `frpc.log` and `frpc.toml`, appends to the logs and rotates each to `<log>.1`. Those files are
-/// listed too, for each that already exists.
-pub fn opens(paths: &Paths, exe: &Path) -> Vec<Need> {
+/// Every path `run` opens, with what it needs of each. `exe` is the binary the service will run and `frpc` the one it
+/// starts; at an `install`, `exe` is the staged copy, which gets the access the installed binary gets. A directory is
+/// listed only where `run` makes files (the log dir); `run` lists none, and SeChangeNotifyPrivilege lets a service
+/// through directories it has no right to (asserted by the platform test of `CREDITED`).
+pub fn opens(paths: &Paths, exe: &Path, frpc: &Path) -> Vec<Need> {
     let logs = &paths.log_dir;
     let mut needs = vec![
         Need::of(exe.to_path_buf(), RUN),
-        Need::of(download::tools(paths).frpc, RUN),
+        Need::of(frpc.to_path_buf(), RUN),
         Need::of(paths.config_file(), READ),
         Need::of(paths.bridge_pem(), READ),
         Need::of(paths.bridge_token(), READ),
@@ -122,16 +116,16 @@ pub fn opens(paths: &Paths, exe: &Path) -> Vec<Need> {
 }
 
 /// Fails, naming each path and what is wrong, unless the service account has what `run` opens by the DACLs: an allow
-/// for the account or for a credited group, and no deny ACE of any kind. `run --check` as the caller cannot show this:
-/// an administrator reads what the account cannot.
-pub fn check(paths: &Paths, exe: &Path) -> Result<()> {
+/// for the account or for a credited group, and no deny ACE of any kind. `run --check` calls it, with the paths of the
+/// binary that the service will run.
+pub fn check(paths: &Paths, exe: &Path, frpc: &Path) -> Result<()> {
     let account = Sid::parse(&account::ensure(service::ACCOUNT)?.sid()).context("the service account's SID")?;
     let mut holders = vec![(account, service::ACCOUNT)];
     for (sid, name) in CREDITED {
         holders.push((Sid::parse(sid).with_context(|| format!("the SID of {name}"))?, name));
     }
     let who = Principals { holders };
-    let problems: Vec<String> = opens(paths, exe)
+    let problems: Vec<String> = opens(paths, exe, frpc)
         .iter()
         .filter_map(|need| problem(need, &who).map(|problem| format!("{}: {problem}", need.path.display())))
         .collect();
@@ -141,10 +135,15 @@ pub fn check(paths: &Paths, exe: &Path) -> Result<()> {
 
 /// Why the service account cannot have what `run` needs of `need.path`, in the user's words.
 fn problem(need: &Need, who: &Principals) -> Option<String> {
+    explain(need, who, security::aces_of(&need.path))
+}
+
+/// `problem` for what reading `need.path`'s DACL gave.
+fn explain(need: &Need, who: &Principals, dacl: io::Result<Dacl>) -> Option<String> {
     let account = service::ACCOUNT;
     let (needs, verb) = need.itself;
-    let aces = match security::aces_of(&need.path) {
-        Ok(aces) => aces,
+    let dacl = match dacl {
+        Ok(dacl) => dacl,
         Err(err) if err.kind() == ErrorKind::NotFound => {
             return (!need.made_by_run).then(|| format!("it is missing, and {account} needs to {verb} it"));
         }
@@ -159,19 +158,24 @@ fn problem(need: &Need, who: &Principals) -> Option<String> {
         let names: Vec<&str> = who.holders.iter().skip(1).map(|(_, name)| *name).collect();
         names.join(", ")
     };
-    Some(match barrier_of(&aces, who, needs, inherits)? {
+    let left_out = match dacl.left_out {
+        0 => String::new(),
+        1 => " One conditional or object allow ACE was not counted.".to_string(),
+        n => format!(" {n} conditional or object allow ACEs were not counted."),
+    };
+    Some(match barrier_of(&dacl.aces, who, needs, inherits)? {
         Barrier::Denied(by) => {
             format!("an ACE in its ACL denies access to {by}. {account} must not be denied anything: remove that ACE.")
         }
         Barrier::NotAllowed => format!(
             "{account} cannot {verb} it: no ACE in its ACL allows that to {account} or to a group it always \
-             belongs to ({}). Allow {account} to {verb} it.",
+             belongs to ({}). Allow {account} to {verb} it.{left_out}",
             groups()
         ),
         Barrier::NotInherited => format!(
             "the files {account} makes in it would not get the right to {files_verb} themselves: no ACE in its ACL \
              that files inherit allows that to {account} or to a group it always belongs to ({}). Add an allow for \
-             {account} that files inherit.",
+             {account} that files inherit.{left_out}",
             groups()
         ),
     })
@@ -189,12 +193,10 @@ pub enum Barrier {
     NotInherited,
 }
 
-/// What stands in the way of `who` having all of `needs` of an object, and its files all of
-/// `inherits`, as the DACL `aces` gives it: there is no deny ACE at all (inherit-only ones too, which the object's
-/// contents get), the allows for `who` add up to `needs`, and those that files inherit add up to `inherits`. Allows
-/// for the object's contents only count for nothing towards `needs`; an allow for CREATOR OWNER that files inherit
-/// counts towards `inherits` (the service owns what it makes). A sufficient condition, not AccessCheck: it
-/// refuses a DACL whose order would let the account through, and ignores the owner and privileges.
+/// What stands in the way of `who` having `needs` of an object and its files `inherits`, by the DACL `aces`: any deny
+/// ACE (inherit-only too: the contents get it), allows for `who` not adding up to `needs`, or those that files inherit
+/// (plus CREATOR OWNER's: the service owns what it makes) not adding up to `inherits`. A sufficient condition, not
+/// AccessCheck: it refuses a DACL whose order would let the account through, and ignores the owner and privileges.
 fn barrier_of(aces: &[Ace], who: &Principals, needs: u32, inherits: u32) -> Option<Barrier> {
     let (mut allowed, mut inherited) = (0, 0);
     for ace in aces {
@@ -210,8 +212,7 @@ fn barrier_of(aces: &[Ace], who: &Principals, needs: u32, inherits: u32) -> Opti
                 inherited |= rights;
             }
         } else if ace.object_inherit && ace.sid == *CREATOR_OWNER_SID {
-            // Files the service makes are its own, which CREATOR OWNER becomes in them. It is nothing in the
-            // directory itself, so it adds nothing to `allowed`.
+            // CREATOR OWNER is nothing in the directory itself: not counted in `allowed`.
             inherited |= rights;
         }
     }

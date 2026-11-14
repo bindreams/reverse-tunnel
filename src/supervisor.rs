@@ -60,8 +60,13 @@ impl Setup<'_> {
 }
 
 /// Runs frpc and the listener until one fails, which is always an error. With `check_only`, verifies the configuration
-/// and returns.
+/// and returns; on Windows it first judges, from the DACLs, what the service account has of what `run` opens (the
+/// caller's own rights would hide what it lacks), for this binary and its frpc.
 pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
+    #[cfg(windows)]
+    if check_only {
+        crate::access::check(paths, &std::env::current_exe()?, &tools.frpc)?;
+    }
     run_with(paths, tools, check_only, (Ipv4Addr::LOCALHOST, 0).into())
 }
 

@@ -23,16 +23,16 @@ fn no_sid_is_a_null_sid() {
     assert!(!unsafe { system.is(null_mut()) });
 }
 
-/// The ACEs that `sddl`'s DACL gives a new directory.
-fn aces_after(sddl: &str) -> Vec<Ace> {
+/// What `aces_of` reads of the DACL that `sddl` gives a new directory.
+fn aces_after(sddl: &str) -> Dacl {
     let dir = tempfile::tempdir().unwrap();
     Descriptor::parse(sddl).unwrap().apply(dir.path()).unwrap();
     aces_of(dir.path()).unwrap()
 }
 
-/// `aces` as (allows, inherit-only, mask, SID).
-fn summary(aces: Vec<Ace>) -> Vec<(bool, bool, u32, String)> {
-    aces.into_iter()
+fn summary(dacl: Dacl) -> Vec<(bool, bool, u32, String)> {
+    dacl.aces
+        .into_iter()
         .map(|ace| (ace.allows, ace.inherit_only, ace.mask, ace.sid.text().unwrap()))
         .collect()
 }
@@ -62,11 +62,13 @@ fn a_dacl_that_is_not_there_gives_everyone_full_access() {
 #[test]
 fn deny_aces_of_every_kind_are_read_with_their_own_sid_and_the_other_allows_are_left_out() {
     // A plain deny, a callback deny and an object deny with both GUIDs, then a callback allow, which is left out.
-    let found = summary(aces_after(
+    let dacl = aces_after(
         "D:P(D;;0x1;;;WD)(XD;;0x2;;;BU;(Member_of{SID(BA)}))\
          (OD;;0x4;bf967aba-0de6-11d0-a285-00aa00c04fc1;bf967aba-0de6-11d0-a285-00aa00c04fc1;AU)\
          (XA;;0x8;;;SY;(Member_of{SID(BA)}))(A;;0x10;;;BA)",
-    ));
+    );
+    assert_eq!(dacl.left_out, 1);
+    let found = summary(dacl);
 
     assert_eq!(
         found,
@@ -82,6 +84,7 @@ fn deny_aces_of_every_kind_are_read_with_their_own_sid_and_the_other_allows_are_
 #[test]
 fn an_ace_that_files_inherit_is_read_as_such() {
     let found: Vec<bool> = aces_after("D:P(A;OI;0x1;;;WD)(A;CI;0x2;;;BU)(A;;0x4;;;SY)")
+        .aces
         .iter()
         .map(|ace| ace.object_inherit)
         .collect();
@@ -167,9 +170,7 @@ fn only_a_sid_this_machine_answers_for_is_asked_for_a_name() {
     assert!(!ask("S-1-5-21-1-2-4-1001", Some(&machine)));
     assert!(!ask("S-1-5-21-9-2-3-1001", Some(&machine)));
     assert!(!ask("S-1-5-21-1-2-3-1001", None));
-    // Not on the list: a logon session (which a domain controller may answer for), an Entra ID account, a capability
-    // other than the two application packages, a SID next to Everyone's, a per-VM SID, and an NT AUTHORITY SID past
-    // the well-known ones.
+    // Not on the list (a logon session is one a domain controller may answer for):
     for text in [
         "S-1-5-5-0-12345",
         "S-1-12-1-1-2-3-4",

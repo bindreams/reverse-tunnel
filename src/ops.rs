@@ -75,8 +75,8 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
 /// install's and open to the account by contract.
 ///
-/// On Windows it runs as the caller, whom a file the account cannot read does not stop, so the DACLs of what `run`
-/// opens are then judged for the account (`access::check`).
+/// On Windows it runs as the caller, whom a file the account cannot read does not stop, so `run --check` also judges
+/// the DACLs for the account (`access::check`).
 pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
     // Windows runs the check as the caller, whoever is asked for.
     #[cfg(windows)]
@@ -111,8 +111,6 @@ pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str
     };
     command::run_built(&format!("{what} {who}"), &mut check)
         .context("the service would not start with this configuration")?;
-    #[cfg(windows)]
-    crate::access::check(paths, exe).context("the service would not start with this configuration")?;
     Ok(())
 }
 

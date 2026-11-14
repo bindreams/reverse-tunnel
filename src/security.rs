@@ -156,8 +156,8 @@ impl Descriptor {
     }
 }
 
-/// Gives `path` the DACL that its parent's inheritable ACEs make, and none of its own: what a file made there has. Any
-/// edit of its DACL goes, a protected DACL included. The owner stays.
+/// Gives `path` the DACL that its parent's inheritable ACEs make, and none of its own: what a file made there has. The
+/// owner stays.
 pub fn inherit_dacl(path: &Path) -> io::Result<()> {
     // An empty DACL, unprotected: Windows adds the inherited ACEs to it.
     Descriptor::parse("D:")?.set(path, UNPROTECTED_DACL_SECURITY_INFORMATION)
@@ -198,10 +198,16 @@ pub struct Ace {
     pub sid: Sid,
 }
 
-/// The plain allow ACEs and every kind of deny ACE (plain, callback, object, callback object) of `path`'s DACL,
-/// inherited ones included. Other allows (conditional, object) are left out: nothing may rely on them. A path with no
-/// DACL gives everyone full access, so it has one ACE: Everyone's.
-pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
+/// What `aces_of` reads of a DACL.
+pub struct Dacl {
+    pub aces: Vec<Ace>,
+    /// How many allow ACEs were left out (conditional and object ones).
+    pub left_out: usize,
+}
+
+/// `path`'s DACL (inherited ACEs included) as plain allows and all four kinds of deny; conditional and object allows are
+/// left out because they may not grant, and counted. No DACL means full access for Everyone: one ACE.
+pub fn aces_of(path: &Path) -> io::Result<Dacl> {
     let (mut dacl, mut descriptor) = (null_mut(), null_mut());
     // SAFETY: the path is NUL-terminated, and the out pointers are live.
     let code = unsafe {
@@ -221,13 +227,16 @@ pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
     }
     let _descriptor = Local(descriptor);
     if dacl.is_null() {
-        return Ok(vec![Ace {
-            allows: true,
-            inherit_only: false,
-            object_inherit: false,
-            mask: FILE_ALL_ACCESS,
-            sid: Sid::parse("S-1-1-0")?,
-        }]);
+        return Ok(Dacl {
+            aces: vec![Ace {
+                allows: true,
+                inherit_only: false,
+                object_inherit: false,
+                mask: FILE_ALL_ACCESS,
+                sid: Sid::parse("S-1-1-0")?,
+            }],
+            left_out: 0,
+        });
     }
     let mut info = ACL_SIZE_INFORMATION::default();
     // SAFETY: `dacl` points into the live descriptor, and `info` is the size that the call is told.
@@ -242,7 +251,7 @@ pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
     if read == 0 {
         return Err(io::Error::last_os_error());
     }
-    let mut aces = Vec::new();
+    let (mut aces, mut left_out) = (Vec::new(), 0);
     for at in 0..info.AceCount {
         let mut ace = null_mut();
         // SAFETY: `at` is below the ACL's count, and the out pointer is live.
@@ -258,6 +267,7 @@ pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
             ACCESS_DENIED_OBJECT_ACE_TYPE | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
         );
         if !allows && kind != ACCESS_DENIED_ACE_TYPE && kind != ACCESS_DENIED_CALLBACK_ACE_TYPE && !object {
+            left_out += 1;
             continue;
         }
         // SAFETY: GetAce gave a pointer to an ACE whose header says it is `AceSize` bytes, inside the live descriptor.
@@ -275,7 +285,7 @@ pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
             sid: unsafe { Sid::copy_of(bytes.as_ptr().add(sid_at).cast_mut().cast()) },
         });
     }
-    Ok(aces)
+    Ok(Dacl { aces, left_out })
 }
 
 /// The mask of an allow or deny ACE and where its SID starts, from its `bytes`: the header, the mask, then for an
@@ -361,9 +371,8 @@ impl Sid {
     }
 
     /// What to call this SID for a person: the account or group it names, as `DOMAIN\Name` (`Name` for a well-known one
-    /// such as Everyone), else the SID as `S-1-5-...`. Only a SID that this machine answers for is looked up
-    /// (`is_local`: the well-known SIDs, the built-in and service SIDs, and those of the machine's own accounts);
-    /// every other, a domain account, a logon session or an Entra ID SID, is shown as its text, so a lookup never
+    /// such as Everyone), else the SID as `S-1-5-...`. Only a SID that this machine answers for (`is_local`) is looked
+    /// up; every other, a domain account, a logon session or an Entra ID SID, is shown as its text, so a lookup never
     /// waits on a domain controller.
     pub fn label(&self) -> String {
         let name = is_local(self, machine_domain).then(|| self.account_name()).flatten();
@@ -389,7 +398,6 @@ impl Sid {
                 &mut kind,
             )
         };
-        // SAFETY: only reads the thread's last error.
         if sized != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
             return None;
         }
@@ -491,13 +499,10 @@ fn read_machine_domain() -> Option<Sid> {
     (!sid.is_null()).then(|| unsafe { Sid::copy_of(sid) })
 }
 
-/// Whether this machine answers for `sid`, so that a lookup of it asks no other: only these, never "whatever is not
-/// known to be foreign". Everyone (`S-1-1-0`), the local and creator authorities (`S-1-2-*`, `S-1-3-*`), the NT
-/// AUTHORITY SIDs `S-1-5-1` to `S-1-5-20` but the logon sessions (`S-1-5-5-*`), `S-1-5-33`, `S-1-5-64-*`, `S-1-5-83-0`,
-/// `S-1-5-90-*`, `S-1-5-113` and `S-1-5-114`, BUILTIN (`S-1-5-32-*`), the service SIDs (`S-1-5-80-*`, which the local
-/// LSA computes), the application packages `S-1-15-2-1` and `S-1-15-2-2`, and the SIDs of this machine's own account
-/// domain (`machine_domain`, called only for such a SID; with none known, no domain SID is). A logon, Entra ID
-/// (`S-1-12-*`), other capability or another domain's SID is not.
+/// Whether this machine answers for `sid`, so that looking it up asks no other machine: an allow-list, never "whatever
+/// is not known to be foreign". It covers the well-known, built-in and service SIDs, two application packages, and this
+/// machine's own account domain (`machine_domain`, read only for a domain SID). Logon sessions, Entra ID, other
+/// capabilities and other domains' SIDs are not.
 fn is_local<'a>(sid: &Sid, machine_domain: impl FnOnce() -> Option<&'a Sid>) -> bool {
     match sid.parts() {
         (1, subs) => subs == [0],

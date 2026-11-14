@@ -95,7 +95,7 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
     rights
 }
 
-/// What `class` says of the token of process `pid`, in a buffer that is 8-aligned and as large as Windows said.
+/// What `class` says of the token of process `pid`.
 fn token_information(pid: u32, class: TOKEN_INFORMATION_CLASS) -> Vec<u64> {
     // SAFETY: plain calls with live pointers; each handle is owned, so it is closed once.
     unsafe {
