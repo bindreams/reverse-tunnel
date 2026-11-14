@@ -102,11 +102,11 @@ pub fn images_of_the_binary(paths: &Paths) -> Result<Vec<PathBuf>> {
     let binary = binary.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     let (mut of_binary, mut of_images) = (Vec::new(), Vec::new());
     for image in images(paths)? {
-        let kept = image.file_name().and_then(|name| name.to_str()).and_then(kept_name);
-        match kept {
-            Some(kept) if kept.eq_ignore_ascii_case(binary) => of_binary.push(image),
-            Some(kept) if service::is_image(&kept.to_ascii_lowercase()) => of_images.push(image),
-            _ => {}
+        let name = image.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        if is_leftover_of(name, binary) {
+            of_binary.push(image);
+        } else if kept_name(name).is_some_and(service::is_image) {
+            of_images.push(image);
         }
     }
     of_binary.extend(of_images);

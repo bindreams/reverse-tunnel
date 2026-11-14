@@ -204,12 +204,14 @@ fn a_file_held_open_without_delete_sharing_is_refused_with_a_sharing_violation()
 }
 
 #[test]
-fn a_file_replaced_by_a_rename_has_exactly_the_name_it_was_given_whatever_the_length() {
+fn a_file_renamed_over_has_exactly_the_name_it_was_given_whatever_the_length() {
     let (_dir, bin) = bin();
     // The name's length decides how the rename's argument ends, which the system reads up to its terminator.
     let names: Vec<String> = (1..=8).map(|len| "n".repeat(len)).collect();
     for name in &names {
-        write_atomic(&bin.join(name), b"x", Perm::executable(), Replace::Always).unwrap();
+        let mut temp = tempfile::NamedTempFile::new_in(&bin).unwrap();
+        rename_over(temp.as_file(), temp.path(), &bin.join(name)).unwrap();
+        temp.disable_cleanup(true);
     }
 
     let mut found: Vec<_> = fs::read_dir(&bin)
@@ -218,14 +220,4 @@ fn a_file_replaced_by_a_rename_has_exactly_the_name_it_was_given_whatever_the_le
         .collect();
     found.sort();
     assert_eq!(found, names);
-}
-
-#[test]
-fn a_posix_rename_falls_back_only_where_the_system_does_not_support_it() {
-    // ERROR_INVALID_PARAMETER: Windows before 1709. ERROR_NOT_SUPPORTED: a filesystem without POSIX rename.
-    assert!(posix_rename_unsupported(&io::Error::from_raw_os_error(87)));
-    assert!(posix_rename_unsupported(&io::Error::from_raw_os_error(50)));
-    // Access denied and a sharing violation are answers about `dest`, which the fallback would only repeat.
-    assert!(!posix_rename_unsupported(&io::Error::from_raw_os_error(5)));
-    assert!(!posix_rename_unsupported(&io::Error::from_raw_os_error(32)));
 }

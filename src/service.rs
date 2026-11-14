@@ -56,15 +56,18 @@ pub fn image(paths: &Paths, binary: &[u8]) -> PathBuf {
     }
 }
 
-/// Windows: whether `name` is that of a service image (see `image`) of some build.
+/// Windows: whether `name` is that of a service image (see `image`) of some build. Names are case-insensitive there.
 #[cfg(windows)]
 pub fn is_image(name: &str) -> bool {
     let digest = name
-        .strip_prefix(IMAGE_PREFIX)
-        .and_then(|rest| rest.strip_suffix(EXE_SUFFIX));
-    digest.is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    })
+        .get(..IMAGE_PREFIX.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(IMAGE_PREFIX))
+        .and_then(|_| {
+            let rest = &name[IMAGE_PREFIX.len()..];
+            let (digest, suffix) = rest.split_at_checked(rest.len().checked_sub(EXE_SUFFIX.len())?)?;
+            suffix.eq_ignore_ascii_case(EXE_SUFFIX).then_some(digest)
+        });
+    digest.is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 /// The file that the installed service runs: `exe` on Unix, and on Windows the image that the registered service is

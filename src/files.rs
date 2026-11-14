@@ -343,7 +343,16 @@ impl OpenElsewhere {
 /// Whether `err` is ERROR_SHARING_VIOLATION (32): another process has the file open without delete sharing, which a
 /// delete, a rename and a replace (see `rename_over`) all give. Not `EPIPE`, which is 32 on Unix.
 fn is_sharing_violation(err: &io::Error) -> bool {
-    cfg!(windows) && err.raw_os_error() == Some(32)
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
+        err.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = err;
+        false
+    }
 }
 
 /// Writes `data` to `dest` through a temp file in the same directory, which has `perm` before it gets any data, so
@@ -407,10 +416,11 @@ fn persist_over(file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfi
     file.persist(dest).map(drop)
 }
 
-/// Puts `file` at `dest`, replacing what is there, by `rename_over`, or, where the system has no POSIX rename (see
-/// `posix_rename_unsupported`), by `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, as `tempfile` persists. Both give
-/// the same answers about `dest` (see `OpenElsewhere`), except that a `dest` another process holds open with delete
-/// sharing refuses the second.
+/// Puts `file` at `dest`, replacing what is there, by `rename_over`. Where the system answers that it has no POSIX
+/// rename (see `posix_rename_unsupported`), by `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, as `tempfile` persists;
+/// that is decided per call, as std's POSIX delete does it, since the answer belongs to a file system. It gives the
+/// same answers about `dest` (see `OpenElsewhere`), except that a `dest` another process holds open with delete
+/// sharing is refused. Every other error is `rename_over`'s, unchanged. See issue #85 for older systems.
 #[cfg(windows)]
 fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfile::PersistError> {
     match rename_over(file.as_file(), file.path(), dest) {
@@ -425,16 +435,23 @@ fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), te
 }
 
 /// Whether `err`, the failure of `rename_over`, says that the system cannot rename with POSIX semantics:
-/// ERROR_INVALID_PARAMETER (87, Windows before 1709) or ERROR_NOT_SUPPORTED (50, a filesystem without it).
+/// ERROR_INVALID_PARAMETER (Windows before 1709), ERROR_NOT_SUPPORTED or ERROR_INVALID_FUNCTION (a file system
+/// without it).
 #[cfg(windows)]
 fn posix_rename_unsupported(err: &io::Error) -> bool {
-    matches!(err.raw_os_error(), Some(87 | 50))
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED};
+    err.raw_os_error().is_some_and(|code| {
+        [ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION].contains(&(code as u32))
+    })
 }
 
 /// Windows: renames `from`, which `file` has open, to `to`, replacing `to` as a POSIX rename does: a `to` that another
 /// process has open with delete sharing (an indexer, a scanner) does not stop it, where `MoveFileExW` would be refused.
 /// A `to` that is open without delete sharing gives ERROR_SHARING_VIOLATION (see `OpenElsewhere`), and one that is a
 /// running image, or that the ACL or the read-only attribute protects, gives access denied.
+///
+/// Not `std::fs::rename`: it tries `MoveFileExW` first and returns its access denied (5) for a `to` held without delete
+/// sharing, where this gives 32; a held file and a refused one would look alike, and only the first is waited on.
 #[cfg(windows)]
 fn rename_over(file: &File, from: &Path, to: &Path) -> io::Result<()> {
     use std::ffi::c_void;
