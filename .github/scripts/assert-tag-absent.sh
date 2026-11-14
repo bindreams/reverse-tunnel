@@ -12,7 +12,7 @@ err="$(git ls-remote --exit-code --tags origin "refs/tags/${tag}" 2>&1 >/dev/nul
 
 case "$status" in
     0)
-        echo "::error::Tag ${tag} already exists on origin. GitHub would bind the release to that tag's existing commit instead of the intended one. Delete the tag first."
+        echo "::error::Tag ${tag} already exists on origin. GitHub would bind the release to that tag's existing commit instead of the intended one. Delete the tag if GitHub allows it; a tag an immutable release has used cannot be, so then bump the version in Cargo.toml on main and draft that version."
         exit 1
         ;;
     2)
