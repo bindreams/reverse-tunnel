@@ -317,8 +317,9 @@ fn machine_path() -> String {
     machine_path_and_type().0
 }
 
-/// The file names in the operations the system runs at its next boot. Only names are compared: a leftover's name is
-/// unique by its random id, and the value's paths and layout are written by other programs too.
+/// Every file name in `PendingFileRenameOperations`, sources and targets alike. Only names are compared: a leftover's
+/// name is unique by its random id, the product schedules leftovers only as deletions, and the value's paths and layout
+/// are written by other programs too.
 pub fn names_scheduled_at_reboot() -> Vec<String> {
     let session = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(SESSION_MANAGER).unwrap();
     let value = match session.get_raw_value("PendingFileRenameOperations") {
@@ -328,7 +329,7 @@ pub fn names_scheduled_at_reboot() -> Vec<String> {
     };
     registry_text(&value.bytes)
         .split('\0')
-        .filter_map(|path| path.rsplit('\\').next())
+        .map(|path| path.rsplit_once('\\').map_or(path, |(_, name)| name))
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect()
