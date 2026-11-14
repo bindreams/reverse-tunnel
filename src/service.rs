@@ -6,6 +6,8 @@ use std::time::Duration;
 use goetia::manager::ServiceManager;
 use goetia::spec::{DaemonFields, DaemonSpec, Id, Kind, Restart, User};
 
+#[cfg(windows)]
+use crate::files::{strip_prefix, strip_suffix};
 use crate::paths::Paths;
 
 /// The name of the service, which `ID` and the accounts' names are spelled from.
@@ -59,15 +61,13 @@ pub fn image(paths: &Paths, binary: &[u8]) -> PathBuf {
 /// Windows: whether `name` is that of a service image (see `image`) of some build. Names are case-insensitive there.
 #[cfg(windows)]
 pub fn is_image(name: &str) -> bool {
-    let digest = name
-        .get(..IMAGE_PREFIX.len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case(IMAGE_PREFIX))
-        .and_then(|_| {
-            let rest = &name[IMAGE_PREFIX.len()..];
-            let (digest, suffix) = rest.split_at_checked(rest.len().checked_sub(EXE_SUFFIX.len())?)?;
-            suffix.eq_ignore_ascii_case(EXE_SUFFIX).then_some(digest)
-        });
-    digest.is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    let Some(rest) = strip_prefix(name, IMAGE_PREFIX) else {
+        return false;
+    };
+    let Some(digest) = strip_suffix(rest, EXE_SUFFIX) else {
+        return false;
+    };
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// The file that the installed service runs: `exe` on Unix, and on Windows the image that the registered service is

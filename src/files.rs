@@ -288,6 +288,24 @@ pub fn is_access_denied(err: &anyhow::Error) -> bool {
     has_kind(err, ErrorKind::PermissionDenied)
 }
 
+/// Whether `a` and `b` are the same Windows file name, which ignores ASCII case.
+pub fn same_name(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// `name` without the start `prefix`, if it has it, whatever the ASCII case (see `same_name`).
+pub fn strip_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    let (start, rest) = (name.get(..prefix.len())?, name.get(prefix.len()..)?);
+    same_name(start, prefix).then_some(rest)
+}
+
+/// `name` without the end `suffix`, if it has it, whatever the ASCII case (see `same_name`).
+pub fn strip_suffix<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    let at = name.len().checked_sub(suffix.len())?;
+    let (rest, end) = (name.get(..at)?, name.get(at..)?);
+    same_name(end, suffix).then_some(rest)
+}
+
 /// Whether `err`, or the `io::Error` it wraps, is the OS saying that the path is not there.
 #[cfg(windows)]
 pub fn is_not_found(err: &anyhow::Error) -> bool {
@@ -418,9 +436,10 @@ fn persist_over(file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfi
 
 /// Puts `file` at `dest`, replacing what is there, by `rename_over`. Where the system answers that it has no POSIX
 /// rename (see `posix_rename_unsupported`), by `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, as `tempfile` persists;
-/// that is decided per call, as std's POSIX delete does it, since the answer belongs to a file system. It gives the
-/// same answers about `dest` (see `OpenElsewhere`), except that a `dest` another process holds open with delete
-/// sharing is refused. Every other error is `rename_over`'s, unchanged. See issue #85 for older systems.
+/// that is decided per call, as std's POSIX delete does it, since the answer belongs to a file system. Every other
+/// error is `rename_over`'s, unchanged. On that fallback `MoveFileExW` answers 5, not 32, for a `dest` that another
+/// process holds open without delete sharing, so that holder is not waited on (see `OpenElsewhere`), and it refuses a
+/// `dest` held open with delete sharing. See issue #85 for older systems.
 #[cfg(windows)]
 fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfile::PersistError> {
     match rename_over(file.as_file(), file.path(), dest) {

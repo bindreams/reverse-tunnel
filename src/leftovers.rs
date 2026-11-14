@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::files::{
-    OpenElsewhere, hex_of_random_bytes, is_access_denied, is_not_found, remove_file, require_regular_file,
+    OpenElsewhere, hex_of_random_bytes, is_access_denied, is_not_found, remove_file, require_regular_file, same_name,
+    strip_prefix,
 };
 use crate::paths::Paths;
 use crate::service;
@@ -31,26 +32,20 @@ pub fn pattern(dir: &Path) -> PathBuf {
     dir.join(format!("{PREFIX}*"))
 }
 
-/// What follows `PREFIX` in `name`, which `cmd` matches whatever the case.
-fn after_prefix(name: &str) -> Option<&str> {
-    let (prefix, rest) = (name.get(..PREFIX.len())?, name.get(PREFIX.len()..)?);
-    prefix.eq_ignore_ascii_case(PREFIX).then_some(rest)
-}
-
 /// Whether the file called `name` is a leftover: whether `pattern` matches it.
 pub fn is_leftover(name: &str) -> bool {
-    after_prefix(name).is_some()
+    strip_prefix(name, PREFIX).is_some()
 }
 
 /// Whether the file called `name` is a leftover of a file that was called `original`.
 pub fn is_leftover_of(name: &str, original: &str) -> bool {
-    kept_name(name).is_some_and(|kept| kept.eq_ignore_ascii_case(original))
+    kept_name(name).is_some_and(|kept| same_name(kept, original))
 }
 
 /// The name that the leftover called `name` had, if it is a leftover.
 pub fn kept_name(name: &str) -> Option<&str> {
     // The id is hex, so the first dot ends it.
-    after_prefix(name)?.split_once('.').map(|(_id, kept)| kept)
+    strip_prefix(name, PREFIX)?.split_once('.').map(|(_id, kept)| kept)
 }
 
 /// The folder that holds the bin dir, where leftovers go.

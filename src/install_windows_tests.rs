@@ -264,6 +264,25 @@ fn the_sweep_keeps_the_registered_image_and_deletes_the_other_old_images_or_rena
 }
 
 #[test]
+fn the_sweep_and_the_clean_keep_a_file_whose_name_differs_from_the_wanted_one_only_in_case() {
+    let (_dir, paths) = installed();
+    let registered = service::image(&paths, b"registered");
+    let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
+    let image = paths.bin_dir.join(name(&registered).to_uppercase());
+    // Only the extension differs, so the name still has `clean_bin_dir`'s frpc prefix.
+    let frpc = paths
+        .bin_dir
+        .join(name(&download::tools(&paths).frpc).replace(".exe", ".EXE"));
+    fs::write(&image, "").unwrap();
+    fs::write(&frpc, "").unwrap();
+
+    assert!(sweep_old_images(&paths, &registered).is_empty());
+    clean_bin_dir(&paths).unwrap();
+
+    assert!(image.exists() && frpc.exists());
+}
+
+#[test]
 fn the_sweep_goes_on_past_an_image_it_cannot_delete() {
     let (_dir, paths) = installed();
     let registered = service::image(&paths, b"registered");

@@ -24,7 +24,7 @@ use crate::config::{Config, valid_label};
 use crate::files::is_access_denied;
 use crate::files::{
     Perm, Replace, WriteOutcome, hex_of_random_bytes, make_dir, make_missing_dirs, open_file, remove_entry,
-    remove_file, restore_binary, write_atomic,
+    remove_file, restore_binary, same_name, write_atomic,
 };
 use crate::join::{self, JoinInfo};
 #[cfg(windows)]
@@ -710,6 +710,10 @@ fn remove_file_that_may_run(paths: &Paths, path: &Path) -> Result<()> {
 /// cause, except that a failure to read the directory ends it.
 #[cfg(windows)]
 fn sweep_old_images(paths: &Paths, registered: &Path) -> Vec<anyhow::Error> {
+    let registered = registered
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     let reading = || format!("reading {}", paths.bin_dir.display());
     let listing = match fs::read_dir(&paths.bin_dir) {
         Ok(listing) => listing,
@@ -722,11 +726,8 @@ fn sweep_old_images(paths: &Paths, registered: &Path) -> Vec<anyhow::Error> {
             // A listing that fails once can fail on every step after it.
             Err(err) => return vec![anyhow::Error::new(err).context(reading())],
         };
-        let is_image = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(service::is_image);
-        if is_image && path != registered {
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+        if service::is_image(name) && !same_name(name, registered) {
             old.push(path);
         }
     }
@@ -1055,10 +1056,11 @@ fn place_binary(pending: Option<&Paths>, dest: &Path, binary: &[u8], replace: Re
 /// be removed is a warning.
 fn clean_bin_dir(paths: &Paths) -> Result<()> {
     let current = download::tools(paths).frpc;
+    let current = current.file_name().and_then(|name| name.to_str()).unwrap_or_default();
     for entry in fs::read_dir(&paths.bin_dir)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
+        let stale = !same_name(name, current) && (name.starts_with("frpc-") || name.starts_with(".tmp"));
         if name.starts_with(upgrade::STAGED) {
             upgrade::warn_if_kept(remove_file_that_may_run(paths, &path));
         } else if stale {
