@@ -58,10 +58,10 @@ def docker_down(folder, build=False):
 
 @pytest.fixture
 def docker(tmp_path, monkeypatch):
-    """A fake `docker`, alone on PATH: logs its arguments, prints $FAKE_STDERR, exits with $FAKE_EXIT."""
+    """A fake `docker`, alone on PATH: logs its arguments, prints $FAKE_STDOUT and $FAKE_STDERR, exits $FAKE_EXIT."""
     exe = tmp_path / "bin" / "docker"
     exe.parent.mkdir()
-    exe.write_text('#!/bin/sh\necho "$@" >> "$0.log"\necho "$FAKE_STDERR" >&2\nexit "${FAKE_EXIT:-0}"\n')
+    exe.write_text('#!/bin/sh\necho "$@" >> "$0.log"\necho "$FAKE_STDOUT"\necho "$FAKE_STDERR" >&2\nexit "${FAKE_EXIT:-0}"\n')
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", str(exe.parent))
     return exe
@@ -362,15 +362,27 @@ def test_network_exists_reports_docker_failure(docker, tmp_path, monkeypatch):
         compose.network_exists("gateway")
 
 
-def test_compose_up_recreates_only_the_plugin_and_starts_frps_if_it_is_not_running(docker, tmp_path):
-    compose.compose_up(tmp_path)  # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it
-    compose.compose_up(tmp_path, build=True)
-    base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml up -d"
+def test_compose_up_recreates_only_the_plugin_and_starts_frps_if_it_is_not_running(docker, tmp_path, monkeypatch):
+    base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml"
     frps = "--no-recreate reverse-tunnel-frps"  # recreating a running frps drops every tunnel
     plugin = "--no-deps reverse-tunnel-plugin"
-    assert Path(f"{docker}.log").read_text() == (
-        f"{base} {plugin}\n{base} {frps}\n{base} --build {plugin}\n{base} --build {frps}\n"
-    )
+    log = Path(f"{docker}.log")
+
+    def calls(*lines):
+        return "".join(f"{base} {line}\n" for line in lines)
+
+    assert not compose.compose_up(tmp_path)  # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it
+    assert log.read_text() == calls("ps -aq reverse-tunnel-frps", f"up -d {plugin}", f"up -d {frps}")
+
+    log.unlink()  # no frps container yet: the build is for both images
+    assert not compose.compose_up(tmp_path, build=True)
+    expected = calls("ps -aq reverse-tunnel-frps", f"up -d --build {plugin}", f"up -d --build {frps}")
+    assert log.read_text() == expected
+
+    log.unlink()  # a container exists: its image would be built and thrown away, so only the plugin is built
+    monkeypatch.setenv("FAKE_STDOUT", "0123abcd")
+    assert compose.compose_up(tmp_path, build=True)
+    assert log.read_text() == calls("ps -aq reverse-tunnel-frps", f"up -d --build {plugin}", f"up -d {frps}")
 
 
 def test_init_starts_the_bridge_and_prints_the_join_code_last_under_a_label(bridge, monkeypatch, capsys):
@@ -385,6 +397,21 @@ def test_init_starts_the_bridge_and_prints_the_join_code_last_under_a_label(brid
     assert lines[-1].startswith("rt1:")
     label = " ".join(lines[1:-1])
     assert "Join code" in label and "reverse-tunnel install" in label and "ctl join-code" in label
+
+
+def test_init_says_how_to_apply_a_change_to_a_frps_it_left_running(bridge, monkeypatch, capsys):
+    monkeypatch.setattr(compose, "compose_up", lambda folder, build=False: True)
+    assert cli.main(["init"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-1].startswith("rt1:"), "the join code stays last, for copying"
+    note = [line for line in lines if "left running" in line]
+    assert len(note) == 1 and "docker compose up -d --build reverse-tunnel-frps" in note[0]
+    assert "tunnel" in note[0] and "restart" not in note[0]
+
+
+def test_init_says_nothing_of_frps_when_it_started_it(bridge, capsys):
+    assert cli.main(["init"]) == 0
+    assert "left running" not in capsys.readouterr().out
 
 
 def test_a_command_other_than_init_brings_the_whole_bridge_up_without_a_build(inited):
@@ -407,7 +434,10 @@ def test_every_command_and_argument_has_help(name, capsys):
 
 
 def test_bring_up_holds_the_state_lock(inited, monkeypatch):
+    ran = []
+
     def up(folder, build=False):
+        ran.append(folder)
         fd = os.open("state/lock", os.O_RDWR)
         try:
             with pytest.raises(BlockingIOError):  # another ctl would wait here
@@ -417,6 +447,7 @@ def test_bring_up_holds_the_state_lock(inited, monkeypatch):
 
     monkeypatch.setattr(compose, "compose_up", up)
     assert cli.main(["list"]) == 0
+    assert ran, "the bring-up did not run, so the lock was never checked"
 
 
 def test_a_failed_first_bring_up_says_to_rerun_init_which_prints_the_join_code(bridge, monkeypatch, capsys):

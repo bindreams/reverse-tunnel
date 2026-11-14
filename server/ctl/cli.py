@@ -128,8 +128,14 @@ def _init_report(args, hosts, aliases, env):
     )
 
 
+FRPS_KEPT = (
+    "reverse-tunnel-frps was left running. To apply a change to its image, compose.yaml or .env, which drops every "
+    "tunnel once, run `docker compose up -d --build reverse-tunnel-frps`."
+)
+
+
 class Command(NamedTuple):
-    # Edits the registries in place and returns text to print after the reload.
+    # Edits the registries in place and returns text to print: before the bring-up, or after it for `bootstrap`.
     handler: Callable
     help: str
     arguments: dict[str, str]  # the help of each argument
@@ -222,7 +228,7 @@ def _run(args) -> None:
             print(out)  # after the write, which may fail; before the reload, which may too
         try:
             atomic_write(GENERATED, render_compose(hosts, aliases, domain).encode(), 0o644)
-            compose.compose_up(Path.cwd(), build=command.bootstrap)
+            frps_exists = compose.compose_up(Path.cwd(), build=command.bootstrap)
         except (OSError, ValueError, subprocess.CalledProcessError) as e:
             updated = "the registry is updated but " if (hosts, aliases) != (old_hosts, old_aliases) else ""
             retry = (
@@ -231,7 +237,9 @@ def _run(args) -> None:
                 else "rerun any ctl command to retry"
             )
             raise CtlError(f"{updated}the bridge was not brought up ({e}); {retry}") from e
-        if out and command.bootstrap:
+        if command.bootstrap:
+            if frps_exists:
+                print(FRPS_KEPT)
             print(out)
 
 

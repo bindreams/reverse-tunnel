@@ -22,7 +22,22 @@ fn the_ssh_config_block_names_the_ssh_service_of_the_host_on_the_bridge() {
 }
 
 #[test]
-fn there_is_no_block_for_a_host_that_does_not_publish_ssh() {
+fn the_block_names_whichever_tcp_service_is_on_port_22_by_the_name_that_always_routes() {
+    let cfg = Config::parse(
+        "host: myhost\nbridge: tunnel.example.com\ndefault: shell\nservices:\n  web:\n    port: 80\n    type: http\n  \
+         shell:\n    port: 22\n    type: tcp\n",
+    )
+    .unwrap();
+    let text = instructions(&cfg).unwrap();
+    assert!(
+        text.contains("\n    HostName shell.myhost.tunnel.example.com\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn there_is_no_block_for_a_host_with_no_tcp_service_on_port_22() {
     assert!(instructions(&config("  web:\n    port: 80\n    type: http\n")).is_none());
     assert!(instructions(&config("  ssh:\n    port: 22\n    type: http\n")).is_none());
+    assert!(instructions(&config("  ssh:\n    port: 2222\n    type: tcp\n")).is_none());
 }
