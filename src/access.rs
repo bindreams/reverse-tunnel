@@ -13,7 +13,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use crate::account;
 use crate::logfile::ROTATED;
-use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::paths::{ADMIN_PORT_FILE, FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
 use crate::security::{self, Ace, Dacl, Sid};
 use crate::service;
 
@@ -42,7 +42,8 @@ const RUN: Right = (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, "read and run");
 /// Of the log directory itself: `run` makes files there, and renames a log there (rotation).
 const MAKE_FILES: Right = (FILE_ADD_FILE, "create files in");
 /// Of a file `run` makes in the log directory, which it gets by inheritance: `run` writes each, `frpc` reads
-/// `frpc.toml`, and rotation renames a log over `<log>.1`, which needs DELETE on the log and on `<log>.1`.
+/// `frpc.toml`, a rename replaces the recorded admin port, and rotation renames a log over `<log>.1`; each rename needs
+/// DELETE on the file it replaces, and rotation on the log too.
 const NEW_FILE: Right = (
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
     "read, write and delete",
@@ -110,6 +111,7 @@ pub fn opens(paths: &Paths, exe: &Path, frpc: &Path) -> Vec<Need> {
             ..Need::of(logs.clone(), MAKE_FILES)
         },
         Need::made(logs.join(FRPC_CONFIG), RENDERED),
+        Need::made(logs.join(ADMIN_PORT_FILE), NEW_FILE),
     ];
     for log in [LOG_SUPERVISOR, LOG_FRPC] {
         needs.push(Need::made(logs.join(log), LOG));

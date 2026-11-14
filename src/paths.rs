@@ -6,6 +6,8 @@ pub const LOG_FRPC: &str = "frpc.log";
 pub const LOG_SUPERVISOR: &str = "supervisor.log";
 /// The frpc configuration `run` renders into the log dir.
 pub const FRPC_CONFIG: &str = "frpc.toml";
+/// The loopback port of frpc's admin API, which `run` picks at each start of frpc and records beside its configuration.
+pub const ADMIN_PORT_FILE: &str = "frpc-admin.port";
 
 /// Where an installation keeps its files on this OS.
 #[derive(Debug, Clone)]
@@ -44,6 +46,11 @@ impl Paths {
     /// The password of frpc's admin API (`admin::USER`), which `status` reads.
     pub fn admin_password(&self) -> PathBuf {
         self.secrets_dir.join("admin.password")
+    }
+
+    /// Where `run` records the port of frpc's admin API, which `status` reads. It holds no secret.
+    pub fn admin_port_file(&self) -> PathBuf {
+        self.log_dir.join(ADMIN_PORT_FILE)
     }
 
     /// Paths for tests: fixed names under `root`, and no link.

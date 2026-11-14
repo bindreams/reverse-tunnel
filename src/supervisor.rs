@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdListener};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -28,12 +28,16 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Config;
 use crate::download::Tools;
+use crate::files::{Perm, Replace, write_atomic};
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT};
 use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
 
-/// Any valid port: `frpc verify` reads the port but does not connect to it.
+/// Any valid port: `frpc verify` reads the ports but does not connect to them.
 const CHECK_PORT: u16 = 1;
+
+/// The mode of the recorded admin port.
+const RECORDED: Perm = Perm::new(0o644);
 
 /// How long a client has to finish the WebSocket handshake.
 const HANDSHAKE_WITHIN: Duration = Duration::from_secs(60);
@@ -105,11 +109,20 @@ pub(crate) fn token(path: &Path) -> Result<String> {
     Ok(text.trim().to_string())
 }
 
-/// Renders frpc.toml for `port` into `dir` and returns its path. It holds no secret: frpc reads the tokens from its
-/// environment.
-fn render_config(setup: &Setup<'_>, port: u16, dir: &Path) -> Result<PathBuf> {
+/// A port on loopback that nothing holds now, for frpc's admin API: binds port 0, reads the port and releases it.
+///
+/// Another program can take the port before frpc binds it. frpc then exits, so `run` fails, and the service manager's
+/// restart of `run` picks another port.
+fn free_loopback_port() -> Result<u16> {
+    let socket = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).context("picking a port for frpc's admin API")?;
+    Ok(socket.local_addr()?.port())
+}
+
+/// Renders frpc.toml for the WebSocket listener's `ws_port` and the admin API's `admin_port` into `dir` and returns
+/// its path. It holds no secret: frpc reads the tokens from its environment.
+fn render_config(setup: &Setup<'_>, ws_port: u16, admin_port: u16, dir: &Path) -> Result<PathBuf> {
     let config = dir.join(FRPC_CONFIG);
-    fs::write(&config, render(&setup.cfg, port, setup.paths))
+    fs::write(&config, render(&setup.cfg, ws_port, admin_port, setup.paths))
         .with_context(|| format!("writing {}", config.display()))?;
     Ok(config)
 }
@@ -119,7 +132,7 @@ async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
     // A temp dir, not the log dir: as root the check would leave files there that the service account cannot overwrite,
     // and as the account it would overwrite the running service's frpc.toml.
     let dir = tempfile::tempdir()?;
-    let config = render_config(setup, CHECK_PORT, dir.path())?;
+    let config = render_config(setup, CHECK_PORT, CHECK_PORT, dir.path())?;
     let status = setup.frpc(&["verify"], &config).status().await;
     let status = status.with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     ensure!(status.success(), "frpc verify rejected the configuration: {status}");
@@ -133,7 +146,12 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
         .with_context(|| format!("binding the WebSocket listener on {listen}"))?;
     // The log dir is the one directory the service account may write. A stopped `run` cannot clean up after itself
     // (the service manager kills it), so every start overwrites the same file.
-    let config = render_config(setup, listener.local_addr()?.port(), &setup.paths.log_dir)?;
+    let admin_port = free_loopback_port()?;
+    let config = render_config(setup, listener.local_addr()?.port(), admin_port, &setup.paths.log_dir)?;
+    // For `status`, which has no other way to find the port. No secret: anyone may read it.
+    let recorded = setup.paths.admin_port_file();
+    write_atomic(&recorded, admin_port.to_string().as_bytes(), RECORDED, Replace::Always)
+        .with_context(|| format!("writing {}", recorded.display()))?;
 
     let mut frpc = setup.frpc(&[], &config);
     frpc.stdin(Stdio::null())?

@@ -5,8 +5,8 @@ use crate::config::{CONTROL_PORT, Config, Kind};
 use crate::paths::Paths;
 
 /// The frpc.toml for `cfg`. It holds no secret: the tokens and the admin password are read from frpc's environment.
-/// `tcp` services point at `ws_port`.
-pub fn render(cfg: &Config, ws_port: u16, paths: &Paths) -> String {
+/// `tcp` services point at `ws_port`, and frpc's admin API listens on `admin_port`.
+pub fn render(cfg: &Config, ws_port: u16, admin_port: u16, paths: &Paths) -> String {
     let (host, bridge) = (&cfg.host, &cfg.bridge);
     // `Paths::system()` guarantees Unicode, and a Windows backslash escapes alike in JSON and TOML basic strings.
     let ca = serde_json::to_string(paths.bridge_pem().to_str().unwrap()).unwrap();
@@ -27,7 +27,6 @@ webServer.port = {admin_port}
 webServer.user = "{admin_user}"
 webServer.password = "{{{{ .Envs.RT_ADMIN_PASSWORD }}}}"
 "#,
-        admin_port = cfg.admin_port(),
         admin_user = admin::USER,
     );
     for (name, service) in &cfg.services {

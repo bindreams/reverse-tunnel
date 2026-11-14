@@ -84,11 +84,6 @@ fn config_accepts_utf8_bom() {
 }
 
 #[test]
-fn config_admin_port_defaults_and_is_never_0() {
-    assert_eq!(Config::parse(OK).unwrap().admin_port(), ADMIN_PORT);
-    assert_eq!(
-        Config::parse(&format!("{OK}admin_port: 7777\n")).unwrap().admin_port(),
-        7777
-    );
-    assert!(error(&format!("{OK}admin_port: 0\n")).contains("admin_port"));
+fn config_has_no_admin_port_key() {
+    assert!(error(&format!("{OK}admin_port: 7777\n")).contains("admin_port"));
 }

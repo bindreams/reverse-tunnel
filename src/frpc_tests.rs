@@ -17,9 +17,15 @@ services:
     type: http
 ";
 const WS_PORT: u16 = 41234;
+const ADMIN_PORT: u16 = 41235;
 
 fn render_yaml(yaml: &str) -> String {
-    render(&Config::parse(yaml).unwrap(), WS_PORT, &Paths::testing("root"))
+    render(
+        &Config::parse(yaml).unwrap(),
+        WS_PORT,
+        ADMIN_PORT,
+        &Paths::testing("root"),
+    )
 }
 
 /// The text of the `[[proxies]]` table named `name`.
@@ -35,7 +41,7 @@ fn proxy(out: &str, name: &str) -> String {
 fn render_transport() {
     let p = Paths::testing("root");
     let ca = serde_json::to_string(p.bridge_pem().to_str().unwrap()).unwrap();
-    let out = render(&Config::parse(YAML).unwrap(), WS_PORT, &p);
+    let out = render(&Config::parse(YAML).unwrap(), WS_PORT, ADMIN_PORT, &p);
     for line in [
         "serverAddr = \"tunnel.example.test\"",
         "serverPort = 7000",
@@ -53,20 +59,21 @@ fn render_transport() {
     }
 }
 
-/// The admin API is on loopback, with the password read from frpc's environment like the tokens.
+/// The admin API is on loopback, at the port `render` is given, with the password read from frpc's environment like
+/// the tokens.
 #[test]
 fn render_admin_api() {
-    let lines = |yaml: &str| render_yaml(yaml).lines().map(String::from).collect::<Vec<_>>();
+    let lines = render_yaml(YAML).lines().map(String::from).collect::<Vec<_>>();
     for line in [
-        "webServer.addr = \"127.0.0.1\"",
-        "webServer.port = 7400",
-        "webServer.user = \"reverse-tunnel\"",
-        "webServer.password = \"{{ .Envs.RT_ADMIN_PASSWORD }}\"",
+        "webServer.addr = \"127.0.0.1\"".to_string(),
+        format!("webServer.port = {ADMIN_PORT}"),
+        "webServer.user = \"reverse-tunnel\"".to_string(),
+        "webServer.password = \"{{ .Envs.RT_ADMIN_PASSWORD }}\"".to_string(),
     ] {
-        assert!(lines(YAML).contains(&line.to_string()), "missing line {line:?}");
+        assert!(lines.contains(&line), "missing line {line:?}");
     }
-    let moved = format!("{YAML}admin_port: 7777\n");
-    assert!(lines(&moved).contains(&"webServer.port = 7777".to_string()));
+    let other = render(&Config::parse(YAML).unwrap(), WS_PORT, 7777, &Paths::testing("root"));
+    assert!(other.lines().any(|line| line == "webServer.port = 7777"));
 }
 
 #[test]
@@ -113,7 +120,7 @@ fn frpc_verify_accepts_render() {
     std::fs::create_dir(&paths.config_dir).unwrap();
     std::fs::write(paths.bridge_pem(), include_str!("../server/testdata/bridge.pem")).unwrap();
     let toml = dir.path().join("frpc.toml");
-    let out = render(&Config::parse(YAML).unwrap(), WS_PORT, &paths);
+    let out = render(&Config::parse(YAML).unwrap(), WS_PORT, ADMIN_PORT, &paths);
     std::fs::write(&toml, out).unwrap();
     let verify = Command::new(frpc).args(["verify", "-c"]).arg(&toml).output().unwrap();
     assert!(

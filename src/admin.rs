@@ -1,12 +1,14 @@
 //! frpc's admin API, on loopback: whether this host is logged in to the bridge, and what each published service is
-//! doing. Its password is `secrets/admin.password`, which only the service account and administrators read.
+//! doing. Its password is `secrets/admin.password`, which only the service account and administrators read, and its port
+//! is the one `run` recorded (`Paths::admin_port_file`).
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::fs;
 use std::io::{self, ErrorKind};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::Deserialize;
@@ -59,11 +61,31 @@ pub fn tunnel(cfg: &Config, paths: &Paths) -> Tunnel {
         }
         Err(err) => return Tunnel::Unknown(format!("{err:#}")),
     };
-    match get(cfg.admin_port(), &password).and_then(|body| parse(&body)) {
+    let port = match recorded_port(paths) {
+        Ok(port) => port,
+        Err(err) => return Tunnel::Unknown(format!("{err:#}")),
+    };
+    match get(port, &password).and_then(|body| parse(&body)) {
         Ok(proxies) if proxies.is_empty() => Tunnel::NotConnected,
         Ok(proxies) => Tunnel::Connected(proxies),
         Err(err) => Tunnel::Unknown(format!("{err:#}")),
     }
+}
+
+/// The port `run` recorded when it last started frpc, which picks a new one at each start.
+fn recorded_port(paths: &Paths) -> Result<u16> {
+    let file = paths.admin_port_file();
+    let text = match fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(err) if err.kind() == ErrorKind::NotFound => bail!("the service has not started frpc"),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", file.display())),
+    };
+    let port: u16 = text
+        .trim()
+        .parse()
+        .with_context(|| format!("{} does not hold a port", file.display()))?;
+    ensure!(port != 0, "{} holds port 0", file.display());
+    Ok(port)
 }
 
 /// The body of frpc's `/api/status`.

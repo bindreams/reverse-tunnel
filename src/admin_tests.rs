@@ -101,15 +101,19 @@ fn get_says_when_nothing_answers() {
     assert!(format!("{:#}", get(free, "pw").unwrap_err()).contains("did not answer"));
 }
 
-/// A host whose `admin_port` is `port` and whose admin password is `pw`, if any.
-fn host(port: u16, password: Option<&str>, services: &str) -> (tempfile::TempDir, Config, Paths) {
+/// A host whose admin password is `password` and whose recorded admin port is `port`, if any.
+fn host(port: Option<u16>, password: Option<&str>, services: &str) -> (tempfile::TempDir, Config, Paths) {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::testing(dir.path());
     fs::create_dir_all(&paths.secrets_dir).unwrap();
+    fs::create_dir_all(&paths.log_dir).unwrap();
     if let Some(password) = password {
         fs::write(paths.admin_password(), format!("{password}\n")).unwrap();
     }
-    let yaml = format!("host: h\nbridge: t.example\nadmin_port: {port}\nservices:{services}");
+    if let Some(port) = port {
+        fs::write(paths.admin_port_file(), port.to_string()).unwrap();
+    }
+    let yaml = format!("host: h\nbridge: t.example\nservices:{services}");
     (dir, Config::parse(&yaml).unwrap(), paths)
 }
 
@@ -118,7 +122,7 @@ const SSH: &str = "\n  ssh: {port: 22, type: tcp}\n";
 #[test]
 fn tunnel_is_connected_when_frpc_lists_the_services() {
     let (port, served) = serve("200 OK", ANSWER);
-    let (_dir, config, paths) = host(port, Some("pw"), SSH);
+    let (_dir, config, paths) = host(Some(port), Some("pw"), SSH);
     assert_eq!(tunnel(&config, &paths), Tunnel::Connected(parse(ANSWER).unwrap()));
     assert!(
         served.join().unwrap().contains(&STANDARD.encode("reverse-tunnel:pw")),
@@ -129,27 +133,57 @@ fn tunnel_is_connected_when_frpc_lists_the_services() {
 #[test]
 fn tunnel_is_not_connected_when_frpc_lists_nothing() {
     let (port, _served) = serve("200 OK", "{}");
-    let (_dir, config, paths) = host(port, Some("pw"), SSH);
+    let (_dir, config, paths) = host(Some(port), Some("pw"), SSH);
     assert_eq!(tunnel(&config, &paths), Tunnel::NotConnected);
 }
 
 #[test]
 fn tunnel_says_why_it_was_not_checked() {
-    let (_dir, config, paths) = host(1, None, SSH);
+    let (_dir, config, paths) = host(Some(1), None, SSH);
     let Tunnel::Unknown(why) = tunnel(&config, &paths) else {
         panic!()
     };
     assert!(why.contains("admin.password"), "{why}");
 
-    let (_dir, config, paths) = host(1, Some(""), SSH);
+    let (_dir, config, paths) = host(Some(1), Some(""), SSH);
     let Tunnel::Unknown(why) = tunnel(&config, &paths) else {
         panic!()
     };
     assert!(why.contains("is empty"), "{why}");
 
-    let (_dir, config, paths) = host(1, Some("pw"), " {}\n");
+    let (_dir, config, paths) = host(Some(1), Some("pw"), " {}\n");
     let Tunnel::Unknown(why) = tunnel(&config, &paths) else {
         panic!()
     };
     assert!(why.contains("no service is published"), "{why}");
+}
+
+#[test]
+fn tunnel_reads_the_port_that_run_recorded() {
+    let (port, served) = serve("200 OK", ANSWER);
+    let (_dir, config, paths) = host(None, Some("pw"), SSH);
+    fs::write(paths.admin_port_file(), format!("{port}\r\n")).unwrap();
+    assert!(matches!(tunnel(&config, &paths), Tunnel::Connected(_)));
+    served.join().unwrap();
+}
+
+#[test]
+fn tunnel_is_not_checked_before_the_service_has_started_frpc() {
+    let (_dir, config, paths) = host(None, Some("pw"), SSH);
+    let Tunnel::Unknown(why) = tunnel(&config, &paths) else {
+        panic!()
+    };
+    assert_eq!(why, "the service has not started frpc");
+}
+
+#[test]
+fn tunnel_is_not_checked_when_the_recorded_port_is_no_port() {
+    for text in ["", "http", "65536", "0"] {
+        let (_dir, config, paths) = host(None, Some("pw"), SSH);
+        fs::write(paths.admin_port_file(), text).unwrap();
+        let Tunnel::Unknown(why) = tunnel(&config, &paths) else {
+            panic!("{text:?}")
+        };
+        assert!(why.contains("frpc-admin.port"), "{why}");
+    }
 }

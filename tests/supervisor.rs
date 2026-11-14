@@ -143,6 +143,22 @@ fn run_renders_into_the_log_dir_and_leaves_the_config_dir_alone() {
     );
 }
 
+/// `status` finds frpc's admin API at the port in this file, so it must be the one frpc was told.
+#[test]
+fn run_records_the_admin_port_it_renders() {
+    let host = Host::new("record 3 {record}", SSH);
+    host.run(false).unwrap_err();
+
+    let record = fs::read_to_string(host.record()).unwrap();
+    let rendered = record.split_once("TOML\n").unwrap().1;
+    let port = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("webServer.port = "))
+        .expect("a webServer.port line");
+    assert_ne!(port.parse::<u16>().unwrap(), 0);
+    assert_eq!(fs::read_to_string(host.paths.admin_port_file()).unwrap(), port);
+}
+
 #[test]
 fn missing_token_file_is_refused() {
     let host = Host::new("exit 0", SSH);
