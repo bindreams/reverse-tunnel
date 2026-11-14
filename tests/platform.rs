@@ -1927,10 +1927,10 @@ fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
     assert!(stderr.contains("starting the removal failed"), "{stderr}");
     assert!(service::exe(&machine.paths).exists(), "the binary was moved: {stderr}");
     // The advice is the one for an installed binary: the text between "to finish it" and the cause that follows it.
-    let advice = stderr.split("to finish it ").nth(1).and_then(|rest| {
-        rest.split(format!(": removing {}", removal_dir.display()).as_str())
-            .next()
-    });
+    let advice = stderr
+        .split("to finish it ")
+        .nth(1)
+        .and_then(|rest| rest.split(": moving it aside failed (").next());
     assert_eq!(
         advice,
         Some(install::rerun_uninstall(&machine.paths).as_str()),

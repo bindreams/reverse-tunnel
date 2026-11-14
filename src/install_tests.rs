@@ -303,6 +303,19 @@ fn bin_dir_loses_old_versions_and_temp_files() {
 }
 
 #[test]
+fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
+    let machine = Machine::new();
+    let bin = &machine.paths.bin_dir;
+    let stale = bin.join("frpc-0.0.1");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("inside"), b"x").unwrap();
+
+    clean_bin_dir(&machine.paths).unwrap_err();
+
+    assert!(stale.join("inside").exists());
+}
+
+#[test]
 fn unchanged_install_leaves_a_running_service_alone() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();

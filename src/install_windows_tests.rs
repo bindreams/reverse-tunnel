@@ -507,6 +507,38 @@ fn a_file_whose_delete_was_refused_and_is_gone_when_looked_at_is_deleted() {
 }
 
 #[test]
+fn a_refused_delete_and_a_refused_move_keep_the_refusal_as_the_cause() {
+    let (dir, paths) = installed();
+    let file = paths.bin_dir.join("frpc-0.1.exe");
+    fs::write(&file, "").unwrap();
+    let refused = |_: &Path| Err(io::Error::from(ErrorKind::PermissionDenied).into());
+
+    let err = delete_or_move_aside(&file, &dir.path().join("missing"), refused).unwrap_err();
+
+    assert!(is_access_denied(&err), "{err:#}");
+    assert!(format!("{err:#}").contains("moving it to"), "{err:#}");
+}
+
+#[test]
+fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
+    let (_dir, paths) = installed();
+    let stale = paths.bin_dir.join("frpc-0.0.1");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("inside"), b"x").unwrap();
+
+    clean_bin_dir(&paths).unwrap_err();
+
+    assert!(stale.join("inside").exists());
+}
+
+#[test]
+fn a_leftover_that_is_gone_is_deleted_not_kept() {
+    let (dir, _paths) = installed();
+
+    assert!(delete_what_can_be(vec![dir.path().join("gone.exe")]).is_empty());
+}
+
+#[test]
 fn a_directory_that_cannot_be_deleted_fails_the_removal_and_is_not_renamed() {
     let (_dir, paths) = installed();
     let sub = paths.bin_dir.join("old");

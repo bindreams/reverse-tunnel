@@ -22,10 +22,10 @@ use crate::command;
 use crate::config::{Config, valid_label};
 use crate::files::{
     Perm, Replace, WriteOutcome, hex_of_random_bytes, make_dir, make_missing_dirs, open_file, remove_entry,
-    restore_binary, write_atomic,
+    remove_file, restore_binary, write_atomic,
 };
 #[cfg(windows)]
-use crate::files::{is_access_denied, move_aside, remove_file, require_regular_file};
+use crate::files::{is_access_denied, is_not_found, move_aside, refused_and_not_moved, require_regular_file};
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
@@ -709,9 +709,9 @@ pub const MOVED_IT_TO: &str = "so it was moved to";
 /// refuses with access denied, which a running image gets and which another process holding it open does not (that
 /// waits), `path` is renamed into `leftovers` (see `move_aside`, which moves only a regular file) and its new path
 /// returned; a leftover is deleted once it can be. A refused rename, or a `path` that is not a regular file, is an error
-/// that has the OS's answer to the delete and to the move, and nothing is moved. A `path` that is gone by then, as one
-/// that another delete is already finishing is, is deleted: `None`. Any other failure is an error. Nothing asks whether
-/// a process runs `path`: the OS's answer decides.
+/// that has the OS's answer to the delete and to the move, and nothing is moved. A `path` not found after the delete was
+/// refused is done: `None`. A delete-pending file whose metadata read is refused is an error. Any other failure is an
+/// error. Nothing asks whether a process runs `path`: the OS's answer decides.
 #[cfg(windows)]
 fn delete_or_move_aside(
     path: &Path,
@@ -726,32 +726,47 @@ fn delete_or_move_aside(
     match move_aside(path, leftovers) {
         Ok(to) => Ok(Some(to)),
         Err(_) if fs::symlink_metadata(path).is_err_and(|err| err.kind() == ErrorKind::NotFound) => Ok(None),
-        Err(moving) => Err(anyhow::anyhow!("{refused:#}; moving it aside failed too: {moving:#}")),
+        Err(moving) => Err(refused_and_not_moved(refused, &moving)),
     }
 }
 
-/// Removes the file `path`, which the service or this run may be running: on Windows one that Windows refuses to
+/// Removes the file `path` (never a directory), which the service or this run may be running: on Windows one that Windows refuses to
 /// delete is moved aside as a leftover (see `delete_or_move_aside`), which the next `install` deletes once it can.
 fn remove_file_that_may_run(paths: &Paths, path: &Path) -> Result<()> {
     #[cfg(windows)]
-    return delete_or_move_aside(path, leftover_dir(paths)?, remove_entry).map(drop);
+    return delete_or_move_aside(path, leftover_dir(paths)?, remove_file).map(drop);
     #[cfg(not(windows))]
     {
         let _ = paths;
-        remove_entry(path)
+        remove_file(path)
+    }
+}
+
+/// Windows: whether `image`, a file to delete, is there: `false` if it is gone, an error if it is not a regular file.
+#[cfg(windows)]
+fn is_there_to_delete(image: &Path) -> Result<bool> {
+    match require_regular_file(image, "never deleted") {
+        Ok(()) => Ok(true),
+        Err(err) if is_not_found(&err) => Ok(false),
+        Err(err) => Err(err),
     }
 }
 
 /// Windows: deletes the files `images` (leftovers, see `move_aside`), all of them whatever happens to one, and moves
-/// none. Returns, one error for each, those that were kept, with the path and the cause: anything that is not a regular
-/// file, which is never deleted, one that Windows refuses to delete, and one that fails for another reason.
+/// none. A file that is gone is deleted. Returns, one error for each, those that were kept, with the path and the
+/// cause: anything that is not a regular file, which is never deleted, one that Windows refuses to delete, and one that
+/// fails for another reason.
 #[cfg(windows)]
 fn delete_what_can_be(images: Vec<PathBuf>) -> Vec<anyhow::Error> {
     let mut kept = Vec::new();
     for image in images {
-        if let Err(err) = require_regular_file(&image, "never deleted") {
-            kept.push(err);
-            continue;
+        match is_there_to_delete(&image) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(err) => {
+                kept.push(err);
+                continue;
+            }
         }
         let Err(err) = remove_file(&image) else { continue };
         kept.push(if is_access_denied(&err) {
@@ -791,11 +806,16 @@ fn sweep_old_images(paths: &Paths, registered: &Path) {
             old.push(path);
         }
     }
+    let leftovers = match leftover_dir(paths) {
+        Ok(leftovers) => leftovers,
+        Err(err) => return say(format!("{err:#}")),
+    };
     for image in old {
-        let swept = leftover_dir(paths).and_then(|leftovers| {
-            require_regular_file(&image, "never deleted")?;
-            delete_or_move_aside(&image, leftovers, remove_file).map(drop)
-        });
+        let swept = match is_there_to_delete(&image) {
+            Ok(true) => delete_or_move_aside(&image, leftovers, remove_file).map(drop),
+            Ok(false) => Ok(()),
+            Err(err) => Err(err),
+        };
         if let Err(err) = swept {
             say(format!("{err:#}"));
         }

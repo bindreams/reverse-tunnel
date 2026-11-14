@@ -257,28 +257,23 @@ pub fn make_missing_dirs(path: &Path, perm: Perm) -> Result<()> {
 /// that watches files) makes the removal wait until it closes it: the removal is tried again, with no limit, and the
 /// first time says on stderr that it waits (see `OpenElsewhere`). Every other failure is an error.
 pub fn remove_entry(path: &Path) -> Result<()> {
-    remove_waiting(path, true)
+    remove_waiting(path, |path| match fs::symlink_metadata(path) {
+        Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+        Err(err) => Err(err),
+    })
 }
 
 /// Removes the file or link `path`, unless it is already gone, and waits like `remove_entry`. Never a directory: one at
 /// `path`, even one that replaced a file a moment ago, is an error and is left as it is.
 pub fn remove_file(path: &Path) -> Result<()> {
-    remove_waiting(path, false)
+    remove_waiting(path, |path| fs::remove_file(path))
 }
 
-fn remove_waiting(path: &Path, directories_too: bool) -> Result<()> {
+fn remove_waiting(path: &Path, remove: impl Fn(&Path) -> io::Result<()>) -> Result<()> {
     let mut wait = OpenElsewhere::default();
     loop {
-        let removed = if directories_too {
-            match fs::symlink_metadata(path) {
-                Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
-                Ok(_) => fs::remove_file(path),
-                Err(err) => Err(err),
-            }
-        } else {
-            fs::remove_file(path)
-        };
-        match removed {
+        match remove(path) {
             Err(err) if wait.waited_for(path, &err) => {}
             Err(err) if err.kind() != ErrorKind::NotFound => {
                 return Err(err).with_context(|| format!("removing {}", path.display()));
@@ -290,8 +285,17 @@ fn remove_waiting(path: &Path, directories_too: bool) -> Result<()> {
 
 /// Whether `err`, or the `io::Error` it wraps, is the OS refusing an operation for lack of access.
 pub fn is_access_denied(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<io::Error>()
-        .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied)
+    has_kind(err, ErrorKind::PermissionDenied)
+}
+
+/// Whether `err`, or the `io::Error` it wraps, is the OS saying that the path is not there.
+#[cfg(windows)]
+pub fn is_not_found(err: &anyhow::Error) -> bool {
+    has_kind(err, ErrorKind::NotFound)
+}
+
+fn has_kind(err: &anyhow::Error, kind: ErrorKind) -> bool {
+    err.downcast_ref::<io::Error>().is_some_and(|err| err.kind() == kind)
 }
 
 /// Windows: `Err` naming `path` unless it is a regular file, not a directory, junction or link (a link is not
@@ -431,12 +435,8 @@ fn persist_over_refused(
     refused: io::Error,
 ) -> Result<()> {
     let writing = || format!("writing {}", dest.display());
-    let aside = move_aside(dest, leftovers).map_err(|moving| {
-        anyhow::anyhow!(
-            "{}: replacing it was refused ({refused}); moving it aside failed too: {moving:#}",
-            writing()
-        )
-    })?;
+    let aside = move_aside(dest, leftovers)
+        .map_err(|moving| refused_and_not_moved(anyhow::Error::new(refused).context(writing()), &moving))?;
     let Err(err) = persist_waiting(file, dest, false) else {
         return Ok(());
     };
@@ -468,6 +468,13 @@ pub fn move_aside(path: &Path, leftovers: &Path) -> Result<std::path::PathBuf> {
         }
     }
     Ok(to)
+}
+
+/// Windows: the error for a delete or replace that Windows `refused` and whose move aside (`moving`) failed too. It has
+/// both OS answers, and `refused` stays the source, so `is_access_denied` and `root_cause` still reach it.
+#[cfg(windows)]
+pub fn refused_and_not_moved(refused: anyhow::Error, moving: &anyhow::Error) -> anyhow::Error {
+    refused.context(format!("moving it aside failed ({moving:#}), after this refusal"))
 }
 
 /// The hex digits of `N` random bytes from the OS.

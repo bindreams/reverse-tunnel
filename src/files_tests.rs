@@ -133,6 +133,7 @@ fn a_running_file_stays_where_it_is_when_it_cannot_be_moved_aside() {
     )
     .unwrap_err();
 
+    assert!(is_access_denied(&err), "{err:#}");
     let err = format!("{err:#}");
     assert!(err.contains("moving it to"), "{err}");
     // The replace's answer (access denied) and the rename's (no such path).
