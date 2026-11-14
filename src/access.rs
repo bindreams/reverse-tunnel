@@ -162,8 +162,10 @@ fn explain(need: &Need, who: &Principals, dacl: io::Result<Dacl>) -> Option<Stri
     };
     let left_out = match dacl.left_out {
         0 => String::new(),
-        1 => " This check does not count conditional, object or compound allow ACEs; its ACL has one.".to_string(),
-        n => format!(" This check does not count conditional, object or compound allow ACEs; its ACL has {n}."),
+        n => {
+            let count = if n == 1 { "one".to_string() } else { n.to_string() };
+            format!(" This check does not count conditional, object or compound allow ACEs; its ACL has {count}.")
+        }
     };
     Some(match barrier_of(&dacl.aces, who, needs, inherits)? {
         Barrier::Denied(by) => {

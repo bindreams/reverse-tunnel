@@ -139,7 +139,7 @@ fn a_missing_file_that_run_makes_is_no_problem() {
     assert!(problem(&Need::made(dir.path().join("supervisor.log"), LOG), &who()).is_none());
 }
 
-/// A DACL of `aces` that left out `left_out` allows.
+/// A DACL of `aces` and `left_out` allows of kinds the check does not count.
 fn dacl(aces: Vec<Ace>, left_out: usize) -> io::Result<Dacl> {
     Ok(Dacl { aces, left_out })
 }
@@ -159,7 +159,7 @@ fn a_denied_path_is_explained_by_the_principal_denied_and_the_remedy() {
 }
 
 #[test]
-fn a_path_nothing_allows_is_explained_by_the_right_the_groups_and_any_ace_not_counted() {
+fn a_path_nothing_allows_is_explained_by_the_right_the_groups_and_the_aces_this_check_does_not_count() {
     let need = Need::of("config.yaml".into(), READ);
     let aces = || vec![ace(true, ADMINISTRATORS, FILE_GENERIC_READ)];
 
@@ -172,7 +172,7 @@ fn a_path_nothing_allows_is_explained_by_the_right_the_groups_and_any_ace_not_co
         plain.contains(&format!("{} cannot read it", service::ACCOUNT)) && plain.contains("(Users, the service)"),
         "{plain}"
     );
-    assert!(!plain.contains("not counted"), "{plain}");
+    assert!(!plain.contains("does not count"), "{plain}");
     assert!(
         one.contains("This check does not count conditional, object or compound allow ACEs; its ACL has one."),
         "{one}"
@@ -184,7 +184,7 @@ fn a_path_nothing_allows_is_explained_by_the_right_the_groups_and_any_ace_not_co
 }
 
 #[test]
-fn a_directory_whose_files_would_not_be_allowed_is_explained_with_any_ace_not_counted() {
+fn a_directory_whose_files_would_not_be_allowed_is_explained_with_the_aces_this_check_does_not_count() {
     let need = Need {
         files: Some(NEW_FILE),
         ..Need::of("logs".into(), MAKE_FILES)
@@ -200,7 +200,7 @@ fn a_directory_whose_files_would_not_be_allowed_is_explained_with_any_ace_not_co
             && plain.contains("that files inherit"),
         "{plain}"
     );
-    assert!(!plain.contains("not counted"), "{plain}");
+    assert!(!plain.contains("does not count"), "{plain}");
     assert!(left_out.contains("its ACL has one."), "{left_out}");
 }
 
