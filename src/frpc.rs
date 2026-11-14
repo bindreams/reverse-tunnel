@@ -53,8 +53,9 @@ pub fn ws_routes(cfg: &Config) -> BTreeMap<String, u16> {
         .collect()
 }
 
-/// Public hostnames of service `name`; the default service also gets the bare `<host>.T`.
-fn hosts(cfg: &Config, name: &str) -> Vec<String> {
+/// Public hostnames of service `name`: first `<name>.<host>.T`, which always routes, then, for the default service, the
+/// bare `<host>.T`.
+pub(crate) fn hosts(cfg: &Config, name: &str) -> Vec<String> {
     let mut hosts = vec![format!("{name}.{}.{}", cfg.host, cfg.bridge)];
     if cfg.default.as_deref() == Some(name) {
         hosts.push(format!("{}.{}", cfg.host, cfg.bridge));

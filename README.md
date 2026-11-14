@@ -5,8 +5,8 @@ inbound ports on the host. Its SSH and HTTP services become reachable at `<servi
 through a WebSocket proxy, HTTP in a browser. The bridge is a server running frps, Traefik and a small plugin that
 lets in only registered hosts; see [server/README.md](server/README.md) to run one.
 
-Below, `T` is the bridge's tunnel domain (for example `tunnel.binarydreams.me`), and the bridge folder is `server/`
-of this repository on the bridge's server.
+Below, `T` is the bridge's tunnel domain, and the bridge folder is `server/` of this repository on the bridge's
+server. The names in the examples (`tunnel.example.com`, `myhost`, `yourdomain.tld`) are placeholders: use your own.
 
 ## Set up a host
 
@@ -34,22 +34,25 @@ sudo ./reverse-tunnel install
 
 `install` asks for the join code (paste it, press Enter; or pass it as `--join CODE`) and names the host after the
 machine (lowercased); to choose a name, add `--host NAME`. A host with a `config.yaml` keeps its name, and `--host` with
-another name fails; to rename, uninstall and install again, register the new name and revoke the old. It installs and starts the service, and prints a line:
+another name fails; to rename, uninstall and install again, register the new name and revoke the old. It installs and starts the service, and prints a line, then the block for reaching the host (see
+[Set up a client](#set-up-a-client)):
 
 ```
 Register this host on the bridge by running:
-    uv run ctl add mothership sha256:...
+    uv run ctl add myhost sha256:...
 ```
 
-Run that line in the bridge folder. Until you do, the host is refused ("host not registered" in its `frpc.log`) and
+Run that line in the bridge folder; it is the host's registration, and [Set up a client](#set-up-a-client) is the next
+step. Until you do, the host is refused ("host not registered" in its `frpc.log`) and
 retries on its own; once you have, it connects with no restart. You may delete the downloaded file; `install` put a
 copy in place and linked it as `reverse-tunnel` on the `PATH`.
 
 By default the host publishes SSH (port 22): the host is reachable at `<host>.T`. `install` is safe to run again; it
 changes only what differs.
 
-**Windows**: download the binary, then run `install` and the other commands that say `sudo` from an elevated prompt, without
-`sudo`. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
+**Windows**: download the binary, then run `install` and the other commands that say `sudo` from an administrator
+terminal (right-click Terminal or PowerShell, "Run as administrator"), without `sudo`: Windows' `sudo` opens a new window
+that closes before the registration line can be read. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
 `%ProgramData%\reverse-tunnel`, and `install` puts `%ProgramFiles%\reverse-tunnel` on the system `PATH`: open a new shell
 to run `reverse-tunnel` (on the desktop, sign out and in; an SSH session sees it at once). `install` edits the `PATH` as
 every installer does, by reading it and writing it back: another program that edits it at the same moment can lose one of
@@ -69,25 +72,26 @@ Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/late
 
 Clients need [websocat](https://github.com/vi/websocat) on their `PATH`: a binary from its
 [releases](https://github.com/vi/websocat/releases), `brew install websocat`, or `cargo install websocat`. Then add
-this to `~/.ssh/config`, with the host's name in place of `mothership` and the tunnel domain in place of
-`tunnel.binarydreams.me`:
+this to `~/.ssh/config`, with the host's name in place of `myhost` and the tunnel domain in place of
+`tunnel.example.com` (`reverse-tunnel install` prints the block with both filled in):
 
 ```ssh-config
-Host mothership
-    HostName mothership.tunnel.binarydreams.me
+Host myhost
+    HostName ssh.myhost.tunnel.example.com
     ProxyCommand websocat --binary wss://%h/
 ```
 
-`ssh mothership` now reaches the host's sshd. Any other TCP service the host publishes (`type: tcp`, below) is
-reached the same way, at its own `<service>.<host>.T`.
+`ssh myhost` now reaches the host's sshd, at its `ssh` service. (`install` prints the block for the service named `ssh`
+when it is `type: tcp`, whatever its port, and prints none otherwise.) Any other TCP service the host publishes
+(`type: tcp`, below) is reached the same way, at its own `<service>.<host>.T`.
 
 ## Publish another service
 
 Services are listed in the host's `config.yaml`. `install` writes it with SSH:
 
 ```yaml
-host: mothership
-bridge: tunnel.binarydreams.me
+host: myhost
+bridge: tunnel.example.com
 default: ssh
 services:
   ssh:
@@ -117,7 +121,7 @@ either it can write the public name's zone, or that zone delegates `_acme-challe
 can.
 
 ```sh
-uv run ctl alias movies.binarydreams.me jellyfin.mothership.tunnel.binarydreams.me
+uv run ctl alias movies.yourdomain.tld jellyfin.myhost.tunnel.example.com
 ```
 
 `uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts and aliases.
@@ -128,7 +132,7 @@ Jellyfin builds absolute links from the request, and behind the tunnel it sees t
 environment set the address people use:
 
 ```
-JELLYFIN_PublishedServerUrl=https://movies.binarydreams.me
+JELLYFIN_PublishedServerUrl=https://movies.yourdomain.tld
 ```
 
 The bridge always forwards `X-Forwarded-Proto: http`, even over HTTPS, so Jellyfin does not take its scheme from it.
@@ -161,8 +165,8 @@ to run are in [server/README.md](server/README.md#rotating-the-certificate).
 
 ```
 service: running (pid 1234), enabled at boot
-host: mothership
-bridge: tunnel.binarydreams.me
+host: myhost
+bridge: tunnel.example.com
 certificate: SHA-256 AB:CD:...
 ```
 
@@ -186,8 +190,8 @@ rotated at 10 MB to `<name>.1`, replacing the previous one.
 `sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: your session
 ends when the service restarts, and the host reconnects on the new version. Before it replaces anything it checks the
 new version against this host's settings, and a failure leaves the old version running. It prints the registration
-line again; the host is already registered, so ignore it. A version that passes the check and cannot carry SSH locks a
-tunnel-only host out until someone is at the machine.
+line again, and the `ssh` block when the host publishes SSH; the host is already registered, so ignore the line. A
+version that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.
 
 **Windows**: run `reverse-tunnel upgrade` from an elevated prompt, without `sudo`. Windows will not overwrite or delete a
 running program, so each build is installed as a file of its own, `%ProgramFiles%\reverse-tunnel\reverse-tunnel-<SHA-256

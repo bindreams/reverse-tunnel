@@ -15,11 +15,27 @@ def _docker(*args: str, **kwargs) -> subprocess.CompletedProcess:
         raise DockerError("docker is not installed") from e
 
 
-def compose_up_plugin(folder: Path) -> None:
-    """Create or update the plugin container from the bridge folder's compose files, leaving frps alone."""
+def compose_up(folder: Path, build: bool = False) -> bool:
+    """Bring the bridge up from the folder's compose files: the plugin created or updated, frps started if it is
+    not running. An existing frps container is never built for, removed or recreated, because that drops every tunnel.
+
+    `build` is for `init`: it also builds the plugin, and frps too when it has no container. Returns whether `init`
+    found an existing frps container and kept it as it is; `False` when not `init`.
+    """
     # -p and -f pin the project and files: COMPOSE_FILE and COMPOSE_PROJECT_NAME in the shell must not redirect it
     command = ["compose", "-p", "reverse-tunnel", "-f", "compose.yaml", "-f", "compose.generated.yaml"]
-    _docker(*command, "up", "-d", "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
+    kept = build and _frps_exists(command, folder)
+    up = [*command, "up", "-d"]
+    flags = ["--build"] if build else []
+    _docker(*up, *flags, "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
+    _docker(*up, *(flags if not kept else []), "--no-recreate", "reverse-tunnel-frps", cwd=folder, check=True)
+    return kept
+
+
+def _frps_exists(command: list[str], folder: Path) -> bool:
+    # stderr is not captured: docker's own failure reaches the user
+    ps = [*command, "ps", "-a", "-q", "reverse-tunnel-frps"]
+    return bool(_docker(*ps, cwd=folder, check=True, stdout=subprocess.PIPE, text=True).stdout.strip())
 
 
 def network_exists(name: str) -> bool:

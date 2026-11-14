@@ -21,39 +21,39 @@ def test_label_rule_refuses_reserved_double_hyphen():
 
 
 def test_allowed_names():
-    allowed = allowed_names("mothership", "tunnel.example.test")
-    assert allowed("mothership.tunnel.example.test")
-    assert allowed("jellyfin.mothership.tunnel.example.test")
-    assert not allowed("a.b.mothership.tunnel.example.test")
+    allowed = allowed_names("myhost", "tunnel.example.test")
+    assert allowed("myhost.tunnel.example.test")
+    assert allowed("jellyfin.myhost.tunnel.example.test")
+    assert not allowed("a.b.myhost.tunnel.example.test")
     assert not allowed("jellyfin.other.tunnel.example.test")
-    assert not allowed("mothership.tunnel.example.test.evil")
+    assert not allowed("myhost.tunnel.example.test.evil")
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        "*.mothership.t.test",
-        "mothership.t.test.",
-        "Mothership.t.test",
+        "*.myhost.t.test",
+        "myhost.t.test.",
+        "Myhost.t.test",
         "",
-        "s..mothership.t.test",
-        "S.mothership.t.test",
-        ".mothership.t.test",
+        "s..myhost.t.test",
+        "S.myhost.t.test",
+        ".myhost.t.test",
     ],
 )
 def test_allowed_names_refuses_malformed(name):
-    assert not allowed_names("mothership", "t.test")(name)
+    assert not allowed_names("myhost", "t.test")(name)
 
 
 @pytest.mark.parametrize(
     ("name", "host"),
     [
-        ("mothership.t.test", "mothership"),
-        ("jellyfin.mothership.t.test", "mothership"),
+        ("myhost.t.test", "myhost"),
+        ("jellyfin.myhost.t.test", "myhost"),
         ("t.test", None),
         ("ab--c.t.test", None),
         ("x.ab--c.t.test", None),
-        ("xn--a.mothership.t.test", None),
+        ("xn--a.myhost.t.test", None),
         (".t.test", None),
     ],
 )
@@ -61,7 +61,7 @@ def test_owner_host(name, host):
     assert owner_host(name, "t.test") == host
 
 
-@pytest.mark.parametrize("domain", ["t.test", "tunnel.binarydreams.me", "a.b.c.d", "a" * 63 + ".b"])
+@pytest.mark.parametrize("domain", ["t.test", "tunnel.example.com", "a.b.c.d", "a" * 63 + ".b"])
 def test_valid_domain(domain):
     assert valid_domain(domain)
 
@@ -76,7 +76,7 @@ def test_invalid_domain(domain):
 
 @pytest.mark.parametrize(
     "name",
-    ["movies.binarydreams.me", "a.b", "notexample.com", "example.com.binarydreams.me", "myexample.org"],
+    ["movies.yourdomain.tld", "a.b", "notexample.com", "example.com.yourdomain.tld", "myexample.org"],
 )
 def test_valid_public_name(name):
     assert valid_public_name(name)
@@ -87,15 +87,15 @@ def test_valid_public_name(name):
     [
         "",
         "localhost",
-        "movies.binarydreams.me.",
-        "bad`name.binarydreams.me",
-        "movies..binarydreams.me",
-        "Movies.binarydreams.me",
-        "mo_vies.binarydreams.me",
-        "ab--c.binarydreams.me",
-        "a" * 64 + ".binarydreams.me",
+        "movies.yourdomain.tld.",
+        "bad`name.yourdomain.tld",
+        "movies..yourdomain.tld",
+        "Movies.yourdomain.tld",
+        "mo_vies.yourdomain.tld",
+        "ab--c.yourdomain.tld",
+        "a" * 64 + ".yourdomain.tld",
         "1.2.3.4",
-        "binarydreams.123",
+        "yourdomain.123",
         ".".join(["a" * 63] * 3 + ["a" * 62]),
         "movies.invalid",
         "movies.test",
