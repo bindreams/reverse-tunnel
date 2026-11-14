@@ -17,20 +17,21 @@ def _docker(*args: str, **kwargs) -> subprocess.CompletedProcess:
 
 def compose_up(folder: Path, build: bool = False) -> bool:
     """Bring the bridge up from the folder's compose files: the plugin created or updated, frps started if it is not
-    running. A running frps is never recreated, because that drops every tunnel. `build` rebuilds the plugin's image,
-    and frps's only if there is no frps container yet (a rebuilt image would be discarded). Returns whether the frps
-    container already existed, in which case its image, `compose.yaml` and `.env` are not applied to it.
+    running. A running frps is never recreated, because that drops every tunnel. `build` (for `init`) rebuilds both
+    images, frps's only if it is not running (a rebuilt image would be discarded). Returns whether frps was running
+    and left as it was, in which case its image, `compose.yaml` and `.env` are not applied to it.
     """
     # -p and -f pin the project and files: COMPOSE_FILE and COMPOSE_PROJECT_NAME in the shell must not redirect it
     command = ["compose", "-p", "reverse-tunnel", "-f", "compose.yaml", "-f", "compose.generated.yaml"]
-    ps = ["ps", "-aq", "reverse-tunnel-frps"]
-    frps_exists = bool(_docker(*command, *ps, cwd=folder, check=True, capture_output=True, text=True).stdout.strip())
+    running = [*command, "ps", "-q", "--status", "running", "reverse-tunnel-frps"]
+    # no capture of stderr: docker's own failure reaches the user, and check=True stops the bring-up
+    frps_running = build and bool(_docker(*running, cwd=folder, check=True, stdout=subprocess.PIPE, text=True).stdout.strip())
     up = [*command, "up", "-d"]
-    plugin_build = ["--build"] if build else []
-    frps_build = ["--build"] if build and not frps_exists else []
-    _docker(*up, *plugin_build, "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
-    _docker(*up, *frps_build, "--no-recreate", "reverse-tunnel-frps", cwd=folder, check=True)
-    return frps_exists
+    _docker(*up, *(["--build"] if build else []), "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
+    # a frps that is not running has no tunnel to drop, so on `init` it is built and started as it should be
+    frps_flag = "--build" if build and not frps_running else "--no-recreate"
+    _docker(*up, frps_flag, "reverse-tunnel-frps", cwd=folder, check=True)
+    return frps_running
 
 
 def network_exists(name: str) -> bool:

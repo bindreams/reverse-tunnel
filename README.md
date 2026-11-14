@@ -81,9 +81,9 @@ Host myhost
     ProxyCommand websocat --binary wss://%h/
 ```
 
-`ssh myhost` now reaches the host's sshd, at its `ssh` service. (`install` prints the block for the host's TCP service on port 22,
-whatever its name, and prints none for a host with no such service.) Any other TCP service the host publishes (`type: tcp`, below) is
-reached the same way, at its own `<service>.<host>.T`.
+`ssh myhost` now reaches the host's sshd, at its `ssh` service. (`install` prints the block for the service named `ssh`
+when it is `type: tcp`, whatever its port, and prints none otherwise.) Any other TCP service the host publishes
+(`type: tcp`, below) is reached the same way, at its own `<service>.<host>.T`.
 
 ## Publish another service
 
@@ -190,8 +190,8 @@ rotated at 10 MB to `<name>.1`, replacing the previous one.
 `sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: your session
 ends when the service restarts, and the host reconnects on the new version. Before it replaces anything it checks the
 new version against this host's settings, and a failure leaves the old version running. It prints the registration
-line again, and the `ssh` block when the host publishes SSH; the host is already registered, so ignore the line. A version that passes the check and cannot carry SSH locks a
-tunnel-only host out until someone is at the machine.
+line again, and the `ssh` block when the host publishes SSH; the host is already registered, so ignore the line. A
+version that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.
 
 **Windows**: run `reverse-tunnel upgrade` from an elevated prompt, without `sudo`. Windows will not overwrite or delete a
 running program, so each build is installed as a file of its own, `%ProgramFiles%\reverse-tunnel\reverse-tunnel-<SHA-256

@@ -362,27 +362,39 @@ def test_network_exists_reports_docker_failure(docker, tmp_path, monkeypatch):
         compose.network_exists("gateway")
 
 
-def test_compose_up_recreates_only_the_plugin_and_starts_frps_if_it_is_not_running(docker, tmp_path, monkeypatch):
+def test_compose_up_never_recreates_a_running_frps(docker, tmp_path, monkeypatch):
     base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml"
-    frps = "--no-recreate reverse-tunnel-frps"  # recreating a running frps drops every tunnel
     plugin = "--no-deps reverse-tunnel-plugin"
+    probe = "ps -q --status running reverse-tunnel-frps"
     log = Path(f"{docker}.log")
 
     def calls(*lines):
         return "".join(f"{base} {line}\n" for line in lines)
 
-    assert not compose.compose_up(tmp_path)  # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it
-    assert log.read_text() == calls("ps -aq reverse-tunnel-frps", f"up -d {plugin}", f"up -d {frps}")
+    # Not `init`: no probe and no build; a running frps is kept, a stopped or absent one is started as it is.
+    # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it.
+    assert not compose.compose_up(tmp_path)
+    assert log.read_text() == calls(f"up -d {plugin}", "up -d --no-recreate reverse-tunnel-frps")
 
-    log.unlink()  # no frps container yet: the build is for both images
+    # `init`, frps absent or stopped (nothing running to drop): both images are built and frps comes up as built.
+    log.unlink()
     assert not compose.compose_up(tmp_path, build=True)
-    expected = calls("ps -aq reverse-tunnel-frps", f"up -d --build {plugin}", f"up -d --build {frps}")
-    assert log.read_text() == expected
+    assert log.read_text() == calls(probe, f"up -d --build {plugin}", "up -d --build reverse-tunnel-frps")
 
-    log.unlink()  # a container exists: its image would be built and thrown away, so only the plugin is built
+    # `init`, frps running: only the plugin is built; frps is not recreated, and the caller is told.
+    log.unlink()
     monkeypatch.setenv("FAKE_STDOUT", "0123abcd")
     assert compose.compose_up(tmp_path, build=True)
-    assert log.read_text() == calls("ps -aq reverse-tunnel-frps", f"up -d --build {plugin}", f"up -d {frps}")
+    assert log.read_text() == calls(probe, f"up -d --build {plugin}", "up -d --no-recreate reverse-tunnel-frps")
+
+
+def test_a_failed_frps_probe_shows_dockers_stderr_and_brings_nothing_up(docker, tmp_path, monkeypatch, capfd):
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    monkeypatch.setenv("FAKE_STDERR", "Cannot connect to the Docker daemon")
+    with pytest.raises(subprocess.CalledProcessError):
+        compose.compose_up(tmp_path, build=True)
+    assert "Cannot connect to the Docker daemon" in capfd.readouterr().err
+    assert " up " not in Path(f"{docker}.log").read_text()
 
 
 def test_init_starts_the_bridge_and_prints_the_join_code_last_under_a_label(bridge, monkeypatch, capsys):
@@ -407,6 +419,12 @@ def test_init_says_how_to_apply_a_change_to_a_frps_it_left_running(bridge, monke
     note = [line for line in lines if "left running" in line]
     assert len(note) == 1 and "docker compose up -d --build reverse-tunnel-frps" in note[0]
     assert "tunnel" in note[0] and "restart" not in note[0]
+
+
+def test_init_prints_no_blank_line_when_its_handler_has_no_text(bridge, monkeypatch, capsys):
+    monkeypatch.setitem(cli.COMMANDS, "init", cli.COMMANDS["init"]._replace(handler=lambda *args: ""))
+    assert cli.main(["init"]) == 0
+    assert capsys.readouterr().out == ""
 
 
 def test_init_says_nothing_of_frps_when_it_started_it(bridge, capsys):

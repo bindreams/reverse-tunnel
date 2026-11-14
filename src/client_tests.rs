@@ -22,22 +22,51 @@ fn the_ssh_config_block_names_the_ssh_service_of_the_host_on_the_bridge() {
 }
 
 #[test]
-fn the_block_names_whichever_tcp_service_is_on_port_22_by_the_name_that_always_routes() {
-    let cfg = Config::parse(
-        "host: myhost\nbridge: tunnel.example.com\ndefault: shell\nservices:\n  web:\n    port: 80\n    type: http\n  \
-         shell:\n    port: 22\n    type: tcp\n",
-    )
+fn the_block_is_for_the_service_named_ssh_whatever_its_port() {
+    let text = instructions(&config(
+        "  ssh:
+    port: 2222
+    type: tcp
+",
+    ))
     .unwrap();
-    let text = instructions(&cfg).unwrap();
     assert!(
-        text.contains("\n    HostName shell.myhost.tunnel.example.com\n"),
+        text.contains(
+            "
+    HostName ssh.myhost.tunnel.example.com
+"
+        ),
         "{text}"
     );
 }
 
 #[test]
-fn there_is_no_block_for_a_host_with_no_tcp_service_on_port_22() {
-    assert!(instructions(&config("  web:\n    port: 80\n    type: http\n")).is_none());
-    assert!(instructions(&config("  ssh:\n    port: 22\n    type: http\n")).is_none());
-    assert!(instructions(&config("  ssh:\n    port: 2222\n    type: tcp\n")).is_none());
+fn there_is_no_block_unless_the_service_named_ssh_is_tcp() {
+    assert!(
+        instructions(&config(
+            "  web:
+    port: 80
+    type: http
+"
+        ))
+        .is_none()
+    );
+    assert!(
+        instructions(&config(
+            "  ssh:
+    port: 22
+    type: http
+"
+        ))
+        .is_none()
+    );
+    assert!(
+        instructions(&config(
+            "  shell:
+    port: 22
+    type: tcp
+"
+        ))
+        .is_none()
+    );
 }

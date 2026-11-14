@@ -228,7 +228,7 @@ def _run(args) -> None:
             print(out)  # after the write, which may fail; before the reload, which may too
         try:
             atomic_write(GENERATED, render_compose(hosts, aliases, domain).encode(), 0o644)
-            frps_exists = compose.compose_up(Path.cwd(), build=command.bootstrap)
+            frps_running = compose.compose_up(Path.cwd(), build=command.bootstrap)
         except (OSError, ValueError, subprocess.CalledProcessError) as e:
             updated = "the registry is updated but " if (hosts, aliases) != (old_hosts, old_aliases) else ""
             retry = (
@@ -238,9 +238,10 @@ def _run(args) -> None:
             )
             raise CtlError(f"{updated}the bridge was not brought up ({e}); {retry}") from e
         if command.bootstrap:
-            if frps_exists:
+            if frps_running:
                 print(FRPS_KEPT)
-            print(out)
+            if out:
+                print(out)
 
 
 def build_parser() -> argparse.ArgumentParser:
