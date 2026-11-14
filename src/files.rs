@@ -317,8 +317,8 @@ pub const OPEN_ELSEWHERE_LINE: &str = ": another process has it open; waiting un
 
 /// The wait that every delete, replace and move of a file shares. Windows refuses to delete, replace or rename a file
 /// that another process has open without delete sharing (an antivirus scan, a program that watches files); the
-/// operation is tried again, with no limit, until that process closes it. Every other failure is the caller's. The first
-/// wait is said on stderr.
+/// operation is tried again, with no limit, until that process closes it. Every other failure is the caller's. The
+/// first wait is said on stderr.
 #[derive(Default)]
 pub(crate) struct OpenElsewhere {
     said: bool,
@@ -407,7 +407,10 @@ fn persist_over(file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfi
     file.persist(dest).map(drop)
 }
 
-/// Puts `file` at `dest`, replacing what is there, by `rename_over`.
+/// Puts `file` at `dest`, replacing what is there, by `rename_over`, or, where the system has no POSIX rename (see
+/// `posix_rename_unsupported`), by `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`, as `tempfile` persists. Both give
+/// the same answers about `dest` (see `OpenElsewhere`), except that a `dest` another process holds open with delete
+/// sharing refuses the second.
 #[cfg(windows)]
 fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfile::PersistError> {
     match rename_over(file.as_file(), file.path(), dest) {
@@ -416,8 +419,16 @@ fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), te
             file.disable_cleanup(true);
             Ok(())
         }
+        Err(error) if posix_rename_unsupported(&error) => file.persist(dest).map(drop),
         Err(error) => Err(tempfile::PersistError { error, file }),
     }
+}
+
+/// Whether `err`, the failure of `rename_over`, says that the system cannot rename with POSIX semantics:
+/// ERROR_INVALID_PARAMETER (87, Windows before 1709) or ERROR_NOT_SUPPORTED (50, a filesystem without it).
+#[cfg(windows)]
+fn posix_rename_unsupported(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(87 | 50))
 }
 
 /// Windows: renames `from`, which `file` has open, to `to`, replacing `to` as a POSIX rename does: a `to` that another

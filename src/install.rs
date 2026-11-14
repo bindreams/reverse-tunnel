@@ -156,7 +156,7 @@ fn apply(
     // binary on the `PATH`.
     #[cfg(windows)]
     {
-        changed |= place_path_copy(paths, new)?;
+        place_path_copy(paths, new)?;
         system_path::add(&paths.bin_dir)?;
         say_kept(sweep_old_images(paths, &new.image));
     }
@@ -478,7 +478,8 @@ pub fn rerun_uninstall(paths: &Paths) -> String {
 }
 
 /// How to run `uninstall` again: by the command on the `PATH`, or, once the installed binary is gone, by any
-/// `reverse-tunnel` binary, which includes the leftovers of the installed binary (see `leftovers::images_of_the_binary`).
+/// `reverse-tunnel` binary, which includes the leftovers of the installed binary (see
+/// `leftovers::images_of_the_binary`).
 #[cfg(windows)]
 pub fn rerun_uninstall(paths: &Paths) -> String {
     if service::exe(paths).exists() {
@@ -629,9 +630,10 @@ fn remove_saying_what_it_moved_aside(path: &Path, leftover_dir: &Path) -> Result
     remove_entry(path)
 }
 
-/// Windows: once the removal has succeeded, has the system delete the leftovers (see `leftovers`) at the next boot. The task sweeps them after it has deleted itself, so possibly after `uninstall` has returned, and a reboot
-/// before then would orphan them. Scheduling earlier would delete, after a failed removal, the renamed binary that the
-/// rerun advice names. A failure is printed and does not fail the removal.
+/// Windows: once the removal has succeeded, has the system delete the leftovers (see `leftovers`) at the next boot. The
+/// task sweeps them after it has deleted itself, so possibly after `uninstall` has returned, and a reboot before then
+/// would orphan them. Scheduling earlier would delete, after a failed removal, the renamed binary that the rerun advice
+/// names. A failure is printed and does not fail the removal.
 #[cfg(windows)]
 fn delete_leftover_images_at_reboot(paths: &Paths) {
     let images = leftovers::images(paths).unwrap_or_else(|err| {
@@ -668,10 +670,10 @@ pub const MOVED_IT_TO: &str = "so it was moved to";
 /// Windows: deletes `path` with `delete` (`remove_entry`, or `remove_file` where only a file may go). When Windows
 /// refuses with access denied, which a running image gets and which another process holding it open does not (that
 /// waits), `path` is renamed into `leftover_dir` (see `leftovers::move_aside`, which moves only a regular file) and its
-/// new path returned. A refused rename, or a `path` that is not a regular file, is an error
-/// that has the OS's answer to the delete and to the move, and nothing is moved. A `path` not found after the delete was
-/// refused is done: `None`. A delete-pending file whose metadata read is refused is an error. Any other failure is an
-/// error. Nothing asks whether a process runs `path`: the OS's answer decides.
+/// new path returned. A refused rename, or a `path` that is not a regular file, is an error that has the OS's answer to
+/// the delete and to the move, and nothing is moved. A `path` not found after the delete was refused is done: `None`.
+/// A delete-pending file whose metadata read is refused is an error. Any other failure is an error. Nothing asks
+/// whether a process runs `path`: the OS's answer decides.
 #[cfg(windows)]
 fn delete_or_move_aside(
     path: &Path,
@@ -881,16 +883,22 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
         if !created {
             let text = fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?;
             changed |= replace_if_changed(
-                paths,
+                Some(paths),
                 &config,
                 with_bridge(&text, &join.domain, &config)?,
                 PUBLIC_FILE,
                 Replace::Always,
             )?;
         }
-        changed |= replace_if_changed(paths, &paths.bridge_pem(), &join.cert_pem, PUBLIC_FILE, Replace::Always)?;
+        changed |= replace_if_changed(
+            Some(paths),
+            &paths.bridge_pem(),
+            &join.cert_pem,
+            PUBLIC_FILE,
+            Replace::Always,
+        )?;
         let token = format!("{}\n", join.token);
-        changed |= replace_if_changed(paths, &paths.bridge_token(), token, secret, Replace::Always)?;
+        changed |= replace_if_changed(Some(paths), &paths.bridge_token(), token, secret, Replace::Always)?;
     }
 
     let host_token = paths.host_token();
@@ -919,9 +927,10 @@ fn create_config(paths: &Paths, host: Option<&str>, join: Option<&JoinInfo>) -> 
     Ok(written == WriteOutcome::Written)
 }
 
-/// Replaces `dest` with `data` unless it holds it already. Whether it wrote.
+/// Replaces `dest` with `data` unless it holds it already. Whether it wrote. With `pending`, a write is first marked as
+/// one that the service has not picked up (see `mark_pending`).
 fn replace_if_changed(
-    paths: &Paths,
+    pending: Option<&Paths>,
     dest: &Path,
     data: impl AsRef<[u8]>,
     perm: Perm,
@@ -931,7 +940,9 @@ fn replace_if_changed(
     if fs::read(dest).is_ok_and(|current| current == data) {
         return Ok(false);
     }
-    mark_pending(paths)?;
+    if let Some(paths) = pending {
+        mark_pending(paths)?;
+    }
     write_atomic(dest, data, perm, replace)?;
     Ok(true)
 }
@@ -1003,9 +1014,9 @@ fn place_binaries(paths: &Paths, new: &Binary) -> Result<bool> {
     #[cfg(windows)]
     say_kept(leftovers::delete_what_can_be(leftovers::images(paths)?));
     #[cfg(windows)]
-    let changed = place_binary(paths, &new.image, &new.bytes, Replace::Always)?;
+    let changed = place_binary(Some(paths), &new.image, &new.bytes, Replace::Always)?;
     #[cfg(not(windows))]
-    let changed = place_binary(paths, &service::exe(paths), &new.bytes, Replace::Always)?;
+    let changed = place_binary(Some(paths), &service::exe(paths), &new.bytes, Replace::Always)?;
     clean_bin_dir(paths)?;
     #[cfg(windows)]
     for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {
@@ -1020,19 +1031,18 @@ fn place_binaries(paths: &Paths, new: &Binary) -> Result<bool> {
 
 /// Windows: replaces the binary on the `PATH`, which runs when this is an `upgrade` run from it and is where a service
 /// of an earlier build is registered until `register` moves it. Windows will not overwrite a running image, and lets it
-/// be renamed (see `Replace::OrMoveAside`). Whether it changed.
+/// be renamed (see `Replace::OrMoveAside`). The service runs its image, so a change here is no reason to restart it.
 #[cfg(windows)]
-fn place_path_copy(paths: &Paths, new: &Binary) -> Result<bool> {
+fn place_path_copy(paths: &Paths, new: &Binary) -> Result<()> {
     let exe = service::exe(paths);
-    let changed = place_binary(paths, &exe, &new.bytes, Replace::OrMoveAside(leftovers::dir(paths)?))?;
-    crate::files::own_by_administrators(&exe)?;
-    Ok(changed)
+    place_binary(None, &exe, &new.bytes, Replace::OrMoveAside(leftovers::dir(paths)?))?;
+    crate::files::own_by_administrators(&exe)
 }
 
-/// Puts `binary` at `dest`, unless it is there. Whether it changed. A hand-edited ACL, mode or owner of an unchanged
-/// binary does not outlive a reinstall.
-fn place_binary(paths: &Paths, dest: &Path, binary: &[u8], replace: Replace) -> Result<bool> {
-    let changed = replace_if_changed(paths, dest, binary, Perm::executable(), replace)?;
+/// Puts `binary` at `dest`, unless it is there. Whether it changed, and with `pending` that is marked (see
+/// `replace_if_changed`). A hand-edited ACL, mode or owner of an unchanged binary does not outlive a reinstall.
+fn place_binary(pending: Option<&Paths>, dest: &Path, binary: &[u8], replace: Replace) -> Result<bool> {
+    let changed = replace_if_changed(pending, dest, binary, Perm::executable(), replace)?;
     if !changed {
         restore_binary(dest)?;
     }

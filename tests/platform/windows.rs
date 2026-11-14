@@ -100,8 +100,8 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
     rights
 }
 
-/// A handle to a process, opened while it runs. Unlike the process's id or image name, which the system reuses, it never
-/// stands for another process, so waiting on it waits for that process alone.
+/// A handle to a process, opened while it runs. Unlike the process's id or image name, which the system reuses, it
+/// never stands for another process, so waiting on it waits for that process alone.
 pub struct Watched(OwnedHandle);
 
 pub fn watch(pid: u32) -> Watched {

@@ -1,7 +1,8 @@
 //! Windows: leftovers. Windows refuses to delete or replace a running image (access denied) and allows renaming it, so
-//! such a file is renamed aside instead: a leftover is `.reverse-tunnel.<id>.<the name it had>` in the folder that holds
-//! the bin dir (see `dir`), which only administrators can write to. Every `install` and `upgrade` deletes the leftovers
-//! it can (see `delete_what_can_be`), and the removal's task deletes the rest (see `schtasks::removal_script`).
+//! such a file is renamed aside instead: a leftover is `.reverse-tunnel.<id>.<the name it had>` in the folder that
+//! holds the bin dir (see `dir`), which only administrators can write to. Every `install` and `upgrade` deletes the
+//! leftovers it can (see `delete_what_can_be`), and the removal's task deletes the rest (see
+//! `schtasks::removal_script`).
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -93,18 +94,23 @@ pub fn images(paths: &Paths) -> Result<Vec<PathBuf>> {
     Ok(images)
 }
 
-/// The leftovers of the installed binary: of the file on the `PATH` or of a service image (see `service::image`). Any of
-/// them can be run with `uninstall`, and a removal that ran from one may have left it as the only copy.
+/// The leftovers of the installed binary: of the file on the `PATH` first, then of the service images (see
+/// `service::image`), each sorted by path. Any of them can be run with `uninstall`, and a removal that ran from one may
+/// have left it as the only copy.
 pub fn images_of_the_binary(paths: &Paths) -> Result<Vec<PathBuf>> {
     let binary = service::exe(paths);
     let binary = binary.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    let mut images = images(paths)?;
-    images.retain(|image| {
-        let name = image.file_name().and_then(|name| name.to_str());
-        let kept = name.and_then(kept_name);
-        kept.is_some_and(|kept| kept.eq_ignore_ascii_case(binary) || service::is_image(kept))
-    });
-    Ok(images)
+    let (mut of_binary, mut of_images) = (Vec::new(), Vec::new());
+    for image in images(paths)? {
+        let kept = image.file_name().and_then(|name| name.to_str()).and_then(kept_name);
+        match kept {
+            Some(kept) if kept.eq_ignore_ascii_case(binary) => of_binary.push(image),
+            Some(kept) if service::is_image(&kept.to_ascii_lowercase()) => of_images.push(image),
+            _ => {}
+        }
+    }
+    of_binary.extend(of_images);
+    Ok(of_binary)
 }
 
 /// Whether `image`, a file to delete, is there: `false` if it is gone, an error if it is not a regular file.
@@ -140,6 +146,7 @@ pub fn delete_what_can_be(images: Vec<PathBuf>) -> Vec<anyhow::Error> {
     kept
 }
 
+// Shared with `install`'s tests, which need the same installation.
 #[cfg(test)]
 #[path = "leftovers_tests.rs"]
-mod tests;
+pub(crate) mod tests;

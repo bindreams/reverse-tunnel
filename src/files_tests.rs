@@ -219,3 +219,13 @@ fn a_file_replaced_by_a_rename_has_exactly_the_name_it_was_given_whatever_the_le
     found.sort();
     assert_eq!(found, names);
 }
+
+#[test]
+fn a_posix_rename_falls_back_only_where_the_system_does_not_support_it() {
+    // ERROR_INVALID_PARAMETER: Windows before 1709. ERROR_NOT_SUPPORTED: a filesystem without POSIX rename.
+    assert!(posix_rename_unsupported(&io::Error::from_raw_os_error(87)));
+    assert!(posix_rename_unsupported(&io::Error::from_raw_os_error(50)));
+    // Access denied and a sharing violation are answers about `dest`, which the fallback would only repeat.
+    assert!(!posix_rename_unsupported(&io::Error::from_raw_os_error(5)));
+    assert!(!posix_rename_unsupported(&io::Error::from_raw_os_error(32)));
+}

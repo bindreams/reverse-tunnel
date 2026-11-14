@@ -1201,8 +1201,8 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     assert_eq!(upgrade_remnants(&machine), Vec::<PathBuf>::new());
 }
 
-/// Windows: has goetia register the running service again with `image`, a copy of this build in the bin dir, as its host
-/// and in its command, as an `install` of another binary does. Returns the image.
+/// Windows: has goetia register the running service again with `image`, a copy of this build in the bin dir, as its
+/// host and in its command, as an `install` of another binary does. Returns the image.
 #[cfg(windows)]
 fn move_the_service_onto_a_copy(machine: &Machine) -> PathBuf {
     let image = machine.paths.bin_dir.join("reverse-tunnel-copy.exe");

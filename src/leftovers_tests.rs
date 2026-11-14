@@ -46,38 +46,49 @@ fn a_leftover_is_of_a_file_by_the_name_it_kept_whatever_the_case() {
     assert!(!is_leftover_of("reverse-tunnel.exe", "reverse-tunnel.exe"));
 }
 
-/// A bin dir in a temp dir, whose parent holds the leftovers, and a leftover of `original` in it.
-fn installed() -> (tempfile::TempDir, Paths) {
+/// Paths under a temp dir, which is also the folder that holds the bin dir (see `dir`), with the installed binary in
+/// the bin dir.
+pub(crate) fn installed() -> (tempfile::TempDir, Paths) {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::testing(dir.path());
     fs::create_dir_all(&paths.bin_dir).unwrap();
+    fs::write(service::exe(&paths), "").unwrap();
     (dir, paths)
 }
 
-fn leftover_in(dir: &Path, id: &str, original: &str) -> PathBuf {
+/// Where the leftover called `id` of the file `original` is in the folder `dir`, which `images` lists: the path only,
+/// no file is made.
+pub(crate) fn leftover_in(dir: &Path, id: &str, original: &str) -> PathBuf {
     dir.join(name(id, OsStr::new(original)))
 }
 
 #[test]
-fn the_leftovers_of_the_binary_are_those_that_kept_its_name_or_a_service_images() {
+fn the_leftovers_of_the_binary_are_those_that_kept_its_name_or_a_service_images_and_the_binary_comes_first() {
     let (dir, paths) = installed();
     let image = service::image(&paths, b"an old build");
     let image = image.file_name().unwrap().to_str().unwrap();
-    let ours = [
-        leftover_in(dir.path(), "a", "reverse-tunnel.exe"),
-        leftover_in(dir.path(), "b", "REVERSE-TUNNEL.EXE"),
-        leftover_in(dir.path(), "c", image),
+    // The images have the ids that sort first.
+    let binary = [
+        leftover_in(dir.path(), "c", "reverse-tunnel.exe"),
+        leftover_in(dir.path(), "d", "REVERSE-TUNNEL.EXE"),
+    ];
+    let images = [
+        leftover_in(dir.path(), "a", image),
+        leftover_in(dir.path(), "b", &image.to_uppercase()),
     ];
     let others = [
-        leftover_in(dir.path(), "d", "frpc-0.1.exe"),
-        leftover_in(dir.path(), "e", "old-reverse-tunnel.exe"),
-        leftover_in(dir.path(), "f", "reverse-tunnel-0.1.0.exe"),
+        leftover_in(dir.path(), "e", "frpc-0.1.exe"),
+        leftover_in(dir.path(), "f", "old-reverse-tunnel.exe"),
+        leftover_in(dir.path(), "g", "reverse-tunnel-0.1.0.exe"),
     ];
-    for file in ours.iter().chain(&others) {
+    for file in binary.iter().chain(&images).chain(&others) {
         fs::write(file, "").unwrap();
     }
 
-    assert_eq!(images_of_the_binary(&paths).unwrap(), ours);
+    assert_eq!(
+        images_of_the_binary(&paths).unwrap(),
+        binary.iter().chain(&images).cloned().collect::<Vec<_>>()
+    );
 }
 
 #[test]

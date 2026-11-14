@@ -1,8 +1,8 @@
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::leftovers::tests::{installed, leftover_in};
 
 /// Where the leftover images go, in these tests.
 const LEFTOVERS: &str = r"C:\";
@@ -59,15 +59,6 @@ fn a_disabled_removal_task_is_a_failed_removal() {
     assert!(failure_of(TaskState::Disabled, true).contains("disabled"));
 }
 
-/// Paths in a temp dir, with an installed binary.
-fn installed() -> (tempfile::TempDir, Paths) {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = Paths::testing(dir.path());
-    fs::create_dir_all(&paths.bin_dir).unwrap();
-    fs::write(service::exe(&paths), "").unwrap();
-    (dir, paths)
-}
-
 #[test]
 fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_not() {
     let (_dir, paths) = installed();
@@ -76,11 +67,6 @@ fn the_rerun_advice_names_the_command_on_the_path_and_any_binary_for_when_it_is_
         rerun_uninstall(&paths),
         "run `reverse-tunnel uninstall` in an elevated prompt (with any `reverse-tunnel` binary, if that is not found)"
     );
-}
-
-/// The leftover file in `dir` that renamed a file called `original`, called `id`.
-fn leftover_in(dir: &Path, id: &str, original: &str) -> PathBuf {
-    dir.join(leftovers::name(id, OsStr::new(original)))
 }
 
 #[test]
@@ -532,4 +518,17 @@ fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
     clean_bin_dir(&paths).unwrap_err();
 
     assert!(stale.join("inside").exists());
+}
+
+#[test]
+fn a_binary_placed_with_no_pending_paths_needs_no_restart() {
+    let (_dir, paths) = installed();
+    fs::create_dir_all(&paths.config_dir).unwrap();
+    let exe = service::exe(&paths);
+
+    assert!(place_binary(None, &exe, b"for the path", Replace::Always).unwrap());
+    assert!(!pending_file(&paths).exists());
+
+    assert!(place_binary(Some(&paths), &exe, b"for the service", Replace::Always).unwrap());
+    assert!(pending_file(&paths).exists());
 }

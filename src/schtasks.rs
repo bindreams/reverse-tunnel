@@ -180,9 +180,9 @@ fn connect() -> Result<ITaskFolder> {
 
 /// What `cmd` runs for the removal task, in order: `uninstall --finish` from `copy` (failure ends `cmd` with code 1, the
 /// task's last result), then the deletion of `copy` and `dir`, the task `name`'s own deletion (code 4 on failure), and
-/// the leftovers in `leftover_dir` (see `leftovers`). `del` and `rmdir` report a held file only in their message, so each is repeated
-/// until its target is gone (see `until_gone`). The leftovers go after the task's own deletion because until then
-/// `uninstall`'s waiter is alive and may be running one.
+/// the leftovers in `leftover_dir` (see `leftovers`). `del` and `rmdir` report a held file only in their message, so
+/// each is repeated until its target is gone (see `until_gone`). The leftovers go after the task's own deletion because
+/// until then `uninstall`'s waiter is alive and may be running one.
 pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftover_dir: &Path) -> String {
     let (copy, log, dir) = (copy.display(), log.display(), dir.display());
     let pattern = leftovers::pattern(leftover_dir);
