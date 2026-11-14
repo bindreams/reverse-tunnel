@@ -12,8 +12,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 use crate::account;
-use crate::logfile::ROTATED;
-use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::logfile;
+use crate::paths::{FRPC_CONFIG, LOG_SUPERVISOR, Paths};
 use crate::security::{self, Ace, Dacl, Sid};
 use crate::service;
 
@@ -110,9 +110,9 @@ pub fn opens(paths: &Paths, exe: &Path, frpc: &Path) -> Vec<Need> {
         },
         Need::made(logs.join(FRPC_CONFIG), RENDERED),
     ];
-    for log in [LOG_SUPERVISOR, LOG_FRPC] {
-        needs.push(Need::made(logs.join(log), LOG));
-        needs.push(Need::made(logs.join(format!("{log}{ROTATED}")), ROTATED_LOG));
+    for log in [logs.join(LOG_SUPERVISOR), paths.frpc_log()] {
+        needs.push(Need::made(log.clone(), LOG));
+        needs.push(Need::made(logfile::rotated(&log), ROTATED_LOG));
     }
     needs
 }

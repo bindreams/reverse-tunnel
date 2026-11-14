@@ -401,11 +401,16 @@ def test_ssh_through_proxycommand(stack, registered):
 
 
 def test_status_and_list_show_the_host_connected(stack, registered, other):
-    """The host's `status` ends with frpc's log, which says it logged in, `logs` shows the same, and the bridge's
-    `ctl list` (frps's API) says the host is up."""
+    """`logs` shows that the host logged in since the service started for this test, `status` ends with a tail of that
+    log under its header, and the bridge's `ctl list` (frps's API) says the host is up."""
     login = "login to server success"
-    wait_until(lambda: login in run(INSTALLED, "status").stdout)
-    assert login in run(INSTALLED, "logs", "-n", "5").stdout
+    wait_until(lambda: login in run(INSTALLED, "logs").stdout[stack.started_at :])
+    status = run(INSTALLED, "status").stdout
+    header, found, tail = status.partition("`reverse-tunnel logs` shows it all):\n")
+    assert found and header.endswith("frpc log (last 10 lines; "), status
+    assert tail.strip(), status
+    # What `status` printed is a run of lines of the log, which only grows.
+    assert tail in run(INSTALLED, "logs").stdout, status
     online = rf"^presence {HOST} online since \d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d UTC$"
     listing = wait_until(lambda: re.search(online, text := stack.ctl("list"), re.M) and text)
     # OTHER is registered, and no frpc runs for it.

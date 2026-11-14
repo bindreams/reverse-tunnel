@@ -47,52 +47,45 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(text.contains(FINGERPRINT), "{text}");
     assert!(text.contains("stopped"), "{text}");
     assert!(!text.contains("secret"), "{text}");
-    assert!(
-        text.ends_with(
-            "frpc log: no log yet
-"
-        ),
-        "{text}"
-    );
+    assert!(text.ends_with("frpc log: no log yet\n"), "{text}");
+}
+
+/// The host's `status` with the service in `state` and `lines` lines in frpc's log.
+fn status_with_log(state: State, lines: usize) -> String {
+    let (_dir, paths) = host();
+    let log: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
+    fs::write(paths.frpc_log(), log).unwrap();
+    let manager = Fake::default();
+    let spec = service::spec(&service::exe(&paths)).unwrap();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), state);
+    status_text(&manager, &paths)
 }
 
 /// The end of frpc's log, as it is, after the certificate lines: the last ten lines of twelve.
 #[test]
 fn status_ends_with_the_last_ten_lines_of_frpc_log() {
-    let (_dir, paths) = host();
-    let lines = (1..=12)
-        .map(|n| {
-            format!(
-                "line {n}
-"
-            )
-        })
-        .collect::<String>();
-    fs::write(paths.frpc_log(), lines).unwrap();
-    let manager = Fake::default();
-    manager
-        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
-        .unwrap();
-
-    let text = status_text(&manager, &paths);
+    let text = status_with_log(State::Running, 12);
 
     let (_, log) = text.split_once(FINGERPRINT).unwrap();
-    let (_, shown) = log.split_once("frpc log (last 10 lines").unwrap();
-    let (_, shown) = shown
-        .split_once(
-            ":
-",
-        )
-        .unwrap();
-    let expected = (3..=12)
-        .map(|n| {
-            format!(
-                "line {n}
-"
-            )
-        })
-        .collect::<String>();
+    let (header, shown) = log.split_once(":\n").unwrap();
+    let expected: String = (3..=12).map(|n| format!("line {n}\n")).collect();
     assert_eq!(shown, expected, "{text}");
+    assert!(header.contains("frpc log (last 10 lines;"), "{text}");
+}
+
+/// The tail of a service that is not running is its last run's: `status` says so, and does not when it runs.
+#[test]
+fn status_says_when_the_log_tail_is_from_the_last_run() {
+    for state in [State::Stopped, State::Failed] {
+        let text = status_with_log(state, 3);
+        assert!(
+            text.contains("frpc log (last 10 lines, from the service's last run;"),
+            "{text}"
+        );
+    }
+    let text = status_with_log(State::Running, 3);
+    assert!(!text.contains("last run"), "{text}");
 }
 
 /// A host whose installed binary is a copy of `stub-frpc` in its `check` mode (`testbin/stub_frpc.rs`), which stands

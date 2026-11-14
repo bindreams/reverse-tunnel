@@ -18,6 +18,13 @@ use crate::output::eprintln_best_effort;
 /// What a rotated log's name ends with.
 pub const ROTATED: &str = ".1";
 
+/// Where a log at `path` goes when it is rotated.
+pub fn rotated(path: &Path) -> PathBuf {
+    let mut old = OsString::from(path);
+    old.push(ROTATED);
+    old.into()
+}
+
 /// The size at which a log is rotated.
 pub const ROTATE_AT: u64 = 10 * 1024 * 1024;
 
@@ -98,8 +105,7 @@ impl Active {
     }
 
     fn rotate(&mut self) -> Result<()> {
-        let mut old = OsString::from(&self.path);
-        old.push(ROTATED);
+        let old = rotated(&self.path);
         // A missing log was already renamed by a rotation that then failed to open the new one.
         match fs::rename(&self.path, &old) {
             Err(err) if err.kind() != ErrorKind::NotFound => {
@@ -114,24 +120,41 @@ impl Active {
     }
 }
 
-/// Opens `path` for appending, created if missing. On Unix the file is mode 0644 whatever the umask: every local
-/// account may read a log (`logs`, `status`), and nothing secret is in it. On Windows the log directory's ACL, which
-/// `install` sets, gives Everyone read on each new file.
+/// Opens `path` for appending, created if missing. A file this creates on Unix is made mode 0644 whatever the umask:
+/// every local account may read a log (`logs`, `status`), and nothing secret is in it. A mode that cannot be set is
+/// reported and does not stop the log; a file that already exists keeps its mode. On Windows the log directory's ACL,
+/// which `install` sets, gives Everyone read on each new file.
 fn open(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o644);
-    let file = options
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o644))
-            .with_context(|| format!("making {} readable by everyone", path.display()))?;
+    loop {
+        let mut create = OpenOptions::new();
+        create.create_new(true).append(true);
+        #[cfg(unix)]
+        create.mode(0o644);
+        match create.open(path) {
+            Ok(file) => {
+                #[cfg(unix)]
+                make_readable(&file, path);
+                return Ok(file);
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err).with_context(|| format!("opening {}", path.display())),
+        }
+        // Removed since the attempt to create it: look again.
+        match OpenOptions::new().append(true).open(path) {
+            Ok(file) => return Ok(file),
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("opening {}", path.display())),
+        }
     }
-    Ok(file)
+}
+
+/// The mode that the umask may have narrowed.
+#[cfg(unix)]
+fn make_readable(file: &File, path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(err) = file.set_permissions(fs::Permissions::from_mode(0o644)) {
+        eprintln_best_effort(&format!("making {} readable by everyone: {err}", path.display()));
+    }
 }
 
 /// The local time and its UTC offset in whole minutes, e.g. `2026-11-02T21:04:05+01:00`; `1970-01-01T00:00:00+00:00`

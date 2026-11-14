@@ -300,8 +300,11 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     // frpc runs only after the supervisor read both tokens, which it does as the service account.
     assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
     // `logs` and `status` show the logs to every account.
-    for log in [reverse_tunnel::paths::LOG_SUPERVISOR, reverse_tunnel::paths::LOG_FRPC] {
-        is(&paths.log_dir.join(log), EVERYONE, READ_EXECUTE);
+    for log in [
+        paths.log_dir.join(reverse_tunnel::paths::LOG_SUPERVISOR),
+        paths.frpc_log(),
+    ] {
+        is(&log, EVERYONE, READ_EXECUTE);
     }
 }
 

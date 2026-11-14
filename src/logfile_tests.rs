@@ -41,3 +41,22 @@ fn log_files_are_created_0644() {
         assert_eq!(mode & 0o777, 0o644, "{name}");
     }
 }
+
+/// Only a file that `open` creates is made 0644: one that exists keeps the mode its owner gave it.
+#[cfg(unix)]
+#[test]
+fn an_existing_log_keeps_its_mode() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::LogFile;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.log");
+    fs::write(&path, "").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    LogFile::open(path.clone(), 10).unwrap();
+
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+}

@@ -74,7 +74,8 @@ enum Command {
         /// Show only the last N lines.
         #[arg(short = 'n', long = "lines", value_name = "N")]
         lines: Option<usize>,
-        /// Keep running and show lines as they are appended, until interrupted.
+        /// Keep running and show lines as they are appended, until interrupted. Starts with the last 10 lines unless
+        /// -n says otherwise, and waits for the log if there is none yet.
         #[arg(short, long)]
         follow: bool,
     },
