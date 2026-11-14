@@ -419,6 +419,14 @@ fn persist_over(file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfi
 fn persist_over(mut file: tempfile::NamedTempFile, dest: &Path) -> Result<(), tempfile::PersistError> {
     match rename_over(file.as_file(), file.path(), dest) {
         Ok(()) => {
+            let names: Vec<_> = fs::read_dir(dest.parent().unwrap())
+                .map(|d| d.flatten().map(|e| e.file_name()).collect())
+                .unwrap_or_default();
+            eprintln!(
+                "DIAG2 renamed to {}: before drop {:?}, dir {names:?}",
+                dest.display(),
+                fs::metadata(dest).map(|m| m.len())
+            );
             // The temp file's name is gone: `file` must not delete whatever is at it later.
             file.disable_cleanup(true);
             Ok(())
