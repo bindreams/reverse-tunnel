@@ -1,4 +1,5 @@
-use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE};
+use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
 use super::*;
 
@@ -16,14 +17,16 @@ fn ace(allows: bool, sid: &str, mask: u32) -> Ace {
     }
 }
 
-/// What the check finds for `aces`, with the service and the groups Everyone and Users credited.
-fn barrier(aces: &[Ace], needs: u32) -> Option<Barrier> {
-    let who = [(EVERYONE, "Everyone"), (USERS, "Users"), (SERVICE, "the service")];
-    let who: Vec<(Sid, &str)> = who
+fn who() -> Vec<(Sid, &'static str)> {
+    [(EVERYONE, "Everyone"), (USERS, "Users"), (SERVICE, "the service")]
         .iter()
         .map(|(sid, name)| (Sid::parse(sid).unwrap(), *name))
-        .collect();
-    barrier_of(aces, &who, needs)
+        .collect()
+}
+
+/// What the check finds for `aces`, with the service and the groups Everyone and Users credited.
+fn barrier(aces: &[Ace], needs: u32) -> Option<Barrier> {
+    barrier_of(aces, &who(), needs)
 }
 
 #[test]
@@ -58,29 +61,47 @@ fn an_allow_of_less_than_is_needed_is_not_enough() {
 }
 
 #[test]
-fn a_deny_for_the_service_or_a_credited_group_names_who_is_denied() {
-    for (sid, name) in [(SERVICE, "the service"), (EVERYONE, "Everyone")] {
-        let aces = [ace(false, sid, 0x1), ace(true, EVERYONE, FILE_GENERIC_READ)];
+fn an_allow_of_generic_rights_counts_as_the_file_rights_they_map_to() {
+    for (generic, needs) in [
+        (GENERIC_READ, FILE_GENERIC_READ),
+        (GENERIC_WRITE, FILE_GENERIC_WRITE),
+        (GENERIC_EXECUTE, FILE_GENERIC_EXECUTE),
+        (
+            GENERIC_ALL,
+            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE | FILE_GENERIC_WRITE | DELETE,
+        ),
+    ] {
+        let found = barrier(&[ace(true, EVERYONE, generic)], needs);
 
-        let found = barrier(&aces, FILE_GENERIC_READ);
-
-        assert!(matches!(found, Some(Barrier::Denied(who)) if who == name), "{sid}");
+        assert!(found.is_none(), "{generic:#x}: {found:?}");
     }
 }
 
 #[test]
-fn a_deny_for_someone_else_or_of_other_rights_is_no_barrier() {
-    let aces = [
-        ace(false, ADMINISTRATORS, FILE_GENERIC_READ),
-        ace(false, SERVICE, FILE_GENERIC_WRITE & !FILE_GENERIC_READ),
+fn any_deny_ace_is_a_barrier_naming_its_sid_whoever_it_names_and_whatever_it_denies() {
+    for sid in [SERVICE, EVERYONE, ADMINISTRATORS] {
+        let aces = [ace(false, sid, 0x1), ace(true, EVERYONE, FILE_GENERIC_READ)];
+
+        let found = barrier(&aces, FILE_GENERIC_READ);
+
+        assert!(
+            matches!(found, Some(Barrier::Denied(ref denied)) if denied == sid),
+            "{sid}: {found:?}"
+        );
+    }
+    let other_rights = [
+        ace(false, ADMINISTRATORS, FILE_GENERIC_WRITE & !FILE_GENERIC_READ),
         ace(true, SERVICE, FILE_GENERIC_READ),
     ];
 
-    assert!(barrier(&aces, FILE_GENERIC_READ).is_none());
+    assert!(matches!(
+        barrier(&other_rights, FILE_GENERIC_READ),
+        Some(Barrier::Denied(_))
+    ));
 }
 
 #[test]
-fn an_ace_that_only_applies_to_what_the_object_contains_counts_for_nothing() {
+fn an_allow_that_only_applies_to_what_the_object_contains_counts_for_nothing_but_a_deny_still_fails() {
     let allow_only_below = Ace {
         inherit_only: true,
         ..ace(true, SERVICE, FILE_GENERIC_READ)
@@ -91,11 +112,20 @@ fn an_ace_that_only_applies_to_what_the_object_contains_counts_for_nothing() {
     };
 
     let not_allowed = barrier(&[allow_only_below], FILE_GENERIC_READ);
-    let allowed = barrier(
+    let denied = barrier(
         &[deny_only_below, ace(true, SERVICE, FILE_GENERIC_READ)],
         FILE_GENERIC_READ,
     );
 
     assert!(matches!(not_allowed, Some(Barrier::NotAllowed)), "{not_allowed:?}");
-    assert!(allowed.is_none(), "{allowed:?}");
+    assert!(matches!(denied, Some(Barrier::Denied(_))), "{denied:?}");
+}
+
+#[test]
+fn a_missing_path_is_reported_as_missing() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let said = problem(&dir.path().join("config.yaml"), READ, &who()).unwrap();
+
+    assert!(said.contains("is missing"), "{said}");
 }

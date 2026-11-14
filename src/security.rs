@@ -14,12 +14,16 @@ use windows_sys::Win32::Security::Authorization::{
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows_sys::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, EqualSid,
-    GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, INHERIT_ONLY_ACE,
-    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
+    ACE_HEADER, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl,
+    GetSecurityDescriptorOwner, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
-use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
+    ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
+};
 
 /// A descriptor that names only an owner: Administrators.
 pub const OWNED_BY_ADMINISTRATORS: &str = "O:BA";
@@ -149,7 +153,8 @@ pub struct Ace {
     pub sid: Sid,
 }
 
-/// The allow and deny ACEs of `path`'s DACL, inherited ones included; ACEs of other kinds are left out. A path with no
+/// The plain allow ACEs and every kind of deny ACE (plain, callback, object, callback object) of `path`'s DACL,
+/// inherited ones included. Other allows (conditional, object) are left out: nothing may rely on them. A path with no
 /// DACL gives everyone full access, so it has one ACE: Everyone's.
 pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
     let (mut dacl, mut descriptor) = (null_mut(), null_mut());
@@ -200,17 +205,31 @@ pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
         }
         // SAFETY: `ace` points into the live descriptor at an ACE, which starts with its header.
         let header = unsafe { *ace.cast::<ACE_HEADER>() };
-        if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8 && header.AceType != ACCESS_DENIED_ACE_TYPE as u8 {
+        let kind = u32::from(header.AceType);
+        let allows = kind == ACCESS_ALLOWED_ACE_TYPE;
+        let object = matches!(
+            kind,
+            ACCESS_DENIED_OBJECT_ACE_TYPE | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
+        );
+        if !allows && kind != ACCESS_DENIED_ACE_TYPE && kind != ACCESS_DENIED_CALLBACK_ACE_TYPE && !object {
             continue;
         }
-        // SAFETY: an allow and a deny ACE have this layout: the header, the mask and the SID, which starts at
-        // `SidStart` and is valid for as long as the descriptor is.
+        // SAFETY: every one of these ACEs is the header, the mask, then for an object ACE its flags and the GUIDs that
+        // they say are present, and then the SID, which is valid for as long as the descriptor is.
         let (mask, sid) = unsafe {
-            let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-            (ace.Mask, Sid::copy_of((&raw const ace.SidStart).cast_mut().cast()))
+            let base = ace.cast::<u8>();
+            let mask = base.add(4).cast::<u32>().read_unaligned();
+            let mut sid_at = 8;
+            if object {
+                let flags = base.add(8).cast::<u32>().read_unaligned();
+                sid_at = 12
+                    + 16 * usize::from(flags & ACE_OBJECT_TYPE_PRESENT != 0)
+                    + 16 * usize::from(flags & ACE_INHERITED_OBJECT_TYPE_PRESENT != 0);
+            }
+            (mask, Sid::copy_of(base.add(sid_at).cast()))
         };
         aces.push(Ace {
-            allows: header.AceType == ACCESS_ALLOWED_ACE_TYPE as u8,
+            allows,
             inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0,
             mask,
             sid,

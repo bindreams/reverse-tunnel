@@ -170,16 +170,9 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     let has_no_access = |path: &Path, sid: &str| {
         assert_eq!(rights(path, sid), 0, "{sid} has access to {}", path.display());
     };
-    let tokens = [
-        machine.secrets().join("bridge.token"),
-        machine.secrets().join("host.token"),
-    ];
+    let tokens = [machine.paths.bridge_token(), machine.paths.host_token()];
 
-    for public in [
-        paths.config_dir.clone(),
-        paths.config_dir.join("config.yaml"),
-        paths.config_dir.join("bridge.pem"),
-    ] {
+    for public in [paths.config_dir.clone(), paths.config_file(), paths.bridge_pem()] {
         is(&public, SYSTEM, FULL);
         is(&public, ADMINISTRATORS, FULL);
         is(&public, EVERYONE, READ_EXECUTE);

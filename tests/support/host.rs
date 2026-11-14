@@ -36,9 +36,9 @@ impl Host {
             fs::create_dir_all(dir).unwrap();
         }
         let config = format!("host: testhost\nbridge: tunnel.example\ndefault: ssh\nservices:\n{services}");
-        fs::write(paths.config_dir.join("config.yaml"), config).unwrap();
-        fs::write(paths.secrets_dir.join("bridge.token"), "bridge-secret\n").unwrap();
-        fs::write(paths.secrets_dir.join("host.token"), "host-secret\r\n").unwrap();
+        fs::write(paths.config_file(), config).unwrap();
+        fs::write(paths.bridge_token(), "bridge-secret\n").unwrap();
+        fs::write(paths.host_token(), "host-secret\r\n").unwrap();
         let frpc = paths.bin_dir.join(format!("frpc{EXE_SUFFIX}"));
         copy_stub(&frpc);
         let record = root.join("record");

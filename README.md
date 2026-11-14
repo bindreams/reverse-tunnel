@@ -56,9 +56,9 @@ every installer does, by reading it and writing it back: another program that ed
 the two edits, and running that program's installer again restores its entry. `install` refuses a Program Files folder
 whose path contains `%`, which Windows reads as a variable in the commands that finish `uninstall` and in the system
 `PATH`. `restart` and `install` check the configuration as the caller, then check from the ACLs that the service account
-`NT SERVICE\reverse-tunnel` can read what `run` reads: an allow for it or for a group that every service has
-(Everyone, Users, SERVICE and others), and no deny for any of them. `upgrade` is not available yet: to change the
-binary, uninstall and install again.
+`NT SERVICE\reverse-tunnel` has what `run` opens (the binaries, the configuration and token files, and the log folder):
+an allow for it or for a group that every service has (Everyone, SERVICE and others), and no deny ACE for anyone.
+`upgrade` is not available yet: to change the binary, uninstall and install again.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe

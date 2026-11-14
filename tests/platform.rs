@@ -262,7 +262,7 @@ impl Machine {
     fn break_config(&self) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
-        let config = self.paths.config_dir.join("config.yaml");
+        let config = self.paths.config_file();
         let text = fs::read(&config).unwrap();
         fs::remove_file(&config).unwrap();
         fs::write(&config, text).unwrap();
@@ -274,7 +274,7 @@ impl Machine {
     /// only the service account cannot read is caught by its ACL, see `restart_refuses_a_config_the_service_account_cannot_read`.)
     #[cfg(windows)]
     fn break_config(&self) -> PathBuf {
-        let config = self.paths.config_dir.join("config.yaml");
+        let config = self.paths.config_file();
         fs::write(&config, "host: [unclosed").unwrap();
         config
     }
@@ -300,10 +300,6 @@ impl Machine {
     fn wait_for_frpc(&self) -> Vec<Process> {
         wait_until("frpc runs", || !self.frpc().is_empty());
         self.frpc()
-    }
-
-    fn secrets(&self) -> PathBuf {
-        self.paths.secrets_dir.clone()
     }
 
     /// Runs `program args` as the probe account, which `acls_as_specified` creates; whether it succeeded.
@@ -451,21 +447,26 @@ fn assert_installed_as_specified(machine: &Machine) {
     let secrets_dir_mode = if cfg!(target_os = "linux") { 0o2750 } else { 0o750 };
     let expected = [
         (paths.config_dir.clone(), 0o755),
-        (paths.config_dir.join("config.yaml"), 0o644),
-        (paths.config_dir.join("bridge.pem"), 0o644),
+        (paths.config_file(), 0o644),
+        (paths.bridge_pem(), 0o644),
         (paths.log_dir.clone(), 0o755),
         (paths.secrets_dir.clone(), secrets_dir_mode),
-        (machine.secrets().join("bridge.token"), 0o640),
-        (machine.secrets().join("host.token"), 0o640),
+        (machine.paths.bridge_token(), 0o640),
+        (machine.paths.host_token(), 0o640),
         (paths.bin_dir.clone(), 0o755),
         (service::exe(paths), 0o755),
     ];
     for (path, mode) in expected {
         assert_eq!(mode_of(&path), mode, "mode of {}", path.display());
     }
-    for token in ["bridge.token", "host.token"] {
-        let meta = fs::metadata(machine.secrets().join(token)).unwrap();
-        assert_eq!((meta.uid(), meta.gid()), (0, service.gid), "owner of {token}");
+    for token in [paths.bridge_token(), paths.host_token()] {
+        let meta = fs::metadata(&token).unwrap();
+        assert_eq!(
+            (meta.uid(), meta.gid()),
+            (0, service.gid),
+            "owner of {}",
+            token.display()
+        );
     }
     assert_eq!(fs::metadata(&paths.log_dir).unwrap().uid(), service.uid);
     let link = paths.link.as_ref().unwrap();
@@ -476,10 +477,7 @@ fn assert_installed_as_specified(machine: &Machine) {
         link.display()
     );
 
-    for readable in [
-        paths.config_dir.join("config.yaml"),
-        paths.config_dir.join("bridge.pem"),
-    ] {
+    for readable in [paths.config_file(), paths.bridge_pem()] {
         assert!(
             machine.probe("cat", &readable),
             "{} is not readable by everyone",
@@ -491,10 +489,11 @@ fn assert_installed_as_specified(machine: &Machine) {
         !machine.probe("ls", &paths.secrets_dir),
         "secrets/ can be listed by another user"
     );
-    for token in ["bridge.token", "host.token"] {
+    for token in [paths.bridge_token(), paths.host_token()] {
         assert!(
-            !machine.probe("cat", &machine.secrets().join(token)),
-            "{token} is readable by another user"
+            !machine.probe("cat", &token),
+            "{} is readable by another user",
+            token.display()
         );
     }
 
@@ -1047,7 +1046,7 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
         "the rejoin should fail on the file at {}: {stderr}",
         blocker.display()
     );
-    let token = fs::read_to_string(machine.secrets().join("bridge.token")).unwrap();
+    let token = fs::read_to_string(machine.paths.bridge_token()).unwrap();
     assert_eq!(
         token, "token-for-new.example.test\n",
         "the rejoin failed before it wrote the bridge files"
@@ -1145,6 +1144,35 @@ fn the_groups_the_check_credits_are_enabled_in_the_services_token() {
             enabled.iter().any(|held| held == sid),
             "{name} ({sid}) is not enabled in the service's token: {enabled:?}"
         );
+    }
+}
+
+/// Every path `run` opens (the product's list) is checked: with each one's ACL stripped of the service's access in
+/// turn, `restart` fails naming it and every earlier one, and the service is left as it was.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn restart_checks_every_path_run_opens() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let before = machine.status();
+    let no_service = reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)").unwrap();
+    let mut broken = Vec::new();
+
+    for (path, _) in reverse_tunnel::access::opens(&machine.paths, &service::exe(&machine.paths)) {
+        no_service.apply(&path).unwrap();
+        broken.push(path.display().to_string());
+
+        let failed = Command::new(BIN).arg("restart").output().unwrap();
+
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(
+            !failed.status.success() && broken.iter().all(|path| stderr.contains(path)),
+            "restart should refuse all of {broken:?}: {stderr}"
+        );
+        let after = machine.status();
+        assert_eq!((after.state, after.pid), (before.state, before.pid));
     }
 }
 
@@ -1253,7 +1281,7 @@ fn install_is_refused_while_an_uninstall_is_unfinished() {
         !refused.status.success() && stderr.contains("uninstall is in progress"),
         "{stderr}"
     );
-    let config = fs::read_to_string(machine.paths.config_dir.join("config.yaml")).unwrap();
+    let config = fs::read_to_string(machine.paths.config_file()).unwrap();
     assert!(
         config.contains("old.example.test"),
         "the refused install changed config.yaml"
@@ -1327,7 +1355,7 @@ fn install_removes_a_stray_ace_from_secrets() {
     // An Administrator's hand edit: Everyone may read the tokens.
     let secrets = machine.paths.secrets_dir.display().to_string();
     output_of("icacls", &[&secrets, "/grant", "*S-1-1-0:(OI)(CI)R"]);
-    let token = machine.secrets().join("host.token");
+    let token = machine.paths.host_token();
     assert_ne!(
         windows::effective_rights(&token, &everyone),
         0,
