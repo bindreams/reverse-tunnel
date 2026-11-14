@@ -21,7 +21,7 @@ use crate::account::{self, Account};
 use crate::command;
 use crate::config::{Config, valid_label};
 use crate::files::{
-    Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, restore, write_atomic,
+    Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, restore_binary, write_atomic,
 };
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
@@ -919,7 +919,7 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
     let frpc = download::tools(paths).frpc;
     if frpc.try_exists()? {
-        restore(&frpc)?;
+        restore_binary(&frpc)?;
     } else {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
@@ -930,12 +930,12 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
 }
 
 /// Puts the binary `binary` and the symlink in place. Whether the binary changed. A binary that did not change gets the
-/// access a new one has (`files::restore`), so a hand-edited ACL, mode or owner does not outlive a reinstall.
+/// access a new one has (`files::restore_binary`), so a hand-edited ACL, mode or owner does not outlive a reinstall.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::executable())?;
     if !changed {
-        restore(&exe)?;
+        restore_binary(&exe)?;
     }
     clean_bin_dir(paths)?;
     #[cfg(windows)]

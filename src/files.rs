@@ -53,7 +53,7 @@ impl Perm {
 
     /// A binary the installation puts in place. On Unix it is owned by the user and group this process runs as (root,
     /// at an install), named explicitly: a new file takes its group from its directory on some systems (macOS), so a
-    /// new binary and a kept one (`restore`) have the same owner and group only by both being given these.
+    /// new binary and a kept one (`restore_binary`) have the same owner and group only by both being given these.
     pub fn executable() -> Perm {
         let perm = Perm::new(0o755);
         #[cfg(unix)]
@@ -150,7 +150,7 @@ fn open_and_apply(path: &Path, perm: Perm) -> Result<()> {
 /// Gives the existing binary `path` what `write_atomic` with `Perm::executable()` gives a new one. On Unix that is its
 /// mode, owner and group (named explicitly: a new file's own group depends on the system, and macOS takes its
 /// directory's). On Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
-pub fn restore(path: &Path) -> Result<()> {
+pub fn restore_binary(path: &Path) -> Result<()> {
     #[cfg(unix)]
     return open_and_apply(path, Perm::executable());
     #[cfg(windows)]

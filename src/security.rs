@@ -503,7 +503,7 @@ fn is_local<'a>(sid: &Sid, machine_domain: impl FnOnce() -> Option<&'a Sid>) -> 
         (1, subs) => subs == [0],
         (2 | 3, _) => true,
         (5, subs) => match subs.as_slice() {
-            [1..=4 | 6..=20 | 32 | 33 | 64 | 80 | 90 | 113 | 114, ..] | [83, 0] => true,
+            [1..=4 | 6..=20 | 32 | 64 | 80 | 90, ..] | [33] | [113] | [114] | [83, 0] => true,
             [21, ..] => machine_domain().is_some_and(|machine| sid.in_domain_of(machine)),
             _ => false,
         },
