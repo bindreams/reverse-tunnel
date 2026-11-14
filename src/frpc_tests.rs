@@ -5,7 +5,7 @@ use crate::download::{fetch, host_pin};
 use crate::paths::Paths;
 
 const YAML: &str = "\
-host: mothership
+host: myhost
 bridge: tunnel.example.test
 default: ssh
 services:
@@ -41,7 +41,7 @@ fn render_transport() {
         "serverPort = 7000",
         "transport.protocol = \"quic\"",
         &format!("transport.tls.trustedCaFile = {ca}"),
-        "user = \"mothership\"",
+        "user = \"myhost\"",
         "loginFailExit = false",
         "log.to = \"console\"",
         "log.level = \"info\"",
@@ -58,7 +58,7 @@ fn render_http_service() {
     let table = proxy(&render_yaml(YAML), "jellyfin");
     assert!(table.contains("type = \"http\""));
     assert!(table.contains("localPort = 8096"));
-    assert!(table.contains("customDomains = [\"jellyfin.mothership.tunnel.example.test\"]"));
+    assert!(table.contains("customDomains = [\"jellyfin.myhost.tunnel.example.test\"]"));
 }
 
 #[test]
@@ -72,17 +72,17 @@ fn render_tcp_service_points_at_listener() {
 #[test]
 fn render_default_adds_bare_name() {
     let out = render_yaml(&YAML.replace("default: ssh", "default: jellyfin"));
-    let default = "customDomains = [\"jellyfin.mothership.tunnel.example.test\", \"mothership.tunnel.example.test\"]";
+    let default = "customDomains = [\"jellyfin.myhost.tunnel.example.test\", \"myhost.tunnel.example.test\"]";
     assert!(proxy(&out, "jellyfin").contains(default));
-    assert!(proxy(&out, "ssh").contains("customDomains = [\"ssh.mothership.tunnel.example.test\"]"));
+    assert!(proxy(&out, "ssh").contains("customDomains = [\"ssh.myhost.tunnel.example.test\"]"));
 }
 
 #[test]
 fn ws_routes_cover_tcp_services_and_default() {
     let routes = ws_routes(&Config::parse(YAML).unwrap());
     let want = BTreeMap::from([
-        ("ssh.mothership.tunnel.example.test".to_string(), 22),
-        ("mothership.tunnel.example.test".to_string(), 22),
+        ("ssh.myhost.tunnel.example.test".to_string(), 22),
+        ("myhost.tunnel.example.test".to_string(), 22),
     ]);
     assert_eq!(routes, want);
 }

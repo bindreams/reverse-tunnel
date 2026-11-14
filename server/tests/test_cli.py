@@ -1,3 +1,4 @@
+import argparse
 import base64
 import json
 import os
@@ -25,7 +26,7 @@ GENERATED = Path("compose.generated.yaml")
 CHILD = """
 import sys
 from ctl import cli, compose
-compose.compose_up_plugin = lambda folder: None
+compose.compose_up = lambda folder, build=False: None
 compose.network_exists = lambda name: True
 cli.resolve = lambda name: True
 sys.exit(cli.main(sys.argv[1:]))
@@ -34,11 +35,11 @@ sys.exit(cli.main(sys.argv[1:]))
 
 @pytest.fixture
 def bridge(tmp_path, monkeypatch):
-    """A bridge folder (the cwd) holding `.env`; Docker and DNS are faked. Returns the list of plugin reloads."""
+    """A bridge folder (the cwd) holding `.env`; Docker and DNS are faked. Returns the list of `compose_up` calls."""
     (tmp_path / ".env").write_text(f"TUNNEL_DOMAIN={T}\n")
     monkeypatch.chdir(tmp_path)
     reloads = []
-    monkeypatch.setattr(compose, "compose_up_plugin", reloads.append)
+    monkeypatch.setattr(compose, "compose_up", lambda folder, build=False: reloads.append((folder, build)))
     monkeypatch.setattr(compose, "network_exists", lambda name: True)
     monkeypatch.setattr(cli, "resolve", lambda name: True)
     return reloads
@@ -51,7 +52,7 @@ def inited(bridge):
     return bridge
 
 
-def docker_down(folder):
+def docker_down(folder, build=False):
     raise subprocess.CalledProcessError(1, "docker")
 
 
@@ -137,12 +138,12 @@ def test_comments_survive_add_and_revoke(inited):
 
 
 def test_ctl_rewrites_keep_long_entries_on_one_line(inited):
-    host_line = "mothership: sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55  # office laptop\n"
-    alias_line = f"{'a' * 63}.{'b' * 63}.binarydreams.me: {'s' * 63}.{'h' * 63}.{T}\n"
+    host_line = "myhost: sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55  # office laptop\n"
+    alias_line = f"{'a' * 63}.{'b' * 63}.yourdomain.org: {'s' * 63}.{'h' * 63}.{T}\n"
     Path("state/hosts.yaml").write_text(host_line)
     Path("state/aliases.yaml").write_text(alias_line)
     assert cli.main(["add", "web", H]) == 0
-    assert cli.main(["alias", "media.binarydreams.me", f"svc.web.{T}"]) == 0
+    assert cli.main(["alias", "media.yourdomain.org", f"svc.web.{T}"]) == 0
     assert Path("state/hosts.yaml").read_text().startswith(host_line)
     assert Path("state/aliases.yaml").read_text().startswith(alias_line)
 
@@ -183,7 +184,7 @@ def test_concurrent_add(inited):
     assert f"*.a.{T}" in GENERATED.read_text() and f"*.b.{T}" in GENERATED.read_text()
 
 
-@pytest.mark.parametrize("public", ["nodots", f"x.{T}", "a b.binarydreams.me", "a`b.binarydreams.me"])
+@pytest.mark.parametrize("public", ["nodots", f"x.{T}", "a b.yourdomain.org", "a`b.yourdomain.org"])
 def test_alias_rejects_bad_public_name(inited, public):
     assert cli.main(["alias", public, f"svc.web.{T}"]) == 1
     assert read_aliases(Path("state/aliases.yaml"), T) == {}
@@ -191,17 +192,17 @@ def test_alias_rejects_bad_public_name(inited, public):
 
 
 def test_alias_requires_backend_under_T(inited):
-    assert cli.main(["alias", "media.binarydreams.me", f"svc.web.{T}"]) == 0
-    assert read_aliases(Path("state/aliases.yaml"), T) == {"media.binarydreams.me": f"svc.web.{T}"}
-    assert "Host(`media.binarydreams.me`)" in GENERATED.read_text()
-    assert cli.main(["alias", "other.binarydreams.me", "svc.web.binarydreams.me"]) == 1
-    assert cli.main(["unalias", "media.binarydreams.me"]) == 0
+    assert cli.main(["alias", "media.yourdomain.org", f"svc.web.{T}"]) == 0
+    assert read_aliases(Path("state/aliases.yaml"), T) == {"media.yourdomain.org": f"svc.web.{T}"}
+    assert "Host(`media.yourdomain.org`)" in GENERATED.read_text()
+    assert cli.main(["alias", "other.yourdomain.org", "svc.web.yourdomain.org"]) == 1
+    assert cli.main(["unalias", "media.yourdomain.org"]) == 0
     assert read_aliases(Path("state/aliases.yaml"), T) == {}
 
 
 def test_revoke_prints_restart_hint(inited, monkeypatch, capsys):
     cli.main(["add", "web", H])
-    monkeypatch.setattr(compose, "compose_up_plugin", docker_down)
+    monkeypatch.setattr(compose, "compose_up", docker_down)
     capsys.readouterr()
     assert cli.main(["revoke", "web"]) == 1  # the hint must not depend on the reload
     assert "docker compose restart reverse-tunnel-frps" in capsys.readouterr().out
@@ -254,17 +255,17 @@ def test_init_domain_change_fails(inited, capsys):
 
 
 def test_docker_failure_after_write_is_reported(inited, monkeypatch, capsys):
-    monkeypatch.setattr(compose, "compose_up_plugin", docker_down)
+    monkeypatch.setattr(compose, "compose_up", docker_down)
     assert cli.main(["add", "web", H]) == 1
     err = capsys.readouterr().err
-    assert "registry is updated" in err and "plugin was not reloaded" in err and "rerun any ctl command" in err
+    assert "registry is updated" in err and "the bridge was not brought up" in err and "rerun any ctl command" in err
     assert "web" in read_hosts(Path("state/hosts.yaml"))
     assert cli.main(["list"]) == 1
     err = capsys.readouterr().err
-    assert "plugin was not reloaded" in err and "registry is updated" not in err
-    monkeypatch.setattr(compose, "compose_up_plugin", inited.append)
+    assert "the bridge was not brought up" in err and "registry is updated" not in err
+    monkeypatch.setattr(compose, "compose_up", lambda folder, build=False: inited.append((folder, build)))
     assert cli.main(["list"]) == 0
-    assert inited == [Path.cwd()]
+    assert inited == [(Path.cwd(), False)]
 
 
 def test_list_regenerates(inited, capsys):
@@ -361,11 +362,37 @@ def test_network_exists_reports_docker_failure(docker, tmp_path, monkeypatch):
         compose.network_exists("gateway")
 
 
-def test_plugin_reload_uses_only_the_bridge_compose_files(docker, tmp_path):
-    compose.compose_up_plugin(tmp_path)  # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it
-    assert Path(f"{docker}.log").read_text() == (
-        "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml up -d --no-deps reverse-tunnel-plugin\n"
-    )
+def test_compose_up_uses_only_the_bridge_compose_files_and_starts_every_service(docker, tmp_path):
+    compose.compose_up(tmp_path)  # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it
+    compose.compose_up(tmp_path, build=True)
+    base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml up -d"
+    assert Path(f"{docker}.log").read_text() == f"{base}\n{base} --build\n"
+
+
+def test_init_starts_the_bridge_and_prints_the_join_code_last_under_a_label(bridge, monkeypatch, capsys):
+    def up(folder, build=False):
+        assert build, "init builds both images"
+        print("docker's build output")
+
+    monkeypatch.setattr(compose, "compose_up", up)
+    assert cli.main(["init"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "docker's build output"
+    assert lines[-1].startswith("rt1:")
+    label = " ".join(lines[1:-1])
+    assert "Join code" in label and "reverse-tunnel install" in label and "ctl join-code" in label
+
+
+def test_a_command_other_than_init_brings_the_whole_bridge_up_without_a_build(inited):
+    assert cli.main(["list"]) == 0
+    assert inited == [(Path.cwd(), False)]
+
+
+def test_every_command_and_argument_has_help():
+    subparsers = next(a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction))
+    assert [c.dest for c in subparsers._choices_actions if not c.help] == []
+    missing = [f"{name} {a.dest}" for name, p in subparsers.choices.items() for a in p._actions if not a.help]
+    assert missing == []
 
 
 def test_failed_registry_write_prints_nothing(inited, monkeypatch, capsys):

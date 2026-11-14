@@ -17,6 +17,7 @@ use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
 use crate::account::{self, Account};
+use crate::client;
 #[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::{Config, valid_label};
@@ -161,10 +162,7 @@ fn apply(
         say_kept(sweep_old_images(paths, &new.image));
     }
 
-    println!(
-        "Register this host on the bridge by running:\n    {}",
-        registration(paths)?
-    );
+    println!("{}", registration(paths)?);
     manager.enable(&spec.id)?;
     pick_up(manager, &spec.id, paths, changed)
 }
@@ -1081,11 +1079,16 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
     symlink(target, link).with_context(|| format!("linking {}", link.display()))
 }
 
+/// What `install` prints once the host is set up: the line that registers it on the bridge, then how to reach it.
 fn registration(paths: &Paths) -> Result<String> {
-    let host = Config::load(&paths.config_file())?.host;
+    let cfg = Config::load(&paths.config_file())?;
     let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
-    Ok(registration_line(&host, token.trim()))
+    Ok(format!(
+        "Register this host on the bridge by running:\n    {}\n\n{}",
+        registration_line(&cfg.host, token.trim()),
+        client::instructions(&cfg.host, &cfg.bridge)
+    ))
 }
 
 fn registration_line(host: &str, token: &str) -> String {

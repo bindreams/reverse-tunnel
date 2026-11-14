@@ -25,7 +25,7 @@ providers:
 certificatesResolvers:
   letsencrypt:
     acme:
-      email: e2e@tunnel.binarydreams.me
+      email: e2e@tunnel.example.org
       storage: /acme/acme.json
       caServer: https://pebble:14000/dir
       dnsChallenge:

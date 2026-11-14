@@ -15,11 +15,14 @@ def _docker(*args: str, **kwargs) -> subprocess.CompletedProcess:
         raise DockerError("docker is not installed") from e
 
 
-def compose_up_plugin(folder: Path) -> None:
-    """Create or update the plugin container from the bridge folder's compose files, leaving frps alone."""
+def compose_up(folder: Path, build: bool = False) -> None:
+    """Create or update every service of the bridge folder's compose files, starting any that is not running.
+
+    `build` rebuilds the images first. A service whose definition and image are unchanged is left running.
+    """
     # -p and -f pin the project and files: COMPOSE_FILE and COMPOSE_PROJECT_NAME in the shell must not redirect it
     command = ["compose", "-p", "reverse-tunnel", "-f", "compose.yaml", "-f", "compose.generated.yaml"]
-    _docker(*command, "up", "-d", "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
+    _docker(*command, "up", "-d", *(["--build"] if build else []), cwd=folder, check=True)
 
 
 def network_exists(name: str) -> bool:

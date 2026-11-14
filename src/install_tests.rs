@@ -108,7 +108,7 @@ fn join_prompt_gives_up_at_a_blank_line_or_the_end_of_input() {
 fn token_file_format() {
     let machine = Machine::new();
     let code = code_for("tunnel.example.test", "shared-token", CERT);
-    machine.settings(Some("mothership"), Some(&code));
+    machine.settings(Some("myhost"), Some(&code));
 
     let host = fs::read_to_string(machine.paths.host_token()).unwrap();
     let hex = host.strip_suffix('\n').expect("a newline ends the file");
@@ -123,17 +123,17 @@ fn token_file_format() {
 #[test]
 fn registration_line() {
     let token = "0".repeat(64);
-    let line = super::registration_line("mothership", &token);
-    assert_eq!(line, format!("uv run ctl add mothership {}", join::token_hash(&token)));
+    let line = super::registration_line("myhost", &token);
+    assert_eq!(line, format!("uv run ctl add myhost {}", join::token_hash(&token)));
 }
 
 #[test]
 fn first_config_has_ssh_default() {
     let machine = Machine::new();
-    assert!(machine.settings(Some("mothership"), Some(CODE)));
+    assert!(machine.settings(Some("myhost"), Some(CODE)));
 
     let cfg = Config::load(&machine.config()).unwrap();
-    assert_eq!(cfg.host, "mothership");
+    assert_eq!(cfg.host, "myhost");
     assert_eq!(cfg.bridge, "tunnel.example.test");
     assert_eq!(cfg.default.as_deref(), Some("ssh"));
     let ssh = &cfg.services["ssh"];
@@ -144,32 +144,32 @@ fn first_config_has_ssh_default() {
 #[test]
 fn uninstall_prints_revoke_line() {
     let machine = Machine::new();
-    machine.settings(Some("mothership"), Some(CODE));
-    assert_eq!(revoke_line(&machine.paths).unwrap(), "uv run ctl revoke mothership");
+    machine.settings(Some("myhost"), Some(CODE));
+    assert_eq!(revoke_line(&machine.paths).unwrap(), "uv run ctl revoke myhost");
 }
 
 #[test]
 fn host_that_differs_from_the_config_is_refused() {
     let machine = Machine::new();
     assert_eq!(
-        configured_host(&machine.paths, Some("mothership")).unwrap().as_deref(),
-        Some("mothership"),
+        configured_host(&machine.paths, Some("myhost")).unwrap().as_deref(),
+        Some("myhost"),
         "a first install takes the name"
     );
-    machine.settings(Some("mothership"), Some(CODE));
+    machine.settings(Some("myhost"), Some(CODE));
 
-    let err = format!("{:#}", configured_host(&machine.paths, Some("flagship")).unwrap_err());
+    let err = format!("{:#}", configured_host(&machine.paths, Some("otherhost")).unwrap_err());
     let config = machine.paths.config_file().display().to_string();
     assert_eq!(
         err,
         format!(
-            "--host \"flagship\" differs from this host's name \"mothership\" in {config}: `install` does not rename \
-             a host. To rename it, uninstall it and install it again with --host flagship"
+            "--host \"otherhost\" differs from this host's name \"myhost\" in {config}: `install` does not rename \
+             a host. To rename it, uninstall it and install it again with --host otherhost"
         )
     );
     let err = format!("{:#}", configured_host(&machine.paths, Some("Not_Valid")).unwrap_err());
     assert!(err.contains("not a valid name"), "{err}");
-    for same in [Some("mothership"), None] {
+    for same in [Some("myhost"), None] {
         assert_eq!(configured_host(&machine.paths, same).unwrap(), None);
     }
 }
@@ -198,10 +198,10 @@ fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
 #[test]
 fn host_is_checked_before_the_join_code_is_asked_for() {
     let machine = Machine::new();
-    machine.settings(Some("mothership"), Some(CODE));
+    machine.settings(Some("myhost"), Some(CODE));
     fs::remove_file(machine.paths.bridge_pem()).unwrap();
     let opts = InstallOpts {
-        host: Some("flagship".to_string()),
+        host: Some("otherhost".to_string()),
         join: None,
         paths: machine.paths.clone(),
     };
@@ -213,7 +213,7 @@ fn host_is_checked_before_the_join_code_is_asked_for() {
 fn join_code_never_stored() {
     let machine = Machine::new();
     let code = code_for("tunnel.example.test", "shared-token", CERT);
-    machine.settings(Some("mothership"), Some(&wrapped(&code)));
+    machine.settings(Some("myhost"), Some(&wrapped(&code)));
 
     for file in files_under(machine.dir.path()) {
         let text = fs::read_to_string(&file).unwrap();
@@ -225,7 +225,7 @@ fn join_code_never_stored() {
 #[test]
 fn rejoin_rewrites_bridge_files_only() {
     let machine = Machine::new();
-    machine.settings(Some("mothership"), Some(CODE));
+    machine.settings(Some("myhost"), Some(CODE));
     let host_token = fs::read_to_string(machine.paths.host_token()).unwrap();
     let first = fs::read_to_string(machine.config()).unwrap();
     let edited = format!("# mine\n{first}  web:\n    port: 80\n    type: http\n");
@@ -249,8 +249,8 @@ fn rejoin_changes_only_the_bridge_value() {
     // A service called `bridge`; a config edited on Windows; a last line without a newline.
     let rows = [
         (
-            format!("host: mothership\nbridge: old.example.test\n{services}"),
-            format!("host: mothership\nbridge: new.example.test\n{services}"),
+            format!("host: myhost\nbridge: old.example.test\n{services}"),
+            format!("host: myhost\nbridge: new.example.test\n{services}"),
         ),
         (
             "\u{feff}host: m\r\nbridge: old.example.test\r\nservices: {}\r\n".to_string(),
@@ -262,7 +262,7 @@ fn rejoin_changes_only_the_bridge_value() {
         ),
     ];
     let machine = Machine::new();
-    machine.settings(Some("mothership"), Some(CODE));
+    machine.settings(Some("myhost"), Some(CODE));
     for (before, after) in rows {
         fs::write(machine.config(), &before).unwrap();
 
@@ -391,7 +391,7 @@ fn new_binary(machine: &Machine, outcome: &str) -> PathBuf {
 /// A host an earlier install left, settled and picked up, with the outgoing binary and an frpc in `bin/`.
 fn installed_machine() -> Machine {
     let machine = Machine::new();
-    machine.settings(Some("mothership"), Some(CODE));
+    machine.settings(Some("myhost"), Some(CODE));
     fs::remove_file(pending_file(&machine.paths)).unwrap();
     fs::create_dir(&machine.paths.bin_dir).unwrap();
     fs::write(service::exe(&machine.paths), b"the outgoing binary").unwrap();
@@ -449,7 +449,7 @@ fn first_install_aborts_when_the_new_binary_rejects_the_settings() {
         &machine.account,
         &machine.paths,
         &new,
-        Some("mothership"),
+        Some("myhost"),
         Some(&join),
         false,
     )

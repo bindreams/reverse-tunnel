@@ -16,8 +16,8 @@ from ctl.registry import (
 )
 
 T = "t.test"
-MOVIES = "movies.binarydreams.me"
-DUP = "dup.binarydreams.me"
+MOVIES = "movies.yourdomain.org"
+DUP = "dup.yourdomain.org"
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
 
@@ -106,26 +106,26 @@ def test_hosts_undecodable_bytes_name_their_line(tmp_path):
 @pytest.mark.parametrize(
     "line",
     [
-        "Movies.binarydreams.me: jellyfin.mothership.t.test",
+        "Movies.yourdomain.org: jellyfin.myhost.t.test",
         f"{MOVIES}: jellyfin.other.example",
-        f"{DUP}: jellyfin.mothership.t.test",
+        f"{DUP}: jellyfin.myhost.t.test",
         f"{MOVIES}:",
     ],
 )
 def test_registry_rejects_bad_aliases(tmp_path, line):
     path = tmp_path / "aliases.yaml"
-    path.write_text(f"{DUP}: jellyfin.mothership.t.test\n{line}\n")
+    path.write_text(f"{DUP}: jellyfin.myhost.t.test\n{line}\n")
     with pytest.raises(RegistryError) as err:
         read_aliases(path, T)
     assert err.value.line_no == 2
 
 
-@pytest.mark.parametrize("public", ["movies.tunnel.binarydreams.me", "tunnel.binarydreams.me"])
+@pytest.mark.parametrize("public", ["movies.tunnel.yourdomain.org", "tunnel.yourdomain.org"])
 def test_alias_public_name_under_the_tunnel_domain_is_rejected(tmp_path, public):
     path = tmp_path / "aliases.yaml"
-    path.write_text(f"{public}: jellyfin.mothership.tunnel.binarydreams.me\n")
+    path.write_text(f"{public}: jellyfin.myhost.tunnel.yourdomain.org\n")
     with pytest.raises(RegistryError, match="under the tunnel domain") as err:
-        read_aliases(path, "tunnel.binarydreams.me")
+        read_aliases(path, "tunnel.yourdomain.org")
     assert err.value.line_no == 1
 
 
@@ -163,9 +163,9 @@ def test_write_hosts_refuses_what_the_reader_rejects(tmp_path):
 @pytest.mark.parametrize(
     "bad",
     [
-        {"movies.test": "jellyfin.mothership.t.test"},
+        {"movies.test": "jellyfin.myhost.t.test"},
         {MOVIES: "other.example"},
-        {"movies.t.test": "jellyfin.mothership.t.test"},
+        {"movies.t.test": "jellyfin.myhost.t.test"},
     ],
 )
 def test_write_aliases_refuses_what_the_reader_rejects(tmp_path, bad):
