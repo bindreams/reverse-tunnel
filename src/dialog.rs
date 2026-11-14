@@ -5,7 +5,7 @@
 
 use std::io::{self, BufRead, IsTerminal, Stdin, StdinLock, Stdout, Write};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::config::{Config, valid_label};
 use crate::join::{self, JoinInfo};
@@ -45,16 +45,19 @@ impl<I: BufRead, O: Write> Dialog<I, O> {
         let config = paths.config_file();
         let explicit = explicit.map(explicit_host).transpose()?;
         if config.try_exists()? {
-            let current = Config::load(&config)?.host;
+            let current = Config::load(&config).map(|config| config.host);
             if let Some(asked) = explicit {
+                let current = current.as_ref().map_err(|err| anyhow!("{err:#}"))?;
                 ensure!(
                     asked == current,
-                    "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a \
-                     host. To rename it, uninstall it and install it again with --host {asked}",
+                    "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a \n                     host. To rename it, uninstall it and install it again with --host {asked}",
                     config.display()
                 );
             }
-            writeln!(self.out, "Hostname: {current}")?;
+            // A config that cannot be read is reported by the checks `install` runs next, as the service account.
+            if let Ok(current) = current {
+                writeln!(self.out, "Hostname: {current}")?;
+            }
             return Ok(None);
         }
         let host = match explicit {

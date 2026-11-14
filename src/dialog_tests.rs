@@ -128,6 +128,16 @@ fn an_existing_config_shows_its_host_and_asks_for_neither() {
 }
 
 #[test]
+fn an_existing_config_that_cannot_be_read_is_left_to_the_checks_after_the_dialog() {
+    let (_dir, paths) = machine(true, true);
+    fs::write(paths.config_file(), "host: [").unwrap();
+    let mut dialog = dialog("", false);
+    assert_eq!(dialog.host(&paths, None).unwrap(), None);
+    assert_eq!(said(&dialog), "");
+    assert!(dialog.host(&paths, Some("myhost")).is_err());
+}
+
+#[test]
 fn an_existing_config_without_its_bridge_files_asks_for_the_join_code() {
     let (_dir, paths) = machine(true, false);
     let mut dialog = dialog(&wrapped(CODE.trim()), true);
