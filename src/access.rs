@@ -2,6 +2,7 @@
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, ensure};
 use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE};
@@ -33,6 +34,8 @@ pub const CREDITED: [(&str, &str); 5] = [
 /// CREATOR OWNER: in an ACE that files inherit, whoever makes the file. The service owns what it makes, which the
 /// platform test of `CREDITED` asserts of `supervisor.log`.
 const CREATOR_OWNER: &str = "S-1-3-0";
+static CREATOR_OWNER_SID: LazyLock<Sid> =
+    LazyLock::new(|| Sid::parse(CREATOR_OWNER).expect("CREATOR_OWNER is a valid SID"));
 
 /// A right that `run` needs, and the word for it in a failure.
 pub type Right = (u32, &'static str);
@@ -55,11 +58,9 @@ const LOG: Right = (
 const ROTATED_LOG: Right = (DELETE, "delete");
 const RENDERED: Right = (FILE_GENERIC_READ | FILE_GENERIC_WRITE, "read and write");
 
-/// The SIDs that count in a check.
+/// The SIDs that count in a check: the service account first, then the groups it always belongs to, each with its name.
 pub struct Principals {
-    /// The service account first, then the groups it always belongs to, each with its name.
     pub holders: Vec<(Sid, &'static str)>,
-    pub creator_owner: Sid,
 }
 
 /// A path `run` opens and what it needs of it.
@@ -129,10 +130,7 @@ pub fn check(paths: &Paths, exe: &Path) -> Result<()> {
     for (sid, name) in CREDITED {
         holders.push((Sid::parse(sid).with_context(|| format!("the SID of {name}"))?, name));
     }
-    let who = Principals {
-        holders,
-        creator_owner: Sid::parse(CREATOR_OWNER).expect("CREATOR_OWNER is a valid SID"),
-    };
+    let who = Principals { holders };
     let problems: Vec<String> = opens(paths, exe)
         .iter()
         .filter_map(|need| problem(need, &who).map(|problem| format!("{}: {problem}", need.path.display())))
@@ -182,9 +180,9 @@ fn problem(need: &Need, who: &Principals) -> Option<String> {
 /// What stands between the service and the rights it needs.
 #[derive(Debug)]
 pub enum Barrier {
-    /// An ACE denies this account or group something: its name (`Sid::label`), or its SID where this machine has no
-    /// name for it (a domain account or group, always). Any deny ACE is a barrier, whoever it names and whatever it
-    /// denies.
+    /// An ACE denies this account or group something: its name (`Sid::label`), or its SID where it is not asked for a
+    /// name (a SID of another domain: every domain account and group) or has none. Any deny ACE is a barrier, whoever
+    /// it names and whatever it denies.
     Denied(String),
     /// The allow ACEs for the service and its groups do not add up to the rights.
     NotAllowed,
@@ -212,7 +210,7 @@ fn barrier_of(aces: &[Ace], who: &Principals, needs: u32, inherits: u32) -> Opti
             if ace.object_inherit {
                 inherited |= rights;
             }
-        } else if ace.object_inherit && ace.sid == who.creator_owner {
+        } else if ace.object_inherit && ace.sid == *CREATOR_OWNER_SID {
             // Files the service makes are its own, which CREATOR OWNER becomes in them. It is nothing in the
             // directory itself, so it adds nothing to `allowed`.
             inherited |= rights;

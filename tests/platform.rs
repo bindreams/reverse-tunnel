@@ -577,7 +577,8 @@ fn reinstall_changes_nothing() {
 }
 
 /// A hand edit of an installed binary's ACL (Windows) or mode and owner (Unix), the service's own and the pinned frpc,
-/// does not outlive a reinstall of the same binary: the service may run each again.
+/// does not outlive a reinstall of the same binary: the service may run each again. On Unix a kept binary then has the
+/// owner and group that a new one has (the installing user's), as the first install's new ones show.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn reinstall_puts_the_installed_binarys_access_back() {
@@ -588,6 +589,11 @@ fn reinstall_puts_the_installed_binarys_access_back() {
         service::exe(&machine.paths),
         reverse_tunnel::download::tools(&machine.paths).frpc,
     ];
+    #[cfg(unix)]
+    for binary in &binaries {
+        let meta = fs::metadata(binary).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), (0, 0), "new {}", binary.display());
+    }
     for binary in &binaries {
         #[cfg(unix)]
         {
@@ -609,7 +615,7 @@ fn reinstall_puts_the_installed_binarys_access_back() {
     for binary in &binaries {
         assert_eq!(mode_of(binary), 0o755, "{}", binary.display());
         let meta = fs::metadata(binary).unwrap();
-        assert_eq!((meta.uid(), meta.gid()), (0, 0), "{}", binary.display());
+        assert_eq!((meta.uid(), meta.gid()), (0, 0), "kept {}", binary.display());
     }
     // What `run` opens includes both binaries; a failure names the one that is wrong.
     #[cfg(windows)]

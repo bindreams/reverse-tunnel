@@ -235,7 +235,7 @@ fn install(pin: &Pin, archive: &[u8], dest_dir: &Path) -> Result<PathBuf> {
         ensure!(found, "{} not in {}", pin.member, pin.url);
     }
     let dest = dest_dir.join(file_name(pin.name, pin.version));
-    write_atomic(&dest, &tool, Perm::EXECUTABLE, Replace::Never)?;
+    write_atomic(&dest, &tool, Perm::executable(), Replace::Never)?;
     Ok(dest)
 }
 

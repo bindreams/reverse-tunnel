@@ -134,10 +134,30 @@ fn an_ace_is_read_up_to_its_size_and_never_past_it() {
 }
 
 #[test]
-fn a_sid_is_labelled_by_the_local_account_it_belongs_to_else_by_its_text() {
+fn a_sid_is_asked_for_a_name_unless_it_belongs_to_another_domain() {
+    let sid = |text: &str| Sid::parse(text).unwrap();
+    let machine = sid("S-1-5-21-1-2-3");
+    let ask = |text: &str, machine: Option<&Sid>| is_local(&sid(text), machine);
+
+    // Well-known, built-in and service SIDs, whether or not the machine's domain is known.
+    for text in ["S-1-1-0", "S-1-5-18", "S-1-5-32-544", "S-1-5-80-1-2-3-4-5"] {
+        assert!(ask(text, Some(&machine)) && ask(text, None), "{text}");
+    }
+    // The machine's own domain: an account in it, and the domain itself.
+    assert!(ask("S-1-5-21-1-2-3-1001", Some(&machine)));
+    assert!(ask("S-1-5-21-1-2-3", Some(&machine)));
+    // Another domain's, or any domain's when the machine's is unknown.
+    assert!(!ask("S-1-5-21-1-2-4-1001", Some(&machine)));
+    assert!(!ask("S-1-5-21-9-2-3-1001", Some(&machine)));
+    assert!(!ask("S-1-5-21-1-2-3-1001", None));
+}
+
+#[test]
+fn a_sid_is_labelled_by_its_name_if_it_is_well_known_else_by_its_text() {
     let everyone = Sid::parse("S-1-1-0").unwrap();
     // The name is the system's, which a localized Windows gives in its language: only that it is a name.
     assert!(!everyone.label().is_empty() && everyone.label() != everyone.text().unwrap());
+    // No such account here, and a domain that is not this machine's, which is not asked about.
     for unknown in ["S-1-5-80-1-2-3-4-5", "S-1-5-21-1-2-3-1000"] {
         let unknown = Sid::parse(unknown).unwrap();
         assert_eq!(unknown.label(), unknown.text().unwrap());

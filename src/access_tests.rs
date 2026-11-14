@@ -10,6 +10,8 @@ const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 const EVERYONE: &str = "S-1-1-0";
 const USERS: &str = "S-1-5-32-545";
 const ADMINISTRATORS: &str = "S-1-5-32-544";
+/// An account of a domain that is not this machine's.
+const FOREIGN_DOMAIN_ACCOUNT: &str = "S-1-5-21-111-222-333-1000";
 
 fn ace(allows: bool, sid: &str, mask: u32) -> Ace {
     Ace {
@@ -27,7 +29,6 @@ fn who() -> Principals {
             .iter()
             .map(|(sid, name)| (Sid::parse(sid).unwrap(), *name))
             .collect(),
-        creator_owner: Sid::parse(CREATOR_OWNER).unwrap(),
     }
 }
 
@@ -85,29 +86,33 @@ fn an_allow_of_generic_rights_counts_as_the_file_rights_they_map_to() {
     }
 }
 
+/// What a deny ACE for `sid` is reported as, with an allow that would otherwise be enough.
+fn denied_by(sid: &str, denied: u32) -> Barrier {
+    let aces = [ace(false, sid, denied), ace(true, EVERYONE, FILE_GENERIC_READ)];
+    barrier(&aces, FILE_GENERIC_READ).expect("a deny ACE is a barrier")
+}
+
 #[test]
-fn any_deny_ace_is_a_barrier_naming_its_sid_whoever_it_names_and_whatever_it_denies() {
-    for sid in [SERVICE, EVERYONE, ADMINISTRATORS] {
-        let aces = [ace(false, sid, 0x1), ace(true, EVERYONE, FILE_GENERIC_READ)];
-
-        let found = barrier(&aces, FILE_GENERIC_READ);
-
-        assert!(
-            matches!(&found, Some(Barrier::Denied(by)) if *by == Sid::parse(sid).unwrap().label()),
-            "{sid}: {found:?}"
-        );
+fn any_deny_ace_is_a_barrier_whoever_it_names_and_whatever_it_denies() {
+    for sid in [SERVICE, EVERYONE, ADMINISTRATORS, FOREIGN_DOMAIN_ACCOUNT] {
+        assert!(matches!(denied_by(sid, 0x1), Barrier::Denied(_)), "{sid}");
     }
-    let other_rights = [
-        ace(false, ADMINISTRATORS, FILE_GENERIC_WRITE & !FILE_GENERIC_READ),
-        ace(true, SERVICE, FILE_GENERIC_READ),
-    ];
+    let found = denied_by(ADMINISTRATORS, FILE_GENERIC_WRITE & !FILE_GENERIC_READ);
 
-    let found = barrier(&other_rights, FILE_GENERIC_READ);
+    assert!(matches!(found, Barrier::Denied(_)), "{found:?}");
+}
 
-    assert!(
-        matches!(&found, Some(Barrier::Denied(by)) if *by == Sid::parse(ADMINISTRATORS).unwrap().label()),
-        "{found:?}"
-    );
+#[test]
+fn a_deny_ace_is_reported_by_the_name_of_a_well_known_account_and_by_the_text_of_a_domain_account() {
+    // The name is the system's, which a localized Windows gives in its language: only that it is not the SID.
+    let Barrier::Denied(everyone) = denied_by(EVERYONE, 0x1) else {
+        panic!()
+    };
+    assert!(!everyone.is_empty() && everyone != EVERYONE, "{everyone}");
+    let Barrier::Denied(foreign) = denied_by(FOREIGN_DOMAIN_ACCOUNT, 0x1) else {
+        panic!()
+    };
+    assert_eq!(foreign, FOREIGN_DOMAIN_ACCOUNT);
 }
 
 #[test]

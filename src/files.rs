@@ -51,7 +51,22 @@ impl Perm {
         }
     }
 
-    pub const EXECUTABLE: Perm = Perm::new(0o755);
+    /// A binary the installation puts in place. On Unix it is owned by the user and group this process runs as (root,
+    /// at an install), named explicitly: a new file takes its group from its directory on some systems (macOS), so a
+    /// new binary and a kept one (`restore`) have the same owner and group only by both being given these.
+    pub fn executable() -> Perm {
+        let perm = Perm::new(0o755);
+        #[cfg(unix)]
+        {
+            let this_process = Account {
+                uid: uzers::get_effective_uid(),
+                gid: uzers::get_effective_gid(),
+            };
+            perm.owner(this_process).group(this_process)
+        }
+        #[cfg(windows)]
+        perm
+    }
 }
 
 /// What a directory's contents give an account on Windows, for the bits of the mode that are the account's: modify if
@@ -132,25 +147,11 @@ fn open_and_apply(path: &Path, perm: Perm) -> Result<()> {
     apply(&file, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
 }
 
-/// Gives the existing file `path` what a file written there with `perm` has. On Unix that is `perm`'s mode, and its
-/// owner and group, or where it names none the effective user and group of this process, whose a new file is. On
-/// Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
+/// Gives the existing file `path` what `write_atomic` with `perm` gives a new one. On Unix that is `perm`'s mode, owner
+/// and group (what it names). On Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
 pub fn restore(path: &Path, perm: Perm) -> Result<()> {
     #[cfg(unix)]
-    {
-        let this_process = Account {
-            uid: uzers::get_effective_uid(),
-            gid: uzers::get_effective_gid(),
-        };
-        open_and_apply(
-            path,
-            Perm {
-                owner: perm.owner.or(Some(this_process)),
-                group: perm.group.or(Some(this_process)),
-                ..perm
-            },
-        )
-    }
+    return open_and_apply(path, perm);
     #[cfg(windows)]
     {
         let _ = perm;

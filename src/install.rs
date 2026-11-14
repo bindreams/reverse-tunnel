@@ -903,9 +903,10 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing or gives it the access a new one has, and has a copy of
-/// `binary`, the new one, staged in the bin dir where `run_as` can run it, check the settings as `run_as` (see
-/// `ops::check`). The copy is removed whatever the outcome. It has the access the installed binary is given (`place_binaries`), so what is checked is what the
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
+/// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
+/// the outcome. A frpc that was already there gets the access a new one has, as the unchanged binary does in
+/// `place_binaries`, and the staged copy has the access the installed binary is given, so what is checked is what the
 /// service will run. A fetch needs no restart: a new frpc version only arrives with a new binary, which
 /// `place_binaries` marks.
 fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
@@ -916,12 +917,12 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     make_dir(&paths.bin_dir, PUBLIC_DIR)?;
 
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
-    if !download::tools(paths).frpc.try_exists()? {
+    let frpc = download::tools(paths).frpc;
+    if frpc.try_exists()? {
+        restore(&frpc, Perm::executable())?;
+    } else {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
-    // A frpc that was there gets the access a new one has, as the unchanged binary does in `place_binaries`: the check
-    // below is of what the service will run.
-    restore(&download::tools(paths).frpc, Perm::EXECUTABLE)?;
     let staged = upgrade::stage(paths, binary)?;
     let checked = ops::check(paths, &staged, run_as, "the new binary's `run --check`");
     upgrade::discard(&staged);
@@ -932,9 +933,9 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
 /// access a new one has (`files::restore`), so a hand-edited ACL, mode or owner does not outlive a reinstall.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
-    let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
+    let changed = replace_if_changed(paths, &exe, binary, Perm::executable())?;
     if !changed {
-        restore(&exe, Perm::EXECUTABLE)?;
+        restore(&exe, Perm::executable())?;
     }
     clean_bin_dir(paths)?;
     #[cfg(windows)]
