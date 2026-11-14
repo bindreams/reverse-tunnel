@@ -6,7 +6,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
 use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
@@ -22,8 +22,9 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACE_HEADER, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACL_SIZE_INFORMATION, AclSizeInformation,
-    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl,
-    GetSecurityDescriptorOwner, INHERIT_ONLY_ACE, LookupAccountSidW, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+    DACL_SECURITY_INFORMATION, EqualDomainSid, EqualSid, GetAce, GetAclInformation, GetLengthSid,
+    GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetSidIdentifierAuthority, GetSidSubAuthority,
+    GetSidSubAuthorityCount, INHERIT_ONLY_ACE, LookupAccountSidW, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
     PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Security::{SidTypeDeletedAccount, SidTypeInvalid, SidTypeUnknown};
@@ -360,13 +361,12 @@ impl Sid {
     }
 
     /// What to call this SID for a person: the account or group it names, as `DOMAIN\Name` (`Name` for a well-known one
-    /// such as Everyone), else the SID as `S-1-5-...`. A SID is looked up only if this machine can name it without
-    /// asking another (`is_local`), so a domain account is shown as its SID, and the lookup never waits on a domain
+    /// such as Everyone), else the SID as `S-1-5-...`. Only a SID that this machine answers for is looked up
+    /// (`is_local`: well-known, built-in and service SIDs, and those of the machine's own accounts); every other, a
+    /// domain account, a logon session or an Entra ID SID, is shown as its text, so a lookup never waits on a domain
     /// controller.
     pub fn label(&self) -> String {
-        let name = is_local(self, MACHINE_DOMAIN.as_ref())
-            .then(|| self.account_name())
-            .flatten();
+        let name = is_local(self, machine_domain()).then(|| self.account_name()).flatten();
         name.unwrap_or_else(|| {
             self.text()
                 .unwrap_or_else(|err| format!("an SID that cannot be read ({err})"))
@@ -421,14 +421,27 @@ impl Sid {
         })
     }
 
-    /// The domain of a `S-1-5-21-...` SID: its first four sub-authorities (`21` and the domain's three numbers). None
-    /// for any other SID.
-    fn domain(&self) -> Option<&[u32]> {
-        let (first, second) = (self.0[0].to_le_bytes(), self.0[1].to_le_bytes());
-        // The revision, the sub-authority count, then the 6-byte authority: 5 for NT.
-        let nt_authority = [first[2], first[3], second[0], second[1], second[2], second[3]] == [0, 0, 0, 0, 0, 5];
-        let subs = self.0.get(2..2 + usize::from(first[1]))?;
-        (nt_authority && subs.len() >= 4 && subs[0] == 21).then(|| &subs[..4])
+    /// The identifier authority and the sub-authorities of the SID.
+    fn parts(&self) -> (u64, Vec<u32>) {
+        let sid = self.as_psid();
+        // SAFETY: `self` is a valid SID; the pointers Windows returns point into it, and the sub-authority indexes are
+        // below its count.
+        unsafe {
+            let authority = (*GetSidIdentifierAuthority(sid))
+                .Value
+                .iter()
+                .fold(0, |all, byte| all << 8 | u64::from(*byte));
+            let count = u32::from(*GetSidSubAuthorityCount(sid));
+            (authority, (0..count).map(|at| *GetSidSubAuthority(sid, at)).collect())
+        }
+    }
+
+    /// Whether this SID and `other` are SIDs of one domain (`EqualDomainSid`); false if either is not a domain's.
+    fn in_domain_of(&self, other: &Sid) -> bool {
+        let mut equal = 0;
+        // SAFETY: both are valid SIDs, and `equal` is where the answer goes.
+        let done = unsafe { EqualDomainSid(self.as_psid(), other.as_psid(), &mut equal) };
+        done != 0 && equal != 0
     }
 
     /// Whether `other` is this SID; never for null.
@@ -441,10 +454,19 @@ impl Sid {
     }
 }
 
-/// The domain SID of this machine's own accounts (the local SAM), as Windows answers; None if it does not.
-static MACHINE_DOMAIN: LazyLock<Option<Sid>> = LazyLock::new(machine_domain);
+/// The domain SID of this machine's own accounts, kept once it has been read.
+static MACHINE_DOMAIN: OnceLock<Sid> = OnceLock::new();
 
-fn machine_domain() -> Option<Sid> {
+/// The domain SID of this machine's own accounts (the local SAM), as Windows answers; None if it does not. A failed
+/// read is not kept: the next call reads again.
+fn machine_domain() -> Option<&'static Sid> {
+    if let Some(sid) = MACHINE_DOMAIN.get() {
+        return Some(sid);
+    }
+    read_machine_domain().map(|sid| MACHINE_DOMAIN.get_or_init(|| sid))
+}
+
+fn read_machine_domain() -> Option<Sid> {
     let attributes = LSA_OBJECT_ATTRIBUTES {
         Length: size_of::<LSA_OBJECT_ATTRIBUTES>() as u32,
         ..Default::default()
@@ -469,14 +491,22 @@ fn machine_domain() -> Option<Sid> {
     (!sid.is_null()).then(|| unsafe { Sid::copy_of(sid) })
 }
 
-/// Whether Windows names `sid` from this machine's own accounts, so that asking it is local: any SID that is not a
-/// domain's (`S-1-5-21-...`: well-known, built-in and service SIDs), and a domain SID whose domain is this machine's
-/// (`machine_domain`). The name of another domain's SID, or any when the machine's domain is unknown, would be asked of
-/// a domain controller.
+/// Whether this machine answers for `sid`, so that a lookup of it asks no other: only these, never "whatever is not
+/// known to be foreign". Everyone (`S-1-1-0`), the local and creator authorities (`S-1-2-*`, `S-1-3-*`), the NT
+/// AUTHORITY SIDs `S-1-5-1` to `S-1-5-20` but the logon sessions (`S-1-5-5-*`), BUILTIN (`S-1-5-32-*`), the service
+/// SIDs (`S-1-5-80-*`, which the local LSA computes), and the SIDs of this machine's own account domain
+/// (`machine_domain`; with none known, no domain SID is). A logon, Entra ID (`S-1-12-*`), capability (`S-1-15-*`) or
+/// another domain's SID is not.
 fn is_local(sid: &Sid, machine_domain: Option<&Sid>) -> bool {
-    match sid.domain() {
-        None => true,
-        Some(domain) => machine_domain.and_then(Sid::domain) == Some(domain),
+    match sid.parts() {
+        (1, subs) => subs == [0],
+        (2 | 3, _) => true,
+        (5, subs) => match subs.first() {
+            Some(1..=4 | 6..=20 | 32 | 80) => true,
+            Some(21) => machine_domain.is_some_and(|machine| sid.in_domain_of(machine)),
+            _ => false,
+        },
+        _ => false,
     }
 }
 

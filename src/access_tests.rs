@@ -86,9 +86,10 @@ fn an_allow_of_generic_rights_counts_as_the_file_rights_they_map_to() {
     }
 }
 
-/// What a deny ACE for `sid` is reported as, with an allow that would otherwise be enough.
+/// What a deny ACE for `sid` is reported as, with an allow for another SID that would otherwise be enough.
 fn denied_by(sid: &str, denied: u32) -> Barrier {
-    let aces = [ace(false, sid, denied), ace(true, EVERYONE, FILE_GENERIC_READ)];
+    let allowed = if sid == EVERYONE { USERS } else { EVERYONE };
+    let aces = [ace(false, sid, denied), ace(true, allowed, FILE_GENERIC_READ)];
     barrier(&aces, FILE_GENERIC_READ).expect("a deny ACE is a barrier")
 }
 
@@ -100,19 +101,6 @@ fn any_deny_ace_is_a_barrier_whoever_it_names_and_whatever_it_denies() {
     let found = denied_by(ADMINISTRATORS, FILE_GENERIC_WRITE & !FILE_GENERIC_READ);
 
     assert!(matches!(found, Barrier::Denied(_)), "{found:?}");
-}
-
-#[test]
-fn a_deny_ace_is_reported_by_the_name_of_a_well_known_account_and_by_the_text_of_a_domain_account() {
-    // The name is the system's, which a localized Windows gives in its language: only that it is not the SID.
-    let Barrier::Denied(everyone) = denied_by(EVERYONE, 0x1) else {
-        panic!()
-    };
-    assert!(!everyone.is_empty() && everyone != EVERYONE, "{everyone}");
-    let Barrier::Denied(foreign) = denied_by(FOREIGN_DOMAIN_ACCOUNT, 0x1) else {
-        panic!()
-    };
-    assert_eq!(foreign, FOREIGN_DOMAIN_ACCOUNT);
 }
 
 #[test]
@@ -153,17 +141,24 @@ fn a_missing_file_that_run_makes_is_no_problem() {
 }
 
 #[test]
-fn a_deny_names_the_account_or_group_and_only_an_sid_that_has_no_name_by_its_text() {
-    let denied = |sid| match barrier(&[ace(false, sid, 0x1)], FILE_GENERIC_READ) {
-        Some(Barrier::Denied(by)) => by,
+fn a_deny_is_reported_by_the_denied_principal_not_the_allowed_one() {
+    let denied = |sid| match denied_by(sid, 0x1) {
+        Barrier::Denied(by) => by,
         other => panic!("{other:?}"),
     };
 
+    // The allow in `denied_by` is for Everyone (Users where Everyone is denied), whose name is not any of these.
     assert_eq!(denied(SERVICE), SERVICE);
-    assert!(!denied(EVERYONE).contains("S-1-"), "{}", denied(EVERYONE));
     // A domain account is not looked up: it is shown by its SID.
-    assert_eq!(denied("S-1-5-21-1-2-3-1000"), "S-1-5-21-1-2-3-1000");
-    assert!(!denied(ADMINISTRATORS).contains("S-1-"), "{}", denied(ADMINISTRATORS));
+    assert_eq!(denied(FOREIGN_DOMAIN_ACCOUNT), FOREIGN_DOMAIN_ACCOUNT);
+    // The name is the system's, which a localized Windows gives in its language: only that it is a name, and not the
+    // one of the principal that is allowed.
+    let everyone = denied(EVERYONE);
+    assert!(!everyone.contains("S-1-"), "{everyone}");
+    assert_ne!(everyone, Sid::parse(USERS).unwrap().label());
+    let admins = denied(ADMINISTRATORS);
+    assert!(!admins.contains("S-1-"), "{admins}");
+    assert_ne!(admins, Sid::parse(EVERYONE).unwrap().label());
 }
 
 #[test]

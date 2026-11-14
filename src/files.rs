@@ -148,8 +148,15 @@ fn open_and_apply(path: &Path, perm: Perm) -> Result<()> {
 }
 
 /// Gives the existing file `path` what `write_atomic` with `perm` gives a new one. On Unix that is `perm`'s mode, owner
-/// and group (what it names). On Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
+/// and group, so `perm` must name an owner and a group (as `Perm::executable` does): a new file's own, where `perm`
+/// names none, depends on the system (macOS takes its directory's group), and a kept file cannot be given the same.
+/// On Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
 pub fn restore(path: &Path, perm: Perm) -> Result<()> {
+    #[cfg(unix)]
+    debug_assert!(
+        perm.owner.is_some() && perm.group.is_some(),
+        "restore needs a perm with an owner and a group"
+    );
     #[cfg(unix)]
     return open_and_apply(path, perm);
     #[cfg(windows)]
