@@ -11,7 +11,6 @@ use reverse_tunnel::paths::Paths;
 use reverse_tunnel::report::report;
 use reverse_tunnel::service;
 use reverse_tunnel::supervisor;
-#[cfg(unix)]
 use reverse_tunnel::upgrade;
 
 /// Publishes this machine's services through the reverse-tunnel bridge.
@@ -47,7 +46,8 @@ enum Command {
     ///
     /// The release is staged in the bin directory as `upgrade-<...>`. A successful upgrade's download is removed by the
     /// `install` it runs, a failed one by `upgrade`. `install` removes its own check copy, also `upgrade-<...>`, and
-    /// sweeps any left behind.
+    /// sweeps any left behind. On Windows a copy or binary that still runs is renamed to `.reverse-tunnel.*` beside
+    /// the bin directory, and the next `install` deletes it once it has exited.
     Upgrade {
         /// Install this binary instead of downloading one.
         #[arg(long)]
@@ -101,14 +101,11 @@ fn run() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        #[cfg(unix)]
         Command::Upgrade { from } => {
             require_root()?;
             upgrade::upgrade(&paths, from.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
-        #[cfg(windows)]
-        Command::Upgrade { .. } => anyhow::bail!("upgrade is not available on Windows yet"),
         Command::Start => {
             require_root()?;
             ops::start(&*service::manager(&paths)?)?;

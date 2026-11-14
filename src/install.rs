@@ -669,11 +669,25 @@ fn delete_at_reboot(path: &Path) -> Result<()> {
 #[cfg(windows)]
 pub const MOVED_IT_TO: &str = "moved it to";
 
-/// Windows: deletes `path` (see `remove_entry`), or if it cannot be, renames it (see `remove_or_rename`).
+/// Windows: deletes `path` (see `remove_entry`), or if it cannot be, renames it into `leftovers` (see `remove_or_rename`),
+/// and says so.
 #[cfg(windows)]
 fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
+    if let Some((to, refused)) = delete_or_move_aside(path, leftovers)? {
+        output::println_best_effort(&format!(
+            "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
+            to.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Windows: `delete_or_rename` without saying so. Returns where `path` went and why it could not be deleted, or nothing
+/// if it was deleted.
+#[cfg(windows)]
+fn delete_or_move_aside(path: &Path, leftovers: &Path) -> Result<Option<(PathBuf, anyhow::Error)>> {
     let Err(refused) = remove_entry(path) else {
-        return Ok(());
+        return Ok(None);
     };
     match fs::symlink_metadata(path) {
         Ok(entry) if entry.is_file() => {}
@@ -683,10 +697,35 @@ fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     let original = path.file_name().context("the file has no name")?;
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
     fs::rename(path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
-    output::println_best_effort(&format!(
-        "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
-        to.display()
-    ));
+    Ok(Some((to, refused)))
+}
+
+/// Removes `path`, a file the service or this run may be running: on Windows one that cannot be deleted is renamed aside
+/// as a leftover (see `remove_or_rename`), which the next `install` deletes once it has exited (see
+/// `delete_leftovers`).
+fn remove_or_move_aside(paths: &Paths, path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    return delete_or_move_aside(path, leftover_dir(paths)?).map(drop);
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        remove_entry(path)
+    }
+}
+
+/// Windows: deletes the leftover files (see `remove_or_rename`) whose process has exited. One that still runs, such as
+/// the old binary after an upgrade that has not restarted the service yet, stays for the next `install`.
+#[cfg(windows)]
+fn delete_leftovers(paths: &Paths) -> Result<()> {
+    for image in leftover_images(paths)? {
+        let Err(err) = remove_entry(&image) else { continue };
+        let running = err
+            .downcast_ref::<io::Error>()
+            .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied);
+        if !running {
+            return Err(err);
+        }
+    }
     Ok(())
 }
 
@@ -932,6 +971,12 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
 /// an unchanged binary does not outlive a reinstall.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
+    // Windows will not overwrite or delete a running image but lets it be renamed: the service host is this binary.
+    #[cfg(windows)]
+    if !fs::read(&exe).is_ok_and(|current| current == binary) {
+        mark_pending(paths)?;
+        remove_or_move_aside(paths, &exe)?;
+    }
     let changed = replace_if_changed(paths, &exe, binary, Perm::executable())?;
     if !changed {
         restore_binary(&exe)?;
@@ -949,21 +994,20 @@ fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
 }
 
 /// Removes from the bin dir the frpc versions that are not the current one, temp files a crashed write left, and the
-/// copies `upgrade` ran from (`upgrade-*`), this process's own among them.
+/// copies `upgrade` ran from (`upgrade-*`), this process's own among them. On Windows what runs (the old frpc, this
+/// process's image) is renamed aside, and the leftovers of earlier runs are deleted (see `delete_leftovers`).
 fn clean_bin_dir(paths: &Paths) -> Result<()> {
     let current = download::tools(paths).frpc;
     for entry in fs::read_dir(&paths.bin_dir)? {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
         let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
-        if name.starts_with(upgrade::STAGED) {
-            // An `install` run from a copy deletes its own running image, which Windows refuses; that is not worth
-            // failing `install` over.
-            upgrade::discard(&path);
-        } else if stale {
-            remove_entry(&path)?;
+        if stale || name.starts_with(upgrade::STAGED) {
+            remove_or_move_aside(paths, &path)?;
         }
     }
+    #[cfg(windows)]
+    delete_leftovers(paths)?;
     Ok(())
 }
 

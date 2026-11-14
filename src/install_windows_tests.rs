@@ -227,26 +227,42 @@ mod held;
 
 use held::running;
 
-#[test]
-fn a_staged_copy_that_runs_does_not_fail_the_sweep_of_the_bin_dir() {
-    let (_dir, paths) = installed();
-    let staged = paths.bin_dir.join(format!("{}x.exe", upgrade::STAGED));
-    let _running = running(&staged);
-
-    clean_bin_dir(&paths).unwrap();
-
-    assert!(staged.exists());
+/// The leftovers in `paths`' leftover folder, by the name each kept.
+fn kept_names(paths: &Paths) -> Vec<String> {
+    let images = leftover_images(paths).unwrap();
+    let names = images.iter().map(|image| image.file_name().unwrap().to_string_lossy());
+    names
+        .map(|name| name.splitn(4, '.').nth(3).unwrap().to_string())
+        .collect()
 }
 
 #[test]
-fn a_stale_file_that_runs_fails_the_sweep_of_the_bin_dir() {
+fn a_staged_copy_that_runs_is_renamed_aside_by_the_sweep_and_deleted_by_the_next_once_it_exits() {
     let (_dir, paths) = installed();
-    let stale = paths.bin_dir.join("frpc-0.0.1");
+    let staged = paths.bin_dir.join(format!("{}x.exe", upgrade::STAGED));
+    let running = running(&staged);
+
+    clean_bin_dir(&paths).unwrap();
+
+    assert!(!staged.exists());
+    assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
+    clean_bin_dir(&paths).unwrap();
+    assert_eq!(kept_names(&paths), ["upgrade-x.exe"], "it still runs");
+    drop(running);
+    clean_bin_dir(&paths).unwrap();
+    assert_eq!(kept_names(&paths), Vec::<String>::new());
+}
+
+#[test]
+fn a_stale_frpc_that_runs_is_renamed_aside_by_the_sweep() {
+    let (_dir, paths) = installed();
+    let stale = paths.bin_dir.join("frpc-0.0.1.exe");
     let _running = running(&stale);
 
-    let err = format!("{:#}", clean_bin_dir(&paths).unwrap_err());
+    clean_bin_dir(&paths).unwrap();
 
-    assert!(err.contains("frpc-0.0.1"), "{err}");
+    assert!(!stale.exists());
+    assert_eq!(kept_names(&paths), ["frpc-0.0.1.exe"]);
 }
 
 #[test]

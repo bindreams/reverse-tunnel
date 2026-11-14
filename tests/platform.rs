@@ -1067,23 +1067,12 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
     let rendered = machine.paths.log_dir.join("frpc.toml");
     wait_until("the supervisor renders its first start", || rendered.exists());
 
-    // A file copied over the link makes the rejoin fail after it wrote the new bridge files. On Windows there is no
-    // link, and a different binary cannot replace the one the running service holds (`upgrade` will).
+    // A directory where the host token was makes the rejoin fail, after it wrote the new bridge files.
     let rejoin = join_code("new.example.test");
-    #[cfg(unix)]
-    let (blocker, mut failing) = {
-        let link = machine.paths.link.as_ref().unwrap();
-        fs::remove_file(link).unwrap();
-        fs::write(link, "").unwrap();
-        (link.clone(), machine.install_command(&rejoin))
-    };
-    #[cfg(windows)]
-    let (blocker, mut failing, _scratch) = {
-        let (scratch, newer) = newer_build();
-        let mut install = Command::new(&newer);
-        install.args(["install", "--host", "testhost", "--join", &rejoin]);
-        (service::exe(&machine.paths), install, scratch)
-    };
+    let blocker = machine.paths.host_token();
+    fs::remove_file(&blocker).unwrap();
+    fs::create_dir(&blocker).unwrap();
+    let mut failing = machine.install_command(&rejoin);
     let failed = failing.output().unwrap();
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
@@ -1096,8 +1085,7 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
         token, "token-for-new.example.test\n",
         "the rejoin failed before it wrote the bridge files"
     );
-    #[cfg(unix)]
-    fs::remove_file(&blocker).unwrap();
+    fs::remove_dir(&blocker).unwrap();
 
     machine.install(&rejoin);
 
@@ -1125,6 +1113,88 @@ fn upgrade_from_local_build() {
         status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
     });
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
+}
+
+/// Windows: the images that were the installed binary, and the copies `upgrade` ran from, which a running process kept
+/// from being deleted, so they were renamed aside: every leftover and every `upgrade-*` file in the bin dir.
+#[cfg(windows)]
+fn upgrade_remnants(machine: &Machine) -> Vec<PathBuf> {
+    let staged = fs::read_dir(&machine.paths.bin_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(upgrade::STAGED));
+    install::leftover_images(&machine.paths)
+        .unwrap()
+        .into_iter()
+        .chain(staged)
+        .collect()
+}
+
+/// Windows: `upgrade` replaces the binary that the running service host is, which Windows will not overwrite: the old
+/// image is renamed aside, the service restarts on the new one, and the next `install`, once the old image has
+/// exited, deletes it.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_old_one() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+    let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
+    // Every process that runs the old image: the service host and what it runs.
+    let old_image = service::exe(&machine.paths)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let old_processes: Vec<u32> = processes()
+        .iter()
+        .filter(|process| process.owner == service_owner() && process.args == old_image)
+        .map(|process| process.pid)
+        .collect();
+    assert!(old_processes.contains(&supervisor), "{old_processes:?}");
+    let (_scratch, path) = newer_build();
+    let newer = fs::read(&path).unwrap();
+
+    let mut upgrade = Command::new(BIN);
+    upgrade.arg("upgrade").arg("--from").arg(&path);
+    machine.run_ok(upgrade);
+
+    wait_until("the manager runs a new supervisor", || {
+        let status = machine.status();
+        status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
+    });
+    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
+    assert_eq!(fs::read(leftover_of_the_binary(&machine)).unwrap(), outgoing);
+    wait_until("the old image no longer runs", || {
+        !processes().iter().any(|process| old_processes.contains(&process.pid))
+    });
+    let mut sweep = Command::new(service::exe(&machine.paths));
+    sweep.arg("install");
+    machine.run_ok(sweep);
+    assert_eq!(upgrade_remnants(&machine), Vec::<PathBuf>::new());
+}
+
+/// Windows: the `install` that `upgrade` runs from its download cannot delete the download, which it is running: it
+/// renames it aside without a warning, and the next `install` deletes it. The download is the installed build, so no
+/// old image is left running to delay that.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_install_run_from_the_staged_download_leaves_nothing_after_the_next_install() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let staged = upgrade::stage(&machine.paths, &fs::read(BIN).unwrap()).unwrap();
+
+    let out = Command::new(&staged).arg("install").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && stderr.is_empty(), "{stderr}");
+    assert!(!staged.exists(), "{} is still in the bin dir", staged.display());
+    let mut sweep = Command::new(service::exe(&machine.paths));
+    sweep.arg("install");
+    machine.run_ok(sweep);
+    assert_eq!(upgrade_remnants(&machine), Vec::<PathBuf>::new());
 }
 
 /// Whether `stderr` says that the check refused `config`: unreadable by the service account, or, on Windows where the
