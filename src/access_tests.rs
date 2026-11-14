@@ -10,7 +10,6 @@ const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 const EVERYONE: &str = "S-1-1-0";
 const USERS: &str = "S-1-5-32-545";
 const ADMINISTRATORS: &str = "S-1-5-32-544";
-const CREATOR_OWNER: &str = "S-1-3-0";
 
 fn ace(allows: bool, sid: &str, mask: u32) -> Ace {
     Ace {
@@ -22,11 +21,14 @@ fn ace(allows: bool, sid: &str, mask: u32) -> Ace {
     }
 }
 
-fn who() -> Vec<(Sid, &'static str)> {
-    [(EVERYONE, "Everyone"), (USERS, "Users"), (SERVICE, "the service")]
-        .iter()
-        .map(|(sid, name)| (Sid::parse(sid).unwrap(), *name))
-        .collect()
+fn who() -> Principals {
+    Principals {
+        holders: [(EVERYONE, "Everyone"), (USERS, "Users"), (SERVICE, "the service")]
+            .iter()
+            .map(|(sid, name)| (Sid::parse(sid).unwrap(), *name))
+            .collect(),
+        creator_owner: Sid::parse(CREATOR_OWNER).unwrap(),
+    }
 }
 
 /// What the check finds for `aces`, with the service and the groups Everyone and Users credited, and no demand on the
@@ -83,12 +85,6 @@ fn an_allow_of_generic_rights_counts_as_the_file_rights_they_map_to() {
     }
 }
 
-/// What a deny of `sid` says: the name Windows gives the SID, else its text.
-fn named(sid: &str) -> String {
-    let sid = Sid::parse(sid).unwrap();
-    sid.name().or_else(|_| sid.text()).unwrap()
-}
-
 #[test]
 fn any_deny_ace_is_a_barrier_naming_its_sid_whoever_it_names_and_whatever_it_denies() {
     for sid in [SERVICE, EVERYONE, ADMINISTRATORS] {
@@ -97,7 +93,7 @@ fn any_deny_ace_is_a_barrier_naming_its_sid_whoever_it_names_and_whatever_it_den
         let found = barrier(&aces, FILE_GENERIC_READ);
 
         assert!(
-            matches!(&found, Some(Barrier::Denied(by)) if *by == named(sid)),
+            matches!(&found, Some(Barrier::Denied(by)) if *by == Sid::parse(sid).unwrap().label()),
             "{sid}: {found:?}"
         );
     }
@@ -109,7 +105,7 @@ fn any_deny_ace_is_a_barrier_naming_its_sid_whoever_it_names_and_whatever_it_den
     let found = barrier(&other_rights, FILE_GENERIC_READ);
 
     assert!(
-        matches!(&found, Some(Barrier::Denied(by)) if *by == named(ADMINISTRATORS)),
+        matches!(&found, Some(Barrier::Denied(by)) if *by == Sid::parse(ADMINISTRATORS).unwrap().label()),
         "{found:?}"
     );
 }
@@ -160,7 +156,8 @@ fn a_deny_names_the_account_or_group_and_only_an_sid_that_has_no_name_by_its_tex
 
     assert_eq!(denied(SERVICE), SERVICE);
     assert!(!denied(EVERYONE).contains("S-1-"), "{}", denied(EVERYONE));
-    assert_eq!(denied(ADMINISTRATORS), named(ADMINISTRATORS));
+    // A domain account is not looked up: it is shown by its SID.
+    assert_eq!(denied("S-1-5-21-1-2-3-1000"), "S-1-5-21-1-2-3-1000");
     assert!(!denied(ADMINISTRATORS).contains("S-1-"), "{}", denied(ADMINISTRATORS));
 }
 

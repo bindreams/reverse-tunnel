@@ -8,18 +8,23 @@ use std::path::Path;
 use std::ptr::{null, null_mut};
 
 use windows::core::PCWSTR;
+use windows_sys::Win32::Foundation::STATUS_SUCCESS;
 use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
+use windows_sys::Win32::Security::Authentication::Identity::{
+    LSA_HANDLE, LSA_LOOKUP_ISOLATED_AS_LOCAL, LSA_OBJECT_ATTRIBUTES, LSA_REFERENCED_DOMAIN_LIST, LSA_TRANSLATED_NAME,
+    LSA_UNICODE_STRING, LsaClose, LsaFreeMemory, LsaLookupSids2, LsaOpenPolicy, POLICY_LOOKUP_NAMES,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
-use windows_sys::Win32::Security::SID_NAME_USE;
 use windows_sys::Win32::Security::{
     ACE_HEADER, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl,
     GetSecurityDescriptorOwner, INHERIT_ONLY_ACE, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
     PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
+use windows_sys::Win32::Security::{SidTypeDeletedAccount, SidTypeInvalid, SidTypeUnknown};
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
@@ -29,20 +34,6 @@ use windows_sys::Win32::System::SystemServices::{
 /// A descriptor that names only an owner: Administrators.
 pub const OWNED_BY_ADMINISTRATORS: &str = "O:BA";
 
-#[link(name = "sechost", kind = "raw-dylib")]
-unsafe extern "system" {
-    /// `LookupAccountSidW` for the local machine's own and well-known accounts only: it never asks a domain controller,
-    /// so it cannot wait on the network. (windows-sys has no binding for it.)
-    fn LookupAccountSidLocalW(
-        sid: PSID,
-        name: *mut u16,
-        name_len: *mut u32,
-        domain: *mut u16,
-        domain_len: *mut u32,
-        kind: *mut SID_NAME_USE,
-    ) -> i32;
-}
-
 /// What Windows allocated with `LocalAlloc`, freed when it drops.
 struct Local(*mut c_void);
 
@@ -51,6 +42,41 @@ impl Drop for Local {
         // SAFETY: the pointer came from a Windows call that allocates with `LocalAlloc`, and is freed only here.
         unsafe { LocalFree(self.0 as HLOCAL) };
     }
+}
+
+/// An LSA policy handle, closed when it drops.
+struct Policy(LSA_HANDLE);
+
+impl Drop for Policy {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from `LsaOpenPolicy` and is closed only here.
+        unsafe { LsaClose(self.0) };
+    }
+}
+
+/// What an LSA call allocated (null if it allocated nothing), freed when it drops.
+struct LsaMemory(*mut c_void);
+
+impl Drop for LsaMemory {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: the pointer came from an LSA call that allocates for the caller, and is freed only here.
+            unsafe { LsaFreeMemory(self.0) };
+        }
+    }
+}
+
+/// The text of an LSA string.
+///
+/// # Safety
+/// `string` is empty or its buffer holds `Length` bytes.
+unsafe fn text_of(string: &LSA_UNICODE_STRING) -> String {
+    if string.Buffer.is_null() {
+        return String::new();
+    }
+    // SAFETY: as the caller promises.
+    let units = unsafe { std::slice::from_raw_parts(string.Buffer, usize::from(string.Length) / 2) };
+    String::from_utf16_lossy(units)
 }
 
 pub(crate) fn wide(path: &Path) -> Vec<u16> {
@@ -344,43 +370,71 @@ impl Sid {
         unsafe { string_of_sid(self.as_psid()) }
     }
 
-    /// The account or group this SID names, as `DOMAIN\Name` (`Name` for a well-known one such as Everyone), if it is a
-    /// local or well-known one: a domain account is not looked up, which could wait on the network. Fails if Windows
-    /// knows no such account here.
-    pub fn name(&self) -> io::Result<String> {
-        let (mut name_len, mut domain_len, mut kind) = (0, 0, 0);
-        // SAFETY: `self` is a valid SID; with no buffers the call only reports the sizes it needs.
-        unsafe {
-            LookupAccountSidLocalW(
-                self.as_psid(),
-                null_mut(),
-                &mut name_len,
-                null_mut(),
-                &mut domain_len,
-                &mut kind,
-            )
-        };
-        let (mut name, mut domain) = (vec![0u16; name_len as usize], vec![0u16; domain_len as usize]);
-        // SAFETY: the buffers are as long as the lengths that are passed, which Windows then sets to what it wrote.
-        let found = unsafe {
-            LookupAccountSidLocalW(
-                self.as_psid(),
-                name.as_mut_ptr(),
-                &mut name_len,
-                domain.as_mut_ptr(),
-                &mut domain_len,
-                &mut kind,
-            )
-        };
-        if found == 0 {
-            return Err(io::Error::last_os_error());
+    /// What to call this SID for a person: the account or group it names, as `DOMAIN\Name` (`Name` for a well-known one
+    /// such as Everyone), else the SID as `S-1-5-...`. Only the local machine is asked, so a domain account is shown
+    /// as its SID, and the lookup never waits on a domain controller.
+    pub fn label(&self) -> String {
+        match self.local_name() {
+            Some(name) => name,
+            None => self
+                .text()
+                .unwrap_or_else(|err| format!("an SID that cannot be read ({err})")),
         }
-        let (name, domain) = (&name[..name_len as usize], &domain[..domain_len as usize]);
-        let (name, domain) = (String::from_utf16_lossy(name), String::from_utf16_lossy(domain));
-        Ok(if domain.is_empty() {
-            name
-        } else {
-            format!("{domain}\\{name}")
+    }
+
+    /// The name of the account or group the local machine has for this SID (`LsaLookupSids2` with
+    /// `LSA_LOOKUP_ISOLATED_AS_LOCAL`, which restricts the lookup to this machine), if it has one.
+    fn local_name(&self) -> Option<String> {
+        let attributes = LSA_OBJECT_ATTRIBUTES {
+            Length: size_of::<LSA_OBJECT_ATTRIBUTES>() as u32,
+            ..Default::default()
+        };
+        let mut policy: LSA_HANDLE = 0;
+        // SAFETY: `attributes` is initialized, and `policy` is where the handle goes.
+        let opened = unsafe { LsaOpenPolicy(null(), &attributes, POLICY_LOOKUP_NAMES as u32, &mut policy) };
+        if opened != STATUS_SUCCESS {
+            return None;
+        }
+        let _policy = Policy(policy);
+        let (mut domains, mut names) = (
+            null_mut::<LSA_REFERENCED_DOMAIN_LIST>(),
+            null_mut::<LSA_TRANSLATED_NAME>(),
+        );
+        let sids = [self.as_psid()];
+        // SAFETY: `policy` is open, `sids` has the one SID the count says, and the two results are where Windows puts
+        // what it allocates.
+        let status = unsafe {
+            LsaLookupSids2(
+                policy,
+                LSA_LOOKUP_ISOLATED_AS_LOCAL,
+                1,
+                sids.as_ptr(),
+                &mut domains,
+                &mut names,
+            )
+        };
+        // Whatever the status, what Windows allocated is freed.
+        let (_domains, _names) = (LsaMemory(domains.cast()), LsaMemory(names.cast()));
+        if status != STATUS_SUCCESS || names.is_null() {
+            return None;
+        }
+        // SAFETY: a successful lookup of one SID leaves one name, valid until freed.
+        let name = unsafe { *names };
+        if [SidTypeDeletedAccount, SidTypeInvalid, SidTypeUnknown].contains(&name.Use) {
+            return None;
+        }
+        // SAFETY: `DomainIndex` is an index into the domains the lookup returned, or negative for none.
+        let domain = unsafe {
+            usize::try_from(name.DomainIndex)
+                .ok()
+                .filter(|&at| !domains.is_null() && at < (*domains).Entries as usize)
+                .map(|at| text_of(&(*(*domains).Domains.add(at)).Name))
+        };
+        // SAFETY: the name's buffer is what the lookup returned for it, valid until freed.
+        let name = unsafe { text_of(&name.Name) };
+        Some(match domain {
+            Some(domain) if !domain.is_empty() => format!("{domain}\\{name}"),
+            _ => name,
         })
     }
 

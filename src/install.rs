@@ -925,14 +925,16 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     checked
 }
 
-/// Puts the binary `binary` and the symlink in place. Whether the binary changed. A binary that did not change gets
-/// the access a new one has (`files::restore`), so a hand-edited ACL or mode does not outlive a reinstall.
+/// Puts the binary `binary` and the symlink in place. Whether the binary changed. Each binary kept (the one that did
+/// not change, and the pinned frpc that `verify_tools` leaves if it is there) gets the access a new one has
+/// (`files::restore`), so a hand-edited ACL, mode or owner does not outlive a reinstall.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     if !changed {
         restore(&exe, Perm::EXECUTABLE)?;
     }
+    restore(&download::tools(paths).frpc, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
     #[cfg(windows)]
     for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {

@@ -576,32 +576,44 @@ fn reinstall_changes_nothing() {
     assert_eq!((status.state, status.pid), (State::Running, supervisor));
 }
 
-/// A hand edit of the installed binary's ACL (Windows) or mode (Unix) does not outlive a reinstall of the same binary:
-/// the service may run it again.
+/// A hand edit of an installed binary's ACL (Windows) or mode and owner (Unix), the service's own and the pinned frpc,
+/// does not outlive a reinstall of the same binary: the service may run each again.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn reinstall_puts_the_installed_binarys_access_back() {
     let machine = Machine::begin();
     let code = join_code("tunnel.example.test");
     machine.install(&code);
-    let exe = service::exe(&machine.paths);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+    let binaries = [
+        service::exe(&machine.paths),
+        reverse_tunnel::download::tools(&machine.paths).frpc,
+    ];
+    for binary in &binaries {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, chown};
+            let service = machine.service_account();
+            chown(binary, Some(service.uid), Some(service.gid)).unwrap();
+            fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        #[cfg(windows)]
+        reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
+            .unwrap()
+            .apply(binary)
+            .unwrap();
     }
-    #[cfg(windows)]
-    reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
-        .unwrap()
-        .apply(&exe)
-        .unwrap();
 
     machine.install(&code);
 
     #[cfg(unix)]
-    assert_eq!(mode_of(&exe), 0o755);
+    for binary in &binaries {
+        assert_eq!(mode_of(binary), 0o755, "{}", binary.display());
+        let meta = fs::metadata(binary).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), (0, 0), "{}", binary.display());
+    }
+    // What `run` opens includes both binaries; a failure names the one that is wrong.
     #[cfg(windows)]
-    reverse_tunnel::access::check(&machine.paths, &exe).unwrap();
+    reverse_tunnel::access::check(&machine.paths, &binaries[0]).unwrap();
 }
 
 #[test]
@@ -1160,7 +1172,8 @@ fn restart_checks_the_configuration_as_the_service_account() {
 
 /// What `access::check` relies on is in the token of the running service, enabled: a credited group missing from it
 /// would let `restart` pass a file that only that group may read, and without SeChangeNotifyPrivilege the service
-/// would not pass through the directories the check does not look at (see `access::opens`).
+/// would not pass through the directories the check does not look at (see `access::opens`); and the service owns the
+/// files it makes, which is what the CREATOR OWNER ACE of the log folder counts on.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1179,6 +1192,15 @@ fn the_services_token_holds_the_groups_and_the_privilege_the_check_relies_on() {
     assert!(
         windows::holds_enabled_privilege(pid, "SeChangeNotifyPrivilege"),
         "SeChangeNotifyPrivilege is not enabled in the service's token"
+    );
+    // CREATOR OWNER counts for the files the service makes only if the service owns them.
+    let log = machine.paths.log_dir.join(reverse_tunnel::paths::LOG_SUPERVISOR);
+    let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
+    assert_eq!(
+        reverse_tunnel::security::owner_of(&log).unwrap(),
+        service,
+        "owner of {}",
+        log.display()
     );
 }
 
@@ -1238,17 +1260,19 @@ fn restart_refuses_a_config_the_service_account_cannot_read() {
     let before = machine.status();
     let config = machine.paths.config_file();
     let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
-    // The message names the account as the system names the SID, or by the product's name where it does not.
-    let named = reverse_tunnel::security::Sid::parse(&service)
-        .unwrap()
-        .name()
-        .unwrap_or_else(|_| service::ACCOUNT.to_string());
-    for (acl, says) in [
+    // A deny is named by the account's label, a missing allow by the product's name for it.
+    let label = reverse_tunnel::security::Sid::parse(&service).unwrap().label();
+    for (acl, says, named) in [
         (
             format!("D:P(D;;FR;;;{service})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)"),
             "denies",
+            label,
         ),
-        ("D:P(A;;FA;;;SY)(A;;FA;;;BA)".to_string(), "no ACE"),
+        (
+            "D:P(A;;FA;;;SY)(A;;FA;;;BA)".to_string(),
+            "no ACE",
+            service::ACCOUNT.to_string(),
+        ),
     ] {
         reverse_tunnel::security::Descriptor::parse(&acl)
             .unwrap()

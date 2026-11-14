@@ -134,11 +134,14 @@ fn an_ace_is_read_up_to_its_size_and_never_past_it() {
 }
 
 #[test]
-fn a_sid_is_named_by_the_account_it_belongs_to_and_not_by_a_made_up_one() {
+fn a_sid_is_labelled_by_the_local_account_it_belongs_to_else_by_its_text() {
     let everyone = Sid::parse("S-1-1-0").unwrap();
     // The name is the system's, which a localized Windows gives in its language: only that it is a name.
-    assert!(!everyone.name().unwrap().is_empty() && everyone.name().unwrap() != everyone.text().unwrap());
-    assert!(Sid::parse("S-1-5-80-1-2-3-4-5").unwrap().name().is_err());
+    assert!(!everyone.label().is_empty() && everyone.label() != everyone.text().unwrap());
+    for unknown in ["S-1-5-80-1-2-3-4-5", "S-1-5-21-1-2-3-1000"] {
+        let unknown = Sid::parse(unknown).unwrap();
+        assert_eq!(unknown.label(), unknown.text().unwrap());
+    }
 }
 
 #[test]

@@ -125,13 +125,31 @@ pub fn apply(file: &File, perm: Perm) -> Result<()> {
     Ok(())
 }
 
-/// Gives the existing file `path` what a file written there with `perm` has: on Unix `perm`'s mode and owner, on
-/// Windows the ACL its directory gives, whatever ACEs it had (its owner stays).
+/// Opens `path` and gives it `perm`.
+#[cfg(unix)]
+fn open_and_apply(path: &Path, perm: Perm) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    apply(&file, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+}
+
+/// Gives the existing file `path` what a file written there with `perm` has. On Unix that is `perm`'s mode, and its
+/// owner and group, or where it names none the effective user and group of this process, whose a new file is. On
+/// Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
 pub fn restore(path: &Path, perm: Perm) -> Result<()> {
     #[cfg(unix)]
     {
-        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        apply(&file, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+        let this_process = Account {
+            uid: uzers::get_effective_uid(),
+            gid: uzers::get_effective_gid(),
+        };
+        open_and_apply(
+            path,
+            Perm {
+                owner: perm.owner.or(Some(this_process)),
+                group: perm.group.or(Some(this_process)),
+                ..perm
+            },
+        )
     }
     #[cfg(windows)]
     {
@@ -152,8 +170,7 @@ pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("creating {}", path.display())),
         Ok(()) => {}
     }
-    let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+    open_and_apply(path, perm)
 }
 
 /// Creates `path` if it is missing (not its parents) with the descriptor `perm.sddl()` makes, so that it is never there
