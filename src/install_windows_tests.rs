@@ -265,19 +265,24 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
     assert_eq!(image.parent(), Some(dir.path()));
     let name = image.file_name().unwrap().to_string_lossy().into_owned();
     assert!(schtasks::is_leftover_of(&name, "frpc-0.1.exe"), "{name}");
+    let pending = deletions_at_reboot();
+    let scheduled = format!(r"\??\{}", image.display()).to_lowercase();
     assert!(
-        deletions_at_reboot().contains(&format!(r"\??\{}", image.display()).to_lowercase()),
-        "the renamed image is not scheduled for deletion at the next boot"
+        pending.contains(&scheduled),
+        "{scheduled} is not scheduled for deletion at the next boot: {pending}"
     );
 }
 
-/// The files that the system deletes at its next boot, lower-cased, as `\??\<path>`.
-fn deletions_at_reboot() -> Vec<String> {
+/// The text of the files that the system deletes at its next boot, lower-cased, each as `\??\<path>`: the value is
+/// a list of strings, read raw, with its NULs.
+fn deletions_at_reboot() -> String {
     let session = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
         .open_subkey(r"SYSTEM\CurrentControlSet\Control\Session Manager")
         .unwrap();
-    let pending: Vec<String> = session.get_value("PendingFileRenameOperations").unwrap_or_default();
-    pending.iter().map(|entry| entry.to_lowercase()).collect()
+    let value = session.get_raw_value("PendingFileRenameOperations").unwrap();
+    let (pairs, _) = value.bytes.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    String::from_utf16_lossy(&units).to_lowercase()
 }
 
 #[test]
