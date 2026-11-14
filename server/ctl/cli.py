@@ -2,11 +2,13 @@
 
 import argparse
 import contextlib
+import json
 import secrets
 import socket
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -110,6 +112,68 @@ def _unalias(args, hosts, aliases, env):
         raise CtlError(f"{args.public} is not an alias")
 
 
+FRPS_API_HINT = (
+    "If frps was created before this version, `docker compose restart reverse-tunnel-frps` makes it read the API "
+    "settings (it drops every tunnel once); right after a start it may not listen yet."
+)
+
+
+def online_since(answer: str) -> dict[str, int]:
+    """Each host with a session open at frps, to the epoch second it began (the earliest, if it has several), from
+    frps's `/api/clients` answer. Raises `ValueError`, saying what is wrong, for any other answer."""
+    try:
+        clients = json.loads(answer)
+    except ValueError as e:
+        raise ValueError(f"not JSON: {e}") from e
+    if not isinstance(clients, list):
+        raise ValueError(f"not a list of clients: {answer[:80]!r}")
+    since: dict[str, int] = {}
+    for client in clients:
+        if not isinstance(client, dict) or not isinstance(client.get("user"), str):
+            raise ValueError(f"a client without a user name: {str(client)[:80]!r}")
+        if not isinstance(client.get("online"), bool):
+            raise ValueError(f"client {client['user']!r} without a true or false `online`")
+        if not client["online"]:
+            continue
+        began = client.get("lastConnectedAt")
+        try:
+            if isinstance(began, bool) or not isinstance(began, int):
+                raise ValueError
+            datetime.fromtimestamp(began, UTC)
+        except (ValueError, OverflowError, OSError):
+            raise ValueError(f"client {client['user']!r} has no usable `lastConnectedAt`: {began!r}") from None
+        since[client["user"]] = min(began, since.get(client["user"], began))
+    return since
+
+
+def _presence(hosts: dict) -> str:
+    """One line per registered host: online since when, offline, or unknown with the reason on stderr. Asks nothing
+    when no host is registered."""
+    if not hosts:
+        return ""
+    try:
+        online = online_since(compose.frps_clients(Path.cwd()))
+    except compose.FrpsApiMissing as e:
+        print(f"ctl: frps does not answer on its API ({e}). {FRPS_API_HINT}", file=sys.stderr)
+        online = None
+    except OSError as e:
+        print(f"ctl: could not ask frps who is online: {e}", file=sys.stderr)
+        online = None
+    except ValueError as e:
+        print(f"ctl: frps's answer is unusable: {e}", file=sys.stderr)
+        online = None
+    lines = []
+    for host in hosts:
+        if online is None:
+            state = "unknown"
+        elif host not in online:
+            state = "offline"
+        else:
+            state = "online since " + datetime.fromtimestamp(online[host], UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        lines.append(f"presence {host} {state}")
+    return "\n".join(lines)
+
+
 def _list(args, hosts, aliases, env):
     lines = [f"host {host} {digest}" for host, digest in hosts.items()]
     return "\n".join(lines + [f"alias {public} {backend}" for public, backend in aliases.items()])
@@ -141,6 +205,8 @@ class Command(NamedTuple):
     arguments: dict[str, str]
     # True for `init`: runs in a folder with no `state/`, and its text prints after the bring-up.
     bootstrap: bool = False
+    # Runs after bring-up, with the registry lock released.
+    after: Callable | None = None
 
 
 COMMANDS = {
@@ -178,7 +244,12 @@ COMMANDS = {
         "Remove a public name that `ctl alias` made.",
         {"public": "the public name, as `ctl list` shows it after `alias`"},
     ),
-    "list": Command(_list, "Show the registered hosts and the aliases.", {}),
+    "list": Command(
+        _list,
+        "Show the registered hosts and the aliases, then which hosts are online at frps (since when) or offline.",
+        {},
+        after=_presence,
+    ),
     "join-code": Command(
         _join_code,
         "Print the join code, which every host needs once: paste it into `reverse-tunnel install` on the host.",
@@ -241,6 +312,9 @@ def _run(args) -> None:
                 print(FRPS_KEPT)
             if out:
                 print(out)
+    # frps runs only once the bring-up has made sure of it, and asking it may take long: not under the lock.
+    if command.after and (text := command.after(hosts)):
+        print(text)
 
 
 def build_parser() -> argparse.ArgumentParser:

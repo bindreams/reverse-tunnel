@@ -299,6 +299,12 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     }
     // frpc runs only after the supervisor read both tokens, which it does as the service account.
     assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
+    for log in [
+        paths.log_dir.join(reverse_tunnel::paths::LOG_SUPERVISOR),
+        paths.frpc_log(),
+    ] {
+        is(&log, EVERYONE, READ_EXECUTE);
+    }
 }
 
 /// A job object that kills every process in it when its handle closes, as an OpenSSH session's does.

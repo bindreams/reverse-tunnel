@@ -1,5 +1,5 @@
-//! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
-//! user may read. Nothing here reads `secrets_dir`.
+//! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir` and frpc's log,
+//! which every local user may read. Nothing here reads `secrets_dir`.
 
 use std::fs;
 use std::io::Write;
@@ -20,6 +20,7 @@ use crate::command;
 use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
 use crate::install::refuse_while_uninstalling;
+use crate::logs;
 use crate::output::println_best_effort;
 use crate::paths::Paths;
 use crate::service;
@@ -203,7 +204,7 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
     }
 }
 
-/// Never prints a token.
+/// Never prints a token: the log it ends with holds none.
 pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     let state = manager.status(&service::id())?;
     let word = match state.state {
@@ -233,7 +234,41 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;
     }
+    write_log_tail(&paths.frpc_log(), state.state, out)
+}
+
+/// The last `logs::TAIL` lines of frpc's log under a header, as they are; a service that is not running says they are
+/// from its last run. A log that is not there, or not readable, is said so: `status` still has the rest to show.
+fn write_log_tail(log: &Path, state: State, out: &mut impl Write) -> Result<()> {
+    match read_tail(log) {
+        Ok(Some(tail)) => {
+            let when = if matches!(state, State::Stopped | State::Failed) {
+                ", from the service's last run"
+            } else {
+                ""
+            };
+            writeln!(
+                out,
+                "frpc log (last {} lines{when}; `reverse-tunnel logs` shows it all):",
+                logs::TAIL
+            )?;
+            out.write_all(&tail)?;
+            if !tail.is_empty() && !tail.ends_with(b"\n") {
+                writeln!(out)?;
+            }
+        }
+        Ok(None) => writeln!(out, "frpc log: no log yet")?,
+        Err(err) => writeln!(out, "frpc log: {err:#}")?,
+    }
     Ok(())
+}
+
+fn read_tail(log: &Path) -> Result<Option<Vec<u8>>> {
+    let Some(mut file) = logs::open(log)? else {
+        return Ok(None);
+    };
+    let tail = logs::tail(&mut file, logs::TAIL).with_context(|| format!("reading {}", log.display()))?;
+    Ok(Some(tail))
 }
 
 /// SHA-256 of each certificate's DER, formatted like `openssl x509 -fingerprint -sha256`.

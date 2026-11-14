@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use reverse_tunnel::download::tools;
 use reverse_tunnel::install::{self, InstallOpts};
+use reverse_tunnel::logs;
 use reverse_tunnel::ops;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::report::report;
@@ -66,8 +67,18 @@ enum Command {
     Stop,
     /// Checks config.yaml, then restarts the service to apply it; works over the tunnel. Needs root.
     Restart,
-    /// Shows the service's state and the bridge.
+    /// Shows the service's state, the bridge, and the end of frpc's log.
     Status,
+    /// Shows frpc's log, which every local account may read.
+    Logs {
+        /// Show only the last N lines.
+        #[arg(short = 'n', long = "lines", value_name = "N")]
+        lines: Option<usize>,
+        /// Keep running and show lines as they are appended, until interrupted. Starts with the last 10 lines unless
+        /// -n says otherwise, and waits for the log if there is none yet.
+        #[arg(short, long)]
+        follow: bool,
+    },
 }
 
 /// std prints the error, ignoring a closed stderr; it is handed the report, as std alone would drop goetia's details.
@@ -125,6 +136,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::Status => {
             ops::status(&*service::manager(&paths)?, &paths, &mut io::stdout().lock())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Logs { lines, follow } => {
+            logs::show(&paths.frpc_log(), lines, follow, &mut io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
         }
     }

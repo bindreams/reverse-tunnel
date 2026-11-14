@@ -400,6 +400,22 @@ def test_ssh_through_proxycommand(stack, registered):
     assert stack.ssh("whoami").stdout.strip() == getpass.getuser()
 
 
+def test_status_and_list_show_the_host_connected(stack, registered, other):
+    """Observability end to end: `logs`, `status`'s log tail, and `ctl list`."""
+    login = "login to server success"
+    wait_until(lambda: login in run(INSTALLED, "logs").stdout[stack.started_at :])
+    status = run(INSTALLED, "status").stdout
+    header, found, tail = status.partition("`reverse-tunnel logs` shows it all):\n")
+    assert found and header.endswith("frpc log (last 10 lines; "), status
+    assert tail.strip(), status
+    # What `status` printed is a run of lines of the log, which only grows.
+    assert tail in run(INSTALLED, "logs").stdout, status
+    online = rf"^presence {HOST} online since \d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d UTC$"
+    listing = wait_until(lambda: re.search(online, text := stack.ctl("list"), re.M) and text)
+    # OTHER is registered, and no frpc runs for it.
+    assert re.search(rf"^presence {OTHER} offline$", listing, re.M), listing
+
+
 def test_per_host_cert_issued_on_add(stack, registered):
     """Pebble issued one certificate for `*.h.T` and `h.T`."""
     cert = wait_until(lambda: _try(stack.peer_cert, f"x.{HOST}.{T}"))

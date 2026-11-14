@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT};
-use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::paths::{FRPC_CONFIG, LOG_SUPERVISOR, Paths};
 
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
@@ -91,7 +91,7 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
         return runtime.block_on(check(&setup));
     }
     let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
-    let frpc_log = LogFile::open(paths.log_dir.join(LOG_FRPC), ROTATE_AT)?;
+    let frpc_log = LogFile::open(paths.frpc_log(), ROTATE_AT)?;
     let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log));
     log.line(format_args!("{err:#}"));
     Err(err)

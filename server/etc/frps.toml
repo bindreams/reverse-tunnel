@@ -7,6 +7,11 @@ transport.tls.force = true
 transport.tls.certFile = "/etc/frps-tls/frps.crt"
 transport.tls.keyFile = "/etc/frps-tls/frps.key"
 
+# The admin API, for `ctl list`, which runs `wget` inside this container. On the container's loopback only, so it needs
+# no password: nothing outside the container can reach it. `ctl/compose.py` has the same address; a test checks them.
+webServer.addr = "127.0.0.1"
+webServer.port = 7500
+
 [[httpPlugins]]
 name = "reverse-tunnel-plugin"
 addr = "reverse-tunnel-plugin:9000"

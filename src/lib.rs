@@ -17,6 +17,7 @@ pub mod join;
 #[cfg(windows)]
 pub mod leftovers;
 pub mod logfile;
+pub mod logs;
 pub mod ops;
 pub mod output;
 pub mod paths;
