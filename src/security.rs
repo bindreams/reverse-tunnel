@@ -31,8 +31,8 @@ use windows_sys::Win32::Security::{SidTypeDeletedAccount, SidTypeInvalid, SidTyp
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE,
-    ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
-    ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
+    ACCESS_ALLOWED_COMPOUND_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
+    ACCESS_DENIED_CALLBACK_ACE_TYPE, ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
 };
 
 /// A descriptor that names only an owner: Administrators.
@@ -202,12 +202,12 @@ pub struct Ace {
 /// What `aces_of` reads of a DACL.
 pub struct Dacl {
     pub aces: Vec<Ace>,
-    /// The SIDs of the conditional and object allow ACEs that were left out.
-    pub left_out: Vec<Sid>,
+    /// How many allow ACEs were left out (conditional, object and compound ones).
+    pub left_out: usize,
 }
 
-/// `path`'s DACL (inherited ACEs included) as plain allows and all four kinds of deny; conditional and object allows are
-/// left out because they may not grant, and counted. No DACL means full access for Everyone: one ACE.
+/// `path`'s DACL (inherited ACEs included) as plain allows and all four kinds of deny; conditional, object and compound
+/// allows are left out, and counted. No DACL means full access for Everyone: one ACE.
 pub fn aces_of(path: &Path) -> io::Result<Dacl> {
     let (mut dacl, mut descriptor) = (null_mut(), null_mut());
     // SAFETY: the path is NUL-terminated, and the out pointers are live.
@@ -236,7 +236,7 @@ pub fn aces_of(path: &Path) -> io::Result<Dacl> {
                 mask: FILE_ALL_ACCESS,
                 sid: Sid::parse("S-1-1-0")?,
             }],
-            left_out: Vec::new(),
+            left_out: 0,
         });
     }
     let mut info = ACL_SIZE_INFORMATION::default();
@@ -252,7 +252,7 @@ pub fn aces_of(path: &Path) -> io::Result<Dacl> {
     if read == 0 {
         return Err(io::Error::last_os_error());
     }
-    let (mut aces, mut left_out) = (Vec::new(), Vec::new());
+    let (mut aces, mut left_out) = (Vec::new(), 0);
     for at in 0..info.AceCount {
         let mut ace = null_mut();
         // SAFETY: `at` is below the ACL's count, and the out pointer is live.
@@ -262,28 +262,22 @@ pub fn aces_of(path: &Path) -> io::Result<Dacl> {
         // SAFETY: `ace` points into the live descriptor at an ACE, which starts with its header.
         let header = unsafe { *ace.cast::<ACE_HEADER>() };
         let kind = u32::from(header.AceType);
-        let allows = kind == ACCESS_ALLOWED_ACE_TYPE;
-        let object = matches!(
-            kind,
-            ACCESS_DENIED_OBJECT_ACE_TYPE | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
-        );
+        let (allows, object) = match kind {
+            ACCESS_ALLOWED_ACE_TYPE => (true, false),
+            ACCESS_DENIED_ACE_TYPE | ACCESS_DENIED_CALLBACK_ACE_TYPE => (false, false),
+            ACCESS_DENIED_OBJECT_ACE_TYPE | ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE => (false, true),
+            ACCESS_ALLOWED_COMPOUND_ACE_TYPE
+            | ACCESS_ALLOWED_OBJECT_ACE_TYPE
+            | ACCESS_ALLOWED_CALLBACK_ACE_TYPE
+            | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE => {
+                left_out += 1;
+                continue;
+            }
+            // Audit, alarm, label and the like grant and deny nothing.
+            _ => continue,
+        };
         // SAFETY: GetAce gave a pointer to an ACE whose header says it is `AceSize` bytes, inside the live descriptor.
         let bytes = unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), usize::from(header.AceSize)) };
-        if !allows && kind != ACCESS_DENIED_ACE_TYPE && kind != ACCESS_DENIED_CALLBACK_ACE_TYPE && !object {
-            let allow_object = matches!(
-                kind,
-                ACCESS_ALLOWED_OBJECT_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE
-            );
-            // A callback or object allow has its SID where a plain one does, after the object part; any other kind
-            // (compound, say) has no SID that is read.
-            if (allow_object || kind == ACCESS_ALLOWED_CALLBACK_ACE_TYPE)
-                && let Ok((_, sid_at)) = layout_of(bytes, allow_object)
-            {
-                // SAFETY: `layout_of` checked that a whole SID lies inside the ACE.
-                left_out.push(unsafe { Sid::copy_of(bytes.as_ptr().add(sid_at).cast_mut().cast()) });
-            }
-            continue;
-        }
         let (mask, sid_at) = layout_of(bytes, object).map_err(|what| {
             let message = format!("{}: ACE {at} is {} bytes, {what}", path.display(), bytes.len());
             io::Error::new(io::ErrorKind::InvalidData, message)
@@ -293,7 +287,7 @@ pub fn aces_of(path: &Path) -> io::Result<Dacl> {
             inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0,
             object_inherit: u32::from(header.AceFlags) & OBJECT_INHERIT_ACE != 0,
             mask,
-            // SAFETY: `layout_of` checked that a whole SID lies inside the ACE.
+            // SAFETY: `layout_of` checked that a whole SID lies inside the ACE, which the live descriptor holds.
             sid: unsafe { Sid::copy_of(bytes.as_ptr().add(sid_at).cast_mut().cast()) },
         });
     }
@@ -342,7 +336,6 @@ unsafe fn string_of_sid(sid: PSID) -> io::Result<String> {
 }
 
 /// A SID, in its binary form.
-#[derive(Debug)]
 pub struct Sid(Vec<u32>);
 
 impl Sid {

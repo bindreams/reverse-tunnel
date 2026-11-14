@@ -56,8 +56,8 @@ every installer does, by reading it and writing it back: another program that ed
 the two edits, and running that program's installer again restores its entry. `install` refuses a Program Files folder
 whose path contains `%`, which Windows reads as a variable in the commands that finish `uninstall` and in the system
 `PATH`. `restart` and `install` run `run --check`, which first checks the ACLs of what `run` opens (the binaries, the
-configuration and token files, the log folder) and then the configuration: `NT SERVICE\reverse-tunnel` needs an allow,
-its own or a group every service has (Everyone, SERVICE and others), and no deny ACE may name anyone.
+configuration and token files, the log folder): `NT SERVICE\reverse-tunnel` needs an allow, its own or a group every
+service has (Everyone, SERVICE and others), and no deny ACE may name anyone; and then the configuration.
 `upgrade` is not available yet: to change the binary, uninstall and install again.
 
 ```powershell

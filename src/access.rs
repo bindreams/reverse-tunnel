@@ -160,15 +160,10 @@ fn explain(need: &Need, who: &Principals, dacl: io::Result<Dacl>) -> Option<Stri
         let names: Vec<&str> = who.holders.iter().skip(1).map(|(_, name)| *name).collect();
         names.join(", ")
     };
-    let left_out = match dacl
-        .left_out
-        .iter()
-        .filter(|sid| who.holders.iter().any(|(held, _)| held == *sid))
-        .count()
-    {
+    let left_out = match dacl.left_out {
         0 => String::new(),
-        1 => " One conditional or object allow ACE was not counted.".to_string(),
-        n => format!(" {n} conditional or object allow ACEs were not counted."),
+        1 => " This check does not count conditional, object or compound allow ACEs; its ACL has one.".to_string(),
+        n => format!(" This check does not count conditional, object or compound allow ACEs; its ACL has {n}."),
     };
     Some(match barrier_of(&dacl.aces, who, needs, inherits)? {
         Barrier::Denied(by) => {

@@ -68,10 +68,7 @@ fn deny_aces_of_every_kind_are_read_with_their_own_sid_and_the_other_allows_are_
          (OD;;0x4;bf967aba-0de6-11d0-a285-00aa00c04fc1;bf967aba-0de6-11d0-a285-00aa00c04fc1;AU)\
          (XA;;0x8;;;SY;(Member_of{SID(BA)}))(OA;;0x20;bf967aba-0de6-11d0-a285-00aa00c04fc1;;WD)(A;;0x10;;;BA)",
     );
-    assert_eq!(
-        dacl.left_out,
-        [Sid::parse("S-1-5-18").unwrap(), Sid::parse("S-1-1-0").unwrap()]
-    );
+    assert_eq!(dacl.left_out, 2);
     let found = summary(dacl);
 
     assert_eq!(
