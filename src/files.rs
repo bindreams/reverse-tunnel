@@ -371,7 +371,14 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
             return Ok(WriteOutcome::Written);
         }
         (_, Err(err)) => return Err(err).with_context(|| format!("writing {}", dest.display())),
-        (_, Ok(())) => {}
+        (_, Ok(())) => {
+            eprintln!(
+                "DIAG {} wrote {} bytes, file now {:?}",
+                dest.display(),
+                data.len(),
+                fs::metadata(dest).map(|m| m.len())
+            );
+        }
     }
     #[cfg(unix)]
     File::open(dir)
