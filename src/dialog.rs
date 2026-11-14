@@ -50,7 +50,8 @@ impl<I: BufRead, O: Write> Dialog<I, O> {
                 let current = current.as_ref().map_err(|err| anyhow!("{err:#}"))?;
                 ensure!(
                     asked == current,
-                    "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a \n                     host. To rename it, uninstall it and install it again with --host {asked}",
+                    "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a \
+                     host. To rename it, uninstall it and install it again with --host {asked}",
                     config.display()
                 );
             }
