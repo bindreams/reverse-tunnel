@@ -1,14 +1,16 @@
-//! `install` and `uninstall` against the real service manager, account database and file system, as root. They run
-//! only on CI's `platform` job (`RT_PLATFORM_TESTS=1`), one at a time, on a machine nothing else lives on; never on a
-//! developer's machine.
-
-#![cfg(unix)]
+//! `install` and `uninstall` against the real service manager, account database and file system, as root (on Windows,
+//! as an Administrator). They run only on CI's `platform` job (`RT_PLATFORM_TESTS=1`), one at a time, on a machine
+//! nothing else lives on; never on a developer's machine.
 
 use std::collections::BTreeSet;
 use std::env;
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -17,20 +19,34 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use goetia::manager::{self, Installed, ServiceManager, State, Status};
+use goetia::manager::{Installed, ServiceManager, State, Status};
 use goetia::spec::Id;
+#[cfg(unix)]
 use reverse_tunnel::account::{self, Account};
 use reverse_tunnel::command;
 use reverse_tunnel::install;
 use reverse_tunnel::paths::Paths;
+#[cfg(windows)]
+use reverse_tunnel::schtasks::{self, TaskState};
 use reverse_tunnel::service;
 use reverse_tunnel::upgrade;
+#[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group};
+
+#[cfg(windows)]
+#[path = "platform/windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::assert_installed_as_specified;
+#[cfg(windows)]
+#[path = "support/held.rs"]
+mod held;
 
 const BIN: &str = env!("CARGO_BIN_EXE_reverse-tunnel");
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
 /// An account the test creates, to stand in for any local user.
+#[cfg(unix)]
 const PROBE: &str = "rtprobe";
 
 /// A join code for a domain that never resolves; its token names the domain.
@@ -62,8 +78,28 @@ fn removal_units(state: &str) -> String {
     )
 }
 
+/// Waits for the removal, which `uninstall` starts, to end. On Windows it is a scheduled task, over when it has an exit
+/// code or is gone; call it once the removal has started.
+#[cfg(windows)]
+fn wait_until_removed() {
+    wait_until_task_is_over(schtasks::REMOVAL);
+}
+
+/// Waits until the scheduled task `name` has ended or is gone, and returns which. A task that cannot be read fails
+/// the test.
+#[cfg(windows)]
+fn wait_until_task_is_over(name: &str) -> TaskState {
+    let mut state = TaskState::Running;
+    wait_until(&format!("task {name} is over"), || {
+        state = schtasks::state(name).unwrap();
+        state != TaskState::Running
+    });
+    state
+}
+
 /// Waits for `uninstall --finish`, which `uninstall` starts, to end. On Linux it is a systemd unit named for the run,
 /// and is over when it is gone. Call it once the removal has started, as the unit exists from then on.
+#[cfg(unix)]
 fn wait_until_removed() {
     wait_until("the removal ends", || {
         #[cfg(target_os = "linux")]
@@ -81,25 +117,58 @@ fn output_of(program: &str, args: &[&str]) -> String {
     command::run(&[&[program], args].concat()).unwrap()
 }
 
+/// A running process: `owner` is its uid, or on Windows its user's name; `args` is its command line, or on Windows its
+/// image name.
 struct Process {
     pid: u32,
-    uid: u32,
+    owner: String,
     args: String,
 }
 
+#[cfg(unix)]
 fn processes() -> Vec<Process> {
     output_of("ps", &["-axo", "pid=,uid=,args="])
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
-            let (pid, uid) = (fields.next()?.parse().ok()?, fields.next()?.parse().ok()?);
+            let (pid, owner) = (fields.next()?.parse().ok()?, fields.next()?.to_string());
             Some(Process {
                 pid,
-                uid,
+                owner,
                 args: fields.collect::<Vec<_>>().join(" "),
             })
         })
         .collect()
+}
+
+#[cfg(windows)]
+fn processes() -> Vec<Process> {
+    // "Image Name","PID","Session Name","Session#","Mem Usage","Status","User Name",...
+    output_of("tasklist", &["/V", "/FO", "CSV", "/NH"])
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.trim().trim_matches('"').split("\",\"").collect();
+            Some(Process {
+                pid: fields.get(1)?.parse().ok()?,
+                owner: fields.get(6)?.to_string(),
+                args: fields[0].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// What `Process::owner` is for the service's account.
+#[cfg(unix)]
+fn service_owner() -> String {
+    account::lookup(service::ACCOUNT)
+        .expect("install creates the service account")
+        .uid
+        .to_string()
+}
+
+#[cfg(windows)]
+fn service_owner() -> String {
+    service::ACCOUNT.to_string()
 }
 
 /// The system, with the service not installed. Dropping it removes whatever a test installed.
@@ -107,6 +176,9 @@ struct Machine {
     paths: Paths,
     manager: Box<dyn ServiceManager>,
     id: Id,
+    /// Windows: the machine's `Path` as stored, before the test.
+    #[cfg(windows)]
+    path_before: (String, winreg::enums::RegType),
 }
 
 impl Machine {
@@ -116,20 +188,33 @@ impl Machine {
             Ok("1"),
             "these tests install a real service; they run on CI's platform job only (RT_PLATFORM_TESTS=1)"
         );
-        assert_eq!(rustix::process::getuid().as_raw(), 0, "these tests need root");
+        assert!(
+            cosca::elevation::is_elevated(),
+            "these tests need root, or an Administrator"
+        );
         let paths = Paths::system().unwrap();
         let id = service::id();
-        let manager = manager::native().unwrap();
+        let manager = service::manager(&paths).unwrap();
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());
         }
-        let accounts = account_names();
-        for account in [service::ACCOUNT, PROBE] {
-            assert!(!accounts.contains(account), "{account} is left from before");
+        #[cfg(unix)]
+        {
+            let accounts = account_names();
+            for account in [service::ACCOUNT, PROBE] {
+                assert!(!accounts.contains(account), "{account} is left from before");
+            }
         }
         assert!(
             matches!(manager.status(&id), Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })),
             "the service is left from before"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            windows::path_entries_naming(&paths.bin_dir),
+            0,
+            "the machine's Path names {} from before",
+            paths.bin_dir.display()
         );
         if let Some(link) = &paths.link {
             assert!(
@@ -138,7 +223,13 @@ impl Machine {
                 link.display()
             );
         }
-        Machine { paths, manager, id }
+        Machine {
+            paths,
+            manager,
+            id,
+            #[cfg(windows)]
+            path_before: windows::machine_path_and_type(),
+        }
     }
 
     fn install_command(&self, code: &str) -> Command {
@@ -167,7 +258,8 @@ impl Machine {
 
     /// Has root write `config.yaml` anew, readable by root only: a check run as root would pass it, and the service
     /// account cannot read it. Returns its path.
-    fn hide_config(&self) -> PathBuf {
+    #[cfg(unix)]
+    fn break_config(&self) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
         let config = self.paths.config_dir.join("config.yaml");
@@ -178,13 +270,27 @@ impl Machine {
         config
     }
 
+    /// Has `config.yaml` hold what no binary accepts. Returns its path. (On Windows the check runs as the caller, so a
+    /// file only the service account cannot read is not caught.)
+    #[cfg(windows)]
+    fn break_config(&self) -> PathBuf {
+        let config = self.paths.config_dir.join("config.yaml");
+        fs::write(&config, "host: [unclosed").unwrap();
+        config
+    }
+
     /// The service's account, which exists once installed.
+    #[cfg(unix)]
     fn service_account(&self) -> Account {
         account::lookup(service::ACCOUNT).expect("install creates the service account")
     }
 
     fn frpc(&self) -> Vec<Process> {
-        let prefix = format!("{}/frpc-", self.paths.bin_dir.display());
+        let prefix = if cfg!(windows) {
+            "frpc-".to_string()
+        } else {
+            format!("{}/frpc-", self.paths.bin_dir.display())
+        };
         processes()
             .into_iter()
             .filter(|p| p.args.starts_with(&prefix))
@@ -201,6 +307,7 @@ impl Machine {
     }
 
     /// Runs `program args` as the probe account, which `acls_as_specified` creates; whether it succeeded.
+    #[cfg(unix)]
     fn probe(&self, program: &str, path: &Path) -> bool {
         let status = Command::new("sudo")
             .args(["-n", "-u", PROBE, "--", program])
@@ -216,6 +323,15 @@ impl Machine {
 impl Drop for Machine {
     fn drop(&mut self) {
         let _ = Command::new(BIN).args(["uninstall", "--finish"]).status();
+        // What a removal that was cut short, or that failed, leaves.
+        #[cfg(windows)]
+        {
+            let _ = schtasks::delete(schtasks::REMOVAL);
+            let _ = fs::remove_dir_all(self.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"));
+            for image in install::leftover_images(&self.paths).unwrap_or_default() {
+                let _ = fs::remove_file(image);
+            }
+        }
         #[cfg(target_os = "linux")]
         {
             // `su -l` starts the account's user manager, user@<uid>.service, which outlives the session, and `userdel`
@@ -225,15 +341,19 @@ impl Drop for Machine {
                 !Command::new("pgrep").args(["-u", PROBE]).status().unwrap().success()
             });
         }
-        let removed = account::remove(PROBE);
-        if !thread::panicking() {
-            removed.unwrap();
+        #[cfg(unix)]
+        {
+            let removed = account::remove(PROBE);
+            if !thread::panicking() {
+                removed.unwrap();
+            }
         }
     }
 }
 
 /// The name of every user and group, from the account database; the lookup cache that `account::lookup` goes through
 /// can still answer for an account that has just been removed.
+#[cfg(unix)]
 fn account_names() -> BTreeSet<String> {
     let listing = if cfg!(target_os = "macos") {
         output_of("dscl", &[".", "-list", "/Users"]) + &output_of("dscl", &[".", "-list", "/Groups"])
@@ -272,10 +392,12 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
         paths.config_dir.parent(),
         paths.log_dir.parent(),
     ];
+    // On Windows, `logs/` is in `config_dir`, which an install creates.
     for parent in parents
         .into_iter()
         .flatten()
         .chain(paths.link.as_deref().and_then(Path::parent))
+        .filter(|parent| parent.exists())
     {
         for entry in fs::read_dir(parent).unwrap() {
             let path = entry.unwrap().path();
@@ -286,13 +408,25 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     }
     let units: &[&str] = if cfg!(target_os = "macos") {
         &["/Library/LaunchDaemons", "/Library/Application Support/Goetia"]
+    } else if cfg!(windows) {
+        &[]
     } else {
         &["/etc/systemd/system"]
     };
     for dir in units {
         tree(Path::new(dir), &mut seen);
     }
+    #[cfg(unix)]
     seen.extend(account_names().into_iter().map(|name| format!("account {name}")));
+    #[cfg(windows)]
+    {
+        if schtasks::state(schtasks::REMOVAL).unwrap() != TaskState::Gone {
+            seen.insert(format!("task {}", schtasks::REMOVAL));
+        }
+        if windows::path_entries_naming(&paths.bin_dir) > 0 {
+            seen.insert("a Path entry for the bin dir".to_string());
+        }
+    }
     for installed in machine.manager.list().unwrap() {
         seen.insert(match installed {
             Installed::Ours { spec, .. } => format!("service {}", spec.id),
@@ -302,11 +436,13 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
     seen
 }
 
+#[cfg(unix)]
 fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().mode() & 0o7777
 }
 
 /// The modes, the owners and the access the installation is specified to give.
+#[cfg(unix)]
 fn assert_installed_as_specified(machine: &Machine) {
     let paths = &machine.paths;
     let service = machine.service_account();
@@ -363,7 +499,7 @@ fn assert_installed_as_specified(machine: &Machine) {
     }
 
     // frpc runs only after the supervisor read both tokens, which it does as the service account.
-    assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.uid == service.uid));
+    assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
 }
 
 #[test]
@@ -392,6 +528,7 @@ fn acls_as_specified() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(unix)]
 fn install_under_umask_077() {
     let machine = Machine::begin();
     let mut install = Command::new("sh");
@@ -456,10 +593,12 @@ fn rejoin_takes_effect() {
     assert_ne!(machine.status().pid, supervisor);
 }
 
-/// Runs `session` (which must run `uninstall`, on an installed machine) until the removal has started, ends the
-/// session with `end`, which is given the session and what it printed, and returns once the removal is over.
-fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) {
+/// Runs `session` (which must run `uninstall`, on an installed machine), after `begin` has been given it, until the
+/// removal has started, ends the session with `end`, which is given the session and what it printed, and returns once
+/// the removal is over.
+fn uninstall_survives(mut session: Command, begin: impl FnOnce(&mut Child), end: impl FnOnce(&mut Child, &str)) {
     let mut session = session.stdout(Stdio::piped()).spawn().unwrap();
+    begin(&mut session);
     let mut output = BufReader::new(session.stdout.take().unwrap());
     let mut printed = String::new();
     while !printed.lines().last().is_some_and(|line| line.starts_with("Removing.")) {
@@ -479,10 +618,28 @@ fn uninstall_survives(mut session: Command, end: impl FnOnce(&mut Child, &str)) 
     session.wait().unwrap();
 
     wait_until_removed();
-    assert!(
-        !account_names().contains(service::ACCOUNT),
-        "the removal died with the session"
+    #[cfg(unix)]
+    let removed = !account_names().contains(service::ACCOUNT);
+    #[cfg(windows)]
+    let removed = matches!(
+        service::manager(&Paths::system().unwrap()).unwrap().status(&service::id()),
+        Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
     );
+    assert!(removed, "the removal died with the session");
+    // The removal deletes its own task and directory, last.
+    #[cfg(windows)]
+    {
+        let paths = Paths::system().unwrap();
+        assert_eq!(
+            schtasks::state(schtasks::REMOVAL).unwrap(),
+            TaskState::Gone,
+            "the removal's task is left"
+        );
+        assert!(
+            !install::removal_log_file(&paths).parent().unwrap().exists(),
+            "the removal's directory is left"
+        );
+    }
 }
 
 #[test]
@@ -492,12 +649,40 @@ fn uninstall_survives_session_end() {
     // the service.
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let mut session = Command::new(BIN);
-    session.arg("uninstall").process_group(0);
-    uninstall_survives(session, |session, _| {
-        let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
-        kill_process_group(group, Signal::KILL).unwrap();
-    });
+    #[cfg(unix)]
+    {
+        let mut session = Command::new(BIN);
+        session.arg("uninstall").process_group(0);
+        uninstall_survives(
+            session,
+            |_| {},
+            |session, _| {
+                let group = Pid::from_raw(session.id().try_into().unwrap()).unwrap();
+                kill_process_group(group, Signal::KILL).unwrap();
+            },
+        );
+    }
+    // The session is a job object that kills all it holds when it closes, as OpenSSH's does. `cmd` waits for a line
+    // before it runs `uninstall`, so that everything `uninstall` starts is in the job too.
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::os::windows::process::CommandExt;
+
+        let job = windows::Job::kill_on_close();
+        let mut session = Command::new("cmd");
+        session
+            .raw_arg(format!(r#"/s /c "set /p go=& "{BIN}" uninstall""#))
+            .stdin(Stdio::piped());
+        uninstall_survives(
+            session,
+            |session| {
+                job.add(session);
+                session.stdin.take().unwrap().write_all(b"\r\n").unwrap();
+            },
+            |_, _| job.close(),
+        );
+    }
 }
 
 /// A file the test puts under `/etc`, removed when it drops. `restart` names a service to restart after each change.
@@ -582,24 +767,28 @@ fn uninstall_survives_logind_session_end() {
     session
         .args(["-s", "/bin/sh", "-l", PROBE, "-c"])
         .arg(format!("echo session=$XDG_SESSION_ID; exec sudo -n '{BIN}' uninstall"));
-    uninstall_survives(session, |session, printed| {
-        let id = printed
-            .lines()
-            .find_map(|line| line.strip_prefix("session="))
-            .expect("su -l opens a logind session");
-        // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the scope
-        // because of the drop-in. (A `su` killed outright leaves the scope alone.)
-        output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
-        session.wait().unwrap();
-        wait_until("logind has ended the session", || {
-            !Command::new("loginctl")
-                .args(["show-session", id])
-                .output()
-                .unwrap()
-                .status
-                .success()
-        });
-    });
+    uninstall_survives(
+        session,
+        |_| {},
+        |session, printed| {
+            let id = printed
+                .lines()
+                .find_map(|line| line.strip_prefix("session="))
+                .expect("su -l opens a logind session");
+            // The login's command ends, so `su` ends the session as sshd does, and logind kills what is left in the
+            // scope because of the drop-in. (A `su` killed outright leaves the scope alone.)
+            output_of("pkill", &["-KILL", "-P", &session.id().to_string()]);
+            session.wait().unwrap();
+            wait_until("logind has ended the session", || {
+                !Command::new("loginctl")
+                    .args(["show-session", id])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            });
+        },
+    );
 }
 
 #[test]
@@ -609,17 +798,18 @@ fn uninstall_leaves_nothing() {
     let before = snapshot(&machine);
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    // Not Linux (it opens no file): what the service account, which owns logs/, can plant for root to follow.
-    #[cfg(not(target_os = "linux"))]
+    // macOS (Linux opens no file, and Windows keeps the log outside logs/): what the service account, which owns
+    // logs/, can plant for root to follow.
+    #[cfg(target_os = "macos")]
     let victim = env::temp_dir().join("rt-uninstall-log-victim");
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     std::os::unix::fs::symlink(&victim, machine.paths.log_dir.join("uninstall.log")).unwrap();
 
     let mut uninstall = Command::new(BIN);
     uninstall.arg("uninstall");
     machine.run_ok(uninstall);
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     assert!(!victim.exists(), "uninstall wrote through a link in logs/");
     let after = snapshot(&machine);
     assert_eq!(
@@ -635,10 +825,29 @@ fn uninstall_leaves_nothing() {
     assert!(machine.frpc().is_empty(), "frpc outlived the service");
 }
 
-/// Makes `path` impossible to remove, even by root, until it drops.
+/// Makes `path` impossible to remove, even by root, until it drops. On Windows it is the image of a process that runs
+/// (access denied, which a removal fails on; a handle without delete sharing is waited out instead).
+#[cfg(unix)]
 struct Unremovable<'a>(&'a Path);
 
-impl Unremovable<'_> {
+#[cfg(windows)]
+struct Unremovable<'a>(&'a Path, #[allow(dead_code)] held::Running);
+
+impl<'a> Unremovable<'a> {
+    #[cfg(unix)]
+    fn new(path: &'a Path) -> Self {
+        let held = Unremovable(path);
+        held.set(true);
+        held
+    }
+
+    /// Replaces the file at `path` with an image that runs.
+    #[cfg(windows)]
+    fn new(path: &'a Path) -> Self {
+        Unremovable(path, held::running(path))
+    }
+
+    #[cfg(unix)]
     fn set(&self, on: bool) {
         let (program, flag) = match (cfg!(target_os = "macos"), on) {
             (true, true) => ("chflags", "uchg"),
@@ -650,6 +859,7 @@ impl Unremovable<'_> {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Unremovable<'_> {
     fn drop(&mut self) {
         self.set(false);
@@ -665,8 +875,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
     // of an earlier removal can stand in for it.
     let stuck = machine.paths.config_dir.join(format!("stuck-{}", std::process::id()));
     fs::write(&stuck, "").unwrap();
-    let stuck = Unremovable(&stuck);
-    stuck.set(true);
+    let stuck = Unremovable::new(&stuck);
 
     // The unit's earlier runs are in the journal too: read from here on.
     #[cfg(target_os = "linux")]
@@ -677,7 +886,13 @@ fn a_failed_removal_logs_where_uninstall_says() {
             .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_string))
             .expect("journalctl prints a cursor")
     };
-    let failed = Command::new(BIN).arg("uninstall").output().unwrap();
+    // On Windows the installed binary runs it: the removal renames its image next to the folder, and when the removal
+    // fails it stays there.
+    #[cfg(windows)]
+    let runner = service::exe(&machine.paths);
+    #[cfg(not(windows))]
+    let runner = PathBuf::from(BIN);
+    let failed = Command::new(&runner).arg("uninstall").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(!failed.status.success(), "the removal should fail: {stderr}");
@@ -705,6 +920,99 @@ fn a_failed_removal_logs_where_uninstall_says() {
     let logged = fs::read_to_string(install::removal_log_file(&machine.paths)).unwrap();
     let removing = format!("removing {}", stuck.0.display());
     assert!(logged.contains(&removing), "the log has no `{removing}`: {logged}");
+    // A removal that failed leaves its task, its directory and its log for the rerun.
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            schtasks::state(schtasks::REMOVAL).unwrap(),
+            TaskState::Ended(1),
+            "the failed removal's task is gone, or did not end with `uninstall --finish`'s failure"
+        );
+        assert!(
+            install::removal_log_file(&machine.paths).exists(),
+            "the failed removal's log is gone"
+        );
+        // The removal renamed the waiting `uninstall`'s own image, which was in the bin dir, and logged where it went.
+        // The image is left as the only binary, and the error names it. Running it finishes the removal.
+        let image = leftover_of_the_binary(&machine);
+        assert!(
+            logged.contains(&format!("{} {}", install::MOVED_IT_TO, image.display())),
+            "the log has no rename of the image: {logged}"
+        );
+        assert!(
+            stderr.contains(&format!("\"{}\" uninstall", image.display())),
+            "the error does not name the image as the binary to run: {stderr}"
+        );
+        // A removal that failed schedules nothing: after a reboot the image must still be there to run.
+        let name = image.file_name().unwrap().to_str().unwrap();
+        assert!(
+            !windows::names_scheduled_at_reboot()
+                .iter()
+                .any(|scheduled| scheduled == name),
+            "the failed removal's {} is scheduled for deletion at the next boot",
+            image.display()
+        );
+        drop(stuck);
+        let mut rerun = Command::new(image);
+        rerun.arg("uninstall");
+        assert_uninstalled_by_the_installed_binary(&machine, rerun);
+    }
+}
+
+/// The leftover image that was the installed binary: the one leftover whose original name is its name.
+#[cfg(windows)]
+fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
+    let images = install::leftover_images_of_the_binary(&machine.paths).unwrap();
+    let [image] = images.as_slice() else {
+        panic!("expected one leftover image of the binary, found {images:?}")
+    };
+    image.clone()
+}
+
+/// The removal runs from a copy of the binary in its own directory, which a failed removal leaves. Running that copy
+/// with `uninstall` clears the directory it is in, as it clears every directory the removal deletes: it renames itself
+/// out, and its removal deletes it once it has exited.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_copy_a_failed_removal_leaves_can_run_uninstall() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let stuck = machine.paths.config_dir.join(format!("stuck-{}", std::process::id()));
+    fs::write(&stuck, "").unwrap();
+    let held = Unremovable::new(&stuck);
+    let mut uninstall = Command::new(service::exe(&machine.paths));
+    uninstall.arg("uninstall").current_dir(env::temp_dir());
+    let failed = uninstall.output().unwrap();
+    assert!(!failed.status.success(), "the removal should fail");
+    let copy = machine
+        .paths
+        .bin_dir
+        .with_file_name("reverse-tunnel-uninstall")
+        .join(service::exe(&machine.paths).file_name().unwrap());
+    assert!(copy.exists(), "the failed removal left no copy");
+    drop(held);
+
+    let mut rerun = Command::new(&copy);
+    rerun.arg("uninstall").current_dir(env::temp_dir());
+    assert_uninstalled_by_the_installed_binary(&machine, rerun);
+}
+
+/// A newer build in a directory of its own: this one with a byte appended, which differs and which the loader ignores.
+/// Returns the directory, which removes it when it drops, and the build.
+fn newer_build() -> (tempfile::TempDir, PathBuf) {
+    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch
+        .path()
+        .join(format!("reverse-tunnel{}", env::consts::EXE_SUFFIX));
+    fs::write(&path, newer).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    (scratch, path)
 }
 
 #[test]
@@ -715,24 +1023,37 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
     let rendered = machine.paths.log_dir.join("frpc.toml");
     wait_until("the supervisor renders its first start", || rendered.exists());
 
-    // A file copied over the link makes the rejoin fail after it wrote the new bridge files.
-    let link = machine.paths.link.as_ref().unwrap();
-    fs::remove_file(link).unwrap();
-    fs::write(link, "").unwrap();
+    // A file copied over the link makes the rejoin fail after it wrote the new bridge files. On Windows there is no
+    // link, and a different binary cannot replace the one the running service holds (`upgrade` will).
     let rejoin = join_code("new.example.test");
-    let failed = machine.install_command(&rejoin).output().unwrap();
+    #[cfg(unix)]
+    let (blocker, mut failing) = {
+        let link = machine.paths.link.as_ref().unwrap();
+        fs::remove_file(link).unwrap();
+        fs::write(link, "").unwrap();
+        (link.clone(), machine.install_command(&rejoin))
+    };
+    #[cfg(windows)]
+    let (blocker, mut failing, _scratch) = {
+        let (scratch, newer) = newer_build();
+        let mut install = Command::new(&newer);
+        install.args(["install", "--host", "testhost", "--join", &rejoin]);
+        (service::exe(&machine.paths), install, scratch)
+    };
+    let failed = failing.output().unwrap();
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success() && stderr.contains(&link.display().to_string()),
+        !failed.status.success() && stderr.contains(&blocker.display().to_string()),
         "the rejoin should fail on the file at {}: {stderr}",
-        link.display()
+        blocker.display()
     );
     let token = fs::read_to_string(machine.secrets().join("bridge.token")).unwrap();
     assert_eq!(
         token, "token-for-new.example.test\n",
         "the rejoin failed before it wrote the bridge files"
     );
-    fs::remove_file(link).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(&blocker).unwrap();
 
     machine.install(&rejoin);
 
@@ -743,18 +1064,13 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(unix)]
 fn upgrade_from_local_build() {
-    use std::os::unix::fs::PermissionsExt;
-
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let supervisor = machine.status().pid.expect("a running service has a pid");
-    // A newer build: this one with a byte appended, which differs and which the loader ignores.
-    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
-    let scratch = tempfile::tempdir().unwrap();
-    let path = scratch.path().join("reverse-tunnel");
-    fs::write(&path, &newer).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let (_scratch, path) = newer_build();
+    let newer = fs::read(&path).unwrap();
 
     let mut upgrade = Command::new(BIN);
     upgrade.arg("upgrade").arg("--from").arg(&path);
@@ -767,14 +1083,27 @@ fn upgrade_from_local_build() {
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
 }
 
+/// Whether `stderr` says that the check refused `config`: unreadable by the service account, or, on Windows where the
+/// check runs as the caller, invalid.
+fn rejects_config(stderr: &str, config: &Path) -> bool {
+    if cfg!(windows) {
+        stderr.contains("the service would not start with this configuration")
+    } else {
+        stderr.contains("reading")
+            && stderr.contains(&config.display().to_string())
+            && stderr.contains("Permission denied")
+    }
+}
+
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn restart_checks_the_configuration_as_the_service_account() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     let first = machine.status().pid.expect("a running service has a pid");
+    let old_frpc: Vec<u32> = machine.wait_for_frpc().iter().map(|p| p.pid).collect();
 
-    // The check runs as the service account, with nothing inherited: it must pass, and the service run again.
+    // The check runs with nothing inherited (on Windows as the caller): it must pass, and the service run again.
     let mut restart = Command::new(BIN);
     restart.arg("restart");
     machine.run_ok(restart);
@@ -782,15 +1111,19 @@ fn restart_checks_the_configuration_as_the_service_account() {
         let status = machine.status();
         status.state == State::Running && status.pid.is_some_and(|pid| pid != first)
     });
+    // The new supervisor has read config.yaml once its frpc runs; a file broken before that stops the service itself.
+    wait_until("the new supervisor's frpc runs", || {
+        machine.frpc().iter().any(|process| !old_frpc.contains(&process.pid))
+    });
     let running = machine.status().pid;
 
-    let config = machine.hide_config();
+    let config = machine.break_config();
     let failed = Command::new(BIN).arg("restart").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success() && stderr.contains("reading") && stderr.contains("Permission denied"),
-        "restart should fail on reading {}: {stderr}",
+        !failed.status.success() && rejects_config(&stderr, &config),
+        "restart should fail on {}: {stderr}",
         config.display()
     );
     let status = machine.status();
@@ -800,29 +1133,22 @@ fn restart_checks_the_configuration_as_the_service_account() {
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn install_checks_the_configuration_as_the_service_account() {
-    use std::os::unix::fs::PermissionsExt;
-
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
+    // The supervisor has read config.yaml once frpc runs; a file broken before that stops the service itself.
+    machine.wait_for_frpc();
     let status = machine.status();
     let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
-    let config = machine.hide_config();
+    let config = machine.break_config();
     // A newer build in a directory the service account cannot enter.
-    let newer = [fs::read(BIN).unwrap(), b"newer".to_vec()].concat();
-    let scratch = tempfile::tempdir().unwrap();
-    let path = scratch.path().join("reverse-tunnel");
-    fs::write(&path, newer).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    let (_scratch, path) = newer_build();
 
     let failed = Command::new(&path).arg("install").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
-        !failed.status.success()
-            && stderr.contains("reading")
-            && stderr.contains(&config.display().to_string())
-            && stderr.contains("Permission denied"),
-        "install should fail on reading {}: {stderr}",
+        !failed.status.success() && rejects_config(&stderr, &config),
+        "install should fail on {}: {stderr}",
         config.display()
     );
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), outgoing);
@@ -879,6 +1205,90 @@ fn install_is_refused_while_an_uninstall_is_unfinished() {
 
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn status_needs_no_elevation() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let probe = windows::Probe::create();
+
+    // The installed binary: the test binary's own directory is in the runner's profile.
+    let out = probe.run(&service::exe(&machine.paths), "status");
+
+    let (status, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(out.status.success(), "status as an unelevated user: {status}{stderr}");
+    assert!(status.contains("service: running"), "{status}");
+    assert!(status.contains("bridge: tunnel.example.test"), "{status}");
+    assert!(status.contains("certificate: SHA-256 "), "{status}");
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn install_refuses_a_data_directory_someone_else_made() {
+    let machine = Machine::begin();
+    let probe = windows::Probe::create();
+    // What a standard user can do in %ProgramData% before the install: make the directory, owned by itself.
+    let squat = probe.run(
+        Path::new("cmd.exe"),
+        &format!("/c mkdir {}", machine.paths.config_dir.display()),
+    );
+    assert!(squat.status.success(), "the probe user could not make the directory");
+
+    let refused = machine
+        .install_command(&join_code("tunnel.example.test"))
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success()
+            && stderr.contains(&machine.paths.config_dir.display().to_string())
+            && stderr.contains("delete it"),
+        "install should refuse {}: {stderr}",
+        machine.paths.config_dir.display()
+    );
+    assert_eq!(
+        fs::read_dir(&machine.paths.config_dir).unwrap().count(),
+        0,
+        "install wrote into it"
+    );
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn install_removes_a_stray_ace_from_secrets() {
+    let machine = Machine::begin();
+    let everyone = windows::sid("S-1-1-0");
+    let code = join_code("tunnel.example.test");
+    machine.install(&code);
+    // An Administrator's hand edit: Everyone may read the tokens.
+    let secrets = machine.paths.secrets_dir.display().to_string();
+    output_of("icacls", &[&secrets, "/grant", "*S-1-1-0:(OI)(CI)R"]);
+    let token = machine.secrets().join("host.token");
+    assert_ne!(
+        windows::effective_rights(&token, &everyone),
+        0,
+        "the stray ACE did not reach the token"
+    );
+
+    machine.install(&code);
+
+    assert_eq!(
+        windows::effective_rights(&machine.paths.secrets_dir, &everyone),
+        0,
+        "Everyone has secrets/"
+    );
+    assert_eq!(windows::effective_rights(&token, &everyone), 0, "Everyone has a token");
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(unix)]
 fn status_needs_no_elevation() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
@@ -905,4 +1315,344 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
+}
+
+/// Deletes the scheduled task `name` when it drops, so that a test that panics leaves none registered.
+#[cfg(windows)]
+struct TaskGuard(&'static str);
+
+#[cfg(windows)]
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        let _ = schtasks::delete(self.0);
+    }
+}
+
+/// A delete of a file that another process holds open without delete sharing waits until that process lets go, and says
+/// so once. The delete runs in a child, which is this test run again with the path in `CHILD`: its stderr is what shows
+/// that the delete was refused, so the handle is closed only after that.
+#[test]
+#[ignore = "run by CI's platform job"]
+#[cfg(windows)]
+fn a_delete_waits_for_the_process_that_holds_the_file_open() {
+    const CHILD: &str = "RT_DELETE_THIS";
+    if let Some(path) = env::var_os(CHILD) {
+        reverse_tunnel::files::remove_entry(Path::new(&path)).unwrap();
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("held.txt");
+    fs::write(&path, "").unwrap();
+    let held = held::open_held(&path);
+    let mut child = Command::new(env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "--nocapture"])
+        .arg("a_delete_waits_for_the_process_that_holds_the_file_open")
+        .env(CHILD, &path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let named = path.display().to_string();
+    let refused = BufReader::new(child.stderr.take().unwrap())
+        .lines()
+        .map_while(Result::ok)
+        .any(|line| line.contains(&named) && line.contains("waiting until"));
+    assert!(refused, "the delete did not say that it waits");
+    assert!(path.exists(), "the delete took the file while it was held open");
+
+    drop(held);
+
+    assert!(
+        child.wait().unwrap().success(),
+        "the delete failed after the file was let go"
+    );
+    assert!(!path.exists(), "the file is still there");
+}
+
+/// The removal's task is registered as SYSTEM: `whoami` in it says so.
+#[test]
+#[ignore = "registers a real scheduled task; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_removal_task_runs_as_system() {
+    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let answer = dir.path().join("whoami.txt");
+    let task = "reverse-tunnel-system-test";
+    let _guard = TaskGuard(task);
+    schtasks::start(task, &format!(r#"whoami /user > "{}""#, answer.display())).unwrap();
+
+    assert_eq!(wait_until_task_is_over(task), TaskState::Ended(0));
+
+    let said = fs::read_to_string(&answer).unwrap();
+    assert!(said.contains("S-1-5-18"), "the task ran as: {said}");
+}
+
+/// `command` is `uninstall` run by the installed binary, which the removal deletes and Windows cannot delete while it
+/// runs: the removal, run by SYSTEM, renames that image next to the bin dir and deletes it once `uninstall` has exited.
+/// Asserts that it ended well and left nothing: not the service, the task, the directories, the `Path` entry or a
+/// leftover image, once the removal's task has deleted that.
+#[cfg(windows)]
+fn assert_uninstalled_by_the_installed_binary(machine: &Machine, command: Command) {
+    assert_uninstalled(machine, command);
+    windows::wait_until_no_leftover_image_is_left(machine);
+}
+
+/// `command` is `uninstall`, which has returned: asserts that it ended well and that the service, the task, the
+/// directories and the `Path` entry are gone, whether or not a leftover image still is.
+#[cfg(windows)]
+fn assert_uninstalled(machine: &Machine, mut command: Command) {
+    let said = output_of_success(&mut command);
+
+    assert!(
+        said.contains("Removed."),
+        "uninstall did not say it removed the host: {said}"
+    );
+    assert_nothing_left(machine, &said);
+}
+
+/// Runs `command`, which must succeed; its stdout and stderr.
+#[cfg(windows)]
+fn output_of_success(command: &mut Command) -> String {
+    let ran = command.output().unwrap();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(ran.status.success(), "{command:?} exited with {}: {said}", ran.status);
+    said
+}
+
+/// The service, the removal's task, the directories and the `Path` entry are gone, whether or not a leftover image
+/// still is. `said` is what the removal printed.
+#[cfg(windows)]
+fn assert_nothing_left(machine: &Machine, said: &str) {
+    let removed = matches!(
+        machine.manager.status(&machine.id),
+        Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
+    );
+    assert!(removed, "the service is left: {said}");
+    for left in [
+        &machine.paths.bin_dir,
+        &machine.paths.config_dir,
+        &machine.paths.log_dir,
+        &machine.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"),
+    ] {
+        assert!(!left.exists(), "{} is left: {said}", left.display());
+    }
+    assert_eq!(schtasks::state(schtasks::REMOVAL).unwrap(), TaskState::Gone);
+    assert_eq!(
+        windows::path_entries_naming(&machine.paths.bin_dir),
+        0,
+        "the Path entry is left"
+    );
+    assert_eq!(
+        windows::machine_path_and_type(),
+        machine.path_before,
+        "the machine's Path is not as it was before install"
+    );
+}
+
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_binary() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let binary = service::exe(&machine.paths);
+    let mut uninstall = Command::new(&binary);
+    uninstall.arg("uninstall").current_dir(env::temp_dir());
+    let scheduled_before = windows::names_scheduled_at_reboot();
+
+    assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+
+    // The removal succeeded, so the system is to delete, at the next boot, the image it renamed. Earlier removals'
+    // entries are there too: the image's name is unique by its random id, so it is one not scheduled before.
+    let name = binary.file_name().unwrap().to_str().unwrap();
+    assert!(
+        windows::names_scheduled_at_reboot()
+            .iter()
+            .any(|scheduled| schtasks::is_leftover_of(scheduled, name) && !scheduled_before.contains(scheduled)),
+        "the renamed image is not scheduled for deletion at the next boot"
+    );
+}
+
+/// `uninstall --finish` while the service and frpc run: goetia's `uninstall` returns while the host and frpc are still
+/// ending, and `--finish` waits for them before it deletes their images, so it renames nothing. Run directly, as the
+/// removal's task runs it (elevated, from outside the bin dir), so that no sweep deletes a renamed image unseen.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_finish_while_the_service_and_frpc_run_renames_no_image() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    machine.wait_for_frpc();
+    let mut finish = Command::new(BIN);
+    finish.args(["uninstall", "--finish"]).current_dir(env::temp_dir());
+
+    let said = output_of_success(&mut finish);
+
+    assert_nothing_left(&machine, &said);
+    assert!(
+        !said.contains(install::MOVED_IT_TO),
+        "the removal renamed an image it should have waited for: {said}"
+    );
+}
+
+/// By name, from the environment of a shell opened after `install`, which has the machine's `Path`.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_run_by_name_through_the_path_removes_the_host_and_the_binary() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let cmd = Path::new(&env::var("SystemRoot").unwrap())
+        .join("System32")
+        .join("cmd.exe");
+    let mut uninstall = Command::new(cmd);
+    uninstall
+        .args(["/c", "reverse-tunnel", "uninstall"])
+        .env("PATH", windows::fresh_path())
+        .current_dir(env::temp_dir());
+
+    assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+}
+
+/// A leftover image of an earlier failed removal is deleted by a later successful one, whichever binary runs it.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn a_later_removal_deletes_the_leftover_image_of_an_earlier_one() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let leftover = machine.paths.bin_dir.parent().unwrap().join(schtasks::leftover_name(
+        "earlier",
+        service::exe(&machine.paths).file_name().unwrap(),
+    ));
+    fs::copy(BIN, &leftover).unwrap();
+    // Not the installed binary, and not the leftover.
+    let mut uninstall = Command::new(BIN);
+    uninstall.arg("uninstall").current_dir(env::temp_dir());
+
+    assert_uninstalled_by_the_installed_binary(&machine, uninstall);
+
+    assert!(!leftover.exists());
+}
+
+/// A removal that cannot start leaves the installed binary where it is: `uninstall` moves nothing, so the service's
+/// image is there for as long as the service is registered.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    // A directory left in the removal's directory by an earlier failed removal that nothing can delete, and which is
+    // not renamed: the hand-off clears the directory first, and fails.
+    let removal_dir = machine.paths.bin_dir.with_file_name("reverse-tunnel-uninstall");
+    let stuck = removal_dir.join("stuck");
+    fs::create_dir_all(&stuck).unwrap();
+    let stuck = stuck.join("uninstall.log");
+    let _held = Unremovable::new(&stuck);
+
+    let failed = Command::new(service::exe(&machine.paths))
+        .arg("uninstall")
+        .current_dir(env::temp_dir())
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success(), "the removal should not start: {stderr}");
+    assert!(stderr.contains("starting the removal failed"), "{stderr}");
+    assert!(service::exe(&machine.paths).exists(), "the binary was moved: {stderr}");
+    // The advice is the one for an installed binary: the text between "to finish it" and the cause that follows it.
+    let advice = stderr
+        .split("to finish it ")
+        .nth(1)
+        .and_then(|rest| rest.split(": it is not a regular file").next());
+    assert_eq!(
+        advice,
+        Some(install::rerun_uninstall(&machine.paths).as_str()),
+        "{stderr}"
+    );
+    assert!(install::leftover_images(&machine.paths).unwrap().is_empty());
+}
+
+/// A process's working directory keeps that directory from being deleted, and the shell that started `uninstall` stays
+/// in it: `uninstall` refuses before it changes anything.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn uninstall_started_in_the_install_directory_refuses_before_changing_anything() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+
+    let refused = Command::new(service::exe(&machine.paths))
+        .arg("uninstall")
+        .current_dir(&machine.paths.bin_dir)
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "uninstall should refuse: {stderr}");
+    assert!(stderr.contains("Change to another directory first"), "{stderr}");
+    assert_eq!(machine.status().state, State::Running, "the service was touched");
+    assert!(
+        !machine.paths.config_dir.join("uninstalling").exists(),
+        "the uninstalling marker was written"
+    );
+    assert!(service::exe(&machine.paths).exists(), "the binary was moved");
+}
+
+/// The removal's last step, after its task has deleted itself, deletes the leftover images, however long something holds
+/// one and whatever their attributes, as `uninstall`'s own waiter does until it has seen the task gone.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
+    let machine = Machine::begin();
+    fs::create_dir(&machine.paths.config_dir).unwrap();
+    let dir = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let (copy, log) = (dir.path().join("reverse-tunnel.exe"), dir.path().join("uninstall.log"));
+    fs::copy(BIN, &copy).unwrap();
+    // Outside the directory the script deletes, as the leftover images are.
+    let kept = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
+    let image = kept
+        .path()
+        .join(schtasks::leftover_name("test", OsStr::new("reverse-tunnel.exe")));
+    fs::copy(BIN, &image).unwrap();
+    // Hidden, system and read-only: `del` skips such a file unless it is told to ignore attributes.
+    let hidden = kept
+        .path()
+        .join(schtasks::leftover_name("hidden", OsStr::new("frpc-0.1.exe")));
+    fs::write(&hidden, "").unwrap();
+    output_of("attrib", &["+h", "+s", "+r", hidden.to_str().unwrap()]);
+    // A running image: `del` fails until the test lets go.
+    let held = Unremovable::new(&image);
+    let task = "reverse-tunnel-leftover-image-test";
+    let _guard = TaskGuard(task);
+    let script = schtasks::removal_script(&copy, &log, dir.path(), task, kept.path());
+    schtasks::start(task, &script).unwrap();
+
+    // The task deletes itself, and its `cmd` goes on, and fails to delete the held image.
+    assert_eq!(wait_until_task_is_over(task), TaskState::Gone);
+    assert!(image.exists(), "the held image is gone");
+    drop(held);
+
+    wait_until("the image is deleted by the task's `cmd`", || !image.exists());
+    assert!(!hidden.exists(), "the hidden, read-only leftover is left");
+}
+
+/// `install` puts the bin dir on the machine's `Path` once, however often it runs.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn install_puts_the_bin_dir_on_the_machine_path_once() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
+
+    machine.install(&join_code("tunnel.example.test"));
+
+    assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
 }

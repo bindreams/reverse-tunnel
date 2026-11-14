@@ -466,3 +466,16 @@ fn a_passing_check_places_the_new_binary_and_leaves_no_staged_copy() {
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), fs::read(&new).unwrap());
     assert_eq!(staged_copies(&machine), Vec::<PathBuf>::new());
 }
+
+#[test]
+fn random_hex_is_the_hex_of_as_many_random_bytes_as_asked() {
+    let (a, b) = (
+        hex_of_random_bytes::<16>().unwrap(),
+        hex_of_random_bytes::<16>().unwrap(),
+    );
+
+    assert_eq!(a.len(), 32);
+    assert!(a.bytes().all(|byte| byte.is_ascii_hexdigit()), "{a}");
+    assert_ne!(a, b);
+    assert_eq!(hex_of_random_bytes::<32>().unwrap().len(), 64);
+}

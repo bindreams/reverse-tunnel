@@ -1,14 +1,15 @@
+use std::env;
 use std::io;
 use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use reverse_tunnel::download::tools;
-#[cfg(unix)]
 use reverse_tunnel::install::{self, InstallOpts};
 use reverse_tunnel::ops;
 use reverse_tunnel::paths::Paths;
 use reverse_tunnel::report::report;
+use reverse_tunnel::service;
 use reverse_tunnel::supervisor;
 #[cfg(unix)]
 use reverse_tunnel::upgrade;
@@ -69,29 +70,29 @@ enum Command {
 
 /// std prints the error, ignoring a closed stderr; it is handed the report, as std alone would drop goetia's details.
 fn main() -> Result<ExitCode> {
+    // SCM starts the installed binary as the service's host (see `service::manager`): not a subcommand, before clap.
+    if cfg!(windows)
+        && env::args_os()
+            .nth(1)
+            .is_some_and(|arg| arg == service::SERVICE_HOST_ARG)
+    {
+        goetia::shim::main()
+    }
     run().map_err(|err| anyhow::anyhow!(report(&err)))
 }
 
 fn run() -> Result<ExitCode> {
-    match Cli::parse().command {
-        Command::Run { check } => {
-            let paths = Paths::system()?;
-            supervisor::run(&paths, &tools(&paths), check)
-        }
-        #[cfg(unix)]
+    let command = Cli::parse().command;
+    let paths = Paths::system()?;
+    match command {
+        Command::Run { check } => supervisor::run(&paths, &tools(&paths), check),
         Command::Install { host, join } => {
             require_root()?;
-            install::install(InstallOpts {
-                host,
-                join,
-                paths: Paths::system()?,
-            })?;
+            install::install(InstallOpts { host, join, paths })?;
             Ok(ExitCode::SUCCESS)
         }
-        #[cfg(unix)]
         Command::Uninstall { finish } => {
             require_root()?;
-            let paths = Paths::system()?;
             if finish {
                 install::finish_uninstall(&paths)?;
             } else {
@@ -102,36 +103,29 @@ fn run() -> Result<ExitCode> {
         #[cfg(unix)]
         Command::Upgrade { from } => {
             require_root()?;
-            upgrade::upgrade(&Paths::system()?, from.as_deref())?;
+            upgrade::upgrade(&paths, from.as_deref())?;
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(windows)]
+        Command::Upgrade { .. } => anyhow::bail!("upgrade is not available on Windows yet"),
         Command::Start => {
             require_root()?;
-            ops::start(&*goetia::manager::native()?)?;
+            ops::start(&*service::manager(&paths)?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Stop => {
             require_root()?;
-            ops::stop(&*goetia::manager::native()?)?;
+            ops::stop(&*service::manager(&paths)?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Restart => {
             require_root()?;
-            let paths = Paths::system()?;
-            ops::check_and_restart(&*goetia::manager::native()?, &paths)?;
+            ops::check_and_restart(&*service::manager(&paths)?, &paths)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {
-            ops::status(
-                &*goetia::manager::native()?,
-                &Paths::system()?,
-                &mut io::stdout().lock(),
-            )?;
+            ops::status(&*service::manager(&paths)?, &paths, &mut io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
-        }
-        #[cfg(windows)]
-        Command::Install { .. } | Command::Upgrade { .. } | Command::Uninstall { .. } => {
-            anyhow::bail!("install, upgrade and uninstall are not available on Windows yet")
         }
     }
 }

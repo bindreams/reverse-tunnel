@@ -48,12 +48,19 @@ copy in place and linked it as `reverse-tunnel` on the `PATH`.
 By default the host publishes SSH (port 22): the host is reachable at `<host>.T`. `install` is safe to run again; it
 changes only what differs.
 
-**Windows**: `install`, `upgrade` and `uninstall` are not available on Windows yet
-([goetia#104](https://github.com/bindreams/goetia/issues/104)), so a Windows host cannot be set up. The binary is
-released:
+**Windows**: download the binary, then run `install` and the other commands that say `sudo` from an elevated prompt, without
+`sudo`. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
+`%ProgramData%\reverse-tunnel`, and `install` puts `%ProgramFiles%\reverse-tunnel` on the system `PATH`: open a new shell
+to run `reverse-tunnel` (on the desktop, sign out and in; an SSH session sees it at once). `install` edits the `PATH` as
+every installer does, by reading it and writing it back: another program that edits it at the same moment can lose one of
+the two edits, and running that program's installer again restores its entry. `install` refuses a Program Files folder
+whose path contains `%`, which Windows reads as a variable in the commands that finish `uninstall` and in the system
+`PATH`. `restart` and `install` check `config.yaml` as the caller, not as the service account. `upgrade` is not available
+yet: to change the binary, uninstall and install again.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe
+.\reverse-tunnel.exe install
 ```
 
 ## Set up a client
@@ -182,13 +189,32 @@ tunnel-only host out until someone is at the machine.
 
 ### Uninstall
 
-`sudo reverse-tunnel uninstall` prints the line to run in the bridge folder, `uv run ctl revoke <host>`, then removes
-everything, and prints "Removed." The removal continues if your session ends. Revoking does not cut the host's current
-connection; `ctl revoke` prints the command that does.
+`sudo reverse-tunnel uninstall` (on Windows, see below) prints the line to run in the bridge folder,
+`uv run ctl revoke <host>`, then removes everything, and prints "Removed." The removal continues if your session ends.
+Revoking does not cut the host's current connection; `ctl revoke` prints the command that does.
 
-- If the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*` unit, or a shutdown),
-  `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it. A partial removal may
-  have deleted the `reverse-tunnel` link on the `PATH`: then run it through the installed binary,
+**Windows**: `uninstall` also takes `%ProgramFiles%\reverse-tunnel` off the system `PATH`. `uninstall` refuses to run in
+a shell whose working directory is inside a folder it deletes: change to another directory first. A removal that cannot
+delete a running file (the binary, say) moves it to `%ProgramFiles%\.reverse-tunnel.*` and deletes it once it has
+exited; after a failed removal those files are deleted by the next successful one. A removal that succeeds also
+asks Windows to delete them at the next boot, in case the machine restarts first; if that request fails, the files stay
+until deleted by hand. The task deletes itself from Task Scheduler, but its `cmd.exe`, running as SYSTEM, stays until
+those files have exited and been deleted, then ends. If the machine restarts before `uninstall` returns,
+`%ProgramFiles%\reverse-tunnel-uninstall` and the task `reverse-tunnel-uninstall` may remain; running `uninstall`
+again, with any `reverse-tunnel` binary (the installed one may already be gone), removes them. A
+failed removal's message says why and names the command to finish it; its log is
+`%ProgramFiles%\reverse-tunnel-uninstall\uninstall.log`. A process that keeps one of the files `install` or `uninstall`
+deletes open without letting others delete it (an antivirus scan, a program that watches files, a shell whose working
+directory is in the install folder) makes them wait until it closes the file: they print one line that names the file,
+or the folder that holds it, and go on by themselves when it is closed. `install` prints the line on the console, and so
+does `uninstall` when the folder an earlier removal left, `%ProgramFiles%\reverse-tunnel-uninstall`, is held; a line
+about the install folder is in the removal log, whose path `uninstall` prints. The removal that `uninstall` starts waits
+for that folder the same way and prints nothing: if it does not finish, look for a process that holds a file in that
+folder (one that runs a file from it holds it as long as it runs) and stop it.
+
+- On Linux and macOS, if the removal is stopped while it runs (`systemctl stop` on its `reverse-tunnel-uninstall-*`
+  unit, or a shutdown), `uninstall` may still print "Removed."; run `sudo reverse-tunnel uninstall` again to finish it.
+  A partial removal may have deleted the `reverse-tunnel` link on the `PATH`: then run it through the installed binary,
   `sudo /usr/local/lib/reverse-tunnel/reverse-tunnel uninstall`, or with any other `reverse-tunnel` binary, such as the
   one you downloaded, if you kept it. If neither the link, the installed binary nor the download is left, download the
   binary again with the commands in "Set up a host", and run `sudo ./reverse-tunnel uninstall` with it.

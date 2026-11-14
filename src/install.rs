@@ -1,4 +1,4 @@
-//! `reverse-tunnel install` and `uninstall` on Linux and macOS.
+//! `reverse-tunnel install` and `uninstall`.
 //!
 //! Everything a run writes is final when it is written: modes and owners are set before any content (see `files`),
 //! and each step can be repeated, so an install that failed midway is finished by running it again.
@@ -6,6 +6,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
@@ -23,7 +24,13 @@ use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, ope
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
-use crate::{download, ops, service, upgrade};
+#[cfg(windows)]
+use crate::processes;
+#[cfg(windows)]
+use crate::schtasks::{self, TaskState};
+#[cfg(windows)]
+use crate::system_path;
+use crate::{download, ops, output, service, upgrade};
 
 /// Directories, and files everyone may read.
 const PUBLIC_DIR: Perm = Perm::new(0o755);
@@ -41,12 +48,18 @@ pub struct InstallOpts {
 }
 
 /// Holds the exclusive lock until the guard is dropped. `install` and `uninstall --finish` take it for their whole
-/// run; a second one waits.
+/// run; a second run waits or, on Windows while the removal's task holds it, may fail to open it.
 pub fn lock(paths: &Paths) -> Result<NamedLockGuard> {
+    // On Windows `paths.lock` names a global mutex, which has its creator's default access.
+    #[cfg(windows)]
+    let lock = NamedLock::create(paths.lock.to_str().context("the lock's name is not Unicode")?);
     // Made here, owner-only: named-lock would use the umask's mode, and whoever can open the file can hold the lock.
-    open_file(&paths.lock, Perm::new(0o600), false)?;
-    NamedLock::with_path(&paths.lock)
-        .and_then(|lock| lock.lock())
+    #[cfg(unix)]
+    let lock = {
+        open_file(&paths.lock, Perm::new(0o600), false)?;
+        NamedLock::with_path(&paths.lock)
+    };
+    lock.and_then(|lock| lock.lock())
         .with_context(|| format!("locking {}", paths.lock.display()))
 }
 
@@ -85,7 +98,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     let account = account::ensure(service::ACCOUNT)?;
     let new = env::current_exe().context("finding this binary")?;
     apply(
-        &*goetia::manager::native()?,
+        &*service::manager(paths)?,
         &account,
         paths,
         &new,
@@ -108,13 +121,15 @@ fn apply(
 ) -> Result<()> {
     let spec = service::spec(paths)?;
     let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
-    // The check reads the settings as the account, so they are written first (a new join code's or host's settings
-    // stay even if the binary is rejected); the unit comes after it, so a rejected binary leaves the unit as it was.
+    // The check reads the settings (as the account, except on Windows), so they are written first; the binary and the
+    // unit come after it, so a rejected binary leaves both as they were. The binary is in place before the unit: on
+    // Windows it is the unit's host, which the manager looks at.
     changed |= write_settings(paths, account, host, join)?;
-    verify_tools(paths, &binary, account)?;
-    // The binary is not in place yet; the manager does not look.
-    changed |= register(manager, &spec, paths)?;
+    verify_tools(paths, &binary, Some(*account))?;
     changed |= place_binaries(paths, &binary)?;
+    #[cfg(windows)]
+    system_path::add(&paths.bin_dir)?;
+    changed |= register(manager, &spec, paths)?;
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -124,22 +139,31 @@ fn apply(
     pick_up(manager, &spec.id, paths, changed)
 }
 
-/// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it.
+/// Runs the removal: see `hand_off`. On Windows it first checks that its working directory is not one the removal
+/// deletes: the shell that ran `uninstall` would stay in it whatever this process does.
 pub fn uninstall(paths: &Paths) -> Result<()> {
+    let exe = env::current_exe()?;
+    #[cfg(windows)]
+    refuse_deleted_working_directory(paths, &env::current_dir()?)?;
+    hand_off(paths, &exe)
+}
+
+/// Prepares the removal, hands it to `uninstall --finish` (see `spawn_finish`) and waits for it. `exe` is this binary.
+/// Once the marker is written, an error says how to finish the removal.
+fn hand_off(paths: &Paths, exe: &Path) -> Result<()> {
     let lock = lock(paths)?;
     match revoke_line(paths) {
         Ok(line) => println!("Revoke this host on the bridge by running:\n    {line}"),
         Err(err) => eprintln!("{err:#}\nRevoke this host on the bridge by running: uv run ctl revoke <host>"),
     }
-    let exe = env::current_exe()?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     open_file(&uninstalling_file(paths), Perm::new(0o600), false)?;
-    // `--finish` takes the lock itself; an `install` in between is refused by the marker.
-    drop(lock);
     // Before the removal starts: over the tunnel it can cut the session before anything is printed after.
     println!("Its log will be {}.", removal_log(paths));
-    let removal = spawn_finish(&exe, paths).context("starting the removal")?;
-    ops::println_best_effort("Removing. If this session ends, the removal continues.");
+    // `--finish` takes the lock itself; an `install` in between is refused by the marker.
+    drop(lock);
+    let removal = spawn_finish(exe, paths).with_context(|| not_started(&rerun_uninstall(paths)))?;
+    output::println_best_effort("Removing. If this session ends, the removal continues.");
     let outcome = removal.wait().with_context(|| {
         format!(
             "could not tell how the removal ended; its log is {}, and to finish it {}",
@@ -147,17 +171,32 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
             rerun_uninstall(paths)
         )
     })?;
-    if let WaitOutcome::Failed(why) = outcome {
-        return Err(anyhow!(why)).with_context(|| {
-            format!(
-                "the removal failed: see {}, and {} to finish it",
-                removal_log(paths),
-                rerun_uninstall(paths)
-            )
-        });
+    // The removal's own broadcast, from the task, does not reach the desktop, and `--finish` may already have taken the
+    // entry off the `Path` before the removal failed.
+    #[cfg(windows)]
+    system_path::broadcast();
+    match outcome {
+        WaitOutcome::Ended => {}
+        // Nothing to finish but the task: the log is gone with the rest.
+        #[cfg(windows)]
+        WaitOutcome::LeftBehind(why) => bail!(why),
+        WaitOutcome::Failed(why) => {
+            return Err(anyhow!(why)).with_context(|| {
+                format!(
+                    "the removal failed: see {}, and {} to finish it",
+                    removal_log(paths),
+                    rerun_uninstall(paths)
+                )
+            });
+        }
     }
-    ops::println_best_effort("Removed.");
+    output::println_best_effort("Removed.");
     Ok(())
+}
+
+/// The context of the error of a removal that could not be started: `rerun` says how to run `uninstall` again.
+fn not_started(rerun: &str) -> String {
+    format!("starting the removal failed; to finish it {rerun}")
 }
 
 /// Where the removal's output is, for the operator: the journal, where the lines of earlier failed runs of the unit
@@ -169,22 +208,38 @@ pub fn removal_log(_paths: &Paths) -> String {
         .to_string()
 }
 
-/// Where the removal's output is, for the operator: a file in `logs/`, which the removal deletes when it succeeds.
+/// Where the removal's output is, for the operator: a file, which the removal deletes when it succeeds.
 #[cfg(not(target_os = "linux"))]
 pub fn removal_log(paths: &Paths) -> String {
     removal_log_file(paths).display().to_string()
 }
 
-/// The file the removal's output goes to.
-#[cfg(not(target_os = "linux"))]
+/// The file the removal's output goes to: in `logs/`.
+#[cfg(target_os = "macos")]
 pub fn removal_log_file(paths: &Paths) -> PathBuf {
     paths.log_dir.join("uninstall.log")
+}
+
+/// The file the removal's output goes to: in `removal_dir`.
+#[cfg(windows)]
+pub fn removal_log_file(paths: &Paths) -> PathBuf {
+    removal_dir(paths).join("uninstall.log")
+}
+
+/// Windows: where the removal runs from, a directory next to the bin dir (so only administrators can have made it): a
+/// running binary cannot be deleted, so the removal runs a copy, which its task deletes with the directory.
+#[cfg(windows)]
+fn removal_dir(paths: &Paths) -> PathBuf {
+    paths.bin_dir.with_file_name("reverse-tunnel-uninstall")
 }
 
 /// How a waited-for removal ended, when it could be waited for.
 enum WaitOutcome {
     Ended,
     Failed(String),
+    /// Windows: everything is removed, but the removal's task is still registered.
+    #[cfg(windows)]
+    LeftBehind(String),
 }
 
 /// A started `uninstall --finish`: the transient unit it runs in.
@@ -239,10 +294,56 @@ impl Removal {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+/// A started removal: its directory, which it deletes when it has succeeded, and the folder that holds the leftover
+/// files it leaves when it fails (see `leftover_dir`).
+#[cfg(windows)]
+struct Removal {
+    dir: PathBuf,
+    leftovers: PathBuf,
+}
+
+/// What the removal's task says of how it went, or none while it runs. A task that is gone deleted itself, which it
+/// does after the directory; one that ended has the code of the step that failed (see `removal_script`).
+#[cfg(windows)]
+fn removal_outcome(state: TaskState, dir_present: bool, leftovers: &Path) -> Option<WaitOutcome> {
+    let leftovers = schtasks::leftover_pattern(leftovers);
+    let failed = |why: String| Some(WaitOutcome::Failed(why));
+    match state {
+        TaskState::Running => None,
+        TaskState::Disabled => failed("the removal's task is disabled, so the removal will not run".to_string()),
+        TaskState::Gone if dir_present => failed("the removal's task was deleted before it finished".to_string()),
+        TaskState::Gone => Some(WaitOutcome::Ended),
+        TaskState::Ended(1) => failed("the removal's `uninstall --finish` failed".to_string()),
+        TaskState::Ended(4) => Some(WaitOutcome::LeftBehind(format!(
+            "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`. The files \
+             that remain ({}) can be deleted by hand once this `uninstall` has exited",
+            schtasks::REMOVAL,
+            leftovers.display()
+        ))),
+        TaskState::Ended(code) => failed(format!("the removal's task ended with {code:#x}")),
+    }
+}
+
+#[cfg(windows)]
+impl Removal {
+    /// Waits, with no cap, until the task has ended or is gone (it deletes itself when the removal has succeeded). The
+    /// task is read first: it deletes itself after the directory, so a task that is gone says the directory has been
+    /// deleted by the time it is looked at. A task that cannot be read is an error.
+    fn wait(self) -> Result<WaitOutcome> {
+        loop {
+            let state = schtasks::state(schtasks::REMOVAL)?;
+            if let Some(outcome) = removal_outcome(state, self.dir.try_exists()?, &self.leftovers) {
+                return Ok(outcome);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 struct Removal(std::process::Child);
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 impl Removal {
     /// Waits for the removal to end.
     fn wait(mut self) -> Result<WaitOutcome> {
@@ -268,9 +369,7 @@ impl Removal {
 fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
     use std::ffi::OsStr;
 
-    let mut random = [0u8; 16];
-    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
-    let unit = format!("reverse-tunnel-uninstall-{}", hex::encode(random));
+    let unit = format!("reverse-tunnel-uninstall-{}", hex_of_random_bytes::<16>()?);
     let unit_arg = format!("--unit={unit}");
     command::run(&[
         OsStr::new("systemd-run"),
@@ -286,10 +385,40 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
     Ok(Removal { unit })
 }
 
+/// Windows: a one-time scheduled task run by SYSTEM, since an OpenSSH session ends everything it started, and no job
+/// object can be left. It runs a copy of `exe` from `removal_dir`, with the output in the log, and if the removal
+/// succeeded deletes the directory and then itself, and then the files that a removal renamed (see
+/// `schtasks::removal_script`). What a failed removal left in `removal_dir`, `exe` included, goes by the rule of
+/// `remove_or_rename`.
+#[cfg(windows)]
+fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
+    let dir = removal_dir(paths);
+    let leftovers = leftover_dir(paths)?;
+    // Open before the directory is cleared: `exe` may be the copy that a failed removal left in it.
+    let mut source = fs::File::open(exe).with_context(|| format!("opening {}", exe.display()))?;
+    remove_or_rename(&dir, leftovers)?;
+    make_dir(&dir, Perm::new(0o700))?;
+    // Named as the installed binary is, whatever `exe` is called.
+    let copy = dir.join(
+        service::exe(paths)
+            .file_name()
+            .context("the installed binary has no file name")?,
+    );
+    let mut target = fs::File::create_new(&copy).with_context(|| format!("creating {}", copy.display()))?;
+    io::copy(&mut source, &mut target).with_context(|| format!("copying {}", copy.display()))?;
+    drop(target);
+    let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL, leftovers);
+    schtasks::start(schtasks::REMOVAL, &script)?;
+    Ok(Removal {
+        dir,
+        leftovers: leftovers.to_path_buf(),
+    })
+}
+
 /// macOS: a process group of its own, which the session's hangup does not reach, and which launchd leaves alone. It
 /// inherits the log, which is opened here, by root without following a link: `logs/` belongs to the service account,
 /// which may have left anything in it.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -309,7 +438,8 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
 }
 
 /// How to run `uninstall` again: by the installed binary, or by any `reverse-tunnel` binary once that is gone.
-fn rerun_uninstall(paths: &Paths) -> String {
+#[cfg(not(windows))]
+pub fn rerun_uninstall(paths: &Paths) -> String {
     let exe = service::exe(paths);
     if exe.exists() {
         format!("run `sudo {} uninstall`", exe.display())
@@ -318,25 +448,152 @@ fn rerun_uninstall(paths: &Paths) -> String {
     }
 }
 
+/// How to run `uninstall` again: by the command on the `PATH`, or, once the installed binary is gone, by any
+/// `reverse-tunnel` binary, which includes the leftover images of the installed binary in the folder that holds the bin
+/// dir (see `remove_or_rename`): a removal that ran from the installed binary may have left that as the only copy.
+#[cfg(windows)]
+pub fn rerun_uninstall(paths: &Paths) -> String {
+    if service::exe(paths).exists() {
+        return concat!(
+            "run `reverse-tunnel uninstall` in an elevated prompt ",
+            "(with any `reverse-tunnel` binary, if that is not found)"
+        )
+        .to_string();
+    }
+    // Advice: a folder that cannot be listed has no image to name.
+    let images = leftover_images_of_the_binary(paths).unwrap_or_default();
+    if images.is_empty() {
+        return "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
+            .to_string();
+    }
+    let by_image: Vec<_> = images
+        .iter()
+        .map(|image| format!("`\"{}\" uninstall`", image.display()))
+        .collect();
+    format!(
+        "run {} in an elevated prompt (the installed binary is gone)",
+        by_image.join(" or ")
+    )
+}
+
+/// Windows: every directory the removal deletes: the bin dir, the config dir, the logs, and the removal's own.
+#[cfg(windows)]
+fn deleted_dirs(paths: &Paths) -> [PathBuf; 4] {
+    [
+        paths.bin_dir.clone(),
+        paths.config_dir.clone(),
+        paths.log_dir.clone(),
+        removal_dir(paths),
+    ]
+}
+
+/// Windows: the directory the removal deletes (see `deleted_dirs`) that `dir` is, or is inside of. The OS resolves the
+/// directories, so short names and case do not matter.
+#[cfg(windows)]
+fn deleted_dir_holding(paths: &Paths, dir: &Path) -> Result<Option<PathBuf>> {
+    let unresolved = |path: &Path, err: io::Error| {
+        anyhow::Error::new(err).context(format!(
+            "resolving {} to check whether it is a directory the removal deletes",
+            path.display()
+        ))
+    };
+    let dir = fs::canonicalize(dir).map_err(|err| unresolved(dir, err))?;
+    for deleted in deleted_dirs(paths) {
+        match fs::canonicalize(&deleted) {
+            Ok(resolved) if dir.starts_with(&resolved) => return Ok(Some(deleted)),
+            Ok(_) => {}
+            // A directory that is not there holds nothing.
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(unresolved(&deleted, err)),
+        }
+    }
+    Ok(None)
+}
+
+/// Windows: fails if the working directory `cwd` is in a directory the removal deletes, since Windows cannot delete a
+/// directory that a process is in, and the shell that ran `uninstall` stays there whatever this process does.
+#[cfg(windows)]
+fn refuse_deleted_working_directory(paths: &Paths, cwd: &Path) -> Result<()> {
+    if let Some(held) = deleted_dir_holding(paths, cwd)? {
+        bail!(
+            concat!(
+                "`uninstall` has its current directory in {}, which the removal deletes, and Windows cannot delete a ",
+                "directory that a process is in. Change to another directory first."
+            ),
+            held.display()
+        );
+    }
+    Ok(())
+}
+
+/// Windows: the folder that holds the bin dir, `%ProgramFiles%`, where a removal puts what it cannot delete (see
+/// `remove_or_rename`). Only administrators can write to it, and the removal leaves it alone.
+#[cfg(windows)]
+fn leftover_dir(paths: &Paths) -> Result<&Path> {
+    paths.bin_dir.parent().context("the bin dir has no parent")
+}
+
+/// Windows: the leftover files that earlier removals renamed (see `remove_or_rename`), which a removal's task deletes
+/// once they can be.
+#[cfg(windows)]
+pub fn leftover_images(paths: &Paths) -> Result<Vec<PathBuf>> {
+    let dir = leftover_dir(paths)?;
+    let mut images = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        if schtasks::is_leftover(&entry.file_name().to_string_lossy()) {
+            images.push(entry.path());
+        }
+    }
+    images.sort();
+    Ok(images)
+}
+
+/// Windows: the leftover files that kept the name of the installed binary, which can be run with `uninstall`: a removal
+/// that ran from the installed binary may have left that as the only copy.
+#[cfg(windows)]
+pub fn leftover_images_of_the_binary(paths: &Paths) -> Result<Vec<PathBuf>> {
+    let binary = service::exe(paths);
+    let binary = binary.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let mut images = leftover_images(paths)?;
+    images.retain(|image| {
+        let name = image.file_name().and_then(|name| name.to_str());
+        name.is_some_and(|name| schtasks::is_leftover_of(name, binary))
+    });
+    Ok(images)
+}
+
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
-    if let Err(err) = goetia::manager::native()?.uninstall(&service::id())
+    if let Err(err) = service::manager(paths)?.uninstall(&service::id())
         && !matches!(err.cause(), goetia::Error::NotInstalled { .. })
     {
         return Err(err).context("removing the service");
     }
+    // goetia's `uninstall` returns before the service's processes end (see `processes`).
+    #[cfg(windows)]
+    processes::wait_until_none_runs_as_the_service()?;
     // The order leaves no gap where something is wrong, or where the reason is lost: the tokens go before the account,
     // so they never belong to a freed gid; the link goes before the binary, so it never dangles; the marker stays
     // until the rest of `config_dir` is gone, since `install` is refused while it exists; and `logs/` is last, so that
     // a failure above is still in the log.
     remove_entry(&paths.secrets_dir)?;
     account::remove(service::ACCOUNT)?;
+    #[cfg(unix)]
     remove_link(paths)?;
-    remove_files(paths).with_context(|| rerun_uninstall(paths))
+    remove_files(paths).with_context(|| rerun_uninstall(paths))?;
+    // Last: until then the rerun that a failure advises is run by name, and the `PATH` finds it.
+    #[cfg(windows)]
+    {
+        system_path::remove(&paths.bin_dir)?;
+        delete_leftover_images_at_reboot(paths);
+    }
+    Ok(())
 }
 
 /// Removes the link to the binary, unless it points elsewhere.
+#[cfg(unix)]
 fn remove_link(paths: &Paths) -> Result<()> {
     let Some(link) = &paths.link else { return Ok(()) };
     match fs::read_link(link) {
@@ -352,9 +609,93 @@ fn remove_link(paths: &Paths) -> Result<()> {
     }
 }
 
-/// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs.
+/// Windows: removes `path` (see `remove_entry`). A running image cannot be deleted, so a regular file directly in `path`
+/// that cannot be is renamed into `leftovers` keeping its name (see `schtasks::leftover_name`); the removal's task
+/// deletes it once it exits (a removal that succeeds also asks for it to be deleted at the next boot, see
+/// `delete_leftover_images_at_reboot`). A file that can be neither deleted nor renamed fails the removal naming both errors;
+/// directories, junctions and links are never renamed, since the task's `del` could not delete them.
+#[cfg(windows)]
+fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
+    if !fs::symlink_metadata(path).is_ok_and(|entry| entry.is_dir()) {
+        return delete_or_rename(path, leftovers);
+    }
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+    };
+    for entry in entries {
+        delete_or_rename(&entry?.path(), leftovers)?;
+    }
+    remove_entry(path)
+}
+
+/// Windows: once the removal has succeeded, has the system delete the leftover images (see `remove_or_rename`) at the
+/// next boot. The task sweeps them after it has deleted itself, so possibly after `uninstall` has returned, and a reboot
+/// before then would orphan them. Scheduling earlier would delete, after a failed removal, the renamed binary that the
+/// rerun advice names. A failure is printed and does not fail the removal.
+#[cfg(windows)]
+fn delete_leftover_images_at_reboot(paths: &Paths) {
+    let images = leftover_images(paths).unwrap_or_else(|err| {
+        output::eprintln_best_effort(&format!("{err:#}: nothing is scheduled for deletion at the next boot"));
+        Vec::new()
+    });
+    for image in images {
+        if let Err(err) = delete_at_reboot(&image) {
+            output::eprintln_best_effort(&format!(
+                "{err:#}: it stays after a reboot until it is deleted by hand or by a later removal"
+            ));
+        }
+    }
+}
+
+/// Windows: has the system delete the file or empty directory `path` at its next boot.
+#[cfg(windows)]
+fn delete_at_reboot(path: &Path) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};
+
+    let wide = crate::security::wide(path);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; a null new name means deletion.
+    if unsafe { MoveFileExW(wide.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) } == 0 {
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("scheduling the deletion of {} at the next boot", path.display()));
+    }
+    Ok(())
+}
+
+/// What the removal says, before where, when it renamed a file that it could not delete.
+#[cfg(windows)]
+pub const MOVED_IT_TO: &str = "moved it to";
+
+/// Windows: deletes `path` (see `remove_entry`), or if it cannot be, renames it (see `remove_or_rename`).
+#[cfg(windows)]
+fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
+    let Err(refused) = remove_entry(path) else {
+        return Ok(());
+    };
+    match fs::symlink_metadata(path) {
+        Ok(entry) if entry.is_file() => {}
+        Ok(_) => return Err(refused.context("it is not a regular file, so it is not renamed")),
+        Err(stat) => return Err(refused.context(format!("it is not renamed, since reading what it is failed: {stat}"))),
+    }
+    let original = path.file_name().context("the file has no name")?;
+    let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
+    fs::rename(path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
+    output::println_best_effort(&format!(
+        "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
+        to.display()
+    ));
+    Ok(())
+}
+
+/// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs. On Windows what in
+/// the bin dir cannot be deleted is renamed (see `remove_or_rename`).
 fn remove_files(paths: &Paths) -> Result<()> {
-    remove_entry(&paths.bin_dir)?;
+    #[cfg(windows)]
+    let bin_dir = remove_or_rename(&paths.bin_dir, leftover_dir(paths)?);
+    #[cfg(not(windows))]
+    let bin_dir = remove_entry(&paths.bin_dir);
+    bin_dir?;
     let marker = uninstalling_file(paths);
     match fs::read_dir(&paths.config_dir) {
         Ok(entries) => {
@@ -371,6 +712,13 @@ fn remove_files(paths: &Paths) -> Result<()> {
     remove_entry(&marker)?;
     remove_entry(&paths.config_dir)?;
     remove_entry(&paths.log_dir)
+}
+
+/// The hex digits of `N` random bytes from the OS.
+fn hex_of_random_bytes<const N: usize>() -> Result<String> {
+    let mut random = [0u8; N];
+    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
+    Ok(hex::encode(random))
 }
 
 fn config_file(paths: &Paths) -> PathBuf {
@@ -473,9 +821,9 @@ fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> R
 /// owner. A first run writes `config.yaml` and `secrets/host.token`, both create-new; with `join`, every run
 /// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
-    let secret = Perm::new(0o640).gid(account.gid);
-    make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).gid(account.gid))?;
-    make_dir(&paths.log_dir, Perm::new(0o755).uid(account.uid).gid(account.gid))?;
+    let secret = Perm::new(0o640).group(*account);
+    make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
+    make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))?;
 
     let config = config_file(paths);
     let created = !config.try_exists()? && create_config(paths, host, join)?;
@@ -492,9 +840,7 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
 
     let host_token = paths.secrets_dir.join("host.token");
     if !host_token.try_exists()? {
-        let mut random = [0; 32];
-        getrandom::fill(&mut random).context("reading random bytes from the OS")?;
-        let token = format!("{}\n", hex::encode(random));
+        let token = format!("{}\n", hex_of_random_bytes::<32>()?);
         mark_pending(paths)?;
         changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
     }
@@ -564,10 +910,10 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
 }
 
 /// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
-/// bin dir where `account` can run it, check the settings as `account` (see `ops::check`). The copy is removed whatever
+/// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
 /// the outcome. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries`
 /// marks.
-fn verify_tools(paths: &Paths, binary: &[u8], account: &Account) -> Result<()> {
+fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
@@ -579,7 +925,7 @@ fn verify_tools(paths: &Paths, binary: &[u8], account: &Account) -> Result<()> {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
     let staged = upgrade::stage(paths, binary)?;
-    let checked = ops::check(paths, &staged, Some(*account), "the new binary's `run --check`");
+    let checked = ops::check(paths, &staged, run_as, "the new binary's `run --check`");
     upgrade::discard(&staged);
     checked
 }
@@ -589,6 +935,11 @@ fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
     clean_bin_dir(paths)?;
+    #[cfg(windows)]
+    for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {
+        crate::files::own_by_administrators(&entry?.path())?;
+    }
+    #[cfg(unix)]
     if let Some(link) = &paths.link {
         point_link(link, &exe)?;
     }
@@ -603,7 +954,11 @@ fn clean_bin_dir(paths: &Paths) -> Result<()> {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
         let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
-        if stale || name.starts_with(upgrade::STAGED) {
+        if name.starts_with(upgrade::STAGED) {
+            // An `install` run from a copy deletes its own running image, which Windows refuses; that is not worth
+            // failing `install` over.
+            upgrade::discard(&path);
+        } else if stale {
             remove_entry(&path)?;
         }
     }
@@ -611,6 +966,7 @@ fn clean_bin_dir(paths: &Paths) -> Result<()> {
 }
 
 /// Makes `link` a symlink to `target`.
+#[cfg(unix)]
 fn point_link(link: &Path, target: &Path) -> Result<()> {
     match fs::read_link(link) {
         Ok(current) if current == target => return Ok(()),
@@ -661,6 +1017,10 @@ fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "install_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "install_windows_tests.rs"]
+mod windows_tests;

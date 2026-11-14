@@ -14,8 +14,8 @@ pub struct Paths {
     /// `bridge.token` and `host.token`, readable by administrators and the service account.
     pub secrets_dir: PathBuf,
     pub log_dir: PathBuf,
-    /// Held by `install` and `uninstall` for their whole run. No removal touches it. On Windows, the name of the
-    /// global mutex.
+    /// Held by `install` and `uninstall` for their whole run. No removal touches it. On Windows, the name of a mutex,
+    /// which named-lock puts in the `Global\` namespace: it has no `\`.
     pub lock: PathBuf,
     /// The symlink to the binary on `PATH`; none on Windows.
     pub link: Option<PathBuf>,
@@ -30,17 +30,30 @@ impl Paths {
             config_dir: root.join("config"),
             secrets_dir: root.join("config/secrets"),
             log_dir: root.join("logs"),
-            lock: root.join("lock"),
+            lock: if cfg!(windows) {
+                format!("test-{}", root.file_name().unwrap_or_default().to_string_lossy()).into()
+            } else {
+                root.join("lock")
+            },
             link: None,
         }
     }
 
-    /// The system's paths. Fails if one is not valid Unicode, so later code may rely on that.
+    /// The system's paths. Fails if one is not valid Unicode, so later code may rely on that, and on Windows if the
+    /// bin dir contains `%`, which `cmd` and the system `PATH` read as a variable.
     pub fn system() -> Result<Paths> {
         let (bin_dir, config_dir, log_dir, lock, link) = layout()?;
         for dir in [&bin_dir, &config_dir, &log_dir] {
             ensure!(dir.to_str().is_some(), "{} is not valid Unicode", dir.display());
         }
+        #[cfg(windows)]
+        ensure!(
+            !bin_dir.to_string_lossy().contains('%'),
+            "{} contains `%`. Windows reads `%NAME%` as a variable in the commands that finish `uninstall` and in the \
+             system `PATH`, so reverse-tunnel cannot be installed while the system's Program Files folder has `%` in \
+             its path.",
+            bin_dir.display()
+        );
         Ok(Paths {
             secrets_dir: config_dir.join("secrets"),
             bin_dir,
@@ -52,8 +65,7 @@ impl Paths {
     }
 }
 
-/// The install, config and log directories and the link, from the system's known folders (not
-/// `%ProgramFiles%`, which the installing user's environment can override).
+/// The install, config and log directories and the link, from the system's known folders, not from the environment.
 #[cfg(windows)]
 fn layout() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
     use anyhow::Context;
@@ -66,7 +78,7 @@ fn layout() -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, Option<PathBuf>)> {
         bin_dir,
         config_dir.clone(),
         config_dir.join("logs"),
-        r"Global\reverse-tunnel".into(),
+        "reverse-tunnel".into(),
         None,
     ))
 }

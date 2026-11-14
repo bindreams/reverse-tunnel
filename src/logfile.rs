@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,8 @@ use anyhow::{Context, Result};
 use jiff::fmt::strtime;
 use jiff::tz::TimeZone;
 use jiff::{Unit, Zoned};
+
+use crate::output::eprintln_best_effort;
 
 /// The size at which a log is rotated.
 pub const ROTATE_AT: u64 = 10 * 1024 * 1024;
@@ -71,8 +73,7 @@ impl Active {
         match self.file.write_all(data) {
             Ok(()) => self.size += data.len() as u64,
             Err(err) => {
-                // `eprintln!` would panic on a closed stderr.
-                let _ = writeln!(io::stderr(), "writing {}: {err}", self.path.display());
+                eprintln_best_effort(&format!("writing {}: {err}", self.path.display()));
                 // A partial write still counts toward rotation.
                 self.size = self.file.metadata().map_or(self.size, |meta| meta.len());
             }
