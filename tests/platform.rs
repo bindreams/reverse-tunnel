@@ -271,7 +271,8 @@ impl Machine {
     }
 
     /// Has `config.yaml` hold what no binary accepts. Returns its path. (On Windows the check runs as the caller; a file
-    /// only the service account cannot read is caught by its ACL, see `restart_refuses_a_config_the_service_account_cannot_read`.)
+    /// only the service account cannot read is caught by its ACL, see
+    /// `restart_refuses_a_config_the_service_account_cannot_read`.)
     #[cfg(windows)]
     fn break_config(&self) -> PathBuf {
         let config = self.paths.config_file();
@@ -1129,15 +1130,17 @@ fn restart_checks_the_configuration_as_the_service_account() {
     assert_eq!((status.state, status.pid), (State::Running, running));
 }
 
-/// What `access::check` credits the service with is in the token of the running service, enabled: a group missing from
-/// the token would let `restart` pass a file that only that group may read.
+/// What `access::check` relies on is in the token of the running service, enabled: a credited group missing from it
+/// would let `restart` pass a file that only that group may read, and without SeChangeNotifyPrivilege the service
+/// would not pass through the directories the check does not look at (see `access::opens`).
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
-fn the_groups_the_check_credits_are_enabled_in_the_services_token() {
+fn the_services_token_holds_the_groups_and_the_privilege_the_check_relies_on() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let enabled = windows::enabled_groups(machine.wait_for_frpc()[0].pid);
+    let pid = machine.wait_for_frpc()[0].pid;
+    let enabled = windows::enabled_groups(pid);
 
     for (sid, name) in reverse_tunnel::access::CREDITED {
         assert!(
@@ -1145,10 +1148,15 @@ fn the_groups_the_check_credits_are_enabled_in_the_services_token() {
             "{name} ({sid}) is not enabled in the service's token: {enabled:?}"
         );
     }
+    assert!(
+        windows::holds_enabled_privilege(pid, "SeChangeNotifyPrivilege"),
+        "SeChangeNotifyPrivilege is not enabled in the service's token"
+    );
 }
 
-/// Every path `run` opens (the product's list) is checked: with each one's ACL stripped of the service's access in
-/// turn, `restart` fails naming it and every earlier one, and the service is left as it was.
+/// Every path `run` opens (the product's list) is checked: with the service stopped, so that nothing it does with its
+/// files can change what is measured, each path's ACL is stripped of the service's access in turn, and `restart` fails
+/// naming it and every earlier one, and leaves the service stopped.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1156,13 +1164,24 @@ fn restart_checks_every_path_run_opens() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
+    let mut stop = Command::new(BIN);
+    stop.arg("stop");
+    machine.run_ok(stop);
     let before = machine.status();
+    assert_ne!(before.state, State::Running);
     let no_service = reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)").unwrap();
     let mut broken = Vec::new();
 
-    for (path, _) in reverse_tunnel::access::opens(&machine.paths, &service::exe(&machine.paths)) {
-        no_service.apply(&path).unwrap();
-        broken.push(path.display().to_string());
+    // The log folder's files exist: the service made them.
+    for need in reverse_tunnel::access::opens(&machine.paths, &service::exe(&machine.paths)) {
+        if !need.path.exists() {
+            continue;
+        }
+        no_service.apply(&need.path).unwrap();
+        let shown = need.path.display().to_string();
+        if !broken.contains(&shown) {
+            broken.push(shown);
+        }
 
         let failed = Command::new(BIN).arg("restart").output().unwrap();
 
@@ -1174,6 +1193,12 @@ fn restart_checks_every_path_run_opens() {
         let after = machine.status();
         assert_eq!((after.state, after.pid), (before.state, before.pid));
     }
+    assert!(
+        broken
+            .iter()
+            .any(|path| path.ends_with(reverse_tunnel::paths::LOG_SUPERVISOR)),
+        "the log files were not checked: {broken:?}"
+    );
 }
 
 /// An administrator reads what the service account cannot, so `restart`'s check as the caller passes `config.yaml`:

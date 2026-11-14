@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT};
-use crate::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
 
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
@@ -98,7 +98,7 @@ fn token(path: &Path) -> Result<String> {
 /// Renders frpc.toml for `port` into `dir` and returns its path. It holds no secret: frpc reads the tokens from its
 /// environment.
 fn render_config(setup: &Setup<'_>, port: u16, dir: &Path) -> Result<PathBuf> {
-    let config = dir.join("frpc.toml");
+    let config = dir.join(FRPC_CONFIG);
     fs::write(&config, render(&setup.cfg, port, setup.paths))
         .with_context(|| format!("writing {}", config.display()))?;
     Ok(config)

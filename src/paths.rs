@@ -4,6 +4,8 @@ use anyhow::{Result, ensure};
 
 pub const LOG_FRPC: &str = "frpc.log";
 pub const LOG_SUPERVISOR: &str = "supervisor.log";
+/// The frpc configuration `run` renders into the log dir.
+pub const FRPC_CONFIG: &str = "frpc.toml";
 
 /// Where an installation keeps its files on this OS.
 #[derive(Debug, Clone)]

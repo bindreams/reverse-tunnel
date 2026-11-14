@@ -16,8 +16,8 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     ACE_HEADER, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl,
-    GetSecurityDescriptorOwner, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSID, SECURITY_ATTRIBUTES,
+    GetSecurityDescriptorOwner, INHERIT_ONLY_ACE, LookupAccountSidW, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
 use windows_sys::Win32::System::SystemServices::{
@@ -149,6 +149,8 @@ pub struct Ace {
     pub allows: bool,
     /// Applies to what the object contains, not to the object.
     pub inherit_only: bool,
+    /// Files made in the directory inherit it.
+    pub object_inherit: bool,
     pub mask: u32,
     pub sid: Sid,
 }
@@ -179,6 +181,7 @@ pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
         return Ok(vec![Ace {
             allows: true,
             inherit_only: false,
+            object_inherit: false,
             mask: FILE_ALL_ACCESS,
             sid: Sid::parse("S-1-1-0")?,
         }]);
@@ -214,28 +217,48 @@ pub fn aces_of(path: &Path) -> io::Result<Vec<Ace>> {
         if !allows && kind != ACCESS_DENIED_ACE_TYPE && kind != ACCESS_DENIED_CALLBACK_ACE_TYPE && !object {
             continue;
         }
-        // SAFETY: every one of these ACEs is the header, the mask, then for an object ACE its flags and the GUIDs that
-        // they say are present, and then the SID, which is valid for as long as the descriptor is.
-        let (mask, sid) = unsafe {
-            let base = ace.cast::<u8>();
-            let mask = base.add(4).cast::<u32>().read_unaligned();
-            let mut sid_at = 8;
-            if object {
-                let flags = base.add(8).cast::<u32>().read_unaligned();
-                sid_at = 12
-                    + 16 * usize::from(flags & ACE_OBJECT_TYPE_PRESENT != 0)
-                    + 16 * usize::from(flags & ACE_INHERITED_OBJECT_TYPE_PRESENT != 0);
-            }
-            (mask, Sid::copy_of(base.add(sid_at).cast()))
-        };
+        // SAFETY: GetAce gave a pointer to an ACE whose header says it is `AceSize` bytes, inside the live descriptor.
+        let bytes = unsafe { std::slice::from_raw_parts(ace.cast::<u8>(), usize::from(header.AceSize)) };
+        let (mask, sid_at) = layout_of(bytes, object).map_err(|what| {
+            let message = format!("{}: ACE {at} is {} bytes, {what}", path.display(), bytes.len());
+            io::Error::new(io::ErrorKind::InvalidData, message)
+        })?;
         aces.push(Ace {
             allows,
             inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0,
+            object_inherit: u32::from(header.AceFlags) & OBJECT_INHERIT_ACE != 0,
             mask,
-            sid,
+            // SAFETY: `layout_of` checked that a whole SID lies inside the ACE, which the live descriptor holds.
+            sid: unsafe { Sid::copy_of(bytes.as_ptr().add(sid_at).cast_mut().cast()) },
         });
     }
     Ok(aces)
+}
+
+/// The mask of an allow or deny ACE and where its SID starts, from its `bytes`: the header, the mask, then for an
+/// object ACE its flags and the GUIDs that they say are present, then the SID. Fails, saying what is too small, if any
+/// of these reaches past the ACE.
+fn layout_of(bytes: &[u8], object: bool) -> Result<(u32, usize), &'static str> {
+    const HEADER: usize = size_of::<ACE_HEADER>();
+    const GUID: usize = 16;
+    // Revision, sub-authority count and the 6-byte authority: the SID's fixed part.
+    const SID_FIXED: usize = 8;
+    let word = |at: usize| -> Option<u32> { Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?)) };
+    let mask = word(HEADER).ok_or("too small for its mask")?;
+    let mut sid_at = HEADER + 4;
+    if object {
+        let flags = word(sid_at).ok_or("too small for its object flags")?;
+        sid_at += 4
+            + GUID * usize::from(flags & ACE_OBJECT_TYPE_PRESENT != 0)
+            + GUID * usize::from(flags & ACE_INHERITED_OBJECT_TYPE_PRESENT != 0);
+    }
+    let fixed = bytes.get(sid_at..sid_at + SID_FIXED).ok_or("too small for its SID")?;
+    // A SID is its fixed part and one 32-bit word for each sub-authority.
+    let len = SID_FIXED + 4 * usize::from(fixed[1]);
+    if sid_at + len > bytes.len() {
+        return Err("too small for its SID's sub-authorities");
+    }
+    Ok((mask, sid_at))
 }
 
 /// The text of the SID that `sid` points to, as `S-1-5-...`.
@@ -292,6 +315,47 @@ impl Sid {
     pub fn text(&self) -> io::Result<String> {
         // SAFETY: `self` is a valid SID.
         unsafe { string_of_sid(self.as_psid()) }
+    }
+
+    /// The account or group this SID names, as `DOMAIN\Name` (`Name` for a well-known one such as Everyone). Fails if
+    /// Windows knows no such account.
+    pub fn name(&self) -> io::Result<String> {
+        let (mut name_len, mut domain_len, mut kind) = (0, 0, 0);
+        // SAFETY: `self` is a valid SID; with no buffers the call only reports the sizes it needs.
+        unsafe {
+            LookupAccountSidW(
+                null(),
+                self.as_psid(),
+                null_mut(),
+                &mut name_len,
+                null_mut(),
+                &mut domain_len,
+                &mut kind,
+            )
+        };
+        let (mut name, mut domain) = (vec![0u16; name_len as usize], vec![0u16; domain_len as usize]);
+        // SAFETY: the buffers are as long as the lengths that are passed, which Windows then sets to what it wrote.
+        let found = unsafe {
+            LookupAccountSidW(
+                null(),
+                self.as_psid(),
+                name.as_mut_ptr(),
+                &mut name_len,
+                domain.as_mut_ptr(),
+                &mut domain_len,
+                &mut kind,
+            )
+        };
+        if found == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (name, domain) = (&name[..name_len as usize], &domain[..domain_len as usize]);
+        let (name, domain) = (String::from_utf16_lossy(name), String::from_utf16_lossy(domain));
+        Ok(if domain.is_empty() {
+            name
+        } else {
+            format!("{domain}\\{name}")
+        })
     }
 
     /// Whether `other` is this SID; never for null.

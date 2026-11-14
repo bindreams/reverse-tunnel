@@ -901,10 +901,11 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
-/// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
-/// the outcome. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries`
-/// marks.
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has `binary`, the new one, check the settings as
+/// `run_as` (see `ops::check`): from a copy staged in the bin dir where `run_as` can run it, removed whatever the
+/// outcome, or, if the installed binary already is `binary`, from the installed one, which `place_binaries` keeps with
+/// the descriptor it has, so that is the one whose access the check must judge. A fetch needs no restart: a new frpc
+/// version only arrives with a new binary, which `place_binaries` marks.
 fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
@@ -916,8 +917,13 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     if !download::tools(paths).frpc.try_exists()? {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
+    const WHAT: &str = "the new binary's `run --check`";
+    let installed = service::exe(paths);
+    if fs::read(&installed).is_ok_and(|current| current == binary) {
+        return ops::check(paths, &installed, run_as, WHAT);
+    }
     let staged = upgrade::stage(paths, binary)?;
-    let checked = ops::check(paths, &staged, run_as, "the new binary's `run --check`");
+    let checked = ops::check(paths, &staged, run_as, WHAT);
     upgrade::discard(&staged);
     checked
 }

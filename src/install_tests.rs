@@ -58,10 +58,6 @@ impl Machine {
     fn config(&self) -> PathBuf {
         self.paths.config_file()
     }
-
-    fn secret(&self, path: PathBuf) -> String {
-        fs::read_to_string(path).unwrap()
-    }
 }
 
 fn files_under(dir: &Path) -> Vec<PathBuf> {
@@ -114,11 +110,14 @@ fn token_file_format() {
     let code = code_for("tunnel.example.test", "shared-token", CERT);
     machine.settings(Some("mothership"), Some(&code));
 
-    let host = machine.secret(machine.paths.host_token());
+    let host = fs::read_to_string(machine.paths.host_token()).unwrap();
     let hex = host.strip_suffix('\n').expect("a newline ends the file");
     let lowercase_hex = hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     assert!(hex.len() == 64 && lowercase_hex, "{hex:?}");
-    assert_eq!(machine.secret(machine.paths.bridge_token()), "shared-token\n");
+    assert_eq!(
+        fs::read_to_string(machine.paths.bridge_token()).unwrap(),
+        "shared-token\n"
+    );
 }
 
 #[test]
@@ -227,7 +226,7 @@ fn join_code_never_stored() {
 fn rejoin_rewrites_bridge_files_only() {
     let machine = Machine::new();
     machine.settings(Some("mothership"), Some(CODE));
-    let host_token = machine.secret(machine.paths.host_token());
+    let host_token = fs::read_to_string(machine.paths.host_token()).unwrap();
     let first = fs::read_to_string(machine.config()).unwrap();
     let edited = format!("# mine\n{first}  web:\n    port: 80\n    type: http\n");
     fs::write(machine.config(), &edited).unwrap();
@@ -238,10 +237,10 @@ fn rejoin_rewrites_bridge_files_only() {
 
     let expected = edited.replace("bridge: tunnel.example.test", "bridge: new.example.test");
     assert_eq!(fs::read_to_string(machine.config()).unwrap(), expected);
-    assert_eq!(machine.secret(machine.paths.bridge_token()), "new-token\n");
+    assert_eq!(fs::read_to_string(machine.paths.bridge_token()).unwrap(), "new-token\n");
     let pem = machine.paths.bridge_pem();
     assert_eq!(fs::read_to_string(pem).unwrap(), new_cert);
-    assert_eq!(machine.secret(machine.paths.host_token()), host_token);
+    assert_eq!(fs::read_to_string(machine.paths.host_token()).unwrap(), host_token);
 }
 
 #[test]

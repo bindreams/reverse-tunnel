@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    DELETE, FILE_ADD_FILE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
 };
 
 use crate::account;
 use crate::download;
-use crate::paths::Paths;
+use crate::logfile::ROTATED;
+use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
 use crate::security::{self, Ace, Sid};
 use crate::service;
 
@@ -32,23 +33,74 @@ pub const CREDITED: [(&str, &str); 5] = [
 pub type Right = (u32, &'static str);
 const READ: Right = (FILE_GENERIC_READ, "read");
 const RUN: Right = (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, "read and run");
-/// In the log directory `run` creates its logs and `frpc.toml`, appends to them, and rotates a log by renaming it over
-/// the old one, which deletes that.
-const LOG: Right = (FILE_GENERIC_WRITE | DELETE, "create, write and delete files in");
+/// Of the log directory itself: `run` makes files there, and renames a log there (rotation).
+const MAKE_FILES: Right = (FILE_ADD_FILE, "create files in");
+/// Of a file `run` makes in the log directory, which it gets from the directory: `run` writes each, `frpc` reads
+/// `frpc.toml`, and a rotation renames a log, which needs DELETE on it and on the old log it replaces.
+const NEW_FILE: Right = (
+    FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
+    "read, write and delete",
+);
+/// Of a log: `run` appends to it and renames it over `<log>.1`.
+const LOG: Right = (FILE_GENERIC_WRITE | DELETE, "write to and delete");
+const ROTATED_LOG: Right = (DELETE, "delete");
+const RENDERED: Right = (FILE_GENERIC_READ | FILE_GENERIC_WRITE, "read and write");
 
-/// Every path `run` opens, with what it needs of each; `exe` is the service binary, or at `install` its staged copy,
-/// which is in the same folder with the same descriptor, since the binary is placed only after the check. It reads no directory's listing, and Windows lets a service
-/// through a directory it has no right to (SeChangeNotifyPrivilege), so a directory is here only where `run` writes.
-pub fn opens(paths: &Paths, exe: &Path) -> Vec<(PathBuf, Right)> {
-    vec![
-        (exe.to_path_buf(), RUN),
-        (download::tools(paths).frpc, RUN),
-        (paths.config_file(), READ),
-        (paths.bridge_pem(), READ),
-        (paths.bridge_token(), READ),
-        (paths.host_token(), READ),
-        (paths.log_dir.clone(), LOG),
-    ]
+/// A path `run` opens and what it needs of it.
+pub struct Need {
+    pub path: PathBuf,
+    /// What the service needs of the path itself.
+    pub itself: Right,
+    /// For a directory where `run` makes files: what those must get by inheritance.
+    pub files: Option<Right>,
+    /// `run` makes it if it is missing, so a missing one is no failure.
+    pub made_by_run: bool,
+}
+
+impl Need {
+    fn of(path: PathBuf, itself: Right) -> Need {
+        Need {
+            path,
+            itself,
+            files: None,
+            made_by_run: false,
+        }
+    }
+
+    fn made(path: PathBuf, itself: Right) -> Need {
+        Need {
+            made_by_run: true,
+            ..Need::of(path, itself)
+        }
+    }
+}
+
+/// Every path `run` opens, with what it needs of each; `exe` is the binary the service will run: the installed one,
+/// or, at an `install` that replaces it, the staged copy that is then put in its place with the same descriptor. `run`
+/// lists no directory, and Windows lets a service through a directory it has no right to (SeChangeNotifyPrivilege,
+/// enabled in the service's token: asserted by the platform test of `CREDITED`), so a directory is here only where
+/// `run` makes files: the log directory, where it creates `supervisor.log`, `frpc.log` and `frpc.toml`, appends to the
+/// logs and rotates each to `<log>.1`. Those files are listed too, for each that already exists.
+pub fn opens(paths: &Paths, exe: &Path) -> Vec<Need> {
+    let logs = &paths.log_dir;
+    let mut needs = vec![
+        Need::of(exe.to_path_buf(), RUN),
+        Need::of(download::tools(paths).frpc, RUN),
+        Need::of(paths.config_file(), READ),
+        Need::of(paths.bridge_pem(), READ),
+        Need::of(paths.bridge_token(), READ),
+        Need::of(paths.host_token(), READ),
+        Need {
+            files: Some(NEW_FILE),
+            ..Need::of(logs.clone(), MAKE_FILES)
+        },
+        Need::made(logs.join(FRPC_CONFIG), RENDERED),
+    ];
+    for log in [LOG_SUPERVISOR, LOG_FRPC] {
+        needs.push(Need::made(logs.join(log), LOG));
+        needs.push(Need::made(logs.join(format!("{log}{ROTATED}")), ROTATED_LOG));
+    }
+    needs
 }
 
 /// Fails, naming each path and what is wrong, unless the service account has what `run` opens by the DACLs: an allow
@@ -61,27 +113,21 @@ pub fn check(paths: &Paths, exe: &Path) -> Result<()> {
         who.push((Sid::parse(sid).with_context(|| format!("the SID of {name}"))?, name));
     }
     let problems: Vec<String> = opens(paths, exe)
-        .into_iter()
-        .filter_map(|(path, right)| problem(&path, right, &who).map(|problem| format!("{}: {problem}", path.display())))
+        .iter()
+        .filter_map(|need| problem(need, &who).map(|problem| format!("{}: {problem}", need.path.display())))
         .collect();
-    ensure!(
-        problems.is_empty(),
-        "{}",
-        problems.join(
-            "
-"
-        )
-    );
+    ensure!(problems.is_empty(), "{}", problems.join("\n"));
     Ok(())
 }
 
-/// Why the service account cannot have `right` of `path`, in the user's words.
-fn problem(path: &Path, (needs, verb): Right, who: &[(Sid, &str)]) -> Option<String> {
+/// Why the service account cannot have what `run` needs of `need.path`, in the user's words.
+fn problem(need: &Need, who: &[(Sid, &str)]) -> Option<String> {
     let account = service::ACCOUNT;
-    let aces = match security::aces_of(path) {
+    let (needs, verb) = need.itself;
+    let aces = match security::aces_of(&need.path) {
         Ok(aces) => aces,
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            return Some(format!("it is missing, and {account} needs to {verb} it"));
+            return (!need.made_by_run).then(|| format!("it is missing, and {account} needs to {verb} it"));
         }
         Err(err) => {
             return Some(format!(
@@ -89,48 +135,70 @@ fn problem(path: &Path, (needs, verb): Right, who: &[(Sid, &str)]) -> Option<Str
             ));
         }
     };
-    Some(match barrier_of(&aces, who, needs)? {
-        Barrier::Denied(sid) => {
-            format!("an ACE in its ACL denies access to {sid}. {account} must not be denied anything: remove that ACE.")
+    let (inherits, files_verb) = need.files.unwrap_or_default();
+    let groups = || {
+        let names: Vec<&str> = who.iter().skip(1).map(|(_, name)| *name).collect();
+        names.join(", ")
+    };
+    Some(match barrier_of(&aces, who, needs, inherits)? {
+        Barrier::Denied(by) => {
+            format!("an ACE in its ACL denies access to {by}. {account} must not be denied anything: remove that ACE.")
         }
-        Barrier::NotAllowed => {
-            let groups: Vec<&str> = who.iter().skip(1).map(|(_, name)| *name).collect();
-            format!(
-                "{account} cannot {verb} it: no ACE in its ACL allows that to {account} or to a group it always                  belongs to ({}). Allow {account} to {verb} it.",
-                groups.join(", ")
-            )
-        }
+        Barrier::NotAllowed => format!(
+            "{account} cannot {verb} it: no ACE in its ACL allows that to {account} or to a group it always \
+             belongs to ({}). Allow {account} to {verb} it.",
+            groups()
+        ),
+        Barrier::NotInherited => format!(
+            "the files {account} makes in it would not get the right to {files_verb} themselves: no ACE in its ACL \
+             that files inherit allows that to {account} or to a group it always belongs to ({}). Add an allow for \
+             {account} that files inherit.",
+            groups()
+        ),
     })
 }
 
 /// What stands between the service and the rights it needs.
 #[derive(Debug)]
 pub enum Barrier {
-    /// An ACE denies this SID something. Any deny ACE is a barrier, whoever it names and whatever it denies.
+    /// An ACE denies this account or group (or SID, if Windows knows no name for it) something. Any deny ACE is a
+    /// barrier, whoever it names and whatever it denies.
     Denied(String),
     /// The allow ACEs for the service and its groups do not add up to the rights.
     NotAllowed,
+    /// The allows that files inherit do not add up to what the files `run` makes there need.
+    NotInherited,
 }
 
-/// What stands in the way of `who` (each SID with its name) having all of `needs`, as the DACL `aces` gives it: there
-/// is no deny ACE at all (inherit-only ones too, which the object's contents get), and the allows for `who` add up to
-/// `needs`. Allows for the object's contents only count for nothing. A sufficient condition, not AccessCheck: it
+/// What stands in the way of `who` (each SID with its name) having all of `needs` of an object, and its files all of
+/// `inherits`, as the DACL `aces` gives it: there is no deny ACE at all (inherit-only ones too, which the object's
+/// contents get), the allows for `who` add up to `needs`, and those that files inherit add up to `inherits`. Allows
+/// for the object's contents only count for nothing towards `needs`. A sufficient condition, not AccessCheck: it
 /// refuses a DACL whose order would let the account through, and ignores the owner and privileges.
-fn barrier_of(aces: &[Ace], who: &[(Sid, &str)], needs: u32) -> Option<Barrier> {
-    let mut allowed = 0;
+fn barrier_of(aces: &[Ace], who: &[(Sid, &str)], needs: u32, inherits: u32) -> Option<Barrier> {
+    let (mut allowed, mut inherited) = (0, 0);
     for ace in aces {
         if !ace.allows {
+            let name = ace.sid.name().or_else(|_| ace.sid.text());
             return Some(Barrier::Denied(
-                ace.sid
-                    .text()
-                    .unwrap_or_else(|err| format!("an SID that cannot be read ({err})")),
+                name.unwrap_or_else(|err| format!("an SID that cannot be read ({err})")),
             ));
         }
-        if !ace.inherit_only && who.iter().any(|(sid, _)| *sid == ace.sid) {
-            allowed |= file_rights(ace.mask);
+        if who.iter().any(|(sid, _)| *sid == ace.sid) {
+            let rights = file_rights(ace.mask);
+            if !ace.inherit_only {
+                allowed |= rights;
+            }
+            if ace.object_inherit {
+                inherited |= rights;
+            }
         }
     }
-    (allowed & needs != needs).then_some(Barrier::NotAllowed)
+    if allowed & needs != needs {
+        Some(Barrier::NotAllowed)
+    } else {
+        (inherited & inherits != inherits).then_some(Barrier::NotInherited)
+    }
 }
 
 /// The rights of a file that `mask` gives, the generic ones mapped as the file system maps them.
