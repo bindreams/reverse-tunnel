@@ -154,6 +154,16 @@ jobs:
           out=$(docker compose exec -T reverse-tunnel-frps wget -qO- http://127.0.0.1:7501/ 2>&1 || true)
           echo "$out"
           grep -q 'Connection refused' <<< "$out"
+      - name: wget -T says "timed out" for a listener that accepts and never answers, which ctl list reads as frps not answering
+        run: |
+          # `tail -f` holds nc's input open, so that nc accepts a connection and never answers it.
+          docker compose exec -T -d reverse-tunnel-frps sh -c 'tail -f /dev/null | nc -l -p 7502 > /dev/null'
+          while :; do
+            out=$(docker compose exec -T reverse-tunnel-frps wget -T 2 -qO- http://127.0.0.1:7502/ 2>&1 || true)
+            grep -q 'Connection refused' <<< "$out" || break
+          done
+          echo "$out"
+          grep -q 'timed out' <<< "$out"
       - name: Container label has a single $
         run: docker inspect -f '{{index .Config.Labels "traefik.http.routers.reverse-tunnel-frps.rule"}}' reverse-tunnel-frps | grep -E 'tunnel\.example\.com\\E\$`\)$'
       - name: plugin runs as non-root and reads state/

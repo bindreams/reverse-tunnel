@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -627,6 +628,11 @@ def test_list_when_frps_cannot_be_asked_says_unknown_with_its_reason_and_no_rest
     assert "is not running" in err and "restart" not in err
 
 
+def test_the_api_address_ctl_asks_is_the_one_frps_listens_on():
+    frps = tomllib.loads((Path(__file__).parent.parent / "etc" / "frps.toml").read_text())
+    assert (frps["webServer"]["addr"], frps["webServer"]["port"]) == (compose.FRPS_API_ADDR, compose.FRPS_API_PORT)
+
+
 def test_frps_clients_asks_frps_to_read_its_own_loopback_api(docker, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_STDOUT", "[]")
     assert compose.frps_clients(tmp_path).strip() == "[]"
@@ -648,12 +654,11 @@ def test_frps_clients_tells_a_refused_connection_from_other_failures(docker, tmp
     assert not isinstance(raised.value, compose.FrpsApiMissing)
 
 
-@pytest.mark.parametrize(
-    "stderr", ["wget: download timed out", "wget: can't connect to remote host: Operation timed out"]
-)
-def test_frps_clients_says_when_frps_did_not_answer(docker, tmp_path, monkeypatch, stderr):
+def test_frps_clients_says_when_frps_did_not_answer(docker, tmp_path, monkeypatch):
+    """The text is what busybox `wget -T` prints for a listener that accepts and never answers (the CI bridge job
+    checks it against the real one)."""
     monkeypatch.setenv("FAKE_EXIT", "1")
-    monkeypatch.setenv("FAKE_STDERR", stderr)
+    monkeypatch.setenv("FAKE_STDERR", "wget: download timed out")
     with pytest.raises(compose.DockerError, match="frps did not answer within 10 s") as raised:
         compose.frps_clients(tmp_path)
     assert not isinstance(raised.value, compose.FrpsApiMissing)

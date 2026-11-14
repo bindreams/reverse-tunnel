@@ -121,9 +121,9 @@ impl Active {
 }
 
 /// Opens `path` for appending, created if missing. A file this creates on Unix is made mode 0644 whatever the umask:
-/// every local account may read a log (`logs`, `status`), and nothing secret is in it. A mode that cannot be set is
-/// reported and does not stop the log; a file that already exists keeps its mode. On Windows the log directory's ACL,
-/// which `install` sets, gives Everyone read on each new file.
+/// every local account may read a log (`logs`, `status`). A mode that cannot be set is reported and does not stop the
+/// log; a file that already exists keeps its mode (`install` widens those of an older version). On Windows the log
+/// directory's ACL, which `install` sets, gives Everyone read on each new file.
 fn open(path: &Path) -> Result<File> {
     loop {
         let mut create = OpenOptions::new();
@@ -148,7 +148,7 @@ fn open(path: &Path) -> Result<File> {
     }
 }
 
-/// The mode that the umask may have narrowed.
+/// Sets mode 0644 explicitly, since the umask may have narrowed the create-time mode.
 #[cfg(unix)]
 fn make_readable(file: &File, path: &Path) {
     use std::os::unix::fs::PermissionsExt;

@@ -205,8 +205,7 @@ class Command(NamedTuple):
     arguments: dict[str, str]
     # True for `init`: runs in a folder with no `state/`, and its text prints after the bring-up.
     bootstrap: bool = False
-    # Called with the registered hosts once the bring-up is done and the registry lock is released; returns text to
-    # print.
+    # Runs after bring-up, with the registry lock released.
     after: Callable | None = None
 
 

@@ -204,7 +204,7 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
     }
 }
 
-/// Never prints a token: the log it ends with holds none (`logs`).
+/// Never prints a token: the log it ends with holds none.
 pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     let state = manager.status(&service::id())?;
     let word = match state.state {
@@ -253,7 +253,7 @@ fn write_log_tail(log: &Path, state: State, out: &mut impl Write) -> Result<()> 
                 logs::TAIL
             )?;
             out.write_all(&tail)?;
-            if !tail.ends_with(b"\n") {
+            if !tail.is_empty() && !tail.ends_with(b"\n") {
                 writeln!(out)?;
             }
         }

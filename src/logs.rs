@@ -11,10 +11,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::logfile;
 
-/// How many lines `status` shows.
 pub const TAIL: usize = 10;
 
-/// Between two looks at the log, in `follow`.
 const POLL: Duration = Duration::from_millis(250);
 
 /// The last `n` lines of `text`, a final line without its newline included.
@@ -42,12 +40,10 @@ pub fn open(path: &Path) -> Result<Option<File>> {
     }
 }
 
-/// How much of a log `tail` reads at a time.
 const BLOCK: usize = 8 * 1024;
 
 /// The last `n` lines of `file`, a final line without its newline included, read backwards in blocks so that a long
-/// log is not read whole. Leaves `file` at the end that the lines were taken to, so lines appended meanwhile are
-/// the next read's.
+/// log is not read whole. Leaves `file` positioned after the lines returned, so `follow` continues from there.
 pub fn tail(file: &mut File, n: usize) -> io::Result<Vec<u8>> {
     tail_in_blocks(file, n, BLOCK)
 }
@@ -57,20 +53,21 @@ fn tail_in_blocks(file: &mut File, n: usize, block: usize) -> io::Result<Vec<u8>
     let mut start = end;
     let mut blocks: Vec<Vec<u8>> = Vec::new();
     let mut newlines = 0;
-    // The newlines that bound `n` lines: `n`, and the one that ends the file's last line.
+    // The newlines that bound `n` lines: `n`, and the one that ends the file's last line. `n` may be `usize::MAX`.
     let mut want = n;
-    while n > 0 && start > 0 && newlines < want {
+    while start > 0 && newlines < want {
         let step = start.min(block as u64);
         start -= step;
         let mut buf = vec![0; step as usize];
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut buf)?;
         if blocks.is_empty() && buf.last() == Some(&b'\n') {
-            want += 1;
+            want = want.saturating_add(1);
         }
         newlines += buf.iter().filter(|byte| **byte == b'\n').count();
         blocks.push(buf);
     }
+    debug_assert!(n > 0 || blocks.is_empty(), "no lines are asked for, so none is read");
     file.seek(SeekFrom::Start(end))?;
     let text: Vec<u8> = blocks.into_iter().rev().flatten().collect();
     Ok(last_lines(&text, n).to_vec())
@@ -112,7 +109,7 @@ fn stream(path: &Path, lines: Option<usize>, follow: bool, out: &mut impl Write)
     if follow {
         loop {
             thread::sleep(POLL);
-            following.poll(out)?;
+            following.poll(out, &mut io::stderr())?;
         }
     }
     Ok(())
@@ -126,28 +123,34 @@ struct Follower<'a> {
 }
 
 impl Follower<'_> {
-    /// Prints what has been appended since the last call.
-    fn poll(&mut self, out: &mut impl Write) -> Result<()> {
+    /// Prints what has been appended since the last call. Lines that rotations may have removed before they were read
+    /// are said so on `notes`.
+    fn poll(&mut self, out: &mut impl Write, notes: &mut impl Write) -> Result<()> {
         if self.file.is_none() {
             self.file = open(self.path)?;
+            if let Some(first) = &self.file {
+                // The log may have been rotated before it was first found.
+                copy_rotated(self.path, &[first], out)?;
+            }
         }
         let Some(held) = self.file.as_mut() else {
             return Ok(());
         };
         io::copy(held, out)?;
-        // Between the rename and the new file there is none: the next call looks again.
+        // Mid-rotation: no log yet; look again next call.
         let Some(mut current) = open(self.path)? else {
             return Ok(());
         };
         if identity(&current)? != identity(held)? {
             // Nothing is written to the old file once the new one exists, so this last read is all of it.
             io::copy(held, out)?;
-            // After two rotations since the last call the old file is gone, and `<log>.1` is the file between.
-            if let Some(mut between) = open(&logfile::rotated(self.path))?
-                && identity(&between)? != identity(held)?
-                && identity(&between)? != identity(&current)?
-            {
-                io::copy(&mut between, out)?;
+            // After two rotations since the last call the old file is gone, and `<log>.1` is the file between. After
+            // more, the files before that are gone too, and nothing says how many.
+            if copy_rotated(self.path, &[held, &current], out)? {
+                let _ = writeln!(
+                    notes,
+                    "logs: lines may have been rotated away before they could be shown"
+                );
             }
             io::copy(&mut current, out)?;
             self.file = Some(current);
@@ -155,6 +158,20 @@ impl Follower<'_> {
         out.flush()?;
         Ok(())
     }
+}
+
+/// Prints `<log>.1` unless it is one of `known`; whether it did.
+fn copy_rotated(path: &Path, known: &[&File], out: &mut impl Write) -> Result<bool> {
+    let Some(mut rotated) = open(&logfile::rotated(path))? else {
+        return Ok(false);
+    };
+    for file in known {
+        if identity(&rotated)? == identity(file)? {
+            return Ok(false);
+        }
+    }
+    io::copy(&mut rotated, out)?;
+    Ok(true)
 }
 
 /// What tells one file from another, whatever its name: the device and the file's number on it.

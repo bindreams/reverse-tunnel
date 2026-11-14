@@ -401,8 +401,7 @@ def test_ssh_through_proxycommand(stack, registered):
 
 
 def test_status_and_list_show_the_host_connected(stack, registered, other):
-    """`logs` shows that the host logged in since the service started for this test, `status` ends with a tail of that
-    log under its header, and the bridge's `ctl list` (frps's API) says the host is up."""
+    """Observability end to end: `logs`, `status`'s log tail, and `ctl list`."""
     login = "login to server success"
     wait_until(lambda: login in run(INSTALLED, "logs").stdout[stack.started_at :])
     status = run(INSTALLED, "status").stdout

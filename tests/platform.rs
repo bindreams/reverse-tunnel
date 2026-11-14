@@ -509,7 +509,6 @@ fn assert_installed_as_specified(machine: &Machine) {
 
     // frpc runs only after the supervisor read both tokens, which it does as the service account.
     assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
-    // `logs` and `status` show the logs to every account.
     for log in [
         paths.log_dir.join(reverse_tunnel::paths::LOG_SUPERVISOR),
         paths.frpc_log(),
@@ -594,6 +593,41 @@ fn reinstall_changes_nothing() {
 
     let status = machine.status();
     assert_eq!((status.state, status.pid), (State::Running, supervisor));
+}
+
+/// Logs that a version which made them narrower left, with their rotated files, are readable by every account after
+/// an install, which `upgrade` runs.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(unix)]
+fn reinstall_makes_the_logs_of_an_older_version_readable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::begin();
+    let code = join_code("tunnel.example.test");
+    machine.install(&code);
+    account::ensure(PROBE).unwrap();
+    let mut logs = Vec::new();
+    for name in [reverse_tunnel::paths::LOG_SUPERVISOR, reverse_tunnel::paths::LOG_FRPC] {
+        let log = machine.paths.log_dir.join(name);
+        logs.push(reverse_tunnel::logfile::rotated(&log));
+        logs.push(log);
+    }
+    for log in &logs {
+        let file = fs::OpenOptions::new().append(true).create(true).open(log).unwrap();
+        file.set_permissions(fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!machine.probe("cat", log), "{} is readable before", log.display());
+    }
+
+    machine.install(&code);
+
+    for log in &logs {
+        assert!(
+            machine.probe("cat", log),
+            "{} is not readable by everyone",
+            log.display()
+        );
+    }
 }
 
 /// A hand edit of an installed binary's ACL (Windows) or mode and owner (Unix), the service's own and the pinned frpc,

@@ -50,16 +50,28 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(text.ends_with("frpc log: no log yet\n"), "{text}");
 }
 
-/// The host's `status` with the service in `state` and `lines` lines in frpc's log.
-fn status_with_log(state: State, lines: usize) -> String {
+/// The host's `status` with the service in `state`, after `make_log` has made what is at frpc's log's path.
+fn status_with(state: State, make_log: impl FnOnce(&Path)) -> String {
     let (_dir, paths) = host();
-    let log: String = (1..=lines).map(|n| format!("line {n}\n")).collect();
-    fs::write(paths.frpc_log(), log).unwrap();
+    make_log(&paths.frpc_log());
     let manager = Fake::default();
     let spec = service::spec(&service::exe(&paths)).unwrap();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), state);
     status_text(&manager, &paths)
+}
+
+/// The host's `status` with the service in `state` and `lines` lines in frpc's log.
+fn status_with_log(state: State, lines: usize) -> String {
+    let log: String = (1..=lines)
+        .map(|n| {
+            format!(
+                "line {n}
+"
+            )
+        })
+        .collect();
+    status_with(state, |path| fs::write(path, log).unwrap())
 }
 
 /// The end of frpc's log, as it is, after the certificate lines: the last ten lines of twelve.
@@ -86,6 +98,52 @@ fn status_says_when_the_log_tail_is_from_the_last_run() {
     }
     let text = status_with_log(State::Running, 3);
     assert!(!text.contains("last run"), "{text}");
+}
+
+/// A last line that frpc did not end with a newline still starts its own line after the tail.
+#[test]
+fn status_ends_a_last_line_that_has_no_newline() {
+    let text = status_with(State::Running, |path| {
+        fs::write(
+            path, "one
+two",
+        )
+        .unwrap()
+    });
+
+    assert!(
+        text.ends_with(
+            ":
+one
+two
+"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn status_shows_the_header_alone_for_an_empty_log() {
+    let text = status_with(State::Running, |path| fs::write(path, "").unwrap());
+
+    assert!(
+        text.ends_with(
+            "shows it all):
+"
+        ),
+        "{text}"
+    );
+}
+
+/// A log that is there but cannot be read (here, a directory) is said so, and the rest of `status` is still shown.
+#[test]
+fn status_says_when_the_log_cannot_be_read() {
+    let text = status_with(State::Running, |path| fs::create_dir(path).unwrap());
+
+    let (_, tail) = text.split_once(FINGERPRINT).unwrap();
+    let (_, said) = tail.split_once("frpc log: ").unwrap();
+    assert!(said.contains("frpc.log"), "{text}");
+    assert!(!text.contains("frpc log (last"), "{text}");
 }
 
 /// A host whose installed binary is a copy of `stub-frpc` in its `check` mode (`testbin/stub_frpc.rs`), which stands

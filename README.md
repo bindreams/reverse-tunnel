@@ -152,7 +152,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 | Command | What it does |
 |---|---|
 | `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain, which bridge it trusts (one `certificate:` line per certificate in `bridge.pem`, two during a rotation), and the last 10 lines of `frpc.log`, or `no log yet`; a service that is not running says they are from its last run. No `sudo`. |
-| `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. No `sudo`. |
+| `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. When rotations may have removed lines before it could show them (its output stalled while the log rotated more than once), it says so on stderr. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
 | `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then restarts the service so it reads it again. Works over the tunnel. |
