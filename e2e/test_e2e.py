@@ -44,14 +44,14 @@ INSTALLED = Path("/usr/local/bin/reverse-tunnel")
 BIN_DIR = Path("/usr/local/lib/reverse-tunnel")
 FRPC_LOG = Path("/var/log/reverse-tunnel/frpc.log")
 
-T = "tunnel.binarydreams.me"
+T = "tunnel.example.org"
 HOST = "e2ehost"  # the real host
 OTHER = "e2eother"  # a registered host that frpc, run by hand, stands in for
 OTHER_NAME = f"{OTHER}.{T}"
 BACKEND = f"web.{HOST}.{T}"
 ADDED = f"blog.{HOST}.{T}"  # a second HTTP service, added to config.yaml after the host is running
-ALIAS = "movies.binarydreams.me"
-LOOKALIKE = "x.tunnelXbinarydreams.me"  # T with one character for its dot: the frps router must not match it
+ALIAS = "movies.yourdomain.tld"
+LOOKALIKE = "x.tunnelXexample.org"  # T with one character for its dot: the frps router must not match it
 NOBODY = f"nobody.{T}"  # matches the frps router, and no host publishes it
 TOO_DEEP = f"a.b.{HOST}.{T}"
 # /etc/hosts has no wildcards: every name the tests connect to.
@@ -67,11 +67,11 @@ def http_service(name: str, port: int) -> str:
 
 
 def client_template() -> str:
-    """The README's `~/.ssh/config` block, for a host named `mothership`: its only `ssh-config` fenced block."""
+    """The README's only `ssh-config` fenced block, filled in for HOST on the bridge T."""
     blocks = re.findall(r"^```ssh-config\n(.*?)^```$", (ROOT / "README.md").read_text(), re.DOTALL | re.MULTILINE)
     assert len(blocks) == 1, f"README.md must have exactly one ssh-config block, has {len(blocks)}"
-    assert "mothership" in blocks[0], "README's ssh-config block lacks `mothership`: the template changed shape"
-    return blocks[0]
+    assert "myhost" in blocks[0], "README's ssh-config block lacks `myhost`: the template changed shape"
+    return blocks[0].replace("myhost", HOST).replace("tunnel.example.com", T)
 
 
 def run(*args, cwd=None, env=None, check=True, input=None) -> subprocess.CompletedProcess:
@@ -320,11 +320,12 @@ def stack(tmp_path_factory):
     roots = "https://localhost:15000/roots/0"
     stack.root.write_bytes(wait_until(lambda: _try(lambda: urllib.request.urlopen(roots, context=minica).read())))
 
-    # The bridge, as its README brings it up.
-    shutil.copy(SERVER / ".env.example", SERVER / ".env")
+    # The bridge, as its README brings it up: the template's one line edited, then `ctl init`, which starts it.
+    template = (SERVER / ".env.example").read_text()
+    assert "TUNNEL_DOMAIN=tunnel.example.com\n" in template, ".env.example's domain line changed shape"
+    (SERVER / ".env").write_text(template.replace("tunnel.example.com", T))
     joined = stack.ctl("init").split()
     code = next(word for word in joined if word.startswith("rt1:"))
-    stack.compose("up", "-d", "--build")
     stack.frps_token = dotenv_values(SERVER / ".env")["FRPS_TOKEN"]
 
     # The client config is the README's template.
@@ -335,9 +336,10 @@ def stack(tmp_path_factory):
     ssh_dir.mkdir(mode=0o700, exist_ok=True)
     with open(ssh_dir / "authorized_keys", "a") as keys:
         keys.write(Path(f"{stack.key}.pub").read_text())
-    stack.ssh_config.write_text(client_template().replace("mothership", HOST))
+    stack.ssh_config.write_text(client_template())
 
     installed = run("sudo", BUILT, "install", "--host", HOST, "--join", code).stdout
+    assert client_template() in installed, f"install's ssh-config block is not the README's:\n{installed}"
     registration = re.search(r"uv run ctl add (\S+) (sha256:[0-9a-f]{64})", installed)
     assert registration, f"no `ctl add` line in the install output:\n{installed}"
     stack.registration = registration.groups()
