@@ -5,7 +5,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, ErrorKind, Write};
+use std::io::{self, ErrorKind};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,8 @@ use crate::account::{self, Account};
 use crate::client;
 #[cfg(target_os = "linux")]
 use crate::command;
-use crate::config::{Config, valid_label};
+use crate::config::Config;
+use crate::dialog::Dialog;
 #[cfg(windows)]
 use crate::files::is_access_denied;
 use crate::files::{
@@ -92,16 +93,14 @@ pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
 /// writes changed. Prints the line that registers the host on the bridge.
 pub fn install(opts: InstallOpts) -> Result<()> {
     let paths = &opts.paths;
+    let mut dialog = Dialog::terminal();
+    dialog.intro(paths)?;
     let _lock = lock(paths)?;
     refuse_while_uninstalling(paths)?;
     make_dir(&paths.config_dir, PUBLIC_DIR)?;
     let changed = pending_file(paths).try_exists()?;
-    let host = configured_host(paths, opts.host.as_deref())?;
-    let join = match opts.join.as_deref() {
-        Some(code) => Some(join::decode(code)?),
-        None if needs_join(paths)? => Some(prompt_join(&mut io::stdin().lock(), &mut io::stderr())?),
-        None => None,
-    };
+    let host = dialog.host(paths, opts.host.as_deref())?;
+    let join = dialog.join(paths, opts.join.as_deref())?;
 
     let account = account::ensure(service::ACCOUNT)?;
     let new = Binary::read(paths, &env::current_exe().context("finding this binary")?)?;
@@ -775,82 +774,6 @@ fn remove_files(paths: &Paths) -> Result<()> {
     remove_entry(&paths.log_dir)
 }
 
-/// Whether a join code is needed: some file it provides is missing.
-fn needs_join(paths: &Paths) -> Result<bool> {
-    let files = [paths.config_file(), paths.bridge_pem(), paths.bridge_token()];
-    for file in files {
-        if !file.try_exists()? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// The name for a new `config.yaml`, or none when one exists. Refuses an explicit name that differs from the existing
-/// config's.
-fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<String>> {
-    let config = paths.config_file();
-    if !config.try_exists()? {
-        return host_name(explicit).map(Some);
-    }
-    if let Some(asked) = explicit {
-        let asked = host_name(Some(asked))?;
-        let current = Config::load(&config)?.host;
-        ensure!(
-            asked == current,
-            "--host {asked:?} differs from this host's name {current:?} in {}: `install` does not rename a host. \
-             To rename it, uninstall it and install it again with --host {asked}",
-            config.display()
-        );
-    }
-    Ok(None)
-}
-
-/// The host name for a new `config.yaml`.
-fn host_name(explicit: Option<&str>) -> Result<String> {
-    match explicit {
-        Some(host) => {
-            ensure!(
-                valid_label(host),
-                "--host {host:?} is not a valid name: one DNS label of lowercase letters, digits and hyphens"
-            );
-            Ok(host.to_string())
-        }
-        None => normalize_host(&gethostname::gethostname().to_string_lossy()),
-    }
-}
-
-/// A machine name as a host name: lowercased, and it must then be one valid DNS label.
-fn normalize_host(machine: &str) -> Result<String> {
-    let host = machine.to_lowercase();
-    ensure!(
-        valid_label(&host),
-        "this machine's name {machine:?} is not a valid host name (one DNS label); pass --host"
-    );
-    Ok(host)
-}
-
-/// Reads lines until they form a join code, which may be wrapped over several. A blank line, or the end of the input,
-/// gives up.
-fn prompt_join(input: &mut impl BufRead, prompt: &mut impl Write) -> Result<JoinInfo> {
-    writeln!(
-        prompt,
-        "Paste the join code (`uv run ctl join-code` on the bridge) and press Enter; a blank line gives up:"
-    )?;
-    let mut code = String::new();
-    loop {
-        let mut line = String::new();
-        input.read_line(&mut line)?;
-        code += &line;
-        if line.trim().is_empty() {
-            return join::decode(&code).context("no complete join code was entered");
-        }
-        if let Ok(info) = join::decode(&code) {
-            return Ok(info);
-        }
-    }
-}
-
 /// Registers the service without starting it. Whether it was created or changed.
 fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> Result<bool> {
     if manager.preview_install(spec)? != Outcome::UpToDate {
@@ -1111,14 +1034,14 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
     symlink(target, link).with_context(|| format!("linking {}", link.display()))
 }
 
-/// What `install` prints once the host is set up: the line that registers it on the bridge, then, if the host
+/// What `install` prints once the host is set up: the line that accepts it on the bridge, then, if the host
 /// publishes ssh, how to reach it. It ends in a newline.
 fn registration(paths: &Paths) -> Result<String> {
     let cfg = Config::load(&paths.config_file())?;
     let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
     let line = registration_line(&cfg.host, token.trim());
-    let mut text = format!("Register this host on the bridge by running:\n    {line}\n");
+    let mut text = format!("Host is ready! Run this command on the bridge to accept the host:\n  {line}\n");
     if let Some(client) = client::instructions(&cfg) {
         text.push('\n');
         text.push_str(&client);

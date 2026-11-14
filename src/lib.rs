@@ -4,6 +4,7 @@ pub mod account;
 pub mod client;
 pub mod command;
 pub mod config;
+pub mod dialog;
 pub mod download;
 pub mod files;
 pub mod frpc;

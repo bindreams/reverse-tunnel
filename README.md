@@ -32,17 +32,28 @@ chmod +x reverse-tunnel
 sudo ./reverse-tunnel install
 ```
 
-`install` asks for the join code (paste it, press Enter; or pass it as `--join CODE`) and names the host after the
-machine (lowercased); to choose a name, add `--host NAME`. A host with a `config.yaml` keeps its name, and `--host` with
-another name fails; to rename, uninstall and install again, register the new name and revoke the old. It installs and starts the service, and prints a line, then the block for reaching the host (see
-[Set up a client](#set-up-a-client)):
+`install` asks two things, and prints where the config is saved and, at the end, what to run on the bridge:
 
 ```
-Register this host on the bridge by running:
-    uv run ctl add myhost sha256:...
+$ sudo ./reverse-tunnel install
+Setting up a system-wide reverse tunnel service.
+  Config is saved to: /etc/reverse-tunnel/config.yaml
+Hostname [minicooper]:
+Join code (run `uv run ctl join-code` on the bridge; an empty line gives up):
+Host is ready! Run this command on the bridge to accept the host:
+  uv run ctl add minicooper sha256:...
 ```
 
-Run that line in the bridge folder; it is the host's registration, and [Set up a client](#set-up-a-client) is the next
+Enter takes the machine's name (lowercased) as the host name. The join code may be pasted wrapped over several lines.
+On a host that already has a `config.yaml`, `install` shows its host name and asks neither question, and it asks for
+the join code only if the bridge's files are missing. A host keeps its name: `--host` with another name fails; to
+rename, uninstall and install again, accept the new name and revoke the old.
+
+For a script, pass `--host NAME` and `--join CODE`: a value given is not asked for. With stdin not a terminal, a value
+that is needed and missing is an error naming its flag, and `install` does not wait for input. It installs and starts
+the service, and after the line prints the block for reaching the host (see [Set up a client](#set-up-a-client)).
+
+Run that line in the bridge folder; it accepts the host, and [Set up a client](#set-up-a-client) is the next
 step. Until you do, the host is refused ("host not registered" in its `frpc.log`) and
 retries on its own; once you have, it connects with no restart. You may delete the downloaded file; `install` put a
 copy in place and linked it as `reverse-tunnel` on the `PATH`.
@@ -52,7 +63,7 @@ changes only what differs.
 
 **Windows**: download the binary, then run `install` and the other commands that say `sudo` from an administrator
 terminal (right-click Terminal or PowerShell, "Run as administrator"), without `sudo`: Windows' `sudo` opens a new window
-that closes before the registration line can be read. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
+that closes before the line for the bridge can be read. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
 `%ProgramData%\reverse-tunnel`, and `install` puts `%ProgramFiles%\reverse-tunnel` on the system `PATH`: open a new shell
 to run `reverse-tunnel` (on the desktop, sign out and in; an SSH session sees it at once). `install` edits the `PATH` as
 every installer does, by reading it and writing it back: another program that edits it at the same moment can lose one of
@@ -195,7 +206,7 @@ Each log is rotated at 10 MB to `<name>.1`, replacing the previous one; `logs` s
 
 `sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: your session
 ends when the service restarts, and the host reconnects on the new version. Before it replaces anything it checks the
-new version against this host's settings, and a failure leaves the old version running. It prints the registration
+new version against this host's settings, and a failure leaves the old version running. It prints the line for the bridge
 line again, and the `ssh` block when the host publishes SSH; the host is already registered, so ignore the line. A
 version that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.
 

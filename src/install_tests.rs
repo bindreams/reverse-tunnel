@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -75,36 +74,6 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn hostname_normalization() {
-    assert_eq!(normalize_host("DESKTOP-7Q2X").unwrap(), "desktop-7q2x");
-    for machine in ["Annas-MacBook.local", "my_box"] {
-        let err = format!("{:#}", normalize_host(machine).unwrap_err());
-        assert!(err.contains("--host") && err.contains(machine), "{err}");
-    }
-    let long = "a".repeat(64);
-    for host in ["Desktop", "my_box", long.as_str(), ""] {
-        let err = format!("{:#}", host_name(Some(host)).unwrap_err());
-        assert!(err.contains("--host"), "{host:?}: {err}");
-    }
-}
-
-#[test]
-fn join_prompt_accepts_wrapped_code() {
-    let mut input = Cursor::new(wrapped(CODE.trim()));
-    let info = prompt_join(&mut input, &mut Vec::new()).unwrap();
-    assert_eq!(info.domain, "tunnel.example.test");
-}
-
-#[test]
-fn join_prompt_gives_up_at_a_blank_line_or_the_end_of_input() {
-    let half = &CODE[..CODE.len() / 2];
-    for input in [format!("{half}\n\nmore\n"), format!("{half}\n")] {
-        let err = prompt_join(&mut Cursor::new(input), &mut Vec::new()).unwrap_err();
-        assert!(format!("{err:#}").contains("join code"), "{err:#}");
-    }
-}
-
-#[test]
 fn token_file_format() {
     let machine = Machine::new();
     let code = code_for("tunnel.example.test", "shared-token", CERT);
@@ -156,8 +125,8 @@ services:
 ",
     );
     let expected = format!(
-        "Register this host on the bridge by running:
-    uv run ctl add myhost {ZERO_TOKEN_HASH}
+        "Host is ready! Run this command on the bridge to accept the host:
+  uv run ctl add myhost {ZERO_TOKEN_HASH}
 
 To reach this host with ssh from another machine, add this to ~/.ssh/config there (it needs websocat; the README's \"Set up a client\" has the details: https://github.com/bindreams/reverse-tunnel#set-up-a-client):
 
@@ -181,8 +150,8 @@ services:
 ",
     );
     let expected = format!(
-        "Register this host on the bridge by running:
-    uv run ctl add myhost {ZERO_TOKEN_HASH}
+        "Host is ready! Run this command on the bridge to accept the host:
+  uv run ctl add myhost {ZERO_TOKEN_HASH}
 "
     );
     assert_eq!(registration(&machine.paths).unwrap(), expected);
@@ -255,32 +224,6 @@ fn uninstall_prints_revoke_line() {
     let machine = Machine::new();
     machine.settings(Some("myhost"), Some(CODE));
     assert_eq!(revoke_line(&machine.paths).unwrap(), "uv run ctl revoke myhost");
-}
-
-#[test]
-fn host_that_differs_from_the_config_is_refused() {
-    let machine = Machine::new();
-    assert_eq!(
-        configured_host(&machine.paths, Some("myhost")).unwrap().as_deref(),
-        Some("myhost"),
-        "a first install takes the name"
-    );
-    machine.settings(Some("myhost"), Some(CODE));
-
-    let err = format!("{:#}", configured_host(&machine.paths, Some("otherhost")).unwrap_err());
-    let config = machine.paths.config_file().display().to_string();
-    assert_eq!(
-        err,
-        format!(
-            "--host \"otherhost\" differs from this host's name \"myhost\" in {config}: `install` does not rename \
-             a host. To rename it, uninstall it and install it again with --host otherhost"
-        )
-    );
-    let err = format!("{:#}", configured_host(&machine.paths, Some("Not_Valid")).unwrap_err());
-    assert!(err.contains("not a valid name"), "{err}");
-    for same in [Some("myhost"), None] {
-        assert_eq!(configured_host(&machine.paths, same).unwrap(), None);
-    }
 }
 
 #[test]
