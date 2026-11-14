@@ -127,50 +127,65 @@ fn registration_line() {
     assert_eq!(line, format!("uv run ctl add myhost {}", join::token_hash(&token)));
 }
 
-#[test]
-fn registration_is_the_register_line_then_the_ssh_block() {
+const ZERO_TOKEN_HASH: &str = "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55";
+
+/// A machine whose host token is 64 zeros and whose config is `config`.
+fn machine_with(config: &str) -> Machine {
     let machine = Machine::new();
     machine.settings(Some("myhost"), Some(CODE));
-    let token = fs::read_to_string(machine.paths.host_token()).unwrap();
-    let line = super::registration_line("myhost", token.trim());
+    fs::write(
+        machine.paths.host_token(),
+        "0".repeat(64)
+            + "
+",
+    )
+    .unwrap();
+    fs::write(machine.config(), config).unwrap();
+    machine
+}
 
-    let text = registration(&machine.paths).unwrap();
-    let block = client::instructions(&Config::load(&machine.config()).unwrap()).unwrap();
-    assert_eq!(
-        text,
-        format!(
-            "Register this host on the bridge by running:
-    {line}
-
-{block}"
-        )
+#[test]
+fn registration_is_the_register_line_then_the_ssh_block() {
+    let machine = machine_with(
+        "host: myhost
+bridge: tunnel.example.test
+services:
+  ssh:
+    port: 22
+    type: tcp
+",
     );
-    assert!(text.ends_with('\n'));
+    let expected = format!(
+        "Register this host on the bridge by running:
+    uv run ctl add myhost {ZERO_TOKEN_HASH}
+
+To reach this host with ssh from another machine, add this to ~/.ssh/config there (it needs websocat; the README's \"Set up a client\" has the details: https://github.com/bindreams/reverse-tunnel#set-up-a-client):
+
+Host myhost
+    HostName ssh.myhost.tunnel.example.test
+    ProxyCommand websocat --binary wss://%h/
+"
+    );
+    assert_eq!(registration(&machine.paths).unwrap(), expected);
 }
 
 #[test]
 fn registration_has_no_ssh_block_without_an_ssh_tcp_service() {
-    let machine = Machine::new();
-    machine.settings(Some("myhost"), Some(CODE));
-    let web = "host: myhost
+    let machine = machine_with(
+        "host: myhost
 bridge: tunnel.example.test
 services:
   web:
     port: 80
     type: http
-";
-    fs::write(machine.config(), web).unwrap();
-    let token = fs::read_to_string(machine.paths.host_token()).unwrap();
-    let line = super::registration_line("myhost", token.trim());
-
-    assert_eq!(
-        registration(&machine.paths).unwrap(),
-        format!(
-            "Register this host on the bridge by running:
-    {line}
-"
-        )
+",
     );
+    let expected = format!(
+        "Register this host on the bridge by running:
+    uv run ctl add myhost {ZERO_TOKEN_HASH}
+"
+    );
+    assert_eq!(registration(&machine.paths).unwrap(), expected);
 }
 
 #[test]

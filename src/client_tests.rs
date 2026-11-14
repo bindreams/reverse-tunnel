@@ -73,9 +73,21 @@ fn there_is_no_block_unless_the_service_named_ssh_is_tcp() {
 
 #[test]
 fn the_readme_has_the_heading_the_printed_link_points_at() {
+    let text = instructions(&config(
+        "  ssh:
+    port: 22
+    type: tcp
+",
+    ))
+    .unwrap();
+    let anchor = text.split_once('#').unwrap().1.split(')').next().unwrap();
     let readme = include_str!("../README.md");
+    // GitHub's anchor of a heading: lowercase, spaces to hyphens
+    let has_heading = readme.lines().any(|line| {
+        line.starts_with('#') && line.trim_start_matches('#').trim().to_lowercase().replace(' ', "-") == anchor
+    });
     assert!(
-        readme.lines().any(|line| line == "## Set up a client"),
-        "the printed `#set-up-a-client` anchor has no heading in README.md"
+        has_heading,
+        "the printed `#{anchor}` anchor has no heading in README.md"
     );
 }

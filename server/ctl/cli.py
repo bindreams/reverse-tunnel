@@ -129,8 +129,8 @@ def _init_report(args, hosts, aliases, env):
 
 
 FRPS_KEPT = (
-    "reverse-tunnel-frps was left running. To apply a change to its image, compose.yaml or .env, which drops every "
-    "tunnel once, run `docker compose up -d --build reverse-tunnel-frps`."
+    "reverse-tunnel-frps already existed and was kept as it is. To apply a change to its image, compose.yaml or .env, "
+    "run `docker compose up -d --build reverse-tunnel-frps`, which drops every tunnel if it is running."
 )
 
 

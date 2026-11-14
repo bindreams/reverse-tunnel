@@ -19,9 +19,10 @@ All commands run in this folder.
 3. `uv run ctl init` checks the network and DNS, creates the token, the certificate (`tls/`) and the registries
    (`state/`), builds and starts the bridge, and prints the join code last.
    `uv run ctl join-code` prints it again. Every other `ctl` command also starts whatever of the bridge is not running.
-   None of them recreates a running `reverse-tunnel-frps`, which would drop every tunnel; `init` says so when it
-   leaves one running. To apply a change to its image, `compose.yaml` or `.env` on purpose, run
-   `docker compose up -d --build reverse-tunnel-frps` (`docker compose restart` applies none of these).
+   No `ctl` command builds for, removes or recreates an existing `reverse-tunnel-frps` container, which would drop
+   every tunnel; it starts a stopped one as it is, and `init` says so when it finds one. To apply a change to its
+   image, `compose.yaml` or `.env` on purpose, run `docker compose up -d --build reverse-tunnel-frps`, which drops
+   every tunnel if it is running (`docker compose restart` applies none of these).
 
 Joining a host and publishing a service: see the main README. The commands are `uv run ctl add`, `revoke`, `alias`,
 `unalias`, `list`; `uv run ctl <command> --help` says what each takes.
