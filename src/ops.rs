@@ -1,6 +1,5 @@
-//! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
-//! user may read. Only `status` reads `secrets_dir`, for the admin password and certificate, and does without them where
-//! it may not.
+//! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir` and frpc's log,
+//! which every local user may read. Nothing here reads `secrets_dir`.
 
 use std::fs;
 use std::io::Write;
@@ -17,11 +16,11 @@ use goetia::spec::Id;
 use sha2::{Digest, Sha256};
 
 use crate::account;
-use crate::admin::{self, Tunnel};
 use crate::command;
 use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
 use crate::install::refuse_while_uninstalling;
+use crate::logs;
 use crate::output::println_best_effort;
 use crate::paths::Paths;
 use crate::service;
@@ -205,7 +204,7 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
     }
 }
 
-/// Never prints a secret. The `bridge:` line says whether frpc is logged in, as frpc says it.
+/// Never prints a token: the log it ends with holds none (`logs`).
 pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     let state = manager.status(&service::id())?;
     let word = match state.state {
@@ -229,16 +228,36 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     )?;
 
     let config = Config::load(&paths.config_file())?;
-    writeln!(out, "host: {}", config.host)?;
-    let tunnel = match state.state {
-        State::Running => admin::tunnel(&config, paths),
-        _ => Tunnel::Unknown("the service is not running".into()),
-    };
-    write!(out, "{}", admin::describe(&config.bridge, &tunnel))?;
+    writeln!(out, "host: {}\nbridge: {}", config.host, config.bridge)?;
     let pem_path = paths.bridge_pem();
     let pem = fs::read_to_string(&pem_path).with_context(|| format!("reading {}", pem_path.display()))?;
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;
+    }
+    write_log_tail(&paths.frpc_log(), out)
+}
+
+/// The last `logs::TAIL` lines of frpc's log under a header, as they are. A log that is not there, or not readable, is
+/// said so: `status` still has the rest to show.
+fn write_log_tail(log: &Path, out: &mut impl Write) -> Result<()> {
+    match logs::read(log) {
+        Ok(Some((_, text))) => {
+            writeln!(
+                out,
+                "frpc log (last {} lines; `reverse-tunnel logs` shows it all):",
+                logs::TAIL
+            )?;
+            let tail = logs::last_lines(&text, logs::TAIL);
+            out.write_all(tail)?;
+            if !tail.ends_with(
+                b"
+",
+            ) {
+                writeln!(out)?;
+            }
+        }
+        Ok(None) => writeln!(out, "frpc log: no log yet")?,
+        Err(err) => writeln!(out, "frpc log: {err:#}")?,
     }
     Ok(())
 }

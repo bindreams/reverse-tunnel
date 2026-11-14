@@ -46,29 +46,53 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(text.contains("tunnel.example.test"), "{text}");
     assert!(text.contains(FINGERPRINT), "{text}");
     assert!(text.contains("stopped"), "{text}");
+    assert!(!text.contains("secret"), "{text}");
     assert!(
-        text.contains("bridge: tunnel.example.test (not checked: the service is not running)"),
+        text.ends_with(
+            "frpc log: no log yet
+"
+        ),
         "{text}"
     );
-    assert!(!text.contains("secret"), "{text}");
 }
 
-/// A running service whose frpc cannot be asked (no admin password here) is shown as it is, not as an error.
+/// The end of frpc's log, as it is, after the certificate lines: the last ten lines of twelve.
 #[test]
-fn status_of_a_running_service_says_when_it_could_not_ask_frpc() {
+fn status_ends_with_the_last_ten_lines_of_frpc_log() {
     let (_dir, paths) = host();
+    let lines = (1..=12)
+        .map(|n| {
+            format!(
+                "line {n}
+"
+            )
+        })
+        .collect::<String>();
+    fs::write(paths.frpc_log(), lines).unwrap();
     let manager = Fake::default();
-    let spec = service::spec(&service::exe(&paths)).unwrap();
-    manager.install(&spec, false).unwrap();
-    manager.seed_state(spec.id.as_str(), State::Running);
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
 
     let text = status_text(&manager, &paths);
 
-    assert!(text.contains("service: running"), "{text}");
-    assert!(
-        text.contains("bridge: tunnel.example.test (not checked: reading"),
-        "{text}"
-    );
+    let (_, log) = text.split_once(FINGERPRINT).unwrap();
+    let (_, shown) = log.split_once("frpc log (last 10 lines").unwrap();
+    let (_, shown) = shown
+        .split_once(
+            ":
+",
+        )
+        .unwrap();
+    let expected = (3..=12)
+        .map(|n| {
+            format!(
+                "line {n}
+"
+            )
+        })
+        .collect::<String>();
+    assert_eq!(shown, expected, "{text}");
 }
 
 /// A host whose installed binary is a copy of `stub-frpc` in its `check` mode (`testbin/stub_frpc.rs`), which stands

@@ -111,65 +111,13 @@ fn token_file_format() {
     machine.settings(Some("myhost"), Some(&code));
 
     let host = fs::read_to_string(machine.paths.host_token()).unwrap();
-    let admin = fs::read_to_string(machine.paths.admin_password()).unwrap();
-    assert_ne!(host, admin, "one secret for both");
-    for file in [host, admin] {
-        let hex = file.strip_suffix('\n').expect("a newline ends the file");
-        let lowercase_hex = hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        assert!(hex.len() == 64 && lowercase_hex, "{hex:?}");
-    }
+    let hex = host.strip_suffix('\n').expect("a newline ends the file");
+    let lowercase_hex = hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    assert!(hex.len() == 64 && lowercase_hex, "{hex:?}");
     assert_eq!(
         fs::read_to_string(machine.paths.bridge_token()).unwrap(),
         "shared-token\n"
     );
-}
-
-/// An install from before the admin API has no password: the next `install` makes one, and the service must read it.
-#[test]
-fn install_adds_a_missing_admin_password() {
-    let machine = Machine::new();
-    machine.settings(Some("myhost"), Some(CODE));
-    fs::remove_file(machine.paths.admin_password()).unwrap();
-
-    assert!(
-        machine.settings(None, None),
-        "the service has to be restarted to read it"
-    );
-    assert!(machine.paths.admin_password().exists());
-    assert!(crate::ops::pending_file(&machine.paths).exists());
-}
-
-/// The pair frpc serves its admin API with, and `status` trusts, is made once and kept.
-#[test]
-fn install_makes_the_admin_key_pair_once() {
-    let machine = Machine::new();
-    machine.settings(Some("myhost"), Some(CODE));
-    let (cert, key) = (machine.paths.admin_cert(), machine.paths.admin_key());
-    let (made_cert, made_key) = (fs::read_to_string(&cert).unwrap(), fs::read_to_string(&key).unwrap());
-    assert!(made_cert.starts_with("-----BEGIN CERTIFICATE-----"), "{made_cert}");
-    assert!(made_key.contains("PRIVATE KEY"), "the key is not a PEM private key");
-
-    assert!(!machine.settings(None, None), "a rerun changes nothing");
-    assert_eq!(fs::read_to_string(&cert).unwrap(), made_cert);
-    assert_eq!(fs::read_to_string(&key).unwrap(), made_key);
-}
-
-/// An install from before the admin API served TLS has no pair, and one file of a pair is no pair: the next `install`
-/// makes a whole new one, and the service must read it.
-#[test]
-fn install_makes_a_new_admin_key_pair_when_either_file_is_missing() {
-    for missing in [Paths::admin_cert, Paths::admin_key] {
-        let machine = Machine::new();
-        machine.settings(Some("myhost"), Some(CODE));
-        let before = fs::read_to_string(machine.paths.admin_cert()).unwrap();
-        fs::remove_file(missing(&machine.paths)).unwrap();
-        fs::remove_file(crate::ops::pending_file(&machine.paths)).ok();
-
-        assert!(machine.settings(None, None));
-        assert_ne!(fs::read_to_string(machine.paths.admin_cert()).unwrap(), before);
-        assert!(machine.paths.admin_key().exists());
-        assert!(crate::ops::pending_file(&machine.paths).exists());
-    }
 }
 
 #[test]
@@ -340,7 +288,6 @@ fn rejoin_rewrites_bridge_files_only() {
     let machine = Machine::new();
     machine.settings(Some("myhost"), Some(CODE));
     let host_token = fs::read_to_string(machine.paths.host_token()).unwrap();
-    let admin_password = fs::read_to_string(machine.paths.admin_password()).unwrap();
     let first = fs::read_to_string(machine.config()).unwrap();
     let edited = format!("# mine\n{first}  web:\n    port: 80\n    type: http\n");
     fs::write(machine.config(), &edited).unwrap();
@@ -355,10 +302,6 @@ fn rejoin_rewrites_bridge_files_only() {
     let pem = machine.paths.bridge_pem();
     assert_eq!(fs::read_to_string(pem).unwrap(), new_cert);
     assert_eq!(fs::read_to_string(machine.paths.host_token()).unwrap(), host_token);
-    assert_eq!(
-        fs::read_to_string(machine.paths.admin_password()).unwrap(),
-        admin_password
-    );
 }
 
 #[test]

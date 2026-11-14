@@ -1,7 +1,6 @@
 #[cfg(windows)]
 pub mod access;
 pub mod account;
-pub mod admin;
 pub mod client;
 pub mod command;
 pub mod config;
@@ -18,6 +17,7 @@ pub mod join;
 #[cfg(windows)]
 pub mod leftovers;
 pub mod logfile;
+pub mod logs;
 pub mod ops;
 pub mod output;
 pub mod paths;

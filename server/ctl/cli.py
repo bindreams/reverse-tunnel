@@ -73,10 +73,7 @@ def _init(env: dict) -> None:
         certs.ensure(domain, TLS)
     except certs.CertError as e:
         raise CtlError(str(e)) from e
-    missing = {
-        "FRPS_TOKEN": secrets.token_hex(32),
-        "COMPOSE_FILE": COMPOSE_FILE,
-    }
+    missing = {"FRPS_TOKEN": secrets.token_hex(32), "COMPOSE_FILE": COMPOSE_FILE}
     lines = [f"{key}={value}\n" for key, value in missing.items() if key not in env]
     if lines:
         text = ENV.read_text()

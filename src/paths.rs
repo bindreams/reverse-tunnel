@@ -6,8 +6,6 @@ pub const LOG_FRPC: &str = "frpc.log";
 pub const LOG_SUPERVISOR: &str = "supervisor.log";
 /// The frpc configuration `run` renders into the log dir.
 pub const FRPC_CONFIG: &str = "frpc.toml";
-/// The loopback port of frpc's admin API, which `run` picks at each start of frpc and records beside its configuration.
-pub const ADMIN_PORT_FILE: &str = "frpc-admin.port";
 
 /// Where an installation keeps its files on this OS.
 #[derive(Debug, Clone)]
@@ -15,8 +13,7 @@ pub struct Paths {
     pub bin_dir: PathBuf,
     /// `config.yaml` and `bridge.pem`, readable by everyone.
     pub config_dir: PathBuf,
-    /// `bridge.token`, `host.token`, `admin.password` and the admin API's `admin.crt` and `admin.key`, readable by
-    /// administrators and the service account.
+    /// `bridge.token` and `host.token`, readable by administrators and the service account.
     pub secrets_dir: PathBuf,
     pub log_dir: PathBuf,
     /// Held by `install` and `uninstall` for their whole run. No removal touches it. On Windows, the name of a mutex,
@@ -44,24 +41,9 @@ impl Paths {
         self.secrets_dir.join("host.token")
     }
 
-    /// The password of frpc's admin API (`admin::USER`), which `status` reads.
-    pub fn admin_password(&self) -> PathBuf {
-        self.secrets_dir.join("admin.password")
-    }
-
-    /// The certificate frpc's admin API serves, which `status` trusts alone: a listener without its key is not frpc.
-    pub fn admin_cert(&self) -> PathBuf {
-        self.secrets_dir.join("admin.crt")
-    }
-
-    /// The key of `admin_cert`, which frpc reads.
-    pub fn admin_key(&self) -> PathBuf {
-        self.secrets_dir.join("admin.key")
-    }
-
-    /// Where `run` records the port of frpc's admin API, which `status` reads. It holds no secret.
-    pub fn admin_port_file(&self) -> PathBuf {
-        self.log_dir.join(ADMIN_PORT_FILE)
+    /// frpc's log, which the supervisor writes and `logs` and `status` read.
+    pub fn frpc_log(&self) -> PathBuf {
+        self.log_dir.join(LOG_FRPC)
     }
 
     /// Paths for tests: fixed names under `root`, and no link.

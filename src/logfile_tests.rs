@@ -7,8 +7,8 @@ fn unix_resolves_iana_zone_names() {
         .expect("Europe/Berlin is not found: is the system's tzdata installed?");
 }
 
-/// Logs are 0644 so that, under a service's default umask, anyone on the machine can read them. The umask is
-/// process-wide, so the test re-runs itself in a child under `umask 000`.
+/// Logs are 0644 so that anyone on the machine can read them, whatever the service's umask. The umask is
+/// process-wide, so the test re-runs itself in a child under `umask 077`.
 #[cfg(unix)]
 #[test]
 fn log_files_are_created_0644() {
@@ -30,7 +30,7 @@ fn log_files_are_created_0644() {
 
     let dir = tempfile::tempdir().unwrap();
     let status = Command::new("sh")
-        .args(["-c", "umask 000; exec \"$0\" log_files_are_created_0644"])
+        .args(["-c", "umask 077; exec \"$0\" log_files_are_created_0644"])
         .arg(std::env::current_exe().unwrap())
         .env(CHILD, dir.path())
         .status()

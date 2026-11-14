@@ -82,8 +82,3 @@ fn config_rejects_port_0_and_65536() {
 fn config_accepts_utf8_bom() {
     Config::parse(&format!("\u{feff}{OK}")).unwrap();
 }
-
-#[test]
-fn config_has_no_admin_port_key() {
-    assert!(error(&format!("{OK}admin_port: 7777\n")).contains("admin_port"));
-}

@@ -114,15 +114,24 @@ impl Active {
     }
 }
 
-/// Opens `path` for appending, created if missing. A new file gets mode 0644 less the umask.
+/// Opens `path` for appending, created if missing. On Unix the file is mode 0644 whatever the umask: every local
+/// account may read a log (`logs`, `status`), and nothing secret is in it. On Windows the log directory's ACL, which
+/// `install` sets, gives Everyone read on each new file.
 fn open(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
     options.mode(0o644);
-    options
+    let file = options
         .open(path)
-        .with_context(|| format!("opening {}", path.display()))
+        .with_context(|| format!("opening {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o644))
+            .with_context(|| format!("making {} readable by everyone", path.display()))?;
+    }
+    Ok(file)
 }
 
 /// The local time and its UTC offset in whole minutes, e.g. `2026-11-02T21:04:05+01:00`; `1970-01-01T00:00:00+00:00`

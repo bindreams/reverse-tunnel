@@ -104,7 +104,6 @@ fn tokens_only_in_frpc_env() {
     let env = recorded(&host, "ENV ");
     assert!(env.contains(&"RT_BRIDGE_TOKEN=bridge-secret".to_string()));
     assert!(env.contains(&"RT_HOST_TOKEN=host-secret".to_string()));
-    assert!(env.contains(&"RT_ADMIN_PASSWORD=admin-secret".to_string()));
     assert!(std::env::var_os("RT_BRIDGE_TOKEN").is_none());
     let mut seen = vec![recorded(&host, "ARG ").join(" ")];
     for file in [LOG_SUPERVISOR, LOG_FRPC, "frpc.toml"] {
@@ -143,53 +142,11 @@ fn run_renders_into_the_log_dir_and_leaves_the_config_dir_alone() {
     );
 }
 
-/// `status` finds frpc's admin API at the port in this file, so it must be the one frpc was told.
-#[test]
-fn run_records_the_admin_port_it_renders() {
-    let host = Host::new("record 3 {record}", SSH);
-    host.run(false).unwrap_err();
-
-    let record = fs::read_to_string(host.record()).unwrap();
-    let rendered = record.split_once("TOML\n").unwrap().1;
-    let port = rendered
-        .lines()
-        .find_map(|line| line.strip_prefix("webServer.port = "))
-        .expect("a webServer.port line");
-    assert_ne!(port.parse::<u16>().unwrap(), 0);
-    assert_eq!(fs::read_to_string(host.paths.admin_port_file()).unwrap(), port);
-}
-
-/// `status` only loses what it asks frpc; the tunnel does not depend on the record.
-#[test]
-fn a_port_that_cannot_be_recorded_is_reported_and_frpc_starts() {
-    let host = Host::new("record 3 {record}", SSH);
-    // A directory where the file goes: no write can replace it.
-    fs::create_dir(host.paths.admin_port_file()).unwrap();
-    host.run(false).unwrap_err();
-
-    assert!(
-        fs::read_to_string(host.record()).unwrap().contains(
-            "TOML
-"
-        ),
-        "frpc was not started"
-    );
-    let log = host.log(LOG_SUPERVISOR);
-    assert!(log.contains("frpc-admin.port"), "{log}");
-}
-
 #[test]
 fn missing_token_file_is_refused() {
     let host = Host::new("exit 0", SSH);
     fs::remove_file(host.paths.host_token()).unwrap();
     host.assert_refused("host.token");
-}
-
-#[test]
-fn missing_admin_password_is_refused() {
-    let host = Host::new("exit 0", SSH);
-    fs::remove_file(host.paths.admin_password()).unwrap();
-    host.assert_refused("admin.password");
 }
 
 #[test]

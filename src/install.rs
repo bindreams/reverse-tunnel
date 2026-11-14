@@ -17,7 +17,6 @@ use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
 use crate::account::{self, Account};
-use crate::admin;
 use crate::client;
 #[cfg(target_os = "linux")]
 use crate::command;
@@ -864,14 +863,14 @@ fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> R
     }
 }
 
-/// Creates the directories and writes `config.yaml`, `bridge.pem`, the two tokens, the admin password and the admin
-/// API's key pair, each with its final mode and owner. A first run writes `config.yaml`, `secrets/host.token`,
-/// `secrets/admin.password` and the pair (`secrets/admin.crt`, `secrets/admin.key`), all create-new; a pair missing
-/// either file is made anew. With `join`, every run rewrites the `bridge:` line, `bridge.pem` and
-/// `secrets/bridge.token`. Whether any file changed.
+/// Creates the directories and writes `config.yaml`, `bridge.pem` and the two tokens, each with its final mode and
+/// owner. A first run writes `config.yaml` and `secrets/host.token`, both create-new; with `join`, every run
+/// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
     let secret = Perm::new(0o640).group(*account);
     make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
+    // Readable by everyone, as the logs in it are (`logfile::open`): `logs` and `status` show them to any account, and
+    // nothing secret is in them.
     make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))?;
 
     let config = paths.config_file();
@@ -899,29 +898,14 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
         changed |= replace_if_changed(Some(paths), &paths.bridge_token(), token, secret, Replace::Always)?;
     }
 
-    // Each is made once, at random, and kept.
-    for file in [paths.host_token(), paths.admin_password()] {
-        if !file.try_exists()? {
-            let secret_text = format!("{}\n", hex_of_random_bytes::<32>()?);
-            mark_pending(paths)?;
-            changed |= write_atomic(&file, secret_text.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
-        }
-    }
-    if !paths.admin_cert().try_exists()? || !paths.admin_key().try_exists()? {
-        let pair = admin::generate()?;
+    let host_token = paths.host_token();
+    if !host_token.try_exists()? {
+        let token = format!("{}\n", hex_of_random_bytes::<32>()?);
         mark_pending(paths)?;
-        write_atomic(&paths.admin_key(), pair.key.as_bytes(), secret, Replace::Always)?;
-        write_atomic(&paths.admin_cert(), pair.cert.as_bytes(), secret, Replace::Always)?;
-        changed = true;
+        changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
     }
     // A file left by an earlier account keeps that account's group, whatever its content.
-    for file in [
-        paths.host_token(),
-        paths.bridge_token(),
-        paths.admin_password(),
-        paths.admin_cert(),
-        paths.admin_key(),
-    ] {
+    for file in [paths.host_token(), paths.bridge_token()] {
         open_file(&file, secret, false)?;
     }
     Ok(changed)

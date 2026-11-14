@@ -447,18 +447,6 @@ fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().mode() & 0o7777
 }
 
-/// The files of `secrets/`.
-#[cfg(unix)]
-fn secrets(paths: &Paths) -> [PathBuf; 5] {
-    [
-        paths.bridge_token(),
-        paths.host_token(),
-        paths.admin_password(),
-        paths.admin_cert(),
-        paths.admin_key(),
-    ]
-}
-
 /// The modes, the owners and the access the installation is specified to give.
 #[cfg(unix)]
 fn assert_installed_as_specified(machine: &Machine) {
@@ -475,16 +463,13 @@ fn assert_installed_as_specified(machine: &Machine) {
         (paths.secrets_dir.clone(), secrets_dir_mode),
         (machine.paths.bridge_token(), 0o640),
         (machine.paths.host_token(), 0o640),
-        (machine.paths.admin_password(), 0o640),
-        (machine.paths.admin_cert(), 0o640),
-        (machine.paths.admin_key(), 0o640),
         (paths.bin_dir.clone(), 0o755),
         (service::exe(paths), 0o755),
     ];
     for (path, mode) in expected {
         assert_eq!(mode_of(&path), mode, "mode of {}", path.display());
     }
-    for token in secrets(paths) {
+    for token in [paths.bridge_token(), paths.host_token()] {
         let meta = fs::metadata(&token).unwrap();
         assert_eq!(
             (meta.uid(), meta.gid()),
@@ -514,7 +499,7 @@ fn assert_installed_as_specified(machine: &Machine) {
         !machine.probe("ls", &paths.secrets_dir),
         "secrets/ can be listed by another user"
     );
-    for token in secrets(paths) {
+    for token in [paths.bridge_token(), paths.host_token()] {
         assert!(
             !machine.probe("cat", &token),
             "{} is readable by another user",
@@ -524,6 +509,15 @@ fn assert_installed_as_specified(machine: &Machine) {
 
     // frpc runs only after the supervisor read both tokens, which it does as the service account.
     assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
+    // `logs` and `status` show the logs to every account.
+    for log in [reverse_tunnel::paths::LOG_SUPERVISOR, reverse_tunnel::paths::LOG_FRPC] {
+        let log = paths.log_dir.join(log);
+        assert!(
+            machine.probe("cat", &log),
+            "{} is not readable by everyone",
+            log.display()
+        );
+    }
 }
 
 #[test]
@@ -532,26 +526,6 @@ fn install_then_service_running() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     assert_eq!(machine.status().state, State::Running);
-}
-
-/// `status` asks the installed service's frpc, whose admin API listens on loopback with the generated password; no
-/// bridge answers at this domain, so frpc has not logged in.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-fn status_asks_frpc_and_finds_no_bridge() {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-    machine.wait_for_frpc();
-    let mut text = String::new();
-    wait_until("frpc's admin API answers", || {
-        let out = Command::new(BIN).arg("status").output().unwrap();
-        assert!(out.status.success(), "{out:?}");
-        text = String::from_utf8_lossy(&out.stdout).into_owned();
-        !text.contains("frpc did not answer")
-    });
-    assert!(text.contains("bridge: tunnel.example.test (not connected)"), "{text}");
-    let password = fs::read_to_string(machine.paths.admin_password()).unwrap();
-    assert!(!text.contains(password.trim()), "status printed the admin password");
 }
 
 #[test]
@@ -1576,6 +1550,11 @@ fn status_needs_no_elevation() {
     assert!(status.contains("service: running"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
+    assert!(status.contains("frpc log"), "{status}");
+
+    let logs = probe.run(&service::exe(&machine.paths), "logs");
+
+    assert!(logs.status.success(), "logs as an unelevated user: {logs:?}");
 }
 
 #[test]

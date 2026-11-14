@@ -65,6 +65,7 @@ def docker(tmp_path, monkeypatch):
     exe.parent.mkdir()
     exe.write_text(
         '#!/bin/sh\necho "$@" >> "$0.log"\n'
+        'if [ -n "$FAKE_HANG" ]; then while :; do :; done; fi\n'
         'echo "$FAKE_STDOUT"\necho "$FAKE_STDERR" >&2\nexit "${FAKE_EXIT:-0}"\n'
     )
     exe.chmod(0o755)
@@ -654,5 +655,14 @@ def test_frps_clients_says_when_frps_did_not_answer(docker, tmp_path, monkeypatc
     monkeypatch.setenv("FAKE_EXIT", "1")
     monkeypatch.setenv("FAKE_STDERR", stderr)
     with pytest.raises(compose.DockerError, match="frps did not answer within 10 s") as raised:
+        compose.frps_clients(tmp_path)
+    assert not isinstance(raised.value, compose.FrpsApiMissing)
+
+
+def test_frps_clients_gives_up_on_a_docker_that_hangs(docker, tmp_path, monkeypatch):
+    """`wget -T` bounds only `wget`: a `docker compose exec` that never returns is stopped by the caller's limit."""
+    monkeypatch.setenv("FAKE_HANG", "1")
+    monkeypatch.setattr(compose, "EXEC_WITHIN", 1)
+    with pytest.raises(compose.DockerError, match="frps did not answer within 1 s") as raised:
         compose.frps_clients(tmp_path)
     assert not isinstance(raised.value, compose.FrpsApiMissing)

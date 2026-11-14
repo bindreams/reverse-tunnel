@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -28,16 +28,12 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Config;
 use crate::download::Tools;
-use crate::files::{Perm, Replace, read_secret, write_atomic};
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT};
-use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::paths::{FRPC_CONFIG, LOG_SUPERVISOR, Paths};
 
-/// Any valid port: `frpc verify` reads the ports but does not connect to them.
+/// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
-
-/// The mode of the recorded admin port.
-const RECORDED: Perm = Perm::new(0o644);
 
 /// How long a client has to finish the WebSocket handshake.
 const HANDSHAKE_WITHIN: Duration = Duration::from_secs(60);
@@ -51,7 +47,7 @@ struct Setup<'a> {
     paths: &'a Paths,
     tools: &'a Tools,
     /// The environment frpc reads its tokens from.
-    tokens: [(&'static str, String); 3],
+    tokens: [(&'static str, String); 2],
 }
 
 impl Setup<'_> {
@@ -86,9 +82,8 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
         paths,
         tools,
         tokens: [
-            ("RT_BRIDGE_TOKEN", read_secret(&paths.bridge_token())?),
-            ("RT_HOST_TOKEN", read_secret(&paths.host_token())?),
-            ("RT_ADMIN_PASSWORD", read_secret(&paths.admin_password())?),
+            ("RT_BRIDGE_TOKEN", token(&paths.bridge_token())?),
+            ("RT_HOST_TOKEN", token(&paths.host_token())?),
         ],
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -96,28 +91,24 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
         return runtime.block_on(check(&setup));
     }
     let log = LogFile::open(paths.log_dir.join(LOG_SUPERVISOR), ROTATE_AT)?;
-    let frpc_log = LogFile::open(paths.log_dir.join(LOG_FRPC), ROTATE_AT)?;
+    let frpc_log = LogFile::open(paths.frpc_log(), ROTATE_AT)?;
     let Err(err) = runtime.block_on(supervise(&setup, listen, &log, frpc_log));
     log.line(format_args!("{err:#}"));
     Err(err)
 }
 
-/// A port on loopback that nothing holds now, for frpc's admin API: binds port 0, reads the port and releases it.
-///
-/// Another program can take the port before frpc binds it. frpc cannot take over a bound port: it exits, so `run`
-/// fails, and the service manager's restart of `run` picks another port. The host's local accounts are trusted not to
-/// take the tunnel down this way; what they cannot do is read the password or the config through that port, because
-/// `status` sends the password only to the listener that holds the admin certificate's key (`admin`).
-fn free_loopback_port() -> Result<u16> {
-    let socket = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).context("picking a port for frpc's admin API")?;
-    Ok(socket.local_addr()?.port())
+/// A token file's text without surrounding whitespace, which must not be empty.
+fn token(path: &Path) -> Result<String> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    ensure!(!text.trim().is_empty(), "{} is empty", path.display());
+    Ok(text.trim().to_string())
 }
 
-/// Renders frpc.toml for the WebSocket listener's `ws_port` and the admin API's `admin_port` into `dir` and returns
-/// its path. It holds no secret: frpc reads the tokens from its environment.
-fn render_config(setup: &Setup<'_>, ws_port: u16, admin_port: u16, dir: &Path) -> Result<PathBuf> {
+/// Renders frpc.toml for `port` into `dir` and returns its path. It holds no secret: frpc reads the tokens from its
+/// environment.
+fn render_config(setup: &Setup<'_>, port: u16, dir: &Path) -> Result<PathBuf> {
     let config = dir.join(FRPC_CONFIG);
-    fs::write(&config, render(&setup.cfg, ws_port, admin_port, setup.paths))
+    fs::write(&config, render(&setup.cfg, port, setup.paths))
         .with_context(|| format!("writing {}", config.display()))?;
     Ok(config)
 }
@@ -127,7 +118,7 @@ async fn check(setup: &Setup<'_>) -> Result<ExitCode> {
     // A temp dir, not the log dir: as root the check would leave files there that the service account cannot overwrite,
     // and as the account it would overwrite the running service's frpc.toml.
     let dir = tempfile::tempdir()?;
-    let config = render_config(setup, CHECK_PORT, CHECK_PORT, dir.path())?;
+    let config = render_config(setup, CHECK_PORT, dir.path())?;
     let status = setup.frpc(&["verify"], &config).status().await;
     let status = status.with_context(|| format!("starting {}", setup.tools.frpc.display()))?;
     ensure!(status.success(), "frpc verify rejected the configuration: {status}");
@@ -141,15 +132,7 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
         .with_context(|| format!("binding the WebSocket listener on {listen}"))?;
     // The log dir is the one directory the service account may write. A stopped `run` cannot clean up after itself
     // (the service manager kills it), so every start overwrites the same file.
-    let admin_port = free_loopback_port()?;
-    let config = render_config(setup, listener.local_addr()?.port(), admin_port, &setup.paths.log_dir)?;
-    // For `status`, which has no other way to find the port. No secret: anyone may read it. Only `status` depends on it,
-    // so a failure is reported and frpc starts.
-    let recorded = setup.paths.admin_port_file();
-    let written = write_atomic(&recorded, admin_port.to_string().as_bytes(), RECORDED, Replace::Always);
-    if let Err(err) = written.with_context(|| format!("writing {}", recorded.display())) {
-        log.line(format_args!("{err:#}"));
-    }
+    let config = render_config(setup, listener.local_addr()?.port(), &setup.paths.log_dir)?;
 
     let mut frpc = setup.frpc(&[], &config);
     frpc.stdin(Stdio::null())?

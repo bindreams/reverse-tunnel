@@ -257,13 +257,7 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     let has_no_access = |path: &Path, sid: &str| {
         assert_eq!(rights(path, sid), 0, "{sid} has access to {}", path.display());
     };
-    let tokens = [
-        machine.paths.bridge_token(),
-        machine.paths.host_token(),
-        machine.paths.admin_password(),
-        machine.paths.admin_cert(),
-        machine.paths.admin_key(),
-    ];
+    let tokens = [machine.paths.bridge_token(), machine.paths.host_token()];
 
     for public in [paths.config_dir.clone(), paths.config_file(), paths.bridge_pem()] {
         is(&public, SYSTEM, FULL);
@@ -274,7 +268,7 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     is(&paths.log_dir, EVERYONE, READ_EXECUTE);
     may_not_write(&paths.log_dir, EVERYONE);
     is(&paths.log_dir, &service_sid, MODIFY);
-    for secret in std::iter::once(&paths.secrets_dir).chain(&tokens) {
+    for secret in [&paths.secrets_dir, &tokens[0], &tokens[1]] {
         is(secret, SYSTEM, FULL);
         is(secret, ADMINISTRATORS, FULL);
         is(secret, &service_sid, READ_EXECUTE);
@@ -305,6 +299,10 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     }
     // frpc runs only after the supervisor read both tokens, which it does as the service account.
     assert!(machine.wait_for_frpc().iter().all(|frpc| frpc.owner == service_owner()));
+    // `logs` and `status` show the logs to every account.
+    for log in [reverse_tunnel::paths::LOG_SUPERVISOR, reverse_tunnel::paths::LOG_FRPC] {
+        is(&paths.log_dir.join(log), EVERYONE, READ_EXECUTE);
+    }
 }
 
 /// A job object that kills every process in it when its handle closes, as an OpenSSH session's does.

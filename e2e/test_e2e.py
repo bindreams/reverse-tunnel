@@ -401,10 +401,11 @@ def test_ssh_through_proxycommand(stack, registered):
 
 
 def test_status_and_list_show_the_host_connected(stack, registered, other):
-    """The host's `status` (frpc's admin API, as root) and the bridge's `ctl list` (frps's API) both say it is up."""
-    connected = f"bridge: {T} (connected)"
-    status = wait_until(lambda: connected in (text := run("sudo", INSTALLED, "status").stdout) and text)
-    assert "published ssh: running" in status and "published web: running" in status, status
+    """The host's `status` ends with frpc's log, which says it logged in, `logs` shows the same, and the bridge's
+    `ctl list` (frps's API) says the host is up."""
+    login = "login to server success"
+    wait_until(lambda: login in run(INSTALLED, "status").stdout)
+    assert login in run(INSTALLED, "logs", "-n", "5").stdout
     online = rf"^presence {HOST} online since \d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d UTC$"
     listing = wait_until(lambda: re.search(online, text := stack.ctl("list"), re.M) and text)
     # OTHER is registered, and no frpc runs for it.
