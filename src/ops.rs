@@ -1,5 +1,5 @@
 //! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
-//! user may read. Nothing here reads `secrets_dir`.
+//! user may read. Only `status` reads `secrets_dir`, for the admin password, and does without it where it may not.
 
 use std::fs;
 use std::io::Write;
@@ -16,6 +16,7 @@ use goetia::spec::Id;
 use sha2::{Digest, Sha256};
 
 use crate::account;
+use crate::admin::{self, Tunnel};
 use crate::command;
 use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
@@ -203,7 +204,7 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
     }
 }
 
-/// Never prints a token.
+/// Never prints a secret. The `bridge:` line says whether frpc is logged in, as frpc says it.
 pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     let state = manager.status(&service::id())?;
     let word = match state.state {
@@ -227,7 +228,12 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     )?;
 
     let config = Config::load(&paths.config_file())?;
-    writeln!(out, "host: {}\nbridge: {}", config.host, config.bridge)?;
+    writeln!(out, "host: {}", config.host)?;
+    let tunnel = match state.state {
+        State::Running => admin::tunnel(&config, paths),
+        _ => Tunnel::Unknown("the service is not running".into()),
+    };
+    write!(out, "{}", admin::describe(&config.bridge, &tunnel))?;
     let pem_path = paths.bridge_pem();
     let pem = fs::read_to_string(&pem_path).with_context(|| format!("reading {}", pem_path.display()))?;
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {

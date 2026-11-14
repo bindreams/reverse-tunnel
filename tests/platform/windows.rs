@@ -257,7 +257,11 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     let has_no_access = |path: &Path, sid: &str| {
         assert_eq!(rights(path, sid), 0, "{sid} has access to {}", path.display());
     };
-    let tokens = [machine.paths.bridge_token(), machine.paths.host_token()];
+    let tokens = [
+        machine.paths.bridge_token(),
+        machine.paths.host_token(),
+        machine.paths.admin_password(),
+    ];
 
     for public in [paths.config_dir.clone(), paths.config_file(), paths.bridge_pem()] {
         is(&public, SYSTEM, FULL);
@@ -268,7 +272,7 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     is(&paths.log_dir, EVERYONE, READ_EXECUTE);
     may_not_write(&paths.log_dir, EVERYONE);
     is(&paths.log_dir, &service_sid, MODIFY);
-    for secret in [&paths.secrets_dir, &tokens[0], &tokens[1]] {
+    for secret in [&paths.secrets_dir, &tokens[0], &tokens[1], &tokens[2]] {
         is(secret, SYSTEM, FULL);
         is(secret, ADMINISTRATORS, FULL);
         is(secret, &service_sid, READ_EXECUTE);

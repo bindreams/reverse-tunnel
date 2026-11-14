@@ -10,6 +10,9 @@ use serde::de::{Deserializer, Error, MapAccess, Visitor};
 /// The frps control port, TCP and UDP; shared with `server/compose.yaml`.
 pub const CONTROL_PORT: u16 = 7000;
 
+/// The port of frpc's admin API on `127.0.0.1`, unless `config.yaml` names another.
+pub const ADMIN_PORT: u16 = 7400;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -17,6 +20,8 @@ pub struct Config {
     /// The tunnel domain T.
     pub bridge: String,
     pub default: Option<String>,
+    /// Where frpc's admin API listens on `127.0.0.1` (default `ADMIN_PORT`). frpc does not start when it is taken.
+    pub admin_port: Option<u16>,
     #[serde(deserialize_with = "unique_services")]
     pub services: BTreeMap<String, Service>,
 }
@@ -36,6 +41,10 @@ pub enum Kind {
 }
 
 impl Config {
+    pub fn admin_port(&self) -> u16 {
+        self.admin_port.unwrap_or(ADMIN_PORT)
+    }
+
     pub fn load(path: &Path) -> Result<Config> {
         let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Config::parse(&text).with_context(|| format!("in {}", path.display()))
@@ -55,6 +64,7 @@ impl Config {
             ensure!(valid_label(name), "service name {name:?} is not a valid name");
             ensure!(service.port != 0, "service {name:?}: port must be 1 to 65535");
         }
+        ensure!(cfg.admin_port != Some(0), "admin_port must be 1 to 65535");
         if let Some(default) = &cfg.default {
             ensure!(
                 cfg.services.contains_key(default),

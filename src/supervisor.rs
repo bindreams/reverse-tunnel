@@ -47,7 +47,7 @@ struct Setup<'a> {
     paths: &'a Paths,
     tools: &'a Tools,
     /// The environment frpc reads its tokens from.
-    tokens: [(&'static str, String); 2],
+    tokens: [(&'static str, String); 3],
 }
 
 impl Setup<'_> {
@@ -84,6 +84,7 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
         tokens: [
             ("RT_BRIDGE_TOKEN", token(&paths.bridge_token())?),
             ("RT_HOST_TOKEN", token(&paths.host_token())?),
+            ("RT_ADMIN_PASSWORD", token(&paths.admin_password())?),
         ],
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -97,7 +98,7 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
     Err(err)
 }
 
-/// A token file's text without surrounding whitespace, which must not be empty.
+/// A secret file's text without surrounding whitespace, which must not be empty.
 fn token(path: &Path) -> Result<String> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     ensure!(!text.trim().is_empty(), "{} is empty", path.display());

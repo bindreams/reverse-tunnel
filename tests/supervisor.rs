@@ -104,6 +104,7 @@ fn tokens_only_in_frpc_env() {
     let env = recorded(&host, "ENV ");
     assert!(env.contains(&"RT_BRIDGE_TOKEN=bridge-secret".to_string()));
     assert!(env.contains(&"RT_HOST_TOKEN=host-secret".to_string()));
+    assert!(env.contains(&"RT_ADMIN_PASSWORD=admin-secret".to_string()));
     assert!(std::env::var_os("RT_BRIDGE_TOKEN").is_none());
     let mut seen = vec![recorded(&host, "ARG ").join(" ")];
     for file in [LOG_SUPERVISOR, LOG_FRPC, "frpc.toml"] {
@@ -147,6 +148,13 @@ fn missing_token_file_is_refused() {
     let host = Host::new("exit 0", SSH);
     fs::remove_file(host.paths.host_token()).unwrap();
     host.assert_refused("host.token");
+}
+
+#[test]
+fn missing_admin_password_is_refused() {
+    let host = Host::new("exit 0", SSH);
+    fs::remove_file(host.paths.admin_password()).unwrap();
+    host.assert_refused("admin.password");
 }
 
 #[test]

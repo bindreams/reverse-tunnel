@@ -13,7 +13,7 @@ pub struct Paths {
     pub bin_dir: PathBuf,
     /// `config.yaml` and `bridge.pem`, readable by everyone.
     pub config_dir: PathBuf,
-    /// `bridge.token` and `host.token`, readable by administrators and the service account.
+    /// `bridge.token`, `host.token` and `admin.password`, readable by administrators and the service account.
     pub secrets_dir: PathBuf,
     pub log_dir: PathBuf,
     /// Held by `install` and `uninstall` for their whole run. No removal touches it. On Windows, the name of a mutex,
@@ -39,6 +39,11 @@ impl Paths {
 
     pub fn host_token(&self) -> PathBuf {
         self.secrets_dir.join("host.token")
+    }
+
+    /// The password of frpc's admin API (`admin::USER`), which `status` reads.
+    pub fn admin_password(&self) -> PathBuf {
+        self.secrets_dir.join("admin.password")
     }
 
     /// Paths for tests: fixed names under `root`, and no link.

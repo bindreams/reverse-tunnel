@@ -46,7 +46,29 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(text.contains("tunnel.example.test"), "{text}");
     assert!(text.contains(FINGERPRINT), "{text}");
     assert!(text.contains("stopped"), "{text}");
+    assert!(
+        text.contains("bridge: tunnel.example.test (not checked: the service is not running)"),
+        "{text}"
+    );
     assert!(!text.contains("secret"), "{text}");
+}
+
+/// A running service whose frpc cannot be asked (no admin password here) is shown as it is, not as an error.
+#[test]
+fn status_of_a_running_service_says_when_it_could_not_ask_frpc() {
+    let (_dir, paths) = host();
+    let manager = Fake::default();
+    let spec = service::spec(&service::exe(&paths)).unwrap();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+
+    let text = status_text(&manager, &paths);
+
+    assert!(text.contains("service: running"), "{text}");
+    assert!(
+        text.contains("bridge: tunnel.example.test (not checked: reading"),
+        "{text}"
+    );
 }
 
 /// A host whose installed binary is a copy of `stub-frpc` in its `check` mode (`testbin/stub_frpc.rs`), which stands

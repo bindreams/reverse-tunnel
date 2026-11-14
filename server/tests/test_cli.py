@@ -27,6 +27,7 @@ CHILD = """
 import sys
 from ctl import cli, compose
 compose.compose_up = lambda folder, build=False: False
+compose.frps_online = lambda folder: {}
 compose.network_exists = lambda name: True
 cli.resolve = lambda name: True
 sys.exit(cli.main(sys.argv[1:]))
@@ -40,6 +41,7 @@ def bridge(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     reloads = []
     monkeypatch.setattr(compose, "compose_up", lambda folder, build=False: reloads.append((folder, build)) or False)
+    monkeypatch.setattr(compose, "frps_online", lambda folder: {})
     monkeypatch.setattr(compose, "network_exists", lambda name: True)
     monkeypatch.setattr(cli, "resolve", lambda name: True)
     return reloads
@@ -287,6 +289,8 @@ def test_init_edits_env_in_place(bridge):
     env = dotenv_values(".env")
     assert Path(".env").read_text().startswith(original + "\n")
     assert re.fullmatch("[0-9a-f]{64}", env.pop("FRPS_TOKEN"))
+    assert re.fullmatch("[0-9a-f]{16}", env.pop("FRPS_API_USER"))
+    assert re.fullmatch("[0-9a-f]{64}", env.pop("FRPS_API_PASSWORD"))
     assert env == {"TUNNEL_DOMAIN": T, "OTHER": "1", "COMPOSE_FILE": "compose.yaml:compose.generated.yaml"}
     assert Path(".env").stat().st_mode & 0o777 == 0o600  # it holds the frps token
 
@@ -501,3 +505,51 @@ def test_failed_registry_write_prints_nothing(inited, monkeypatch, capsys):
 def test_cert_is_valid_from_yesterday():
     cert = x509.load_pem_x509_certificate(certs.make_cert(T)[0].encode())
     assert cert.not_valid_before_utc < datetime.now(UTC) - timedelta(hours=23)
+
+
+def test_list_says_which_hosts_are_online_and_since_when(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+    cli.main(["add", "db", H2])
+    monkeypatch.setattr(compose, "frps_online", lambda folder: {"web": 86400, "stranger": 5})
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"host db {H2} offline",
+        f"host web {H} online since 1970-01-02 00:00:00 UTC",
+    ]
+
+
+def test_list_asks_frps_after_the_bring_up(inited, monkeypatch):
+    calls = []
+    monkeypatch.setattr(compose, "compose_up", lambda folder, build=False: calls.append("up") or False)
+    monkeypatch.setattr(compose, "frps_online", lambda folder: calls.append("ask") or {})
+    assert cli.main(["list"]) == 0
+    assert calls == ["up", "ask"]
+
+
+def test_list_without_an_answer_from_frps_says_unknown_and_why(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+
+    def unreachable(folder):
+        raise compose.DockerError("frps's API did not answer")
+
+    monkeypatch.setattr(compose, "frps_online", unreachable)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    out, err = capsys.readouterr()
+    assert out == f"host web {H} unknown\n"
+    assert "could not ask frps who is online: frps's API did not answer" in err and "--build reverse-tunnel-frps" in err
+
+
+def test_frps_online_asks_the_plugin_container(docker, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_STDOUT", '{"web": 86400}')
+    assert compose.frps_online(tmp_path) == {"web": 86400}
+    base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml"
+    assert Path(f"{docker}.log").read_text().splitlines() == [
+        f"{base} exec -T reverse-tunnel-plugin python -m ctl.frps"
+    ]
+
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    monkeypatch.setenv("FAKE_STDERR", "frps's API did not answer")
+    with pytest.raises(OSError, match="frps's API did not answer"):
+        compose.frps_online(tmp_path)

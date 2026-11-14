@@ -39,6 +39,7 @@ impl Host {
         fs::write(paths.config_file(), config).unwrap();
         fs::write(paths.bridge_token(), "bridge-secret\n").unwrap();
         fs::write(paths.host_token(), "host-secret\r\n").unwrap();
+        fs::write(paths.admin_password(), "admin-secret\n").unwrap();
         let frpc = paths.bin_dir.join(format!("frpc{EXE_SUFFIX}"));
         copy_stub(&frpc);
         let record = root.join("record");

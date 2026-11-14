@@ -62,6 +62,10 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
   neighbouring entry when `ctl` adds or removes one; a comment at the end of an entry's line stays with it.
 - If the plugin is down, connected tunnels keep running, and logins and new names are refused until it is back.
 - `ctl revoke` does not cut the host's current session; it prints the command that does.
+- frps's API (port 7500, user and password from `.env`) is not published; `uv run ctl list` asks it through the plugin
+  container. A frps container created before the API existed lacks it: `ctl list` then says `unknown`, and
+  `docker compose up -d --build reverse-tunnel-frps` adds it, dropping every tunnel. Any container on `gateway` can
+  reach the API, with the password.
 - Services behind frps always see `X-Forwarded-Proto: http`, even over HTTPS.
 
 ## Layout
@@ -76,7 +80,7 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 | `ctl/`, `pyproject.toml`, `uv.lock` | the plugin and `uv run ctl` |
 | `tls/` | `frps.crt`, `frps.key`, and `trust.pem`, the certificates hosts trust |
 | `state/` | `hosts.yaml` and `aliases.yaml`, the registries |
-| `.env` | `TUNNEL_DOMAIN`, `FRPS_TOKEN`, `COMPOSE_FILE` |
+| `.env` | `TUNNEL_DOMAIN`, `FRPS_TOKEN`, `FRPS_API_USER`, `FRPS_API_PASSWORD`, `COMPOSE_FILE` |
 
 `tls/`, `state/`, `.env` and `compose.generated.yaml` are gitignored.
 

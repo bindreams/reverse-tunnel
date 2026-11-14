@@ -12,3 +12,9 @@ name = "reverse-tunnel-plugin"
 addr = "reverse-tunnel-plugin:9000"
 path = "/handler"
 ops = ["Login", "NewProxy"]
+
+# The admin API: `ctl list` asks it through the plugin container. Not in compose.yaml's `ports`.
+webServer.addr = "0.0.0.0"
+webServer.port = 7500
+webServer.user = "{{ .Envs.FRPS_API_USER }}"
+webServer.password = "{{ .Envs.FRPS_API_PASSWORD }}"

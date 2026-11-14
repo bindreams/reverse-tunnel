@@ -104,6 +104,7 @@ pub fn opens(paths: &Paths, exe: &Path, frpc: &Path) -> Vec<Need> {
         Need::of(paths.bridge_pem(), READ),
         Need::of(paths.bridge_token(), READ),
         Need::of(paths.host_token(), READ),
+        Need::of(paths.admin_password(), READ),
         Need {
             files: Some(NEW_FILE),
             ..Need::of(logs.clone(), MAKE_FILES)

@@ -124,7 +124,8 @@ can.
 uv run ctl alias movies.yourdomain.tld jellyfin.myhost.tunnel.example.com
 ```
 
-`uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts and aliases.
+`uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts, each `online` (since when) or
+`offline` at the bridge, and the aliases.
 
 ### Jellyfin
 
@@ -150,7 +151,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 
 | Command | What it does |
 |---|---|
-| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain, and which bridge it trusts: one `certificate:` line per certificate in `bridge.pem`, two during a rotation. No `sudo`. |
+| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain with whether frpc is connected to it and what each published service is doing, and which bridge it trusts: one `certificate:` line per certificate in `bridge.pem`, two during a rotation. Asking frpc needs `sudo` (an elevated prompt on Windows); without it, `status` says that it did not ask. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
 | `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then restarts the service so it reads it again. Works over the tunnel. |
@@ -166,9 +167,14 @@ to run are in [server/README.md](server/README.md#rotating-the-certificate).
 ```
 service: running (pid 1234), enabled at boot
 host: myhost
-bridge: tunnel.example.com
+bridge: tunnel.example.com (connected)
+published ssh: running
 certificate: SHA-256 AB:CD:...
 ```
+
+frpc's admin API answers on `127.0.0.1:7400` only, with a password that `install` generates in `secrets/admin.password`.
+If another program holds that port, frpc does not start: set `admin_port:` in `config.yaml` to a free one, then
+`sudo reverse-tunnel restart`. A bridge that has been unreachable for about 30 seconds shows as `not connected`.
 
 The files:
 

@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     environment:
       FRPS_TOKEN: ${FRPS_TOKEN:?run 'uv run ctl init'}
+      FRPS_API_USER: ${FRPS_API_USER:?run 'uv run ctl init'}
+      FRPS_API_PASSWORD: ${FRPS_API_PASSWORD:?run 'uv run ctl init'}
     ports:
       - "7000:7000/tcp"
       - "7000:7000/udp"
@@ -45,6 +47,9 @@ services:
     init: true  # python as PID 1 ignores SIGTERM
     environment:
       TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:?set TUNNEL_DOMAIN in .env}
+      # For `ctl list`, which asks frps's API through this container (ctl/frps.py).
+      FRPS_API_USER: ${FRPS_API_USER:?run 'uv run ctl init'}
+      FRPS_API_PASSWORD: ${FRPS_API_PASSWORD:?run 'uv run ctl init'}
     volumes:
       # A directory, because os.replace leaves a single-file mount on the old inode.
       - type: bind

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -71,13 +72,18 @@ def _init(env: dict) -> None:
         certs.ensure(domain, TLS)
     except certs.CertError as e:
         raise CtlError(str(e)) from e
-    missing = {"FRPS_TOKEN": secrets.token_hex(32), "COMPOSE_FILE": COMPOSE_FILE}
+    missing = {
+        "FRPS_TOKEN": secrets.token_hex(32),
+        "FRPS_API_USER": secrets.token_hex(8),
+        "FRPS_API_PASSWORD": secrets.token_hex(32),
+        "COMPOSE_FILE": COMPOSE_FILE,
+    }
     lines = [f"{key}={value}\n" for key, value in missing.items() if key not in env]
     if lines:
         text = ENV.read_text()
         if not text.endswith("\n"):
             text += "\n"
-        atomic_write(ENV, (text + "".join(lines)).encode(), 0o600)  # it holds the frps token
+        atomic_write(ENV, (text + "".join(lines)).encode(), 0o600)  # it holds the frps token and API password
     _create(TLS / "trust.pem", (TLS / "frps.crt").read_bytes(), 0o644)
     _create(STATE / "hosts.yaml", b"", 0o644)
     _create(STATE / "aliases.yaml", b"", 0o644)
@@ -110,8 +116,27 @@ def _unalias(args, hosts, aliases, env):
         raise CtlError(f"{args.public} is not an alias")
 
 
+FRPS_API_HINT = (
+    "If frps was created before this version it has no API: `docker compose up -d --build reverse-tunnel-frps` "
+    "recreates it, which drops every tunnel."
+)
+
+
+def _presence(host: str, online: dict[str, int] | None) -> str:
+    if online is None:
+        return "unknown"
+    if host not in online:
+        return "offline"
+    return "online since " + datetime.fromtimestamp(online[host], UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
 def _list(args, hosts, aliases, env):
-    lines = [f"host {host} {digest}" for host, digest in hosts.items()]
+    try:
+        online = compose.frps_online(Path.cwd())
+    except (OSError, ValueError) as e:
+        print(f"ctl: could not ask frps who is online: {e}. {FRPS_API_HINT}", file=sys.stderr)
+        online = None
+    lines = [f"host {host} {digest} {_presence(host, online)}" for host, digest in hosts.items()]
     return "\n".join(lines + [f"alias {public} {backend}" for public, backend in aliases.items()])
 
 
@@ -141,6 +166,9 @@ class Command(NamedTuple):
     arguments: dict[str, str]
     # True for `init`: runs in a folder with no `state/`, and its text prints after the bring-up.
     bootstrap: bool = False
+    # True for `list`: the handler runs after the bring-up, which has made the plugin container it asks. It changes no
+    # registry.
+    late: bool = False
 
 
 COMMANDS = {
@@ -178,7 +206,12 @@ COMMANDS = {
         "Remove a public name that `ctl alias` made.",
         {"public": "the public name, as `ctl list` shows it after `alias`"},
     ),
-    "list": Command(_list, "Show the registered hosts and the aliases.", {}),
+    "list": Command(
+        _list,
+        "Show the registered hosts, each online (since when) or offline at frps, and the aliases.",
+        {},
+        late=True,
+    ),
     "join-code": Command(
         _join_code,
         "Print the join code, which every host needs once: paste it into `reverse-tunnel install` on the host.",
@@ -218,7 +251,7 @@ def _run(args) -> None:
         aliases = _registry(read_aliases, STATE / "aliases.yaml", domain)
         old_hosts = dict(hosts)
         old_aliases = dict(aliases)
-        out = command.handler(args, hosts, aliases, env)
+        out = None if command.late else command.handler(args, hosts, aliases, env)
         if hosts != old_hosts:
             _registry(write_hosts, STATE / "hosts.yaml", hosts)
         if aliases != old_aliases:
@@ -236,6 +269,8 @@ def _run(args) -> None:
                 else "rerun any ctl command to retry"
             )
             raise CtlError(f"{updated}the bridge was not brought up ({e}); {retry}") from e
+        if command.late and (out := command.handler(args, hosts, aliases, env)):
+            print(out)
         if command.bootstrap:
             if frps_kept:
                 print(FRPS_KEPT)

@@ -53,6 +53,22 @@ fn render_transport() {
     }
 }
 
+/// The admin API is on loopback, with the password read from frpc's environment like the tokens.
+#[test]
+fn render_admin_api() {
+    let lines = |yaml: &str| render_yaml(yaml).lines().map(String::from).collect::<Vec<_>>();
+    for line in [
+        "webServer.addr = \"127.0.0.1\"",
+        "webServer.port = 7400",
+        "webServer.user = \"reverse-tunnel\"",
+        "webServer.password = \"{{ .Envs.RT_ADMIN_PASSWORD }}\"",
+    ] {
+        assert!(lines(YAML).contains(&line.to_string()), "missing line {line:?}");
+    }
+    let moved = format!("{YAML}admin_port: 7777\n");
+    assert!(lines(&moved).contains(&"webServer.port = 7777".to_string()));
+}
+
 #[test]
 fn render_http_service() {
     let table = proxy(&render_yaml(YAML), "jellyfin");

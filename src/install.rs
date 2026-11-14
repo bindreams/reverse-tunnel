@@ -863,8 +863,9 @@ fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> R
     }
 }
 
-/// Creates the directories and writes `config.yaml`, `bridge.pem` and the two tokens, each with its final mode and
-/// owner. A first run writes `config.yaml` and `secrets/host.token`, both create-new; with `join`, every run
+/// Creates the directories and writes `config.yaml`, `bridge.pem`, the two tokens and the admin password, each with its
+/// final mode and owner. A first run writes `config.yaml`, `secrets/host.token` and `secrets/admin.password`, all
+/// create-new; with `join`, every run
 /// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
     let secret = Perm::new(0o640).group(*account);
@@ -896,14 +897,16 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
         changed |= replace_if_changed(Some(paths), &paths.bridge_token(), token, secret, Replace::Always)?;
     }
 
-    let host_token = paths.host_token();
-    if !host_token.try_exists()? {
-        let token = format!("{}\n", hex_of_random_bytes::<32>()?);
-        mark_pending(paths)?;
-        changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
+    // Each is made once, at random, and kept.
+    for file in [paths.host_token(), paths.admin_password()] {
+        if !file.try_exists()? {
+            let secret_text = format!("{}\n", hex_of_random_bytes::<32>()?);
+            mark_pending(paths)?;
+            changed |= write_atomic(&file, secret_text.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
+        }
     }
     // A file left by an earlier account keeps that account's group, whatever its content.
-    for file in [paths.host_token(), paths.bridge_token()] {
+    for file in [paths.host_token(), paths.bridge_token(), paths.admin_password()] {
         open_file(&file, secret, false)?;
     }
     Ok(changed)
