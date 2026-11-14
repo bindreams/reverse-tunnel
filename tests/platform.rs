@@ -943,6 +943,14 @@ fn a_failed_removal_logs_where_uninstall_says() {
             stderr.contains(&format!("\"{}\" uninstall", image.display())),
             "the error does not name the image as the binary to run: {stderr}"
         );
+        // A removal that failed schedules nothing: after a reboot the image must still be there to run.
+        let name = image.file_name().unwrap();
+        assert!(
+            !windows::deletions_at_reboot()
+                .iter()
+                .any(|file| file.file_name() == Some(name)),
+            "the failed removal's image is scheduled for deletion at the next boot"
+        );
         drop(stuck);
         let mut rerun = Command::new(image);
         rerun.arg("uninstall");
@@ -1457,15 +1465,30 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
 
     assert_uninstalled_by_the_installed_binary(&machine, uninstall);
 
-    // The removal succeeded, so the system is to delete the image it renamed at the next boot, even if the task's sweep
-    // has not. The entry stays after the file is deleted.
+    // The removal succeeded, so the system is to delete, at the next boot, everything that its task still has to: the
+    // image it renamed, the copy and the log, and last the directory that holds them. The entries stay after the files
+    // are deleted, and earlier removals' are there too: look at what this one added.
     let name = binary.file_name().unwrap().to_str().unwrap();
-    let scheduled = windows::deletions_at_reboot();
+    let added: Vec<PathBuf> = windows::deletions_at_reboot()
+        .into_iter()
+        .skip(scheduled_before.len())
+        .collect();
+    let position = |is: &dyn Fn(&Path) -> bool| added.iter().position(|file| is(file));
+    let named =
+        |wanted: PathBuf| move |file: &Path| file.to_string_lossy().eq_ignore_ascii_case(&wanted.to_string_lossy());
+    let dir = machine.paths.bin_dir.with_file_name("reverse-tunnel-uninstall");
+    let positions = [
+        position(&|file| {
+            let leftover = file.file_name().and_then(|file| file.to_str());
+            leftover.is_some_and(|file| schtasks::is_leftover_of(file, name))
+        }),
+        position(&named(dir.join(name))),
+        position(&named(install::removal_log_file(&machine.paths))),
+        position(&named(dir)),
+    ];
     assert!(
-        scheduled
-            .iter()
-            .any(|file| schtasks::is_leftover_of(file, name) && !scheduled_before.contains(file)),
-        "the renamed image is not scheduled for deletion at the next boot: {scheduled:?}"
+        positions.iter().all(Option::is_some) && positions.is_sorted(),
+        "the renamed image, the copy, the log and the directory are not all scheduled for deletion, in that order: {added:?}"
     );
 }
 

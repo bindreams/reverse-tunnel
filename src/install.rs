@@ -233,6 +233,15 @@ fn removal_dir(paths: &Paths) -> PathBuf {
     paths.bin_dir.with_file_name("reverse-tunnel-uninstall")
 }
 
+/// Windows: the copy of the binary that the removal runs, in `removal_dir`, named as the installed binary is whatever the
+/// binary that started the removal is called.
+#[cfg(windows)]
+fn removal_copy(paths: &Paths) -> Result<PathBuf> {
+    let name = service::exe(paths);
+    let name = name.file_name().context("the installed binary has no file name")?;
+    Ok(removal_dir(paths).join(name))
+}
+
 /// How a waited-for removal ended, when it could be waited for.
 enum WaitOutcome {
     Ended,
@@ -315,10 +324,10 @@ fn removal_outcome(state: TaskState, dir_present: bool, leftovers: &Path) -> Opt
         TaskState::Gone => Some(WaitOutcome::Ended),
         TaskState::Ended(1) => failed("the removal's `uninstall --finish` failed".to_string()),
         TaskState::Ended(4) => Some(WaitOutcome::LeftBehind(format!(
-            "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`, and the \
-             files {} by hand",
-            schtasks::REMOVAL,
-            leftovers.display()
+            "the removal is done, and Windows is asked to delete the files that remain (the removal's copy and log, and \
+             {}) at the next boot, but its task is still registered: delete it with `schtasks /Delete /TN {}`",
+            leftovers.display(),
+            schtasks::REMOVAL
         ))),
         TaskState::Ended(code) => failed(format!("the removal's task ended with {code:#x}")),
     }
@@ -398,12 +407,7 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let mut source = fs::File::open(exe).with_context(|| format!("opening {}", exe.display()))?;
     remove_or_rename(&dir, leftovers)?;
     make_dir(&dir, Perm::new(0o700))?;
-    // Named as the installed binary is, whatever `exe` is called.
-    let copy = dir.join(
-        service::exe(paths)
-            .file_name()
-            .context("the installed binary has no file name")?,
-    );
+    let copy = removal_copy(paths)?;
     let mut target = fs::File::create_new(&copy).with_context(|| format!("creating {}", copy.display()))?;
     io::copy(&mut source, &mut target).with_context(|| format!("copying {}", copy.display()))?;
     drop(target);
@@ -491,25 +495,20 @@ fn deleted_dirs(paths: &Paths) -> [PathBuf; 4] {
 /// directories, so short names and case do not matter.
 #[cfg(windows)]
 fn deleted_dir_holding(paths: &Paths, dir: &Path) -> Result<Option<PathBuf>> {
-    let canonical = |path: &Path| {
-        fs::canonicalize(path).map_err(|err| {
-            anyhow::Error::new(err).context(format!(
-                "resolving {} to check whether it is a directory the removal deletes",
-                path.display()
-            ))
-        })
+    let unresolved = |path: &Path, err: io::Error| {
+        anyhow::Error::new(err).context(format!(
+            "resolving {} to check whether it is a directory the removal deletes",
+            path.display()
+        ))
     };
-    let dir = canonical(dir)?;
+    let dir = fs::canonicalize(dir).map_err(|err| unresolved(dir, err))?;
     for deleted in deleted_dirs(paths) {
-        match canonical(&deleted) {
+        match fs::canonicalize(&deleted) {
             Ok(resolved) if dir.starts_with(&resolved) => return Ok(Some(deleted)),
             Ok(_) => {}
             // A directory that is not there holds nothing.
-            Err(err)
-                if err
-                    .downcast_ref::<io::Error>()
-                    .is_some_and(|io| io.kind() == ErrorKind::NotFound) => {}
-            Err(err) => return Err(err),
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(unresolved(&deleted, err)),
         }
     }
     Ok(None)
@@ -592,7 +591,7 @@ pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     #[cfg(windows)]
     {
         system_path::remove(&paths.bin_dir)?;
-        delete_leftovers_at_reboot(paths);
+        delete_the_rest_at_reboot(paths);
     }
     Ok(())
 }
@@ -616,10 +615,9 @@ fn remove_link(paths: &Paths) -> Result<()> {
 
 /// Windows: removes `path` (see `remove_entry`). A running image cannot be deleted, so a regular file directly in `path`
 /// that cannot be is renamed into `leftovers` keeping its name (see `schtasks::leftover_name`); the removal's task
-/// deletes it once it exits (a removal that succeeds also schedules it for deletion at the next boot, see
-/// `delete_leftovers_at_reboot`). A file that can be neither deleted nor
-/// renamed fails the removal naming both errors; directories, junctions and links are never renamed, since the task's
-/// `del` could not delete them.
+/// deletes it once it exits (a removal that succeeds also asks for it to be deleted at the next boot, see
+/// `delete_the_rest_at_reboot`). A file that can be neither deleted nor renamed fails the removal naming both errors;
+/// directories, junctions and links are never renamed, since the task's `del` could not delete them.
 #[cfg(windows)]
 fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     if !fs::symlink_metadata(path).is_ok_and(|entry| entry.is_dir()) {
@@ -636,27 +634,38 @@ fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
     remove_entry(path)
 }
 
-/// Windows: once the removal has succeeded, has the system delete every leftover file at its next boot (see
-/// `remove_or_rename`), in case a reboot comes before the task's sweep ends; scheduling it earlier would delete, after a
-/// failed removal, the renamed binary that the rerun advice names. A failure is printed and does not fail the removal.
+/// Windows: what a removal that has succeeded leaves for its task to delete: the leftover files (see
+/// `remove_or_rename`), the removal's copy and log, and the removal's directory, in the order the system must delete
+/// them, files before their directory. What is not there is left out: `uninstall --finish` can be run without the task.
 #[cfg(windows)]
-fn delete_leftovers_at_reboot(paths: &Paths) {
-    let images = leftover_images(paths).unwrap_or_else(|err| {
-        output::eprintln_best_effort(&format!(
-            "{err:#}: leftover files, if any, are not scheduled for deletion"
-        ));
+fn left_by_the_removal(paths: &Paths) -> Result<Vec<PathBuf>> {
+    let mut left = leftover_images(paths)?;
+    left.extend([removal_copy(paths)?, removal_log_file(paths), removal_dir(paths)]);
+    // A path that cannot be looked up is kept: scheduling it says why.
+    left.retain(|path| path.try_exists().unwrap_or(true));
+    Ok(left)
+}
+
+/// Windows: once the removal has succeeded, has the system delete everything that its task still has to (see
+/// `left_by_the_removal`) at the next boot, in case a reboot comes before the task is done; scheduling it earlier would
+/// delete, after a failed removal, the renamed binary that the rerun advice names and the copy it leaves. A failure is
+/// printed and does not fail the removal, so the line may be in a log that the task then deletes.
+#[cfg(windows)]
+fn delete_the_rest_at_reboot(paths: &Paths) {
+    let left = left_by_the_removal(paths).unwrap_or_else(|err| {
+        output::eprintln_best_effort(&format!("{err:#}: nothing is scheduled for deletion at the next boot"));
         Vec::new()
     });
-    for image in images {
-        if let Err(err) = delete_at_reboot(&image) {
+    for path in left {
+        if let Err(err) = delete_at_reboot(&path) {
             output::eprintln_best_effort(&format!(
-                "{err:#}: the file stays after a reboot until it is deleted by hand or by a later removal"
+                "{err:#}: it stays after a reboot until it is deleted by hand or by a later removal"
             ));
         }
     }
 }
 
-/// Windows: has the system delete the file `path` at its next boot.
+/// Windows: has the system delete the file or empty directory `path` at its next boot.
 #[cfg(windows)]
 fn delete_at_reboot(path: &Path) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_DELAY_UNTIL_REBOOT, MoveFileExW};

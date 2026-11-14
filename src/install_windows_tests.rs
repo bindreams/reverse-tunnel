@@ -50,7 +50,7 @@ fn a_removal_that_left_only_its_task_is_done_and_says_how_to_delete_it() {
 
     assert_eq!(
         why,
-        r"the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN reverse-tunnel-uninstall`, and the files C:\.reverse-tunnel.* by hand"
+        r"the removal is done, and Windows is asked to delete the files that remain (the removal's copy and log, and C:\.reverse-tunnel.*) at the next boot, but its task is still registered: delete it with `schtasks /Delete /TN reverse-tunnel-uninstall`"
     );
 }
 
@@ -296,6 +296,34 @@ fn only_the_bin_dir_has_a_running_image_renamed() {
     assert!(
         names.len() == 1 && schtasks::is_leftover_of(&names[0], "a.exe"),
         "{names:?}"
+    );
+}
+
+#[test]
+fn what_the_removal_leaves_is_listed_with_the_files_before_their_directory() {
+    let (dir, paths) = installed();
+    assert_eq!(left_by_the_removal(&paths).unwrap(), Vec::<PathBuf>::new());
+    let first = leftover_in(dir.path(), "a", "frpc-0.1.exe");
+    let second = leftover_in(dir.path(), "b", "reverse-tunnel.exe");
+    fs::create_dir_all(removal_dir(&paths)).unwrap();
+    for file in [
+        &first,
+        &second,
+        &removal_copy(&paths).unwrap(),
+        &removal_log_file(&paths),
+    ] {
+        fs::write(file, "").unwrap();
+    }
+
+    assert_eq!(
+        left_by_the_removal(&paths).unwrap(),
+        [
+            first,
+            second,
+            removal_copy(&paths).unwrap(),
+            removal_log_file(&paths),
+            removal_dir(&paths)
+        ]
     );
 }
 

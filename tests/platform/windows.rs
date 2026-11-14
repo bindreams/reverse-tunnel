@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
 
@@ -279,17 +279,35 @@ impl Drop for Probe {
     }
 }
 
+/// The key under `HKEY_LOCAL_MACHINE` that holds the system's boot-time settings.
+const SESSION_MANAGER: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager";
+
+/// The text of a registry string with its NULs, replacing what is not UTF-16: other programs' values are read, and an
+/// odd one must not stop the test.
+fn registry_text(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
 /// The key that holds the machine's `Path`.
 fn environment() -> RegKey {
     RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(format!(r"{}\Environment", system_path::SESSION_MANAGER))
+        .open_subkey(format!(r"{SESSION_MANAGER}\Environment"))
         .unwrap()
 }
 
 /// The machine's `Path` as stored, unexpanded and without its terminating NULs, with its registry type.
 pub fn machine_path_and_type() -> (String, RegType) {
     let value = environment().get_raw_value("Path").unwrap();
-    (system_path::decode(&value.bytes).unwrap(), value.vtype)
+    (
+        registry_text(&value.bytes).trim_end_matches('\0').to_string(),
+        value.vtype,
+    )
 }
 
 /// The machine's `Path`, as stored: unexpanded.
@@ -297,22 +315,28 @@ fn machine_path() -> String {
     machine_path_and_type().0
 }
 
-/// The file names of what the system deletes at its next boot. The value is a multi-string of source and target
-/// pairs, each source `\??\<path>` (with a `*1` prefix for a long name), a target empty for a deletion.
-pub fn deletions_at_reboot() -> Vec<String> {
-    let session = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(system_path::SESSION_MANAGER)
-        .unwrap();
+/// What the system deletes at its next boot, in the order it deletes it. The value is a multi-string of source and
+/// target pairs, each source `\??\<path>`, a target empty for a deletion; a pair that is not one is another program's
+/// and is skipped.
+pub fn deletions_at_reboot() -> Vec<PathBuf> {
+    let session = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(SESSION_MANAGER).unwrap();
     let value = match session.get_raw_value("PendingFileRenameOperations") {
         Ok(value) => value,
         Err(err) if err.kind() == ErrorKind::NotFound => return Vec::new(),
         Err(err) => panic!("reading PendingFileRenameOperations: {err}"),
     };
-    let text = system_path::decode(&value.bytes).unwrap();
-    text.split('\0')
-        .filter_map(|path| path.rsplit('\\').next())
-        .filter(|name| !name.is_empty())
-        .map(String::from)
+    let text = registry_text(&value.bytes);
+    // Each string ends in a NUL, and the list in one more.
+    let strings: Vec<&str> = text
+        .strip_suffix('\0')
+        .unwrap_or(&text)
+        .split_terminator('\0')
+        .collect();
+    let (pairs, _) = strings.as_chunks::<2>();
+    pairs
+        .iter()
+        .filter(|[_, target]| target.is_empty())
+        .map(|[source, _]| PathBuf::from(source.strip_prefix(r"\??\").unwrap_or(source)))
         .collect()
 }
 
