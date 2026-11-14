@@ -5,7 +5,9 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, ErrorKind};
+#[cfg(windows)]
+use std::io;
+use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
