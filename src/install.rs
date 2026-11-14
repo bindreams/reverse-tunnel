@@ -20,12 +20,12 @@ use crate::account::{self, Account};
 #[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::{Config, valid_label};
-#[cfg(windows)]
-use crate::files::move_aside;
 use crate::files::{
     Perm, Replace, WriteOutcome, hex_of_random_bytes, make_dir, make_missing_dirs, open_file, remove_entry,
     restore_binary, write_atomic,
 };
+#[cfg(windows)]
+use crate::files::{is_regular_file, move_aside};
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
@@ -705,21 +705,17 @@ fn delete_at_reboot(path: &Path) -> Result<()> {
 #[cfg(windows)]
 pub const MOVED_IT_TO: &str = "moved it to";
 
-/// Windows: deletes `path` (see `remove_entry`). A regular file that Windows refuses to delete with access denied,
-/// which a running image gets and which another process holding it open does not (that waits), is renamed into
-/// `leftovers` (see `move_aside`) and its new path returned; a leftover is deleted once it can be. A refused rename is
-/// an error naming `path` and the OS's answer, and nothing is moved. Any other failure is an error, and so is any for
-/// what is not a regular file, which is never moved. Nothing asks whether a process runs `path`: the OS's answer
-/// decides.
+/// Windows: deletes `path` (see `remove_entry`). When Windows refuses with access denied, which a running image gets
+/// and which another process holding it open does not (that waits), `path` is renamed into `leftovers` (see
+/// `move_aside`, which moves only a regular file) and its new path returned; a leftover is deleted once it can be. A
+/// refused rename, or a `path` that is not a regular file, is an error naming `path` and the OS's answer, and nothing
+/// is moved. Any other failure is an error. Nothing asks whether a process runs `path`: the OS's answer decides.
 #[cfg(windows)]
 fn delete_or_move_aside(path: &Path, leftovers: &Path) -> Result<Option<PathBuf>> {
     let err = match remove_entry(path) {
         Ok(()) => return Ok(None),
         Err(err) => err,
     };
-    if require_regular_file(path).is_err() {
-        return Err(err.context("it is not a regular file, so it is not moved aside"));
-    }
     let refused = err
         .downcast_ref::<io::Error>()
         .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied);
@@ -728,7 +724,7 @@ fn delete_or_move_aside(path: &Path, leftovers: &Path) -> Result<Option<PathBuf>
     }
     move_aside(path, leftovers).map(Some).with_context(|| {
         format!(
-            "{}: deleting it was refused (access denied), and so was moving it aside",
+            "{}: deleting it was refused (access denied), and moving it aside failed",
             path.display()
         )
     })
@@ -751,7 +747,7 @@ fn remove_file_that_may_run(paths: &Paths, path: &Path) -> Result<()> {
 #[cfg(windows)]
 fn require_regular_file(path: &Path) -> Result<()> {
     ensure!(
-        fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file()),
+        is_regular_file(path),
         "{} is not a regular file, so it is never deleted",
         path.display()
     );

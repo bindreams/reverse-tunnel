@@ -465,10 +465,11 @@ impl Drop for Acl<'_> {
     }
 }
 
-/// Measures that a rename needs the same right as a delete: with DELETE on the file and FILE_DELETE_CHILD on its
-/// directory both denied, the delete is refused with access denied and so is the rename into the leftover folder.
+/// Measured on CI, where the removal runs as an elevated administrator: a file whose ACL denies DELETE on it, in a
+/// directory whose ACL denies FILE_DELETE_CHILD, is deleted all the same, so nothing is refused and nothing is moved
+/// aside.
 #[test]
-fn a_file_that_its_acl_will_neither_delete_nor_rename_fails_the_removal_and_leaves_no_leftover() {
+fn a_file_whose_acl_denies_its_delete_is_deleted_by_an_administrators_removal_and_nothing_is_left() {
     let (_dir, paths) = installed();
     let stuck = paths.bin_dir.join("frpc-0.1.exe");
     fs::write(&stuck, "").unwrap();
@@ -477,14 +478,9 @@ fn a_file_that_its_acl_will_neither_delete_nor_rename_fails_the_removal_and_leav
     let _dir_denied = Acl::set(&paths.bin_dir, "D:P(D;;DC;;;WD)(A;OICI;FA;;;WD)", "D:P(A;OICI;FA;;;WD)");
     let _file_denied = Acl::set(&stuck, "D:P(D;;SD;;;WD)(A;;FA;;;WD)", "D:P(A;;FA;;;WD)");
 
-    let err = format!(
-        "{:#}",
-        remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
-    );
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
 
-    assert!(err.contains("frpc-0.1.exe"), "{err}");
-    assert!(err.contains("moving it to"), "{err}");
-    assert!(stuck.exists());
+    assert!(!paths.bin_dir.exists());
     assert!(leftover_images(&paths).unwrap().is_empty());
 }
 

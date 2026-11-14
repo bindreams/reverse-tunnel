@@ -392,7 +392,7 @@ fn persist_waiting(
 fn persist_over_refused(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
     let writing = || format!("writing {}", dest.display());
     let aside = move_aside(dest, leftovers)
-        .context("replacing it was refused (access denied), and so was moving it aside")
+        .context("replacing it was refused (access denied), and moving it aside failed")
         .with_context(writing)?;
     let Err(err) = persist_waiting(file, dest, false) else {
         return Ok(());
@@ -408,12 +408,24 @@ fn persist_over_refused(file: tempfile::NamedTempFile, dest: &Path, leftovers: &
     }
 }
 
+/// Windows: whether `path` is a regular file, not a directory, junction or link (a link is not followed).
+#[cfg(windows)]
+pub fn is_regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file())
+}
+
 /// Windows: renames the file `path` into `leftovers`, keeping its name (see `schtasks::leftover_name`), and returns the
 /// new path. Windows refuses to delete a running image, and lets it be renamed. A file there is deleted once it can be:
-/// by the next `install` or `upgrade`, or by a removal. A `path` that another process holds open waits (see
-/// `OpenElsewhere`).
+/// by the next `install` or `upgrade`, or by a removal. Only a regular file is moved aside, since only a file is an
+/// image and the leftover sweeps never delete anything else: any other `path` is an error naming it, and nothing is
+/// moved. A `path` that another process holds open waits (see `OpenElsewhere`).
 #[cfg(windows)]
 pub fn move_aside(path: &Path, leftovers: &Path) -> Result<std::path::PathBuf> {
+    ensure!(
+        is_regular_file(path),
+        "{} is not a regular file, so it is not moved aside",
+        path.display()
+    );
     let original = path.file_name().context("the file has no name")?;
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
     let mut wait = OpenElsewhere::default();

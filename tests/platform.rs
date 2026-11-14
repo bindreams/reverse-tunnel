@@ -1930,7 +1930,7 @@ fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
     let advice = stderr
         .split("to finish it ")
         .nth(1)
-        .and_then(|rest| rest.split(": it is not a regular file").next());
+        .and_then(|rest| rest.split(format!(": {}", removal_dir.display()).as_str()).next());
     assert_eq!(
         advice,
         Some(install::rerun_uninstall(&machine.paths).as_str()),
