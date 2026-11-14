@@ -3,8 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -14,6 +13,7 @@ use serde::Deserialize;
 
 use crate::config::Config;
 use crate::paths::Paths;
+use crate::supervisor::token;
 
 /// The admin API's user; the password is in `Paths::admin_password`.
 pub const USER: &str = "reverse-tunnel";
@@ -47,16 +47,19 @@ pub fn tunnel(cfg: &Config, paths: &Paths) -> Tunnel {
     if cfg.services.is_empty() {
         return Tunnel::Unknown("no service is published, so frpc has nothing to report".into());
     }
-    let file = paths.admin_password();
-    let password = match fs::read_to_string(&file) {
-        Ok(text) => text,
-        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+    let password = match token(&paths.admin_password()) {
+        Ok(password) => password,
+        Err(err)
+            if err
+                .downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == ErrorKind::PermissionDenied) =>
+        {
             let how = if cfg!(windows) { "an elevated prompt" } else { "sudo" };
             return Tunnel::Unknown(format!("only administrators can read the admin password: use {how}"));
         }
-        Err(err) => return Tunnel::Unknown(format!("reading {}: {err}", file.display())),
+        Err(err) => return Tunnel::Unknown(format!("{err:#}")),
     };
-    match get(cfg.admin_port(), password.trim()).and_then(|body| parse(&body)) {
+    match get(cfg.admin_port(), &password).and_then(|body| parse(&body)) {
         Ok(proxies) if proxies.is_empty() => Tunnel::NotConnected,
         Ok(proxies) => Tunnel::Connected(proxies),
         Err(err) => Tunnel::Unknown(format!("{err:#}")),

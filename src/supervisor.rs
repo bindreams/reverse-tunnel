@@ -99,7 +99,7 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
 }
 
 /// A secret file's text without surrounding whitespace, which must not be empty.
-fn token(path: &Path) -> Result<String> {
+pub(crate) fn token(path: &Path) -> Result<String> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     ensure!(!text.trim().is_empty(), "{} is empty", path.display());
     Ok(text.trim().to_string())

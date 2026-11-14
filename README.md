@@ -124,8 +124,8 @@ can.
 uv run ctl alias movies.yourdomain.tld jellyfin.myhost.tunnel.example.com
 ```
 
-`uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts, each `online` (since when) or
-`offline` at the bridge, and the aliases.
+`uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts and aliases, then a `presence` line
+per host: `online since` when, `offline` at the bridge, or `unknown` with the reason on stderr.
 
 ### Jellyfin
 

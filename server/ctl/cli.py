@@ -2,6 +2,7 @@
 
 import argparse
 import contextlib
+import json
 import secrets
 import socket
 import subprocess
@@ -74,8 +75,6 @@ def _init(env: dict) -> None:
         raise CtlError(str(e)) from e
     missing = {
         "FRPS_TOKEN": secrets.token_hex(32),
-        "FRPS_API_USER": secrets.token_hex(8),
-        "FRPS_API_PASSWORD": secrets.token_hex(32),
         "COMPOSE_FILE": COMPOSE_FILE,
     }
     lines = [f"{key}={value}\n" for key, value in missing.items() if key not in env]
@@ -83,7 +82,7 @@ def _init(env: dict) -> None:
         text = ENV.read_text()
         if not text.endswith("\n"):
             text += "\n"
-        atomic_write(ENV, (text + "".join(lines)).encode(), 0o600)  # it holds the frps token and API password
+        atomic_write(ENV, (text + "".join(lines)).encode(), 0o600)  # it holds the frps token
     _create(TLS / "trust.pem", (TLS / "frps.crt").read_bytes(), 0o644)
     _create(STATE / "hosts.yaml", b"", 0o644)
     _create(STATE / "aliases.yaml", b"", 0o644)
@@ -117,26 +116,66 @@ def _unalias(args, hosts, aliases, env):
 
 
 FRPS_API_HINT = (
-    "If frps was created before this version it has no API: `docker compose up -d --build reverse-tunnel-frps` "
+    "frps was created before this version, so it has no API: `docker compose up -d --build reverse-tunnel-frps` "
     "recreates it, which drops every tunnel."
 )
 
 
-def _presence(host: str, online: dict[str, int] | None) -> str:
-    if online is None:
-        return "unknown"
-    if host not in online:
-        return "offline"
-    return "online since " + datetime.fromtimestamp(online[host], UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+def online_since(answer: str) -> dict[str, int]:
+    """Each host with a session open at frps, to the epoch second it began (the earliest, if it has several), from
+    frps's `/api/clients` answer. Raises `ValueError`, saying what is wrong, for any other answer."""
+    try:
+        clients = json.loads(answer)
+    except ValueError as e:
+        raise ValueError(f"not JSON: {e}") from e
+    if not isinstance(clients, list):
+        raise ValueError(f"not a list of clients: {answer[:80]!r}")
+    since: dict[str, int] = {}
+    for client in clients:
+        if not isinstance(client, dict) or not isinstance(client.get("user"), str):
+            raise ValueError(f"a client without a user name: {str(client)[:80]!r}")
+        if not isinstance(client.get("online"), bool):
+            raise ValueError(f"client {client['user']!r} without a true or false `online`")
+        if not client["online"]:
+            continue
+        began = client.get("lastConnectedAt")
+        try:
+            if isinstance(began, bool) or not isinstance(began, int):
+                raise ValueError
+            datetime.fromtimestamp(began, UTC)
+        except (ValueError, OverflowError, OSError):
+            raise ValueError(f"client {client['user']!r} has no usable `lastConnectedAt`: {began!r}") from None
+        since[client["user"]] = min(began, since.get(client["user"], began))
+    return since
+
+
+def _presence(hosts: dict) -> str:
+    """One line per registered host: online since when, offline, or unknown with the reason on stderr."""
+    try:
+        online = online_since(compose.frps_clients(Path.cwd()))
+    except compose.FrpsApiMissing as e:
+        print(f"ctl: frps's API does not answer: {e}. {FRPS_API_HINT}", file=sys.stderr)
+        online = None
+    except OSError as e:
+        print(f"ctl: could not ask frps who is online: {e}", file=sys.stderr)
+        online = None
+    except ValueError as e:
+        print(f"ctl: frps's answer is unusable: {e}", file=sys.stderr)
+        online = None
+    lines = []
+    for host in hosts:
+        if online is None:
+            state = "unknown"
+        elif host not in online:
+            state = "offline"
+        else:
+            state = "online since " + datetime.fromtimestamp(online[host], UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        lines.append(f"presence {host} {state}")
+    return "\n".join(lines)
 
 
 def _list(args, hosts, aliases, env):
-    try:
-        online = compose.frps_online(Path.cwd())
-    except (OSError, ValueError) as e:
-        print(f"ctl: could not ask frps who is online: {e}. {FRPS_API_HINT}", file=sys.stderr)
-        online = None
-    lines = [f"host {host} {digest} {_presence(host, online)}" for host, digest in hosts.items()]
+    lines = [f"host {host} {digest}" for host, digest in hosts.items()]
     return "\n".join(lines + [f"alias {public} {backend}" for public, backend in aliases.items()])
 
 
@@ -166,9 +205,6 @@ class Command(NamedTuple):
     arguments: dict[str, str]
     # True for `init`: runs in a folder with no `state/`, and its text prints after the bring-up.
     bootstrap: bool = False
-    # True for `list`: the handler runs after the bring-up, which has made the plugin container it asks. It changes no
-    # registry.
-    late: bool = False
 
 
 COMMANDS = {
@@ -208,9 +244,8 @@ COMMANDS = {
     ),
     "list": Command(
         _list,
-        "Show the registered hosts, each online (since when) or offline at frps, and the aliases.",
+        "Show the registered hosts and the aliases, then which hosts are online at frps (since when) or offline.",
         {},
-        late=True,
     ),
     "join-code": Command(
         _join_code,
@@ -251,7 +286,7 @@ def _run(args) -> None:
         aliases = _registry(read_aliases, STATE / "aliases.yaml", domain)
         old_hosts = dict(hosts)
         old_aliases = dict(aliases)
-        out = None if command.late else command.handler(args, hosts, aliases, env)
+        out = command.handler(args, hosts, aliases, env)
         if hosts != old_hosts:
             _registry(write_hosts, STATE / "hosts.yaml", hosts)
         if aliases != old_aliases:
@@ -269,8 +304,8 @@ def _run(args) -> None:
                 else "rerun any ctl command to retry"
             )
             raise CtlError(f"{updated}the bridge was not brought up ({e}); {retry}") from e
-        if command.late and (out := command.handler(args, hosts, aliases, env)):
-            print(out)
+        if args.command == "list" and hosts:  # frps runs only once the bring-up has made sure of it
+            print(_presence(hosts))
         if command.bootstrap:
             if frps_kept:
                 print(FRPS_KEPT)

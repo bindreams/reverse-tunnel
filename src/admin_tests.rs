@@ -141,6 +141,12 @@ fn tunnel_says_why_it_was_not_checked() {
     };
     assert!(why.contains("admin.password"), "{why}");
 
+    let (_dir, config, paths) = host(1, Some(""), SSH);
+    let Tunnel::Unknown(why) = tunnel(&config, &paths) else {
+        panic!()
+    };
+    assert!(why.contains("is empty"), "{why}");
+
     let (_dir, config, paths) = host(1, Some("pw"), " {}\n");
     let Tunnel::Unknown(why) = tunnel(&config, &paths) else {
         panic!()

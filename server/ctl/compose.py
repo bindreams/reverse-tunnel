@@ -1,6 +1,5 @@
 """The only module that runs `docker`."""
 
-import json
 import subprocess
 from pathlib import Path
 
@@ -10,6 +9,10 @@ _COMPOSE = ["compose", "-p", "reverse-tunnel", "-f", "compose.yaml", "-f", "comp
 
 class DockerError(OSError):
     """`docker` could not be run, or reported a failure of its own."""
+
+
+class FrpsApiMissing(DockerError):
+    """frps runs but its API does not answer: it was created before the API existed."""
 
 
 def _docker(*args: str, **kwargs) -> subprocess.CompletedProcess:
@@ -51,13 +54,15 @@ def network_exists(name: str) -> bool:
     raise DockerError(f"docker exited with {result.returncode}" + (f": {stderr}" if stderr else ""))
 
 
-def frps_online(folder: Path) -> dict[str, int]:
-    """Each host with a session open at frps, to the epoch second it began; asked through the plugin container, the
-    only one that can reach frps's API. Raises `DockerError`, with what the container printed, when it cannot be asked.
+def frps_clients(folder: Path) -> str:
+    """frps's `/api/clients` answer, read by `wget` inside the frps container: the API listens on its loopback only.
+    Raises `FrpsApiMissing` when nothing listens there, and `DockerError`, with what docker or `wget` printed, for any
+    other failure.
     """
-    ask = [*_COMPOSE, "exec", "-T", "reverse-tunnel-plugin", "python", "-m", "ctl.frps"]
+    ask = [*_COMPOSE, "exec", "-T", "reverse-tunnel-frps", "wget", "-qO-", "http://127.0.0.1:7500/api/clients"]
     result = _docker(*ask, cwd=folder, capture_output=True, text=True)
     if result.returncode:
         stderr = result.stderr.strip()
-        raise DockerError(stderr or f"docker exited with {result.returncode}")
-    return json.loads(result.stdout)
+        message = stderr or f"docker exited with {result.returncode}"
+        raise (FrpsApiMissing if "Connection refused" in stderr else DockerError)(message)
+    return result.stdout

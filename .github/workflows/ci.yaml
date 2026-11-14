@@ -122,7 +122,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Write a test deployment
         run: |
-          printf 'TUNNEL_DOMAIN=tunnel.example.com\nFRPS_TOKEN=test-token\nFRPS_API_USER=u\nFRPS_API_PASSWORD=p\nCOMPOSE_FILE=compose.yaml:compose.generated.yaml\n' > .env
+          printf 'TUNNEL_DOMAIN=tunnel.example.com\nFRPS_TOKEN=test-token\nCOMPOSE_FILE=compose.yaml:compose.generated.yaml\n' > .env
           printf 'services: {}\n' > compose.generated.yaml
           mkdir tls state
           touch state/hosts.yaml state/aliases.yaml
@@ -141,14 +141,19 @@ jobs:
               exit 1
             fi
           done
-      - name: frps's API answers the plugin container, which reads it with the .env credentials
+      - name: frps's API answers wget inside the frps container, on its loopback
         run: |
-          until [ "$(docker compose exec -T reverse-tunnel-plugin python -m ctl.frps)" = '{}' ]; do
+          until [ "$(docker compose exec -T reverse-tunnel-frps wget -qO- http://127.0.0.1:7500/api/clients)" = '[]' ]; do
             if [ "$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' reverse-tunnel-frps)" != "true 0" ]; then
               docker compose logs
               exit 1
             fi
           done
+      - name: wget says "Connection refused" for a port nothing listens on, which ctl list reads as a frps without the API
+        run: |
+          out=$(docker compose exec -T reverse-tunnel-frps wget -qO- http://127.0.0.1:7501/ 2>&1 || true)
+          echo "$out"
+          grep -q 'Connection refused' <<< "$out"
       - name: Container label has a single $
         run: docker inspect -f '{{index .Config.Labels "traefik.http.routers.reverse-tunnel-frps.rule"}}' reverse-tunnel-frps | grep -E 'tunnel\.example\.com\\E\$`\)$'
       - name: plugin runs as non-root and reads state/

@@ -405,10 +405,10 @@ def test_status_and_list_show_the_host_connected(stack, registered, other):
     connected = f"bridge: {T} (connected)"
     status = wait_until(lambda: connected in (text := run("sudo", INSTALLED, "status").stdout) and text)
     assert "published ssh: running" in status and "published web: running" in status, status
-    online = rf"^host {HOST} \S+ online since \d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d UTC$"
+    online = rf"^presence {HOST} online since \d{{4}}-\d\d-\d\d \d\d:\d\d:\d\d UTC$"
     listing = wait_until(lambda: re.search(online, text := stack.ctl("list"), re.M) and text)
     # OTHER is registered, and no frpc runs for it.
-    assert re.search(rf"^host {OTHER} \S+ offline$", listing, re.M), listing
+    assert re.search(rf"^presence {OTHER} offline$", listing, re.M), listing
 
 
 def test_per_host_cert_issued_on_add(stack, registered):
