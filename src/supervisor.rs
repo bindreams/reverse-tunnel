@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::download::Tools;
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT};
-use crate::paths::{LOG_FRPC, LOG_SUPERVISOR, Paths};
+use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
 
 /// Any valid port: `frpc verify` reads the port but does not connect to it.
 const CHECK_PORT: u16 = 1;
@@ -60,21 +60,30 @@ impl Setup<'_> {
 }
 
 /// Runs frpc and the listener until one fails, which is always an error. With `check_only`, verifies the configuration
-/// and returns.
+/// and returns; on Windows it first judges, from the DACLs, what the service account has of what `run` opens (the
+/// caller's own rights would hide what it lacks), for this binary and its frpc.
 pub fn run(paths: &Paths, tools: &Tools, check_only: bool) -> Result<ExitCode> {
+    #[cfg(windows)]
+    if check_only {
+        crate::access::check(
+            paths,
+            &std::env::current_exe().context("finding this binary")?,
+            &tools.frpc,
+        )?;
+    }
     run_with(paths, tools, check_only, (Ipv4Addr::LOCALHOST, 0).into())
 }
 
 /// `run` with the WebSocket listener bound to `listen`.
 pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAddr) -> Result<ExitCode> {
-    let config = paths.config_dir.join("config.yaml");
+    let config = paths.config_file();
     let setup = Setup {
         cfg: Config::load(&config)?,
         paths,
         tools,
         tokens: [
-            ("RT_BRIDGE_TOKEN", token(&paths.secrets_dir.join("bridge.token"))?),
-            ("RT_HOST_TOKEN", token(&paths.secrets_dir.join("host.token"))?),
+            ("RT_BRIDGE_TOKEN", token(&paths.bridge_token())?),
+            ("RT_HOST_TOKEN", token(&paths.host_token())?),
         ],
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -98,7 +107,7 @@ fn token(path: &Path) -> Result<String> {
 /// Renders frpc.toml for `port` into `dir` and returns its path. It holds no secret: frpc reads the tokens from its
 /// environment.
 fn render_config(setup: &Setup<'_>, port: u16, dir: &Path) -> Result<PathBuf> {
-    let config = dir.join("frpc.toml");
+    let config = dir.join(FRPC_CONFIG);
     fs::write(&config, render(&setup.cfg, port, setup.paths))
         .with_context(|| format!("writing {}", config.display()))?;
     Ok(config)

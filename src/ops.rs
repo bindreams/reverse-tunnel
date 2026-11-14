@@ -74,6 +74,9 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, run_as: Opt
 /// `install` are, it has the account's primary group as its gid and only group (std's `.uid()/.gid()` would leave
 /// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
 /// install's and open to the account by contract.
+///
+/// On Windows it runs as the caller, whom a file the account cannot read does not stop, so `run --check` also judges
+/// the DACLs for the account (`access::check`).
 pub(crate) fn check(paths: &Paths, exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
     // Windows runs the check as the caller, whoever is asked for.
     #[cfg(windows)]
@@ -217,9 +220,9 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
         }
     )?;
 
-    let config = Config::load(&paths.config_dir.join("config.yaml"))?;
+    let config = Config::load(&paths.config_file())?;
     writeln!(out, "host: {}\nbridge: {}", config.host, config.bridge)?;
-    let pem_path = paths.config_dir.join("bridge.pem");
+    let pem_path = paths.bridge_pem();
     let pem = fs::read_to_string(&pem_path).with_context(|| format!("reading {}", pem_path.display()))?;
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;

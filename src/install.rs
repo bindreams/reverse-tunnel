@@ -20,7 +20,9 @@ use crate::account::{self, Account};
 #[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::{Config, valid_label};
-use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
+use crate::files::{
+    Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, restore_binary, write_atomic,
+};
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
@@ -721,17 +723,9 @@ fn hex_of_random_bytes<const N: usize>() -> Result<String> {
     Ok(hex::encode(random))
 }
 
-fn config_file(paths: &Paths) -> PathBuf {
-    paths.config_dir.join("config.yaml")
-}
-
 /// Whether a join code is needed: some file it provides is missing.
 fn needs_join(paths: &Paths) -> Result<bool> {
-    let files = [
-        config_file(paths),
-        paths.config_dir.join("bridge.pem"),
-        paths.secrets_dir.join("bridge.token"),
-    ];
+    let files = [paths.config_file(), paths.bridge_pem(), paths.bridge_token()];
     for file in files {
         if !file.try_exists()? {
             return Ok(true);
@@ -743,7 +737,7 @@ fn needs_join(paths: &Paths) -> Result<bool> {
 /// The name for a new `config.yaml`, or none when one exists. Refuses an explicit name that differs from the existing
 /// config's.
 fn configured_host(paths: &Paths, explicit: Option<&str>) -> Result<Option<String>> {
-    let config = config_file(paths);
+    let config = paths.config_file();
     if !config.try_exists()? {
         return host_name(explicit).map(Some);
     }
@@ -825,7 +819,7 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
     make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
     make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))?;
 
-    let config = config_file(paths);
+    let config = paths.config_file();
     let created = !config.try_exists()? && create_config(paths, host, join)?;
     let mut changed = created;
     if let Some(join) = join {
@@ -833,20 +827,20 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
             let text = fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?;
             changed |= replace_if_changed(paths, &config, with_bridge(&text, &join.domain, &config)?, PUBLIC_FILE)?;
         }
-        changed |= replace_if_changed(paths, &paths.config_dir.join("bridge.pem"), &join.cert_pem, PUBLIC_FILE)?;
+        changed |= replace_if_changed(paths, &paths.bridge_pem(), &join.cert_pem, PUBLIC_FILE)?;
         let token = format!("{}\n", join.token);
-        changed |= replace_if_changed(paths, &paths.secrets_dir.join("bridge.token"), token, secret)?;
+        changed |= replace_if_changed(paths, &paths.bridge_token(), token, secret)?;
     }
 
-    let host_token = paths.secrets_dir.join("host.token");
+    let host_token = paths.host_token();
     if !host_token.try_exists()? {
         let token = format!("{}\n", hex_of_random_bytes::<32>()?);
         mark_pending(paths)?;
         changed |= write_atomic(&host_token, token.as_bytes(), secret, Replace::Never)? == WriteOutcome::Written;
     }
     // A file left by an earlier account keeps that account's group, whatever its content.
-    for name in ["host.token", "bridge.token"] {
-        open_file(&paths.secrets_dir.join(name), secret, false)?;
+    for file in [paths.host_token(), paths.bridge_token()] {
+        open_file(&file, secret, false)?;
     }
     Ok(changed)
 }
@@ -860,7 +854,7 @@ fn create_config(paths: &Paths, host: Option<&str>, join: Option<&JoinInfo>) -> 
         join.domain
     );
     mark_pending(paths)?;
-    let written = write_atomic(&config_file(paths), text.as_bytes(), PUBLIC_FILE, Replace::Never)?;
+    let written = write_atomic(&paths.config_file(), text.as_bytes(), PUBLIC_FILE, Replace::Never)?;
     Ok(written == WriteOutcome::Written)
 }
 
@@ -911,8 +905,9 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
 
 /// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
 /// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
-/// the outcome. A fetch needs no restart: a new frpc version only arrives with a new binary, which `place_binaries`
-/// marks.
+/// the outcome. A kept frpc is restored (`restore_binary`). The staged copy gets the installed binary's access, so the
+/// check sees what the service will run. A fetch needs no restart: a new frpc version only arrives with a new binary,
+/// which `place_binaries` marks.
 fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
@@ -921,7 +916,10 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     make_dir(&paths.bin_dir, PUBLIC_DIR)?;
 
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
-    if !download::tools(paths).frpc.try_exists()? {
+    let frpc = download::tools(paths).frpc;
+    if frpc.try_exists()? {
+        restore_binary(&frpc)?;
+    } else {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
     let staged = upgrade::stage(paths, binary)?;
@@ -930,10 +928,14 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     checked
 }
 
-/// Puts the binary `binary` and the symlink in place. Whether the binary changed.
+/// Puts the binary `binary` and the symlink in place. Whether the binary changed. A hand-edited ACL, mode or owner of
+/// an unchanged binary does not outlive a reinstall.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
-    let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
+    let changed = replace_if_changed(paths, &exe, binary, Perm::executable())?;
+    if !changed {
+        restore_binary(&exe)?;
+    }
     clean_bin_dir(paths)?;
     #[cfg(windows)]
     for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {
@@ -981,8 +983,8 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
 }
 
 fn registration(paths: &Paths) -> Result<String> {
-    let host = Config::load(&config_file(paths))?.host;
-    let token_file = paths.secrets_dir.join("host.token");
+    let host = Config::load(&paths.config_file())?.host;
+    let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
     Ok(registration_line(&host, token.trim()))
 }
@@ -992,7 +994,10 @@ fn registration_line(host: &str, token: &str) -> String {
 }
 
 fn revoke_line(paths: &Paths) -> Result<String> {
-    Ok(format!("uv run ctl revoke {}", Config::load(&config_file(paths))?.host))
+    Ok(format!(
+        "uv run ctl revoke {}",
+        Config::load(&paths.config_file())?.host
+    ))
 }
 
 /// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is

@@ -56,11 +56,7 @@ impl Machine {
     }
 
     fn config(&self) -> PathBuf {
-        self.paths.config_dir.join("config.yaml")
-    }
-
-    fn secret(&self, name: &str) -> String {
-        fs::read_to_string(self.paths.secrets_dir.join(name)).unwrap()
+        self.paths.config_file()
     }
 }
 
@@ -114,11 +110,14 @@ fn token_file_format() {
     let code = code_for("tunnel.example.test", "shared-token", CERT);
     machine.settings(Some("mothership"), Some(&code));
 
-    let host = machine.secret("host.token");
+    let host = fs::read_to_string(machine.paths.host_token()).unwrap();
     let hex = host.strip_suffix('\n').expect("a newline ends the file");
     let lowercase_hex = hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     assert!(hex.len() == 64 && lowercase_hex, "{hex:?}");
-    assert_eq!(machine.secret("bridge.token"), "shared-token\n");
+    assert_eq!(
+        fs::read_to_string(machine.paths.bridge_token()).unwrap(),
+        "shared-token\n"
+    );
 }
 
 #[test]
@@ -160,7 +159,7 @@ fn host_that_differs_from_the_config_is_refused() {
     machine.settings(Some("mothership"), Some(CODE));
 
     let err = format!("{:#}", configured_host(&machine.paths, Some("flagship")).unwrap_err());
-    let config = config_file(&machine.paths).display().to_string();
+    let config = machine.paths.config_file().display().to_string();
     assert_eq!(
         err,
         format!(
@@ -200,7 +199,7 @@ fn install_refused_during_an_uninstall_says_how_to_run_it_again() {
 fn host_is_checked_before_the_join_code_is_asked_for() {
     let machine = Machine::new();
     machine.settings(Some("mothership"), Some(CODE));
-    fs::remove_file(machine.paths.config_dir.join("bridge.pem")).unwrap();
+    fs::remove_file(machine.paths.bridge_pem()).unwrap();
     let opts = InstallOpts {
         host: Some("flagship".to_string()),
         join: None,
@@ -227,7 +226,7 @@ fn join_code_never_stored() {
 fn rejoin_rewrites_bridge_files_only() {
     let machine = Machine::new();
     machine.settings(Some("mothership"), Some(CODE));
-    let host_token = machine.secret("host.token");
+    let host_token = fs::read_to_string(machine.paths.host_token()).unwrap();
     let first = fs::read_to_string(machine.config()).unwrap();
     let edited = format!("# mine\n{first}  web:\n    port: 80\n    type: http\n");
     fs::write(machine.config(), &edited).unwrap();
@@ -238,10 +237,10 @@ fn rejoin_rewrites_bridge_files_only() {
 
     let expected = edited.replace("bridge: tunnel.example.test", "bridge: new.example.test");
     assert_eq!(fs::read_to_string(machine.config()).unwrap(), expected);
-    assert_eq!(machine.secret("bridge.token"), "new-token\n");
-    let pem = machine.paths.config_dir.join("bridge.pem");
+    assert_eq!(fs::read_to_string(machine.paths.bridge_token()).unwrap(), "new-token\n");
+    let pem = machine.paths.bridge_pem();
     assert_eq!(fs::read_to_string(pem).unwrap(), new_cert);
-    assert_eq!(machine.secret("host.token"), host_token);
+    assert_eq!(fs::read_to_string(machine.paths.host_token()).unwrap(), host_token);
 }
 
 #[test]

@@ -51,7 +51,21 @@ impl Perm {
         }
     }
 
-    pub const EXECUTABLE: Perm = Perm::new(0o755);
+    /// A binary the installation puts in place. On Unix it is owned by this process's user and group, named explicitly
+    /// because a new file's group comes from its directory on macOS.
+    pub fn executable() -> Perm {
+        let perm = Perm::new(0o755);
+        #[cfg(unix)]
+        {
+            let this_process = Account {
+                uid: uzers::get_effective_uid(),
+                gid: uzers::get_effective_gid(),
+            };
+            perm.owner(this_process).group(this_process)
+        }
+        #[cfg(windows)]
+        perm
+    }
 }
 
 /// What a directory's contents give an account on Windows, for the bits of the mode that are the account's: modify if
@@ -125,6 +139,22 @@ pub fn apply(file: &File, perm: Perm) -> Result<()> {
     Ok(())
 }
 
+/// Opens `path` and gives it `perm`.
+#[cfg(unix)]
+fn open_and_apply(path: &Path, perm: Perm) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    apply(&file, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+}
+
+/// Gives the existing binary `path` what `write_atomic` with `Perm::executable()` gives a new one. On Unix that is its
+/// mode, owner and group. On Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
+pub fn restore_binary(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    return open_and_apply(path, Perm::executable());
+    #[cfg(windows)]
+    security::inherit_dacl(path).with_context(|| format!("resetting the ACL of {}", path.display()))
+}
+
 /// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had. A new directory is
 /// owner-only until then, so it is never wider than its final mode, whatever the umask. Fails if something else is
 /// there, a link to a directory included.
@@ -137,8 +167,7 @@ pub fn make_dir(path: &Path, perm: Perm) -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("creating {}", path.display())),
         Ok(()) => {}
     }
-    let dir = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    apply(&dir, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+    open_and_apply(path, perm)
 }
 
 /// Creates `path` if it is missing (not its parents) with the descriptor `perm.sddl()` makes, so that it is never there

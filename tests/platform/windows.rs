@@ -4,7 +4,7 @@
 use std::cell::Cell;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
@@ -15,16 +15,21 @@ use reverse_tunnel::account;
 use reverse_tunnel::install;
 use reverse_tunnel::security::{Sid, owner_of};
 use reverse_tunnel::system_path;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID,
     TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
-use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+use windows_sys::Win32::Security::{
+    DACL_SECURITY_INFORMATION, GetTokenInformation, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_GROUPS,
+    TOKEN_INFORMATION_CLASS, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenGroups, TokenPrivileges,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
+use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
+use windows_sys::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, RegType};
 
@@ -90,6 +95,84 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
     rights
 }
 
+/// What `class` says of the token of process `pid`.
+fn token_information(pid: u32, class: TOKEN_INFORMATION_CLASS) -> Vec<u64> {
+    // SAFETY: plain calls with live pointers; each handle is owned, so it is closed once.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        assert!(
+            !process.is_null(),
+            "opening process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let process = OwnedHandle::from_raw_handle(process);
+        let mut token = null_mut();
+        let opened = OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut token);
+        assert_ne!(
+            opened,
+            0,
+            "opening the token of process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let token = OwnedHandle::from_raw_handle(token);
+        let mut size = 0;
+        GetTokenInformation(token.as_raw_handle(), class, null_mut(), 0, &mut size);
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let read = GetTokenInformation(
+            token.as_raw_handle(),
+            class,
+            buffer.as_mut_ptr().cast(),
+            size,
+            &mut size,
+        );
+        assert_ne!(
+            read,
+            0,
+            "reading the token of process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        buffer
+    }
+}
+
+/// The SIDs of the groups in the token of process `pid` that are enabled and not deny-only.
+pub fn enabled_groups(pid: u32) -> Vec<String> {
+    let buffer = token_information(pid, TokenGroups);
+    // SAFETY: the buffer holds the `TOKEN_GROUPS` that Windows wrote, whose groups point into it.
+    unsafe {
+        let groups = buffer.as_ptr().cast::<TOKEN_GROUPS>();
+        std::slice::from_raw_parts((*groups).Groups.as_ptr(), (*groups).GroupCount as usize)
+            .iter()
+            .filter(|group| {
+                group.Attributes & SE_GROUP_ENABLED as u32 != 0
+                    && group.Attributes & SE_GROUP_USE_FOR_DENY_ONLY as u32 == 0
+            })
+            .map(|group| Sid::copy_of(group.Sid).text().unwrap())
+            .collect()
+    }
+}
+
+/// Whether the token of process `pid` holds the privilege `name` (`SeChangeNotifyPrivilege`) enabled.
+pub fn holds_enabled_privilege(pid: u32, name: &str) -> bool {
+    let mut luid = LUID::default();
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    // SAFETY: `wide` is NUL-terminated and the out pointer is live.
+    let found = unsafe { LookupPrivilegeValueW(null(), wide.as_ptr(), &mut luid) };
+    assert_ne!(found, 0, "looking up {name}: {}", std::io::Error::last_os_error());
+    let buffer = token_information(pid, TokenPrivileges);
+    // SAFETY: the buffer holds the `TOKEN_PRIVILEGES` that Windows wrote, whose entries point into it.
+    unsafe {
+        let privileges = buffer.as_ptr().cast::<TOKEN_PRIVILEGES>();
+        std::slice::from_raw_parts((*privileges).Privileges.as_ptr(), (*privileges).PrivilegeCount as usize)
+            .iter()
+            .any(|held| {
+                held.Luid.LowPart == luid.LowPart
+                    && held.Luid.HighPart == luid.HighPart
+                    && held.Attributes & SE_PRIVILEGE_ENABLED != 0
+            })
+    }
+}
+
 /// The ACLs and owners the installation is specified to give; the service account's own access is shown by frpc
 /// running, which needs both tokens, and by the supervisor's files in `logs/`.
 pub fn assert_installed_as_specified(machine: &Machine) {
@@ -117,16 +200,9 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     let has_no_access = |path: &Path, sid: &str| {
         assert_eq!(rights(path, sid), 0, "{sid} has access to {}", path.display());
     };
-    let tokens = [
-        machine.secrets().join("bridge.token"),
-        machine.secrets().join("host.token"),
-    ];
+    let tokens = [machine.paths.bridge_token(), machine.paths.host_token()];
 
-    for public in [
-        paths.config_dir.clone(),
-        paths.config_dir.join("config.yaml"),
-        paths.config_dir.join("bridge.pem"),
-    ] {
+    for public in [paths.config_dir.clone(), paths.config_file(), paths.bridge_pem()] {
         is(&public, SYSTEM, FULL);
         is(&public, ADMINISTRATORS, FULL);
         is(&public, EVERYONE, READ_EXECUTE);
