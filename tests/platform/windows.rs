@@ -336,11 +336,15 @@ pub fn deletions_at_reboot() -> Vec<PathBuf> {
         Err(err) => panic!("reading PendingFileRenameOperations: {err}"),
     };
     let text = registry_text(&value.bytes);
-    // Walk the strings from the start in (source, target) pairs, to the end of the data, whatever NULs end the value.
+    // Walk the strings from the start in (source, target) pairs; an empty source ends the list, as it does for Windows,
+    // whatever NULs or stale data follow.
     let mut strings = text.split('\0');
     let mut deletions = Vec::new();
     while let (Some(source), Some(target)) = (strings.next(), strings.next()) {
-        if !source.is_empty() && target.is_empty() {
+        if source.is_empty() {
+            break;
+        }
+        if target.is_empty() {
             deletions.push(PathBuf::from(nt_path_of(source)));
         }
     }

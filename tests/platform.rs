@@ -892,6 +892,9 @@ fn a_failed_removal_logs_where_uninstall_says() {
     let runner = service::exe(&machine.paths);
     #[cfg(not(windows))]
     let runner = PathBuf::from(BIN);
+    // An earlier, successful removal may have scheduled leftovers of its own that are still there.
+    #[cfg(windows)]
+    let scheduled_before = windows::deletions_at_reboot();
     let failed = Command::new(&runner).arg("uninstall").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&failed.stderr);
@@ -944,7 +947,10 @@ fn a_failed_removal_logs_where_uninstall_says() {
             "the error does not name the image as the binary to run: {stderr}"
         );
         // A removal that failed schedules none of its leftovers: after a reboot the image must still be there to run.
-        let scheduled = windows::deletions_at_reboot();
+        let scheduled: Vec<_> = windows::deletions_at_reboot()
+            .into_iter()
+            .filter(|file| !scheduled_before.contains(file))
+            .collect();
         for leftover in install::leftover_images(&machine.paths).unwrap() {
             assert!(
                 !scheduled.iter().any(|file| file.file_name() == leftover.file_name()),
