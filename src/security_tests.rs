@@ -137,9 +137,9 @@ fn an_ace_is_read_up_to_its_size_and_never_past_it() {
 fn only_a_sid_this_machine_answers_for_is_asked_for_a_name() {
     let sid = |text: &str| Sid::parse(text).unwrap();
     let machine = sid("S-1-5-21-1-2-3");
-    let ask = |text: &str, machine: Option<&Sid>| is_local(&sid(text), machine);
+    let ask = |text: &str, machine: Option<&Sid>| is_local(&sid(text), || machine);
 
-    // Well-known, built-in and service SIDs, whether or not the machine's domain is known.
+    // Well-known, built-in, service and application-package SIDs, whether or not the machine's domain is known.
     for text in [
         "S-1-1-0",
         "S-1-2-0",
@@ -148,7 +148,15 @@ fn only_a_sid_this_machine_answers_for_is_asked_for_a_name() {
         "S-1-5-18",
         "S-1-5-20",
         "S-1-5-32-544",
+        "S-1-5-33",
+        "S-1-5-64-10",
         "S-1-5-80-1-2-3-4-5",
+        "S-1-5-83-0",
+        "S-1-5-90-0",
+        "S-1-5-113",
+        "S-1-5-114",
+        "S-1-15-2-1",
+        "S-1-15-2-2",
     ] {
         assert!(ask(text, Some(&machine)) && ask(text, None), "{text}");
     }
@@ -159,18 +167,48 @@ fn only_a_sid_this_machine_answers_for_is_asked_for_a_name() {
     assert!(!ask("S-1-5-21-1-2-4-1001", Some(&machine)));
     assert!(!ask("S-1-5-21-9-2-3-1001", Some(&machine)));
     assert!(!ask("S-1-5-21-1-2-3-1001", None));
-    // Not on the list: a logon session, an Entra ID account, a capability, Everyone's relatives, an NT AUTHORITY SID
-    // past the well-known ones.
+    // Not on the list: a logon session (which a domain controller may answer for), an Entra ID account, a capability
+    // other than the two application packages, a SID next to Everyone's, a per-VM SID, and an NT AUTHORITY SID past
+    // the well-known ones.
     for text in [
         "S-1-5-5-0-12345",
         "S-1-12-1-1-2-3-4",
         "S-1-15-3-1024-1-2-3-4-5-6-7",
+        "S-1-15-2-3",
         "S-1-1-1",
-        "S-1-5-33",
-        "S-1-5-64-10",
+        "S-1-5-83-1-2-3-4-5",
+        "S-1-5-115",
     ] {
         assert!(!ask(text, Some(&machine)) && !ask(text, None), "{text}");
     }
+}
+
+#[test]
+fn the_machine_domain_is_read_only_for_a_domain_sid() {
+    let reads = std::cell::Cell::new(0);
+    let counting = || {
+        reads.set(reads.get() + 1);
+        None
+    };
+
+    for text in ["S-1-1-0", "S-1-5-18", "S-1-5-32-544", "S-1-5-5-0-1", "S-1-12-1-1-2-3-4"] {
+        is_local(&Sid::parse(text).unwrap(), counting);
+    }
+    assert_eq!(reads.get(), 0);
+    is_local(&Sid::parse("S-1-5-21-1-2-3-1000").unwrap(), counting);
+    assert_eq!(reads.get(), 1);
+}
+
+#[test]
+fn an_account_of_this_machine_is_labelled_by_its_name() {
+    // The machine's own Administrator account (RID 500), which every Windows has: the machine-account path of `label`.
+    let domain = machine_domain()
+        .expect("this machine has an account domain")
+        .text()
+        .unwrap();
+    let administrator = Sid::parse(&format!("{domain}-500")).unwrap();
+
+    assert_ne!(administrator.label(), administrator.text().unwrap());
 }
 
 #[test]
@@ -178,7 +216,8 @@ fn a_sid_is_labelled_by_its_name_if_it_is_well_known_else_by_its_text() {
     let everyone = Sid::parse("S-1-1-0").unwrap();
     // The name is the system's, which a localized Windows gives in its language: only that it is a name.
     assert!(!everyone.label().is_empty() && everyone.label() != everyone.text().unwrap());
-    // No such account here, and a domain that is not this machine's, which is not asked about.
+    // Each is shown as text for its own reason: no such service here, a domain that is not this machine's, a logon
+    // session and an Entra ID account, which are not asked about.
     for unknown in [
         "S-1-5-80-1-2-3-4-5",
         "S-1-5-21-1-2-3-1000",

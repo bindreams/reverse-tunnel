@@ -147,23 +147,14 @@ fn open_and_apply(path: &Path, perm: Perm) -> Result<()> {
     apply(&file, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
 }
 
-/// Gives the existing file `path` what `write_atomic` with `perm` gives a new one. On Unix that is `perm`'s mode, owner
-/// and group, so `perm` must name an owner and a group (as `Perm::executable` does): a new file's own, where `perm`
-/// names none, depends on the system (macOS takes its directory's group), and a kept file cannot be given the same.
-/// On Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
-pub fn restore(path: &Path, perm: Perm) -> Result<()> {
+/// Gives the existing binary `path` what `write_atomic` with `Perm::executable()` gives a new one. On Unix that is its
+/// mode, owner and group (named explicitly: a new file's own group depends on the system, and macOS takes its
+/// directory's). On Windows it is the ACL its directory gives, whatever ACEs it had (its owner stays).
+pub fn restore(path: &Path) -> Result<()> {
     #[cfg(unix)]
-    debug_assert!(
-        perm.owner.is_some() && perm.group.is_some(),
-        "restore needs a perm with an owner and a group"
-    );
-    #[cfg(unix)]
-    return open_and_apply(path, perm);
+    return open_and_apply(path, Perm::executable());
     #[cfg(windows)]
-    {
-        let _ = perm;
-        security::inherit_dacl(path).with_context(|| format!("resetting the ACL of {}", path.display()))
-    }
+    security::inherit_dacl(path).with_context(|| format!("resetting the ACL of {}", path.display()))
 }
 
 /// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had. A new directory is

@@ -919,7 +919,7 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
     let frpc = download::tools(paths).frpc;
     if frpc.try_exists()? {
-        restore(&frpc, Perm::executable())?;
+        restore(&frpc)?;
     } else {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
@@ -935,7 +935,7 @@ fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::executable())?;
     if !changed {
-        restore(&exe, Perm::executable())?;
+        restore(&exe)?;
     }
     clean_bin_dir(paths)?;
     #[cfg(windows)]

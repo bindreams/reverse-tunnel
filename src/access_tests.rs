@@ -162,6 +162,16 @@ fn a_deny_is_reported_by_the_denied_principal_not_the_allowed_one() {
 }
 
 #[test]
+fn a_deny_is_reported_whether_the_allow_comes_before_it_or_after() {
+    let aces = [ace(true, EVERYONE, FILE_GENERIC_READ), ace(false, SERVICE, 0x1)];
+
+    match barrier(&aces, FILE_GENERIC_READ) {
+        Some(Barrier::Denied(by)) => assert_eq!(by, SERVICE),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn what_files_made_in_a_directory_inherit_is_judged_by_the_allows_they_inherit() {
     let inheriting = |inherit_only| Ace {
         object_inherit: true,

@@ -362,11 +362,11 @@ impl Sid {
 
     /// What to call this SID for a person: the account or group it names, as `DOMAIN\Name` (`Name` for a well-known one
     /// such as Everyone), else the SID as `S-1-5-...`. Only a SID that this machine answers for is looked up
-    /// (`is_local`: well-known, built-in and service SIDs, and those of the machine's own accounts); every other, a
-    /// domain account, a logon session or an Entra ID SID, is shown as its text, so a lookup never waits on a domain
-    /// controller.
+    /// (`is_local`: the well-known SIDs, the built-in and service SIDs, and those of the machine's own accounts);
+    /// every other, a domain account, a logon session or an Entra ID SID, is shown as its text, so a lookup never
+    /// waits on a domain controller.
     pub fn label(&self) -> String {
-        let name = is_local(self, machine_domain()).then(|| self.account_name()).flatten();
+        let name = is_local(self, machine_domain).then(|| self.account_name()).flatten();
         name.unwrap_or_else(|| {
             self.text()
                 .unwrap_or_else(|err| format!("an SID that cannot be read ({err})"))
@@ -493,19 +493,21 @@ fn read_machine_domain() -> Option<Sid> {
 
 /// Whether this machine answers for `sid`, so that a lookup of it asks no other: only these, never "whatever is not
 /// known to be foreign". Everyone (`S-1-1-0`), the local and creator authorities (`S-1-2-*`, `S-1-3-*`), the NT
-/// AUTHORITY SIDs `S-1-5-1` to `S-1-5-20` but the logon sessions (`S-1-5-5-*`), BUILTIN (`S-1-5-32-*`), the service
-/// SIDs (`S-1-5-80-*`, which the local LSA computes), and the SIDs of this machine's own account domain
-/// (`machine_domain`; with none known, no domain SID is). A logon, Entra ID (`S-1-12-*`), capability (`S-1-15-*`) or
-/// another domain's SID is not.
-fn is_local(sid: &Sid, machine_domain: Option<&Sid>) -> bool {
+/// AUTHORITY SIDs `S-1-5-1` to `S-1-5-20` but the logon sessions (`S-1-5-5-*`), `S-1-5-33`, `S-1-5-64-*`, `S-1-5-83-0`,
+/// `S-1-5-90-*`, `S-1-5-113` and `S-1-5-114`, BUILTIN (`S-1-5-32-*`), the service SIDs (`S-1-5-80-*`, which the local
+/// LSA computes), the application packages `S-1-15-2-1` and `S-1-15-2-2`, and the SIDs of this machine's own account
+/// domain (`machine_domain`, called only for such a SID; with none known, no domain SID is). A logon, Entra ID
+/// (`S-1-12-*`), other capability or another domain's SID is not.
+fn is_local<'a>(sid: &Sid, machine_domain: impl FnOnce() -> Option<&'a Sid>) -> bool {
     match sid.parts() {
         (1, subs) => subs == [0],
         (2 | 3, _) => true,
-        (5, subs) => match subs.first() {
-            Some(1..=4 | 6..=20 | 32 | 80) => true,
-            Some(21) => machine_domain.is_some_and(|machine| sid.in_domain_of(machine)),
+        (5, subs) => match subs.as_slice() {
+            [1..=4 | 6..=20 | 32 | 33 | 64 | 80 | 90 | 113 | 114, ..] | [83, 0] => true,
+            [21, ..] => machine_domain().is_some_and(|machine| sid.in_domain_of(machine)),
             _ => false,
         },
+        (15, subs) => subs == [2, 1] || subs == [2, 2],
         _ => false,
     }
 }

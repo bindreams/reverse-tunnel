@@ -180,9 +180,8 @@ fn problem(need: &Need, who: &Principals) -> Option<String> {
 /// What stands between the service and the rights it needs.
 #[derive(Debug)]
 pub enum Barrier {
-    /// An ACE denies this account or group something: its name (`Sid::label`), or its SID where it is not asked for a
-    /// name (a SID of another domain: every domain account and group) or has none. Any deny ACE is a barrier, whoever
-    /// it names and whatever it denies.
+    /// An ACE denies this account or group something: `Sid::label` of its SID, which says which SIDs are named and
+    /// which are shown as text. Any deny ACE is a barrier, whoever it names and whatever it denies.
     Denied(String),
     /// The allow ACEs for the service and its groups do not add up to the rights.
     NotAllowed,
