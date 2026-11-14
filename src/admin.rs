@@ -1,24 +1,50 @@
 //! frpc's admin API, on loopback: whether this host is logged in to the bridge, and what each published service is
-//! doing. Its password is `secrets/admin.password`, which only the service account and administrators read, and its port
-//! is the one `run` recorded (`Paths::admin_port_file`).
+//! doing. It is served over TLS with a certificate that `install` generated (`Paths::admin_cert`), which is the only
+//! one `status` trusts, so the password (`secrets/admin.password`, which only the service account and administrators
+//! read) goes only to a listener that holds that certificate's key: frpc. That password unlocks frpc's admin API, which
+//! can change and reload frpc's configuration; frpc.toml holds no token. Its port is the one `run` recorded
+//! (`Paths::admin_port_file`).
+//!
+//! The listener on that port is frpc only while no other local account has taken the port: a local account that takes
+//! it makes frpc fail to start, and `run` then restarts on a new port. The host's local accounts are trusted not to
+//! take the tunnel down.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs;
 use std::io::{self, ErrorKind};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use rcgen::generate_simple_self_signed;
 use serde::Deserialize;
+use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
 use crate::config::Config;
+use crate::files::read_secret;
 use crate::paths::Paths;
-use crate::supervisor::token;
 
 /// The admin API's user; the password is in `Paths::admin_password`.
 pub const USER: &str = "reverse-tunnel";
+
+/// A PEM certificate and its PEM private key, for frpc's admin API.
+pub struct KeyPair {
+    pub cert: String,
+    pub key: String,
+}
+
+/// A new self-signed certificate for `127.0.0.1` (an IP address, not a CA) and its key.
+pub fn generate() -> Result<KeyPair> {
+    let made = generate_simple_self_signed(vec![Ipv4Addr::LOCALHOST.to_string()])
+        .context("generating the admin API's certificate")?;
+    Ok(KeyPair {
+        cert: made.cert.pem(),
+        key: made.signing_key.serialize_pem(),
+    })
+}
 
 /// How long frpc has to answer a request on loopback.
 const ANSWER_WITHIN: Duration = Duration::from_secs(10);
@@ -49,7 +75,7 @@ pub fn tunnel(cfg: &Config, paths: &Paths) -> Tunnel {
     if cfg.services.is_empty() {
         return Tunnel::Unknown("no service is published, so frpc has nothing to report".into());
     }
-    let password = match token(&paths.admin_password()) {
+    let password = match read_secret(&paths.admin_password()) {
         Ok(password) => password,
         Err(err)
             if err
@@ -65,7 +91,11 @@ pub fn tunnel(cfg: &Config, paths: &Paths) -> Tunnel {
         Ok(port) => port,
         Err(err) => return Tunnel::Unknown(format!("{err:#}")),
     };
-    match get(port, &password).and_then(|body| parse(&body)) {
+    let cert = match fs::read(paths.admin_cert()) {
+        Ok(cert) => cert,
+        Err(err) => return Tunnel::Unknown(format!("reading {}: {err}", paths.admin_cert().display())),
+    };
+    match get(port, &cert, &password).and_then(|body| parse(&body)) {
         Ok(proxies) if proxies.is_empty() => Tunnel::NotConnected,
         Ok(proxies) => Tunnel::Connected(proxies),
         Err(err) => Tunnel::Unknown(format!("{err:#}")),
@@ -77,7 +107,9 @@ fn recorded_port(paths: &Paths) -> Result<u16> {
     let file = paths.admin_port_file();
     let text = match fs::read_to_string(&file) {
         Ok(text) => text,
-        Err(err) if err.kind() == ErrorKind::NotFound => bail!("the service has not started frpc"),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            bail!("the service has not recorded frpc's port: it has not started frpc, or could not write the file")
+        }
         Err(err) => return Err(err).with_context(|| format!("reading {}", file.display())),
     };
     let port: u16 = text
@@ -88,25 +120,45 @@ fn recorded_port(paths: &Paths) -> Result<u16> {
     Ok(port)
 }
 
-/// The body of frpc's `/api/status`.
-fn get(port: u16, password: &str) -> Result<String> {
+/// The body of frpc's `/api/status`, asked over TLS of a listener that holds the key of `cert` (PEM), the only
+/// certificate trusted. The password is sent only after that handshake: a listener that fails it is `not this host's
+/// frpc`, and has been sent nothing.
+fn get(port: u16, cert: &[u8], password: &str) -> Result<String> {
+    let trusted = Certificate::from_pem(cert).context("reading the admin API's certificate")?;
+    let tls = TlsConfig::builder()
+        .root_certs(RootCerts::new_with_certs(&[trusted]))
+        .build();
     // No proxy: the address is loopback, and ureq would otherwise take one from the environment.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .proxy(None)
+        .tls_config(tls)
         .timeout_global(Some(ANSWER_WITHIN))
         .http_status_as_error(false)
         .build()
         .into();
     let basic = STANDARD.encode(format!("{USER}:{password}"));
-    let url = format!("http://127.0.0.1:{port}/api/status");
+    let url = format!("https://127.0.0.1:{port}/api/status");
     let mut response = match agent.get(&url).header("Authorization", format!("Basic {basic}")).call() {
         Ok(response) => response,
+        Err(err) if failed_handshake(&err) => {
+            bail!("the listener on the recorded port 127.0.0.1:{port} is not this host's frpc: {err}")
+        }
         Err(err) => bail!("frpc did not answer at 127.0.0.1:{port}: {err}"),
     };
     match response.status().as_u16() {
         200 => Ok(response.body_mut().read_to_string()?),
         401 => bail!("frpc rejected the admin password"),
         status => bail!("frpc answered {status} at 127.0.0.1:{port}"),
+    }
+}
+
+/// Whether `err` is the TLS handshake failing (a certificate other than the trusted one, or no TLS at all), as opposed
+/// to nothing answering.
+fn failed_handshake(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::Rustls(_) => true,
+        ureq::Error::Io(err) => err.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()),
+        _ => false,
     }
 }
 

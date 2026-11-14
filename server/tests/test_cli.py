@@ -538,6 +538,23 @@ def test_list_asks_frps_after_the_bring_up(inited, monkeypatch):
     assert calls == ["up", "ask"]
 
 
+def test_list_asks_frps_with_the_registry_lock_released(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+
+    def ask(folder):
+        fd = os.open("state/lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # BlockingIOError while `list` still holds it
+        finally:
+            os.close(fd)
+        return "[]"
+
+    monkeypatch.setattr(compose, "frps_clients", ask)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    assert capsys.readouterr().out.splitlines() == [f"host web {H}", "presence web offline"]
+
+
 def test_a_failed_bring_up_still_lists_the_registry_then_the_error(inited, monkeypatch, capsys):
     cli.main(["add", "web", H])
     monkeypatch.setattr(compose, "compose_up", docker_down)
@@ -548,7 +565,7 @@ def test_a_failed_bring_up_still_lists_the_registry_then_the_error(inited, monke
     assert "the bridge was not brought up" in err
 
 
-def test_list_with_an_frps_that_has_no_api_says_unknown_and_to_recreate_it(inited, monkeypatch, capsys):
+def test_list_with_an_frps_that_does_not_listen_says_unknown_and_to_restart_it(inited, monkeypatch, capsys):
     cli.main(["add", "web", H])
 
     def refused(folder):
@@ -559,7 +576,9 @@ def test_list_with_an_frps_that_has_no_api_says_unknown_and_to_recreate_it(inite
     assert cli.main(["list"]) == 0
     out, err = capsys.readouterr()
     assert out == f"host web {H}\npresence web unknown\n"
-    assert "Connection refused" in err and "--build reverse-tunnel-frps" in err
+    assert "Connection refused" in err
+    assert "created before this version, `docker compose restart reverse-tunnel-frps`" in err
+    assert "may not listen yet" in err
 
 
 @pytest.mark.parametrize(
@@ -581,7 +600,7 @@ def test_list_with_an_frps_that_has_no_api_says_unknown_and_to_recreate_it(inite
         '[{"user": "web", "online": true, "lastConnectedAt": 99999999999999999999}]',
     ],
 )
-def test_an_unusable_answer_from_frps_says_unknown_with_its_reason_and_no_recreate_hint(
+def test_an_unusable_answer_from_frps_says_unknown_with_its_reason_and_no_restart_hint(
     inited, monkeypatch, capsys, answer
 ):
     cli.main(["add", "web", H])
@@ -590,10 +609,10 @@ def test_an_unusable_answer_from_frps_says_unknown_with_its_reason_and_no_recrea
     assert cli.main(["list"]) == 0
     out, err = capsys.readouterr()
     assert out == f"host web {H}\npresence web unknown\n"
-    assert "frps's answer" in err and "recreates" not in err
+    assert "frps's answer" in err and "restart" not in err
 
 
-def test_list_when_frps_cannot_be_asked_says_unknown_with_its_reason_and_no_recreate_hint(inited, monkeypatch, capsys):
+def test_list_when_frps_cannot_be_asked_says_unknown_with_its_reason_and_no_restart_hint(inited, monkeypatch, capsys):
     cli.main(["add", "web", H])
 
     def not_running(folder):
@@ -604,7 +623,7 @@ def test_list_when_frps_cannot_be_asked_says_unknown_with_its_reason_and_no_recr
     assert cli.main(["list"]) == 0
     out, err = capsys.readouterr()
     assert out == f"host web {H}\npresence web unknown\n"
-    assert "is not running" in err and "recreates" not in err
+    assert "is not running" in err and "restart" not in err
 
 
 def test_frps_clients_asks_frps_to_read_its_own_loopback_api(docker, tmp_path, monkeypatch):
@@ -612,7 +631,7 @@ def test_frps_clients_asks_frps_to_read_its_own_loopback_api(docker, tmp_path, m
     assert compose.frps_clients(tmp_path).strip() == "[]"
     base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml"
     assert Path(f"{docker}.log").read_text().splitlines() == [
-        f"{base} exec -T reverse-tunnel-frps wget -qO- http://127.0.0.1:7500/api/clients"
+        f"{base} exec -T reverse-tunnel-frps wget -T 10 -qO- http://127.0.0.1:7500/api/clients"
     ]
 
 
@@ -624,5 +643,16 @@ def test_frps_clients_tells_a_refused_connection_from_other_failures(docker, tmp
 
     monkeypatch.setenv("FAKE_STDERR", "service reverse-tunnel-frps is not running")
     with pytest.raises(compose.DockerError, match="is not running") as raised:
+        compose.frps_clients(tmp_path)
+    assert not isinstance(raised.value, compose.FrpsApiMissing)
+
+
+@pytest.mark.parametrize(
+    "stderr", ["wget: download timed out", "wget: can't connect to remote host: Operation timed out"]
+)
+def test_frps_clients_says_when_frps_did_not_answer(docker, tmp_path, monkeypatch, stderr):
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    monkeypatch.setenv("FAKE_STDERR", stderr)
+    with pytest.raises(compose.DockerError, match="frps did not answer within 10 s") as raised:
         compose.frps_clients(tmp_path)
     assert not isinstance(raised.value, compose.FrpsApiMissing)

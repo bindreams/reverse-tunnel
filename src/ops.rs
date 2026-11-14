@@ -1,5 +1,6 @@
 //! `start`, `stop`, `restart` and `status`: the service through goetia, and the files in `config_dir`, which every local
-//! user may read. Only `status` reads `secrets_dir`, for the admin password, and does without it where it may not.
+//! user may read. Only `status` reads `secrets_dir`, for the admin password and certificate, and does without them where
+//! it may not.
 
 use std::fs;
 use std::io::Write;

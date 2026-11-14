@@ -447,6 +447,18 @@ fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().mode() & 0o7777
 }
 
+/// The files of `secrets/`.
+#[cfg(unix)]
+fn secrets(paths: &Paths) -> [PathBuf; 5] {
+    [
+        paths.bridge_token(),
+        paths.host_token(),
+        paths.admin_password(),
+        paths.admin_cert(),
+        paths.admin_key(),
+    ]
+}
+
 /// The modes, the owners and the access the installation is specified to give.
 #[cfg(unix)]
 fn assert_installed_as_specified(machine: &Machine) {
@@ -464,13 +476,15 @@ fn assert_installed_as_specified(machine: &Machine) {
         (machine.paths.bridge_token(), 0o640),
         (machine.paths.host_token(), 0o640),
         (machine.paths.admin_password(), 0o640),
+        (machine.paths.admin_cert(), 0o640),
+        (machine.paths.admin_key(), 0o640),
         (paths.bin_dir.clone(), 0o755),
         (service::exe(paths), 0o755),
     ];
     for (path, mode) in expected {
         assert_eq!(mode_of(&path), mode, "mode of {}", path.display());
     }
-    for token in [paths.bridge_token(), paths.host_token(), paths.admin_password()] {
+    for token in secrets(paths) {
         let meta = fs::metadata(&token).unwrap();
         assert_eq!(
             (meta.uid(), meta.gid()),
@@ -500,7 +514,7 @@ fn assert_installed_as_specified(machine: &Machine) {
         !machine.probe("ls", &paths.secrets_dir),
         "secrets/ can be listed by another user"
     );
-    for token in [paths.bridge_token(), paths.host_token(), paths.admin_password()] {
+    for token in secrets(paths) {
         assert!(
             !machine.probe("cat", &token),
             "{} is readable by another user",

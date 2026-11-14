@@ -28,7 +28,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Config;
 use crate::download::Tools;
-use crate::files::{Perm, Replace, write_atomic};
+use crate::files::{Perm, Replace, read_secret, write_atomic};
 use crate::frpc::{render, ws_routes};
 use crate::logfile::{LogFile, ROTATE_AT};
 use crate::paths::{FRPC_CONFIG, LOG_FRPC, LOG_SUPERVISOR, Paths};
@@ -86,9 +86,9 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
         paths,
         tools,
         tokens: [
-            ("RT_BRIDGE_TOKEN", token(&paths.bridge_token())?),
-            ("RT_HOST_TOKEN", token(&paths.host_token())?),
-            ("RT_ADMIN_PASSWORD", token(&paths.admin_password())?),
+            ("RT_BRIDGE_TOKEN", read_secret(&paths.bridge_token())?),
+            ("RT_HOST_TOKEN", read_secret(&paths.host_token())?),
+            ("RT_ADMIN_PASSWORD", read_secret(&paths.admin_password())?),
         ],
     };
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -102,17 +102,12 @@ pub fn run_with(paths: &Paths, tools: &Tools, check_only: bool, listen: SocketAd
     Err(err)
 }
 
-/// A secret file's text without surrounding whitespace, which must not be empty.
-pub(crate) fn token(path: &Path) -> Result<String> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    ensure!(!text.trim().is_empty(), "{} is empty", path.display());
-    Ok(text.trim().to_string())
-}
-
 /// A port on loopback that nothing holds now, for frpc's admin API: binds port 0, reads the port and releases it.
 ///
-/// Another program can take the port before frpc binds it. frpc then exits, so `run` fails, and the service manager's
-/// restart of `run` picks another port.
+/// Another program can take the port before frpc binds it. frpc cannot take over a bound port: it exits, so `run`
+/// fails, and the service manager's restart of `run` picks another port. The host's local accounts are trusted not to
+/// take the tunnel down this way; what they cannot do is read the password or the config through that port, because
+/// `status` sends the password only to the listener that holds the admin certificate's key (`admin`).
 fn free_loopback_port() -> Result<u16> {
     let socket = StdListener::bind((Ipv4Addr::LOCALHOST, 0)).context("picking a port for frpc's admin API")?;
     Ok(socket.local_addr()?.port())
@@ -148,10 +143,13 @@ async fn supervise(setup: &Setup<'_>, listen: SocketAddr, log: &LogFile, frpc_lo
     // (the service manager kills it), so every start overwrites the same file.
     let admin_port = free_loopback_port()?;
     let config = render_config(setup, listener.local_addr()?.port(), admin_port, &setup.paths.log_dir)?;
-    // For `status`, which has no other way to find the port. No secret: anyone may read it.
+    // For `status`, which has no other way to find the port. No secret: anyone may read it. Only `status` depends on it,
+    // so a failure is reported and frpc starts.
     let recorded = setup.paths.admin_port_file();
-    write_atomic(&recorded, admin_port.to_string().as_bytes(), RECORDED, Replace::Always)
-        .with_context(|| format!("writing {}", recorded.display()))?;
+    let written = write_atomic(&recorded, admin_port.to_string().as_bytes(), RECORDED, Replace::Always);
+    if let Err(err) = written.with_context(|| format!("writing {}", recorded.display())) {
+        log.line(format_args!("{err:#}"));
+    }
 
     let mut frpc = setup.frpc(&[], &config);
     frpc.stdin(Stdio::null())?

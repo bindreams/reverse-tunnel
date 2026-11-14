@@ -151,7 +151,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 
 | Command | What it does |
 |---|---|
-| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain with whether frpc is connected to it and what each published service is doing, and which bridge it trusts: one `certificate:` line per certificate in `bridge.pem`, two during a rotation. Asking frpc needs `sudo` (an elevated prompt on Windows); without it, or before the service has started frpc, `status` says that it did not check. |
+| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain with whether frpc is connected to it and what each published service is doing, and which bridge it trusts: one `certificate:` line per certificate in `bridge.pem`, two during a rotation. Asking frpc needs `sudo` (an elevated prompt on Windows); without it, before the service has started frpc, or when the listener on frpc's port is not frpc, `status` says that it did not check. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
 | `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then restarts the service so it reads it again. Works over the tunnel. |
@@ -172,11 +172,14 @@ published ssh: running
 certificate: SHA-256 AB:CD:...
 ```
 
-frpc's admin API answers on `127.0.0.1` only, with a password that `install` generates in `secrets/admin.password`. The
-service picks a free port each time it starts frpc and records it in `frpc-admin.port` in the log directory, for
-`status`. A program that takes the port in the instant before frpc binds it makes frpc exit; the service manager then
-restarts the service, which picks another port. A bridge that has been unreachable for about 30 seconds shows as
-`not connected`.
+frpc's admin API answers on `127.0.0.1` only, over TLS. `install` generates its certificate and key
+(`secrets/admin.crt`, `secrets/admin.key`) and a password (`secrets/admin.password`). `status` trusts only that
+certificate and sends the password only to a listener that holds the key, so a program that takes the port gets nothing
+from `status`. The service picks a free port each time it starts frpc and records it in `frpc-admin.port` in the log
+directory, for `status`. The host's local accounts are trusted not to take the tunnel down: a program that takes the
+port in the instant before frpc binds it makes frpc exit (frpc cannot take over a bound port), the service manager then
+restarts the service, which picks another port, and a program that keeps taking ports keeps the tunnel down. A bridge
+that has been unreachable for about 30 seconds shows as `not connected`.
 
 The files:
 

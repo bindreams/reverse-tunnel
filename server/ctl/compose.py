@@ -11,6 +11,10 @@ class DockerError(OSError):
     """`docker` could not be run, or reported a failure of its own."""
 
 
+# How long `wget` waits for frps's API, in seconds.
+FRPS_ANSWER_WITHIN = 10
+
+
 class FrpsApiMissing(DockerError):
     """frps runs but its API does not answer: it was created before the API existed."""
 
@@ -57,12 +61,15 @@ def network_exists(name: str) -> bool:
 def frps_clients(folder: Path) -> str:
     """frps's `/api/clients` answer, read by `wget` inside the frps container: the API listens on its loopback only.
     Raises `FrpsApiMissing` when nothing listens there, and `DockerError`, with what docker or `wget` printed, for any
-    other failure.
+    other failure, among them frps not answering within `FRPS_ANSWER_WITHIN` seconds.
     """
-    ask = [*_COMPOSE, "exec", "-T", "reverse-tunnel-frps", "wget", "-qO-", "http://127.0.0.1:7500/api/clients"]
+    api = "http://127.0.0.1:7500/api/clients"
+    ask = [*_COMPOSE, "exec", "-T", "reverse-tunnel-frps", "wget", "-T", str(FRPS_ANSWER_WITHIN), "-qO-", api]
     result = _docker(*ask, cwd=folder, capture_output=True, text=True)
     if result.returncode:
         stderr = result.stderr.strip()
+        if "timed out" in stderr:
+            raise DockerError(f"frps did not answer within {FRPS_ANSWER_WITHIN} s")
         message = stderr or f"docker exited with {result.returncode}"
         raise (FrpsApiMissing if "Connection refused" in stderr else DockerError)(message)
     return result.stdout

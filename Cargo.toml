@@ -29,6 +29,10 @@ tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+# The admin API's certificate (src/admin.rs); ring, like ureq's rustls.
+rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring"] }
+# Names the handshake failures ureq reports, and serves TLS in the tests.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 yaml_serde = "0.10.7"
 zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 

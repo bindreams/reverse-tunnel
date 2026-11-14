@@ -116,8 +116,8 @@ def _unalias(args, hosts, aliases, env):
 
 
 FRPS_API_HINT = (
-    "frps was created before this version, so it has no API: `docker compose up -d --build reverse-tunnel-frps` "
-    "recreates it, which drops every tunnel."
+    "If frps was created before this version, `docker compose restart reverse-tunnel-frps` makes it read the API "
+    "settings (it drops every tunnel once); right after a start it may not listen yet."
 )
 
 
@@ -150,11 +150,14 @@ def online_since(answer: str) -> dict[str, int]:
 
 
 def _presence(hosts: dict) -> str:
-    """One line per registered host: online since when, offline, or unknown with the reason on stderr."""
+    """One line per registered host: online since when, offline, or unknown with the reason on stderr. Asks nothing
+    when no host is registered."""
+    if not hosts:
+        return ""
     try:
         online = online_since(compose.frps_clients(Path.cwd()))
     except compose.FrpsApiMissing as e:
-        print(f"ctl: frps's API does not answer: {e}. {FRPS_API_HINT}", file=sys.stderr)
+        print(f"ctl: frps does not answer on its API ({e}). {FRPS_API_HINT}", file=sys.stderr)
         online = None
     except OSError as e:
         print(f"ctl: could not ask frps who is online: {e}", file=sys.stderr)
@@ -205,6 +208,9 @@ class Command(NamedTuple):
     arguments: dict[str, str]
     # True for `init`: runs in a folder with no `state/`, and its text prints after the bring-up.
     bootstrap: bool = False
+    # Called with the registered hosts once the bring-up is done and the registry lock is released; returns text to
+    # print.
+    after: Callable | None = None
 
 
 COMMANDS = {
@@ -246,6 +252,7 @@ COMMANDS = {
         _list,
         "Show the registered hosts and the aliases, then which hosts are online at frps (since when) or offline.",
         {},
+        after=_presence,
     ),
     "join-code": Command(
         _join_code,
@@ -304,13 +311,14 @@ def _run(args) -> None:
                 else "rerun any ctl command to retry"
             )
             raise CtlError(f"{updated}the bridge was not brought up ({e}); {retry}") from e
-        if args.command == "list" and hosts:  # frps runs only once the bring-up has made sure of it
-            print(_presence(hosts))
         if command.bootstrap:
             if frps_kept:
                 print(FRPS_KEPT)
             if out:
                 print(out)
+    # frps runs only once the bring-up has made sure of it, and asking it may take long: not under the lock.
+    if command.after and (text := command.after(hosts)):
+        print(text)
 
 
 def build_parser() -> argparse.ArgumentParser:

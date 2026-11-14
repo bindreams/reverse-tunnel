@@ -261,6 +261,8 @@ pub fn assert_installed_as_specified(machine: &Machine) {
         machine.paths.bridge_token(),
         machine.paths.host_token(),
         machine.paths.admin_password(),
+        machine.paths.admin_cert(),
+        machine.paths.admin_key(),
     ];
 
     for public in [paths.config_dir.clone(), paths.config_file(), paths.bridge_pem()] {
@@ -272,7 +274,7 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     is(&paths.log_dir, EVERYONE, READ_EXECUTE);
     may_not_write(&paths.log_dir, EVERYONE);
     is(&paths.log_dir, &service_sid, MODIFY);
-    for secret in [&paths.secrets_dir, &tokens[0], &tokens[1], &tokens[2]] {
+    for secret in std::iter::once(&paths.secrets_dir).chain(&tokens) {
         is(secret, SYSTEM, FULL);
         is(secret, ADMINISTRATORS, FULL);
         is(secret, &service_sid, READ_EXECUTE);

@@ -59,12 +59,16 @@ fn render_transport() {
     }
 }
 
-/// The admin API is on loopback, at the port `render` is given, with the password read from frpc's environment like
-/// the tokens.
+/// The admin API is on loopback, at the port `render` is given, over TLS with the installed key pair, with the password
+/// read from frpc's environment like the tokens.
 #[test]
 fn render_admin_api() {
     let lines = render_yaml(YAML).lines().map(String::from).collect::<Vec<_>>();
+    let paths = Paths::testing("root");
+    let quoted = |path: std::path::PathBuf| serde_json::to_string(path.to_str().unwrap()).unwrap();
     for line in [
+        format!("webServer.tls.certFile = {}", quoted(paths.admin_cert())),
+        format!("webServer.tls.keyFile = {}", quoted(paths.admin_key())),
         "webServer.addr = \"127.0.0.1\"".to_string(),
         format!("webServer.port = {ADMIN_PORT}"),
         "webServer.user = \"reverse-tunnel\"".to_string(),

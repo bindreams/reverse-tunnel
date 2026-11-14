@@ -15,7 +15,8 @@ pub struct Paths {
     pub bin_dir: PathBuf,
     /// `config.yaml` and `bridge.pem`, readable by everyone.
     pub config_dir: PathBuf,
-    /// `bridge.token`, `host.token` and `admin.password`, readable by administrators and the service account.
+    /// `bridge.token`, `host.token`, `admin.password` and the admin API's `admin.crt` and `admin.key`, readable by
+    /// administrators and the service account.
     pub secrets_dir: PathBuf,
     pub log_dir: PathBuf,
     /// Held by `install` and `uninstall` for their whole run. No removal touches it. On Windows, the name of a mutex,
@@ -46,6 +47,16 @@ impl Paths {
     /// The password of frpc's admin API (`admin::USER`), which `status` reads.
     pub fn admin_password(&self) -> PathBuf {
         self.secrets_dir.join("admin.password")
+    }
+
+    /// The certificate frpc's admin API serves, which `status` trusts alone: a listener without its key is not frpc.
+    pub fn admin_cert(&self) -> PathBuf {
+        self.secrets_dir.join("admin.crt")
+    }
+
+    /// The key of `admin_cert`, which frpc reads.
+    pub fn admin_key(&self) -> PathBuf {
+        self.secrets_dir.join("admin.key")
     }
 
     /// Where `run` records the port of frpc's admin API, which `status` reads. It holds no secret.

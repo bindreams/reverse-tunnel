@@ -159,6 +159,25 @@ fn run_records_the_admin_port_it_renders() {
     assert_eq!(fs::read_to_string(host.paths.admin_port_file()).unwrap(), port);
 }
 
+/// `status` only loses what it asks frpc; the tunnel does not depend on the record.
+#[test]
+fn a_port_that_cannot_be_recorded_is_reported_and_frpc_starts() {
+    let host = Host::new("record 3 {record}", SSH);
+    // A directory where the file goes: no write can replace it.
+    fs::create_dir(host.paths.admin_port_file()).unwrap();
+    host.run(false).unwrap_err();
+
+    assert!(
+        fs::read_to_string(host.record()).unwrap().contains(
+            "TOML
+"
+        ),
+        "frpc was not started"
+    );
+    let log = host.log(LOG_SUPERVISOR);
+    assert!(log.contains("frpc-admin.port"), "{log}");
+}
+
 #[test]
 fn missing_token_file_is_refused() {
     let host = Host::new("exit 0", SSH);

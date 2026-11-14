@@ -139,6 +139,39 @@ fn install_adds_a_missing_admin_password() {
     assert!(crate::ops::pending_file(&machine.paths).exists());
 }
 
+/// The pair frpc serves its admin API with, and `status` trusts, is made once and kept.
+#[test]
+fn install_makes_the_admin_key_pair_once() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let (cert, key) = (machine.paths.admin_cert(), machine.paths.admin_key());
+    let (made_cert, made_key) = (fs::read_to_string(&cert).unwrap(), fs::read_to_string(&key).unwrap());
+    assert!(made_cert.starts_with("-----BEGIN CERTIFICATE-----"), "{made_cert}");
+    assert!(made_key.contains("PRIVATE KEY"), "the key is not a PEM private key");
+
+    assert!(!machine.settings(None, None), "a rerun changes nothing");
+    assert_eq!(fs::read_to_string(&cert).unwrap(), made_cert);
+    assert_eq!(fs::read_to_string(&key).unwrap(), made_key);
+}
+
+/// An install from before the admin API served TLS has no pair, and one file of a pair is no pair: the next `install`
+/// makes a whole new one, and the service must read it.
+#[test]
+fn install_makes_a_new_admin_key_pair_when_either_file_is_missing() {
+    for missing in [Paths::admin_cert, Paths::admin_key] {
+        let machine = Machine::new();
+        machine.settings(Some("myhost"), Some(CODE));
+        let before = fs::read_to_string(machine.paths.admin_cert()).unwrap();
+        fs::remove_file(missing(&machine.paths)).unwrap();
+        fs::remove_file(crate::ops::pending_file(&machine.paths)).ok();
+
+        assert!(machine.settings(None, None));
+        assert_ne!(fs::read_to_string(machine.paths.admin_cert()).unwrap(), before);
+        assert!(machine.paths.admin_key().exists());
+        assert!(crate::ops::pending_file(&machine.paths).exists());
+    }
+}
+
 #[test]
 fn registration_line() {
     let token = "0".repeat(64);

@@ -347,6 +347,13 @@ pub fn split_once(name: &OsStr, sep: u8) -> Option<(&OsStr, &OsStr)> {
     Some(unsafe { (name_of_part(&bytes[..at]), name_of_part(&bytes[at + 1..])) })
 }
 
+/// A secret file's text without surrounding whitespace, which must not be empty.
+pub fn read_secret(path: &Path) -> Result<String> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    ensure!(!text.trim().is_empty(), "{} is empty", path.display());
+    Ok(text.trim().to_string())
+}
+
 /// Whether `err`, or the `io::Error` it wraps, is the OS saying that the path is not there.
 #[cfg(windows)]
 pub fn is_not_found(err: &anyhow::Error) -> bool {
