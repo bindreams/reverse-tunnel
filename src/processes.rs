@@ -268,17 +268,36 @@ fn user_of(process: HANDLE) -> io::Result<Sid> {
     Ok(unsafe { Sid::copy_of((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) })
 }
 
-/// Whether any process runs the image `path`, which Windows will not overwrite or delete while it does. The images are
-/// compared as files (the same path, whatever the case or the short names). A process that cannot be opened, or whose
-/// image cannot be read, is not counted: those are the protected processes of the system, which do not run a file of this
-/// installation.
+/// The images that the processes of the system run, as of one listing: which of several files run is asked of one
+/// moment, not of as many as there are files.
+pub struct RunningImages(Vec<PathBuf>);
+
+impl RunningImages {
+    /// The images of the processes now. A process that cannot be opened, or whose image cannot be read, is not counted:
+    /// those are the protected processes of the system, which do not run a file of this installation.
+    pub fn now() -> Result<RunningImages> {
+        let buffer = Buffer::list().context("listing the processes")?;
+        Ok(RunningImages(
+            buffer
+                .entries()
+                .iter()
+                .filter_map(|entry| image_of(entry.ProcessId))
+                .collect(),
+        ))
+    }
+
+    /// Whether a process of the listing runs the image `path`. The images are compared as files (the same path, whatever
+    /// the case or the short names).
+    pub fn runs(&self, path: &Path) -> Result<bool> {
+        let image = fs::canonicalize(path).with_context(|| format!("looking at {}", path.display()))?;
+        Ok(self.0.contains(&image))
+    }
+}
+
+/// Whether any process runs the image `path` now, which Windows will not overwrite or delete while it does (see
+/// `RunningImages`).
 pub fn runs_image(path: &Path) -> Result<bool> {
-    let image = fs::canonicalize(path).with_context(|| format!("looking at {}", path.display()))?;
-    let buffer = Buffer::list().context("listing the processes")?;
-    Ok(buffer
-        .entries()
-        .iter()
-        .any(|entry| image_of(entry.ProcessId).is_some_and(|runs| runs == image)))
+    RunningImages::now()?.runs(path)
 }
 
 /// The file that process `pid` runs, as `fs::canonicalize` gives it; none if the process has ended, cannot be opened or

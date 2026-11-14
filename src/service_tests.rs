@@ -79,3 +79,25 @@ fn only_a_file_named_by_a_digest_is_an_image() {
 fn spec_refuses_a_relative_bin_dir() {
     assert!(spec(&exe(&Paths::testing("relative/root"))).is_err());
 }
+
+#[cfg(windows)]
+#[test]
+fn the_installed_image_is_the_registered_one_unless_an_unreadable_entry_may_be_the_service() {
+    use goetia::manager::fake::Fake;
+
+    let paths = Paths::testing("C:/root");
+    let manager = Fake::default();
+    // An unreadable entry that names another service is not this one's.
+    manager.seed_opaque("another");
+    assert_eq!(
+        installed_image(&manager, &paths).unwrap_err().to_string(),
+        "the service is not installed"
+    );
+    // One that names none may be.
+    manager.seed_aggregate_undetermined("the scan did not finish.");
+    let err = installed_image(&manager, &paths).unwrap_err().to_string();
+    assert!(
+        err.starts_with("could not tell whether the service is installed"),
+        "{err}"
+    );
+}

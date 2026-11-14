@@ -171,6 +171,26 @@ fn restart_without_the_installed_binary_says_the_service_is_not_installed() {
     assert_eq!(manager.calls(), []);
 }
 
+#[cfg(windows)]
+#[test]
+fn restart_names_the_registered_image_that_is_missing() {
+    let (_dir, paths) = host();
+    let manager = Fake::default();
+    let image = service::image(&paths, b"gone");
+    manager.install(&service::spec(&image).unwrap(), false).unwrap();
+
+    let err = check_and_restart(&manager, &paths).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "the service is registered on {}, which is missing: run `install` again",
+            image.display()
+        )
+    );
+    assert_eq!(manager.calls().iter().filter(|(verb, _)| *verb != "install").count(), 0);
+}
+
 /// A restart during a removal would restart, or write the restart marker into, what the removal is deleting.
 #[cfg(unix)]
 #[test]

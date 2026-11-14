@@ -83,12 +83,14 @@ pub fn installed_image(manager: &dyn ServiceManager, paths: &Paths) -> anyhow::R
                 Installed::OursUnusable { name, reason } if name == ID => {
                     anyhow::bail!("the service is installed, but cannot be read: {reason}")
                 }
-                Installed::Undetermined { reason, .. } => unread = Some(reason),
+                // An entry that names another service is not this one's; one that names none may stand for it.
+                Installed::Undetermined { name, reason } if name.as_deref().is_none_or(|name| name == ID) => {
+                    unread = Some(reason)
+                }
                 _ => {}
             }
         }
         match unread {
-            // An entry that could not be read may be this service's.
             Some(reason) => anyhow::bail!("could not tell whether the service is installed: {reason}"),
             None => anyhow::bail!("the service is not installed"),
         }
@@ -107,10 +109,15 @@ pub fn id() -> Id {
 /// The first argument with which SCM starts the installed binary as its service host: `main` then hands over to goetia.
 pub const SERVICE_HOST_ARG: &str = "--service-host";
 
-/// The service manager of this platform. On Windows `image` is the service host of a daemon it registers: this binary,
-/// which goetia's shim runs when started with `SERVICE_HOST_ARG`. Only `install` registers; everything else may pass
-/// any image.
-pub fn manager(image: &Path) -> goetia::Result<Box<dyn ServiceManager>> {
+/// The service manager of this platform, for everything but registering the service: start, stop, restart, status and
+/// uninstall name no host.
+pub fn manager(paths: &Paths) -> goetia::Result<Box<dyn ServiceManager>> {
+    registering_manager(&exe(paths))
+}
+
+/// The service manager of this platform, for `install` to register the service with. On Windows `image` is the service
+/// host of a daemon it registers: this binary, which goetia's shim runs when started with `SERVICE_HOST_ARG`.
+pub fn registering_manager(image: &Path) -> goetia::Result<Box<dyn ServiceManager>> {
     #[cfg(windows)]
     {
         use goetia::backend::scm::manager::Scm;

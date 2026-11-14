@@ -263,16 +263,29 @@ fn the_sweep_keeps_the_registered_image_and_the_running_one_and_deletes_the_othe
     }
     let running = running(&previous);
 
-    sweep_old_images(&paths, &registered).unwrap();
+    sweep_old_images(&paths, &registered);
 
     assert_eq!([&registered, &previous, &other].map(|file| file.exists()), [true; 3]);
     assert!(!old.exists());
     drop(running);
-    sweep_old_images(&paths, &registered).unwrap();
+    sweep_old_images(&paths, &registered);
     assert_eq!(
         [&registered, &previous, &other].map(|file| file.exists()),
         [true, false, true]
     );
+}
+
+#[test]
+fn the_sweep_goes_on_past_an_image_it_cannot_delete() {
+    let (_dir, paths) = installed();
+    let registered = service::image(&paths, b"registered");
+    let (stuck, old) = (service::image(&paths, b"stuck"), service::image(&paths, b"old"));
+    fs::create_dir(&stuck).unwrap();
+    fs::write(&old, "").unwrap();
+
+    sweep_old_images(&paths, &registered);
+
+    assert!(stuck.exists() && !old.exists());
 }
 
 #[test]

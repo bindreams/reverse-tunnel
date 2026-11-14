@@ -396,8 +396,10 @@ pub fn runs_as_a_file(dest: &Path) -> Result<bool> {
 }
 
 /// Windows: moves the file `dest`, which runs, into `leftovers` and puts `file` in its place. If that fails, `dest` is
-/// put back. Between the two renames there is no file at `dest` (a replacing rename is refused even with POSIX
-/// semantics), so it is only for a file that no service start needs, like the binary on the `PATH`.
+/// put back. Between the two renames there is no file at `dest`, so it is only for a file that no service start needs,
+/// like the binary on the `PATH`. Two renames, because Windows refuses to replace or delete a running image even with
+/// POSIX-semantics rename (error 5) and allows renaming it: measured 2026-11-14 on CI and locally, recorded in
+/// `td-63c-1.md` (the tech-debt deputy's question for PR #84, in the project's `.superpowers/sdd/2026-10-28-gen4/`).
 #[cfg(windows)]
 fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
     let writing = || format!("writing {}", dest.display());

@@ -103,7 +103,7 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     let account = account::ensure(service::ACCOUNT)?;
     let new = Binary::read(paths, &env::current_exe().context("finding this binary")?)?;
     apply(
-        &*service::manager(&new.image)?,
+        &*service::registering_manager(&new.image)?,
         &account,
         paths,
         &new,
@@ -155,7 +155,7 @@ fn apply(
     changed |= register(manager, &spec, paths)?;
     // Only now: until the service is registered on the new image, the old one is what it runs.
     #[cfg(windows)]
-    sweep_old_images(paths, &new.image)?;
+    sweep_old_images(paths, &new.image);
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -593,7 +593,7 @@ pub fn leftover_images_of_the_binary(paths: &Paths) -> Result<Vec<PathBuf>> {
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
-    if let Err(err) = service::manager(&service::exe(paths))?.uninstall(&service::id())
+    if let Err(err) = service::manager(paths)?.uninstall(&service::id())
         && !matches!(err.cause(), goetia::Error::NotInstalled { .. })
     {
         return Err(err).context("removing the service");
@@ -708,13 +708,22 @@ pub const MOVED_IT_TO: &str = "moved it to";
 /// moves it aside into `leftovers` (see `move_aside`) without saying so. Returns where it went and why it could not be
 /// deleted, or nothing if it was deleted. Anything else that cannot be deleted, which a rename would not help, is an
 /// error naming it.
+///
+/// A refusal is not itself proof that the file runs: the process may have exited before the check. So a file that is
+/// refused and does not run is deleted again; a refusal that follows a check that nothing runs it is the error.
 #[cfg(windows)]
 fn delete_or_move_aside(path: &Path, leftovers: &Path) -> Result<Option<(PathBuf, anyhow::Error)>> {
-    let Err(refused) = remove_entry(path) else {
+    let Err(mut refused) = remove_entry(path) else {
         return Ok(None);
     };
     if !runs_as_a_file(path)? {
-        return Err(refused.context("it is not a running file, so it is not moved"));
+        refused = match remove_entry(path) {
+            Ok(()) => return Ok(None),
+            Err(refused) => refused,
+        };
+        if !runs_as_a_file(path)? {
+            return Err(refused.context("it is not a running file, so it is not moved"));
+        }
     }
     let to = move_aside(path, leftovers).map_err(|err| anyhow!("{refused:#}; {err:#}"))?;
     Ok(Some((to, refused)))
@@ -762,24 +771,52 @@ fn delete_what_can_be(images: Vec<PathBuf>) -> Result<Vec<anyhow::Error>> {
 /// Windows: deletes the service images (see `service::image`) in the bin dir other than `registered`, the one that the
 /// service is registered on, once `register` has moved it there: nothing before that may delete the image it names. An
 /// image that runs (the previous build's, which the restart ends) stays for the next install, as does one that cannot be
-/// deleted, which is said.
+/// deleted. The sweep never fails `install`: whatever goes wrong is printed, with the path and the cause, and the rest
+/// goes on. What runs is asked of one listing of the processes.
 #[cfg(windows)]
-fn sweep_old_images(paths: &Paths, registered: &Path) -> Result<()> {
-    let mut old = Vec::new();
-    for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {
-        let path = entry?.path();
+fn sweep_old_images(paths: &Paths, registered: &Path) {
+    let say = |message: String| output::eprintln_best_effort(&message);
+    let listing = match fs::read_dir(&paths.bin_dir) {
+        Ok(listing) => listing,
+        Err(err) => return say(format!("reading {}: {err}", paths.bin_dir.display())),
+    };
+    let running = match processes::RunningImages::now() {
+        Ok(running) => running,
+        Err(err) => {
+            return say(format!(
+                "{err:#}: the old service images in {} stay",
+                paths.bin_dir.display()
+            ));
+        }
+    };
+    for entry in listing {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(err) => {
+                say(format!("reading {}: {err}", paths.bin_dir.display()));
+                continue;
+            }
+        };
         let is_image = path
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(service::is_image);
-        if is_image && path != registered && !runs_as_a_file(&path)? {
-            old.push(path);
+        if !is_image || path == registered {
+            continue;
+        }
+        match running.runs(&path) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(err) => {
+                say(format!("{err:#}"));
+                continue;
+            }
+        }
+        match delete_what_can_be(vec![path]) {
+            Ok(kept) => kept.iter().for_each(|kept| say(format!("{kept:#}"))),
+            Err(err) => say(format!("{err:#}")),
         }
     }
-    for kept in delete_what_can_be(old)? {
-        output::eprintln_best_effort(&format!("{kept:#}"));
-    }
-    Ok(())
 }
 
 /// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs. On Windows what in

@@ -72,7 +72,7 @@ enum Command {
 
 /// std prints the error, ignoring a closed stderr; it is handed the report, as std alone would drop goetia's details.
 fn main() -> Result<ExitCode> {
-    // SCM starts the installed binary as the service's host (see `service::manager`): not a subcommand, before clap.
+    // SCM starts the installed binary as the service's host (see `service::registering_manager`): not a subcommand, before clap.
     if cfg!(windows)
         && env::args_os()
             .nth(1)
@@ -109,25 +109,21 @@ fn run() -> Result<ExitCode> {
         }
         Command::Start => {
             require_root()?;
-            ops::start(&*service::manager(&service::exe(&paths))?)?;
+            ops::start(&*service::manager(&paths)?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Stop => {
             require_root()?;
-            ops::stop(&*service::manager(&service::exe(&paths))?)?;
+            ops::stop(&*service::manager(&paths)?)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Restart => {
             require_root()?;
-            ops::check_and_restart(&*service::manager(&service::exe(&paths))?, &paths)?;
+            ops::check_and_restart(&*service::manager(&paths)?, &paths)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {
-            ops::status(
-                &*service::manager(&service::exe(&paths))?,
-                &paths,
-                &mut io::stdout().lock(),
-            )?;
+            ops::status(&*service::manager(&paths)?, &paths, &mut io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
         }
     }

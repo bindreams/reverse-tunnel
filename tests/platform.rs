@@ -196,7 +196,7 @@ impl Machine {
         );
         let paths = Paths::system().unwrap();
         let id = service::id();
-        let manager = service::manager(&service::exe(&paths)).unwrap();
+        let manager = service::manager(&paths).unwrap();
         for dir in [&paths.bin_dir, &paths.config_dir, &paths.log_dir] {
             assert!(!dir.exists(), "{} is left from before", dir.display());
         }
@@ -670,7 +670,7 @@ fn uninstall_survives(mut session: Command, begin: impl FnOnce(&mut Child), end:
     let removed = !account_names().contains(service::ACCOUNT);
     #[cfg(windows)]
     let removed = matches!(
-        service::manager(&service::exe(&Paths::system().unwrap())).unwrap().status(&service::id()),
+        service::manager(&Paths::system().unwrap()).unwrap().status(&service::id()),
         Err(err) if matches!(err.cause(), goetia::Error::NotInstalled { .. })
     );
     assert!(removed, "the removal died with the session");
@@ -1191,7 +1191,7 @@ fn move_the_service_onto_a_copy(machine: &Machine) -> PathBuf {
     let (data, perm) = (fs::read(BIN).unwrap(), files::Perm::executable());
     files::write_atomic(&image, &data, perm, files::Replace::Always).unwrap();
     files::own_by_administrators(&image).unwrap();
-    let outcome = service::manager(&image)
+    let outcome = service::registering_manager(&image)
         .unwrap()
         .install(&service::spec(&image).unwrap(), false)
         .unwrap();

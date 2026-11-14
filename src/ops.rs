@@ -40,8 +40,17 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 /// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
 pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
     refuse_while_uninstalling(paths)?;
-    // Decided from the binary: the account database can answer for an account that has just been removed.
+    // Not decided from the account database, which can answer for an account that has just been removed. On Windows the
+    // service manager decides (`installed_image` fails if the service is not registered), and the file may be missing;
+    // on Unix the binary decides.
     let exe = service::installed_image(manager, paths)?;
+    #[cfg(windows)]
+    ensure!(
+        exe.try_exists()?,
+        "the service is registered on {}, which is missing: run `install` again",
+        exe.display()
+    );
+    #[cfg(not(windows))]
     ensure!(exe.try_exists()?, "the service is not installed");
     check_and_restart_as(manager, paths, &exe, service_identity()?)
 }
