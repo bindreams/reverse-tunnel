@@ -1166,8 +1166,11 @@ fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_ol
     });
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
     assert_eq!(fs::read(leftover_of_the_binary(&machine)).unwrap(), outgoing);
+    // By the image too: the system reuses a process id.
     wait_until("the old image no longer runs", || {
-        !processes().iter().any(|process| old_processes.contains(&process.pid))
+        !processes()
+            .iter()
+            .any(|process| process.args == old_image && old_processes.contains(&process.pid))
     });
     let mut sweep = Command::new(service::exe(&machine.paths));
     sweep.arg("install");
@@ -1176,7 +1179,7 @@ fn upgrade_replaces_the_running_service_host_and_the_next_install_deletes_the_ol
 }
 
 /// Windows: the `install` that `upgrade` runs from its download cannot delete the download, which it is running: it
-/// renames it aside without a warning, and the next `install` deletes it. The download is the installed build, so no
+/// moves it aside without a warning about it, and the next `install` deletes it. The download is the installed build, so no
 /// old image is left running to delay that.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
@@ -1189,7 +1192,8 @@ fn the_install_run_from_the_staged_download_leaves_nothing_after_the_next_instal
     let out = Command::new(&staged).arg("install").output().unwrap();
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success() && stderr.is_empty(), "{stderr}");
+    // Not empty: waiting for a process that holds a file open is said on stderr.
+    assert!(out.status.success() && !stderr.contains("safe to delete"), "{stderr}");
     assert!(!staged.exists(), "{} is still in the bin dir", staged.display());
     let mut sweep = Command::new(service::exe(&machine.paths));
     sweep.arg("install");

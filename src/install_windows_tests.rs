@@ -220,24 +220,19 @@ fn uninstall_runs_with_its_working_directory_elsewhere() {
     refuse_deleted_working_directory(&paths, dir.path()).unwrap();
 }
 
-// Shared with `tests/`, which uses all of it.
-#[allow(dead_code)]
-#[path = "../tests/support/held.rs"]
-mod held;
-
-use held::running;
+use crate::held::running;
 
 /// The leftovers in `paths`' leftover folder, by the name each kept.
 fn kept_names(paths: &Paths) -> Vec<String> {
     let images = leftover_images(paths).unwrap();
     let names = images.iter().map(|image| image.file_name().unwrap().to_string_lossy());
     names
-        .map(|name| name.splitn(4, '.').nth(3).unwrap().to_string())
+        .map(|name| schtasks::kept_name(&name).unwrap().to_string())
         .collect()
 }
 
 #[test]
-fn a_staged_copy_that_runs_is_renamed_aside_by_the_sweep_and_deleted_by_the_next_once_it_exits() {
+fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_once_it_exits() {
     let (_dir, paths) = installed();
     let staged = paths.bin_dir.join(format!("{}x.exe", upgrade::STAGED));
     let running = running(&staged);
@@ -246,11 +241,28 @@ fn a_staged_copy_that_runs_is_renamed_aside_by_the_sweep_and_deleted_by_the_next
 
     assert!(!staged.exists());
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
-    clean_bin_dir(&paths).unwrap();
-    assert_eq!(kept_names(&paths), ["upgrade-x.exe"], "it still runs");
+    assert_eq!(delete_leftovers(&paths).unwrap().len(), 1, "it still runs");
+    assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
     drop(running);
-    clean_bin_dir(&paths).unwrap();
+    assert!(delete_leftovers(&paths).unwrap().is_empty());
     assert_eq!(kept_names(&paths), Vec::<String>::new());
+}
+
+#[test]
+fn a_leftover_that_is_not_a_regular_file_is_reported_and_never_deleted() {
+    let (dir, paths) = installed();
+    let impostor = leftover_in(dir.path(), "a", "frpc-0.1.exe");
+    fs::create_dir(&impostor).unwrap();
+    fs::write(impostor.join("inside"), "").unwrap();
+
+    let kept = delete_leftovers(&paths).unwrap();
+
+    let [(image, why)] = kept.as_slice() else {
+        panic!("expected the directory to be reported: {kept:?}")
+    };
+    assert_eq!(image, &impostor);
+    assert!(format!("{why:#}").contains(&impostor.display().to_string()), "{why:#}");
+    assert!(impostor.join("inside").exists());
 }
 
 #[test]
@@ -271,7 +283,7 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
     let _running = running(&paths.bin_dir.join("frpc-0.1.exe"));
     fs::write(paths.bin_dir.join("upgrade-1.exe"), "").unwrap();
 
-    remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
 
     assert!(!paths.bin_dir.exists());
     let images = leftover_images(&paths).unwrap();
@@ -339,7 +351,7 @@ fn nothing_is_renamed_when_everything_can_be_deleted() {
     let (_dir, paths) = installed();
     fs::write(paths.bin_dir.join("frpc-0.1.exe"), "").unwrap();
 
-    remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
 
     assert!(!paths.bin_dir.exists());
     assert!(leftover_images(&paths).unwrap().is_empty());
@@ -350,7 +362,7 @@ fn a_bin_dir_that_is_gone_is_removed() {
     let (_dir, paths) = installed();
     fs::remove_dir_all(&paths.bin_dir).unwrap();
 
-    remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
 }
 
 #[test]
@@ -362,7 +374,7 @@ fn a_file_that_can_be_neither_deleted_nor_renamed_fails_the_removal_naming_both(
     // Nothing to rename it into.
     let err = format!(
         "{:#}",
-        remove_or_rename(&paths.bin_dir, &dir.path().join("missing")).unwrap_err()
+        remove_saying_what_it_moved_aside(&paths.bin_dir, &dir.path().join("missing")).unwrap_err()
     );
 
     assert!(err.contains("frpc-0.1.exe"), "{err}");
@@ -380,7 +392,7 @@ fn a_directory_that_cannot_be_deleted_fails_the_removal_and_is_not_renamed() {
 
     let err = format!(
         "{:#}",
-        remove_or_rename(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
+        remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
     );
 
     assert!(err.contains("old"), "{err}");

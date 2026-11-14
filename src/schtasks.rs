@@ -178,7 +178,7 @@ fn connect() -> Result<ITaskFolder> {
 }
 
 /// What a leftover's name starts with. A leftover is a file that a removal could not delete, which it renamed (see
-/// `install::remove_or_rename`) so that its folder can go: `.reverse-tunnel.<id>.<the name it had>`, in the folder that
+/// `files::move_aside`) so that its folder can go: `.reverse-tunnel.<id>.<the name it had>`, in the folder that
 /// holds the bin dir. The removal task's last step deletes every such file once it can (see `removal_script`).
 const LEFTOVER_PREFIX: &str = ".reverse-tunnel.";
 
@@ -207,10 +207,13 @@ pub fn is_leftover(name: &str) -> bool {
 
 /// Whether the file called `name` is a leftover of a file that was called `original`.
 pub fn is_leftover_of(name: &str, original: &str) -> bool {
+    kept_name(name).is_some_and(|kept| kept.eq_ignore_ascii_case(original))
+}
+
+/// The name that the leftover file called `name` had, if it is a leftover.
+pub fn kept_name(name: &str) -> Option<&str> {
     // The id is hex, so the first dot ends it.
-    after_prefix(name)
-        .and_then(|rest| rest.split_once('.'))
-        .is_some_and(|(_id, kept)| kept.eq_ignore_ascii_case(original))
+    after_prefix(name)?.split_once('.').map(|(_id, kept)| kept)
 }
 
 /// What `cmd` runs for the removal task, in order: `uninstall --finish` from `copy` (failure ends `cmd` with code 1, the

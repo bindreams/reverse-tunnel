@@ -17,6 +17,8 @@ use anyhow::{Context, Result, ensure};
 use crate::account::Account;
 use crate::output::eprintln_best_effort;
 #[cfg(windows)]
+use crate::schtasks;
+#[cfg(windows)]
 use crate::security::{self, Descriptor, OWNED_BY_ADMINISTRATORS};
 
 /// Mode and owner for a file or directory. `None` leaves the creator as owner or group. Windows files take their
@@ -108,9 +110,12 @@ impl Perm {
 
 /// What `write_atomic` does when `dest` exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Replace {
+pub enum Replace<'a> {
     Always,
     Never,
+    /// Like `Always`, and on Windows a `dest` that Windows refuses to overwrite because it runs is renamed into this
+    /// directory as a leftover (see `move_aside`) first. On Unix a running file is replaced like any other.
+    OrMoveAside(&'a Path),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -286,6 +291,9 @@ fn is_open_elsewhere(err: &std::io::Error) -> bool {
 
 /// Writes `data` to `dest` through a temp file in the same directory, which has `perm` before it gets any data, so
 /// `dest` is never partial and never briefly readable by others. The data and then the directory are synced.
+///
+/// With `Replace::OrMoveAside`, the old `dest` is moved aside only once the new one is written and synced, and put back
+/// if the new one cannot be put in its place.
 pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> Result<WriteOutcome> {
     let dir = dest.parent().expect("dest is inside a directory");
     let mut file = tempfile::NamedTempFile::new_in(dir)
@@ -294,12 +302,24 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
     file.write_all(data)?;
     file.as_file().sync_all()?;
     let persisted = match replace {
-        Replace::Always => file.persist(dest),
+        Replace::Always | Replace::OrMoveAside(_) => file.persist(dest),
         Replace::Never => file.persist_noclobber(dest),
     };
     match persisted {
         Err(err) if replace == Replace::Never && err.error.kind() == ErrorKind::AlreadyExists => {
             return Ok(WriteOutcome::Existed);
+        }
+        // A directory is refused the same way, and is not moved.
+        #[cfg(windows)]
+        Err(err)
+            if matches!(replace, Replace::OrMoveAside(_))
+                && err.error.kind() == ErrorKind::PermissionDenied
+                && fs::symlink_metadata(dest).is_ok_and(|entry| entry.is_file()) =>
+        {
+            let Replace::OrMoveAside(leftovers) = replace else {
+                unreachable!()
+            };
+            persist_over_running(err.file, dest, leftovers)?;
         }
         Err(err) => return Err(err).with_context(|| format!("writing {}", dest.display())),
         Ok(_) => {}
@@ -309,6 +329,42 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
         .and_then(|dir| dir.sync_all())
         .with_context(|| format!("syncing {}", dir.display()))?;
     Ok(WriteOutcome::Written)
+}
+
+/// Windows: moves the file `dest`, which runs, into `leftovers` and puts `file` in its place. If that fails, `dest` is
+/// put back.
+#[cfg(windows)]
+fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
+    let writing = || format!("writing {}", dest.display());
+    let aside = move_aside(dest, leftovers).with_context(writing)?;
+    let Err(err) = file.persist(dest) else { return Ok(()) };
+    let failure = anyhow::anyhow!(err.error).context(writing());
+    match fs::rename(&aside, dest) {
+        Ok(()) => Err(failure),
+        Err(back) => Err(failure.context(format!(
+            "putting {} back from {} failed too: {back}",
+            dest.display(),
+            aside.display()
+        ))),
+    }
+}
+
+/// Windows: renames the file `path` into `leftovers`, keeping its name (see `schtasks::leftover_name`), and returns the
+/// new path. Windows will not delete a running image, and lets it be renamed. A file there is deleted once it can be:
+/// by the next `install`, or by a removal.
+#[cfg(windows)]
+pub fn move_aside(path: &Path, leftovers: &Path) -> Result<std::path::PathBuf> {
+    let original = path.file_name().context("the file has no name")?;
+    let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
+    fs::rename(path, &to).with_context(|| format!("moving it to {}", to.display()))?;
+    Ok(to)
+}
+
+/// The hex digits of `N` random bytes from the OS.
+pub fn hex_of_random_bytes<const N: usize>() -> Result<String> {
+    let mut random = [0u8; N];
+    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
+    Ok(hex::encode(random))
 }
 
 #[cfg(all(test, windows))]

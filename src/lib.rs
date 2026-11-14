@@ -6,6 +6,11 @@ pub mod config;
 pub mod download;
 pub mod files;
 pub mod frpc;
+// Shared with `tests/`, which uses all of it.
+#[cfg(all(test, windows))]
+#[allow(dead_code)]
+#[path = "../tests/support/held.rs"]
+mod held;
 pub mod install;
 pub mod join;
 pub mod logfile;

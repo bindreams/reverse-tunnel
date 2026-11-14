@@ -139,6 +139,16 @@ fn a_leftover_is_what_the_pattern_matches_whatever_the_case() {
 }
 
 #[test]
+fn a_leftover_gives_back_the_name_it_kept() {
+    let name = leftover_name("ab12", OsStr::new("a.b.exe"))
+        .to_string_lossy()
+        .into_owned();
+
+    assert_eq!(kept_name(&name), Some("a.b.exe"));
+    assert_eq!(kept_name("a.b.exe"), None);
+}
+
+#[test]
 fn a_leftover_is_of_a_file_by_the_name_it_kept_whatever_the_case() {
     let ours = leftover_name("ab12", OsStr::new("reverse-tunnel.exe"))
         .to_string_lossy()
