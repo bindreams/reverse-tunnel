@@ -315,8 +315,16 @@ fn machine_path() -> String {
     machine_path_and_type().0
 }
 
+/// `source` without the prefixes of a pending operation's source: `*1` for a long name, then `\??\`.
+fn nt_path_of(source: &str) -> &str {
+    let source = source
+        .strip_prefix('*')
+        .map_or(source, |rest| rest.trim_start_matches(|c: char| c.is_ascii_digit()));
+    source.strip_prefix(r"\??\").unwrap_or(source)
+}
+
 /// What the system deletes at its next boot, in the order it deletes it. The value is a multi-string of source and
-/// target pairs, each source `\??\<path>`, a target empty for a deletion; a pair that is not one is another program's
+/// target pairs, each source `[*1]\??\<path>`, a target empty for a deletion; a pair that is not one is another program's
 /// and is skipped.
 pub fn deletions_at_reboot() -> Vec<PathBuf> {
     let session = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(SESSION_MANAGER).unwrap();
@@ -336,7 +344,7 @@ pub fn deletions_at_reboot() -> Vec<PathBuf> {
     pairs
         .iter()
         .filter(|[_, target]| target.is_empty())
-        .map(|[source, _]| PathBuf::from(source.strip_prefix(r"\??\").unwrap_or(source)))
+        .map(|[source, _]| PathBuf::from(nt_path_of(source)))
         .collect()
 }
 
