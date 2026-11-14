@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
 
@@ -317,38 +317,21 @@ fn machine_path() -> String {
     machine_path_and_type().0
 }
 
-/// `source` without the prefixes of a pending operation's source: `*1` for a long name, then `\??\`.
-fn nt_path_of(source: &str) -> &str {
-    let source = source
-        .strip_prefix('*')
-        .map_or(source, |rest| rest.trim_start_matches(|c: char| c.is_ascii_digit()));
-    source.strip_prefix(r"\??\").unwrap_or(source)
-}
-
-/// What the system deletes at its next boot, in the order it deletes it. The value is a multi-string of source and
-/// target pairs, each source `[*1]\??\<path>`, a target empty for a deletion; a pair that is not one is another program's
-/// and is skipped.
-pub fn deletions_at_reboot() -> Vec<PathBuf> {
+/// The file names in the operations the system runs at its next boot. Only names are compared: a leftover's name is
+/// unique by its random id, and the value's paths and layout are written by other programs too.
+pub fn names_scheduled_at_reboot() -> Vec<String> {
     let session = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(SESSION_MANAGER).unwrap();
     let value = match session.get_raw_value("PendingFileRenameOperations") {
         Ok(value) => value,
         Err(err) if err.kind() == ErrorKind::NotFound => return Vec::new(),
         Err(err) => panic!("reading PendingFileRenameOperations: {err}"),
     };
-    let text = registry_text(&value.bytes);
-    // Walk the strings from the start in (source, target) pairs; an empty source ends the list, as it does for Windows,
-    // whatever NULs or stale data follow.
-    let mut strings = text.split('\0');
-    let mut deletions = Vec::new();
-    while let (Some(source), Some(target)) = (strings.next(), strings.next()) {
-        if source.is_empty() {
-            break;
-        }
-        if target.is_empty() {
-            deletions.push(PathBuf::from(nt_path_of(source)));
-        }
-    }
-    deletions
+    registry_text(&value.bytes)
+        .split('\0')
+        .filter_map(|path| path.rsplit('\\').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// How many entries of the machine's `Path` name `dir`, as the product decides it.
