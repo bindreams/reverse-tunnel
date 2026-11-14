@@ -269,13 +269,14 @@ fn until_gone(delete: &str, done: &str) -> String {
         }
         escaped.push(c);
     }
-    format!("cmd /d /c {escaped}")
+    format!("cmd /d /e:on /v:off /c {escaped}")
 }
 
 /// What `cmd.exe` is given to run `script`: everything between the outer quotes is the command, whatever quotes it
-/// holds (`/s`), and no AutoRun command runs as SYSTEM (`/d`).
+/// holds (`/s`), no AutoRun command runs as SYSTEM (`/d`), and the machine's `Command Processor` settings cannot turn
+/// command extensions off or delayed expansion on (`/e:on /v:off`).
 fn cmd_arguments(script: &str) -> String {
-    format!(r#"/d /s /c "{script}""#)
+    format!(r#"/d /e:on /v:off /s /c "{script}""#)
 }
 
 /// The definition of a task with no trigger that runs `script` as SYSTEM, however long it takes and whatever the power.

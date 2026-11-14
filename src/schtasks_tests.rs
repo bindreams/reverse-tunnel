@@ -10,7 +10,7 @@ use super::*;
 fn the_script_reaches_cmd_whole() {
     let xml = task_xml(r#""C:\a b\x.exe" uninstall --finish > "C:\a b\log" 2>&1 & rmdir /s /q "C:\a b""#);
     assert!(
-        xml.contains(r#"<Arguments>/d /s /c ""C:\a b\x.exe" uninstall --finish &gt; "C:\a b\log" 2&gt;&amp;1 &amp; rmdir /s /q "C:\a b""</Arguments>"#),
+        xml.contains(r#"<Arguments>/d /e:on /v:off /s /c ""C:\a b\x.exe" uninstall --finish &gt; "C:\a b\log" 2&gt;&amp;1 &amp; rmdir /s /q "C:\a b""</Arguments>"#),
         "{xml}"
     );
 }
@@ -30,10 +30,10 @@ fn the_script_runs_each_step_once_in_turn_and_each_deletion_until_its_target_is_
     // query. Only a failed `--finish` and a failed deletion of the task have exit codes.
     let expected = [
         r#"("C:\d\x.exe" uninstall --finish > "C:\d\log" 2>&1 || exit /b 1)"#,
-        r#"cmd /d /c for /l %i in ^(1,0,2^) do ^(^(del /q "C:\d\x.exe" ^>nul 2^>^&1^) ^& ^(if not exist "C:\d\x.exe" exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
-        r#"cmd /d /c for /l %i in ^(1,0,2^) do ^(^(rmdir /s /q "C:\d" ^>nul 2^>^&1^) ^& ^(if not exist "C:\d" exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
+        r#"cmd /d /e:on /v:off /c for /l %i in ^(1,0,2^) do ^(^(del /q "C:\d\x.exe" ^>nul 2^>^&1^) ^& ^(if not exist "C:\d\x.exe" exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
+        r#"cmd /d /e:on /v:off /c for /l %i in ^(1,0,2^) do ^(^(rmdir /s /q "C:\d" ^>nul 2^>^&1^) ^& ^(if not exist "C:\d" exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
         r#"(schtasks /Delete /F /TN task || exit /b 4)"#,
-        r#"cmd /d /c for /l %i in ^(1,0,2^) do ^(^(del /f /q /a "C:\p\.reverse-tunnel.*" ^>nul 2^>^&1^) ^& ^(dir /b /a:-d "C:\p\.reverse-tunnel.*" ^>nul 2^>^&1 ^|^| exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
+        r#"cmd /d /e:on /v:off /c for /l %i in ^(1,0,2^) do ^(^(del /f /q /a "C:\p\.reverse-tunnel.*" ^>nul 2^>^&1^) ^& ^(dir /b /a:-d "C:\p\.reverse-tunnel.*" ^>nul 2^>^&1 ^|^| exit /b 0^) ^& ping -n 2 127.0.0.1 ^>nul^)"#,
     ];
     assert_eq!(script, expected.join(" & "));
 }

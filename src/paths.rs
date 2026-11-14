@@ -48,7 +48,7 @@ impl Paths {
         }
         #[cfg(windows)]
         ensure!(
-            !bin_dir.to_str().is_some_and(|dir| dir.contains('%')),
+            !bin_dir.to_string_lossy().contains('%'),
             "{} contains `%`. Windows reads `%NAME%` as a variable in the commands that finish `uninstall` and in the \
              system `PATH`, so reverse-tunnel cannot be installed while the system's Program Files folder has `%` in \
              its path.",
