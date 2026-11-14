@@ -16,13 +16,14 @@ def _docker(*args: str, **kwargs) -> subprocess.CompletedProcess:
 
 
 def compose_up(folder: Path, build: bool = False) -> None:
-    """Create or update every service of the bridge folder's compose files, starting any that is not running.
-
-    `build` rebuilds the images first. A service whose definition and image are unchanged is left running.
+    """Bring the bridge up from the folder's compose files: the plugin created or updated, frps started if it is not
+    running. A running frps is never recreated, because that drops every tunnel; `build` rebuilds the images first.
     """
     # -p and -f pin the project and files: COMPOSE_FILE and COMPOSE_PROJECT_NAME in the shell must not redirect it
     command = ["compose", "-p", "reverse-tunnel", "-f", "compose.yaml", "-f", "compose.generated.yaml"]
-    _docker(*command, "up", "-d", *(["--build"] if build else []), cwd=folder, check=True)
+    up = [*command, "up", "-d", *(["--build"] if build else [])]
+    _docker(*up, "--no-deps", "reverse-tunnel-plugin", cwd=folder, check=True)
+    _docker(*up, "--no-recreate", "reverse-tunnel-frps", cwd=folder, check=True)
 
 
 def network_exists(name: str) -> bool:

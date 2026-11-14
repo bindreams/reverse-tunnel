@@ -76,7 +76,7 @@ def test_invalid_domain(domain):
 
 @pytest.mark.parametrize(
     "name",
-    ["movies.yourdomain.org", "a.b", "notexample.com", "example.com.yourdomain.org", "myexample.org"],
+    ["movies.yourdomain.tld", "a.b", "notexample.com", "example.com.yourdomain.tld", "myexample.org"],
 )
 def test_valid_public_name(name):
     assert valid_public_name(name)
@@ -87,13 +87,13 @@ def test_valid_public_name(name):
     [
         "",
         "localhost",
-        "movies.yourdomain.org.",
-        "bad`name.yourdomain.org",
-        "movies..yourdomain.org",
-        "Movies.yourdomain.org",
-        "mo_vies.yourdomain.org",
-        "ab--c.yourdomain.org",
-        "a" * 64 + ".yourdomain.org",
+        "movies.yourdomain.tld.",
+        "bad`name.yourdomain.tld",
+        "movies..yourdomain.tld",
+        "Movies.yourdomain.tld",
+        "mo_vies.yourdomain.tld",
+        "ab--c.yourdomain.tld",
+        "a" * 64 + ".yourdomain.tld",
         "1.2.3.4",
         "yourdomain.123",
         ".".join(["a" * 63] * 3 + ["a" * 62]),

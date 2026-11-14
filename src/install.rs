@@ -162,7 +162,7 @@ fn apply(
         say_kept(sweep_old_images(paths, &new.image));
     }
 
-    println!("{}", registration(paths)?);
+    print!("{}", registration(paths)?);
     manager.enable(&spec.id)?;
     pick_up(manager, &spec.id, paths, changed)
 }
@@ -1079,16 +1079,19 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
     symlink(target, link).with_context(|| format!("linking {}", link.display()))
 }
 
-/// What `install` prints once the host is set up: the line that registers it on the bridge, then how to reach it.
+/// What `install` prints once the host is set up: the line that registers it on the bridge, then, if the host
+/// publishes ssh, how to reach it. It ends in a newline.
 fn registration(paths: &Paths) -> Result<String> {
     let cfg = Config::load(&paths.config_file())?;
     let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
-    Ok(format!(
-        "Register this host on the bridge by running:\n    {}\n\n{}",
-        registration_line(&cfg.host, token.trim()),
-        client::instructions(&cfg.host, &cfg.bridge)
-    ))
+    let line = registration_line(&cfg.host, token.trim());
+    let mut text = format!("Register this host on the bridge by running:\n    {line}\n");
+    if let Some(client) = client::instructions(&cfg) {
+        text.push('\n');
+        text.push_str(&client);
+    }
+    Ok(text)
 }
 
 fn registration_line(host: &str, token: &str) -> String {

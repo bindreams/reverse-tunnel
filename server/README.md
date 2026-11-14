@@ -17,8 +17,11 @@ All commands run in this folder.
    `7000/tcp` and `7000/udp` in its firewall.
 2. `cp .env.example .env`, and edit its `TUNNEL_DOMAIN` line to your tunnel domain (the template's is a placeholder).
 3. `uv run ctl init` checks the network and DNS, creates the token, the certificate (`tls/`) and the registries
-   (`state/`), starts the bridge (`docker compose up -d --build`), and prints the join code last.
+   (`state/`), builds and starts the bridge, and prints the join code last.
    `uv run ctl join-code` prints it again. Every other `ctl` command also starts whatever of the bridge is not running.
+   None of them recreates a running `reverse-tunnel-frps`, which would drop every tunnel; to apply a change to it on
+   purpose, run `docker compose restart reverse-tunnel-frps` (or `docker compose up -d --build` after changing its
+   image).
 
 Joining a host and publishing a service: see the main README. The commands are `uv run ctl add`, `revoke`, `alias`,
 `unalias`, `list`; `uv run ctl <command> --help` says what each takes.

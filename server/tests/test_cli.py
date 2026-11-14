@@ -1,5 +1,5 @@
-import argparse
 import base64
+import fcntl
 import json
 import os
 import re
@@ -139,11 +139,11 @@ def test_comments_survive_add_and_revoke(inited):
 
 def test_ctl_rewrites_keep_long_entries_on_one_line(inited):
     host_line = "myhost: sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55  # office laptop\n"
-    alias_line = f"{'a' * 63}.{'b' * 63}.yourdomain.org: {'s' * 63}.{'h' * 63}.{T}\n"
+    alias_line = f"{'a' * 63}.{'b' * 63}.yourdomain.tld: {'s' * 63}.{'h' * 63}.{T}\n"
     Path("state/hosts.yaml").write_text(host_line)
     Path("state/aliases.yaml").write_text(alias_line)
     assert cli.main(["add", "web", H]) == 0
-    assert cli.main(["alias", "media.yourdomain.org", f"svc.web.{T}"]) == 0
+    assert cli.main(["alias", "media.yourdomain.tld", f"svc.web.{T}"]) == 0
     assert Path("state/hosts.yaml").read_text().startswith(host_line)
     assert Path("state/aliases.yaml").read_text().startswith(alias_line)
 
@@ -184,7 +184,7 @@ def test_concurrent_add(inited):
     assert f"*.a.{T}" in GENERATED.read_text() and f"*.b.{T}" in GENERATED.read_text()
 
 
-@pytest.mark.parametrize("public", ["nodots", f"x.{T}", "a b.yourdomain.org", "a`b.yourdomain.org"])
+@pytest.mark.parametrize("public", ["nodots", f"x.{T}", "a b.yourdomain.tld", "a`b.yourdomain.tld"])
 def test_alias_rejects_bad_public_name(inited, public):
     assert cli.main(["alias", public, f"svc.web.{T}"]) == 1
     assert read_aliases(Path("state/aliases.yaml"), T) == {}
@@ -192,11 +192,11 @@ def test_alias_rejects_bad_public_name(inited, public):
 
 
 def test_alias_requires_backend_under_T(inited):
-    assert cli.main(["alias", "media.yourdomain.org", f"svc.web.{T}"]) == 0
-    assert read_aliases(Path("state/aliases.yaml"), T) == {"media.yourdomain.org": f"svc.web.{T}"}
-    assert "Host(`media.yourdomain.org`)" in GENERATED.read_text()
-    assert cli.main(["alias", "other.yourdomain.org", "svc.web.yourdomain.org"]) == 1
-    assert cli.main(["unalias", "media.yourdomain.org"]) == 0
+    assert cli.main(["alias", "media.yourdomain.tld", f"svc.web.{T}"]) == 0
+    assert read_aliases(Path("state/aliases.yaml"), T) == {"media.yourdomain.tld": f"svc.web.{T}"}
+    assert "Host(`media.yourdomain.tld`)" in GENERATED.read_text()
+    assert cli.main(["alias", "other.yourdomain.tld", "svc.web.yourdomain.tld"]) == 1
+    assert cli.main(["unalias", "media.yourdomain.tld"]) == 0
     assert read_aliases(Path("state/aliases.yaml"), T) == {}
 
 
@@ -362,11 +362,15 @@ def test_network_exists_reports_docker_failure(docker, tmp_path, monkeypatch):
         compose.network_exists("gateway")
 
 
-def test_compose_up_uses_only_the_bridge_compose_files_and_starts_every_service(docker, tmp_path):
+def test_compose_up_recreates_only_the_plugin_and_starts_frps_if_it_is_not_running(docker, tmp_path):
     compose.compose_up(tmp_path)  # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it
     compose.compose_up(tmp_path, build=True)
     base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml up -d"
-    assert Path(f"{docker}.log").read_text() == f"{base}\n{base} --build\n"
+    frps = "--no-recreate reverse-tunnel-frps"  # recreating a running frps drops every tunnel
+    plugin = "--no-deps reverse-tunnel-plugin"
+    assert Path(f"{docker}.log").read_text() == (
+        f"{base} {plugin}\n{base} {frps}\n{base} --build {plugin}\n{base} --build {frps}\n"
+    )
 
 
 def test_init_starts_the_bridge_and_prints_the_join_code_last_under_a_label(bridge, monkeypatch, capsys):
@@ -388,11 +392,39 @@ def test_a_command_other_than_init_brings_the_whole_bridge_up_without_a_build(in
     assert inited == [(Path.cwd(), False)]
 
 
-def test_every_command_and_argument_has_help():
-    subparsers = next(a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction))
-    assert [c.dest for c in subparsers._choices_actions if not c.help] == []
-    missing = [f"{name} {a.dest}" for name, p in subparsers.choices.items() for a in p._actions if not a.help]
-    assert missing == []
+@pytest.mark.parametrize("name", list(cli.COMMANDS))
+def test_every_command_and_argument_has_help(name, capsys):
+    def squeeze(text):  # argparse wraps lines, at hyphens too
+        return "".join(text.split())
+
+    command = cli.COMMANDS[name]
+    with pytest.raises(SystemExit):
+        cli.main([name, "--help"])
+    shown = squeeze(capsys.readouterr().out)
+    assert command.help and squeeze(command.help) in shown
+    for argument, text in command.arguments.items():
+        assert text and squeeze(text) in shown, f"{name} {argument} has no help"
+
+
+def test_bring_up_holds_the_state_lock(inited, monkeypatch):
+    def up(folder, build=False):
+        fd = os.open("state/lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):  # another ctl would wait here
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+    monkeypatch.setattr(compose, "compose_up", up)
+    assert cli.main(["list"]) == 0
+
+
+def test_a_failed_first_bring_up_says_to_rerun_init_which_prints_the_join_code(bridge, monkeypatch, capsys):
+    monkeypatch.setattr(compose, "compose_up", docker_down)
+    assert cli.main(["init"]) == 1
+    captured = capsys.readouterr()
+    assert "rerun `uv run ctl init`" in captured.err and "join code" in captured.err
+    assert "rt1:" not in captured.out
 
 
 def test_failed_registry_write_prints_nothing(inited, monkeypatch, capsys):

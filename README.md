@@ -6,7 +6,7 @@ through a WebSocket proxy, HTTP in a browser. The bridge is a server running frp
 lets in only registered hosts; see [server/README.md](server/README.md) to run one.
 
 Below, `T` is the bridge's tunnel domain, and the bridge folder is `server/` of this repository on the bridge's
-server. The names in the examples (`tunnel.example.com`, `myhost`, `yourdomain.org`) are placeholders: use your own.
+server. The names in the examples (`tunnel.example.com`, `myhost`, `yourdomain.tld`) are placeholders: use your own.
 
 ## Set up a host
 
@@ -77,11 +77,12 @@ this to `~/.ssh/config`, with the host's name in place of `myhost` and the tunne
 
 ```ssh-config
 Host myhost
-    HostName myhost.tunnel.example.com
+    HostName ssh.myhost.tunnel.example.com
     ProxyCommand websocat --binary wss://%h/
 ```
 
-`ssh myhost` now reaches the host's sshd. Any other TCP service the host publishes (`type: tcp`, below) is
+`ssh myhost` now reaches the host's sshd, at its `ssh` service. (`install` prints the block only for a host whose
+`config.yaml` has an `ssh` service of `type: tcp`.) Any other TCP service the host publishes (`type: tcp`, below) is
 reached the same way, at its own `<service>.<host>.T`.
 
 ## Publish another service
@@ -120,7 +121,7 @@ either it can write the public name's zone, or that zone delegates `_acme-challe
 can.
 
 ```sh
-uv run ctl alias movies.yourdomain.org jellyfin.myhost.tunnel.example.com
+uv run ctl alias movies.yourdomain.tld jellyfin.myhost.tunnel.example.com
 ```
 
 `uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts and aliases.
@@ -131,7 +132,7 @@ Jellyfin builds absolute links from the request, and behind the tunnel it sees t
 environment set the address people use:
 
 ```
-JELLYFIN_PublishedServerUrl=https://movies.yourdomain.org
+JELLYFIN_PublishedServerUrl=https://movies.yourdomain.tld
 ```
 
 The bridge always forwards `X-Forwarded-Proto: http`, even over HTTPS, so Jellyfin does not take its scheme from it.
