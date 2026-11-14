@@ -1009,10 +1009,17 @@ fn a_failed_removal_logs_where_uninstall_says() {
     }
 }
 
-/// The leftover image that was the installed binary: the one leftover whose original name is its name.
+/// The leftover image that was the installed binary: the one leftover whose original name is its name (an image of
+/// an earlier build is a leftover of the binary too, see `leftovers::images_of_the_binary`).
 #[cfg(windows)]
 fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
-    let images = leftovers::images_of_the_binary(&machine.paths).unwrap();
+    let name = service::exe(&machine.paths)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut images = leftovers::images_of_the_binary(&machine.paths).unwrap();
+    images.retain(|image| leftovers::is_leftover_of(&image.file_name().unwrap().to_string_lossy(), &name));
     let [image] = images.as_slice() else {
         panic!("expected one leftover image of the binary, found {images:?}")
     };
