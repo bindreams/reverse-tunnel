@@ -27,7 +27,7 @@ pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
         .with_context(|| format!("creating a staged copy of the binary in {}", paths.bin_dir.display()))?;
     let path = file.path().to_path_buf();
     let writing = || format!("writing {}", path.display());
-    apply(file.as_file(), Perm::EXECUTABLE).with_context(writing)?;
+    apply(file.as_file(), Perm::executable()).with_context(writing)?;
     file.write_all(binary).with_context(writing)?;
     file.as_file().sync_all().with_context(writing)?;
     // Closed first: an executable open for writing cannot be run (ETXTBSY).

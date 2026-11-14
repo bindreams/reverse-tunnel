@@ -145,21 +145,21 @@ fn run_renders_into_the_log_dir_and_leaves_the_config_dir_alone() {
 #[test]
 fn missing_token_file_is_refused() {
     let host = Host::new("exit 0", SSH);
-    fs::remove_file(host.paths.secrets_dir.join("host.token")).unwrap();
+    fs::remove_file(host.paths.host_token()).unwrap();
     host.assert_refused("host.token");
 }
 
 #[test]
 fn empty_token_is_refused() {
     let host = Host::new("exit 0", SSH);
-    fs::write(host.paths.secrets_dir.join("bridge.token"), " \r\n").unwrap();
+    fs::write(host.paths.bridge_token(), " \r\n").unwrap();
     host.assert_refused("bridge.token");
 }
 
 #[test]
 fn unloadable_config_is_refused() {
     let host = Host::new("exit 0", SSH);
-    fs::write(host.paths.config_dir.join("config.yaml"), "host: [").unwrap();
+    fs::write(host.paths.config_file(), "host: [").unwrap();
     host.assert_refused("config.yaml");
 }
 

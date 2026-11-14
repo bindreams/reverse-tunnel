@@ -20,8 +20,8 @@ fn host() -> (TempDir, Paths) {
         fs::create_dir_all(dir).unwrap();
     }
     let config = "host: testhost\nbridge: tunnel.example.test\nservices:\n  ssh: {port: 22, type: tcp}\n";
-    fs::write(paths.config_dir.join("config.yaml"), config).unwrap();
-    fs::write(paths.config_dir.join("bridge.pem"), CERT).unwrap();
+    fs::write(paths.config_file(), config).unwrap();
+    fs::write(paths.bridge_pem(), CERT).unwrap();
     (dir, paths)
 }
 
@@ -34,8 +34,8 @@ fn status_text(manager: &Fake, paths: &Paths) -> String {
 #[test]
 fn status_shows_domain_and_fingerprint_not_token() {
     let (_dir, paths) = host();
-    fs::write(paths.secrets_dir.join("bridge.token"), "frps-secret\n").unwrap();
-    fs::write(paths.secrets_dir.join("host.token"), "host-secret\n").unwrap();
+    fs::write(paths.bridge_token(), "frps-secret\n").unwrap();
+    fs::write(paths.host_token(), "host-secret\n").unwrap();
     let manager = Fake::default();
     manager.install(&service::spec(&paths).unwrap(), false).unwrap();
 

@@ -4,6 +4,8 @@ use anyhow::{Result, ensure};
 
 pub const LOG_FRPC: &str = "frpc.log";
 pub const LOG_SUPERVISOR: &str = "supervisor.log";
+/// The frpc configuration `run` renders into the log dir.
+pub const FRPC_CONFIG: &str = "frpc.toml";
 
 /// Where an installation keeps its files on this OS.
 #[derive(Debug, Clone)]
@@ -22,6 +24,23 @@ pub struct Paths {
 }
 
 impl Paths {
+    pub fn config_file(&self) -> PathBuf {
+        self.config_dir.join("config.yaml")
+    }
+
+    /// The bridge's certificate, which frpc trusts.
+    pub fn bridge_pem(&self) -> PathBuf {
+        self.config_dir.join("bridge.pem")
+    }
+
+    pub fn bridge_token(&self) -> PathBuf {
+        self.secrets_dir.join("bridge.token")
+    }
+
+    pub fn host_token(&self) -> PathBuf {
+        self.secrets_dir.join("host.token")
+    }
+
     /// Paths for tests: fixed names under `root`, and no link.
     pub fn testing(root: impl AsRef<Path>) -> Paths {
         let root = root.as_ref();

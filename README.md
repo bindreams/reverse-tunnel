@@ -55,8 +55,11 @@ to run `reverse-tunnel` (on the desktop, sign out and in; an SSH session sees it
 every installer does, by reading it and writing it back: another program that edits it at the same moment can lose one of
 the two edits, and running that program's installer again restores its entry. `install` refuses a Program Files folder
 whose path contains `%`, which Windows reads as a variable in the commands that finish `uninstall` and in the system
-`PATH`. `restart` and `install` check `config.yaml` as the caller, not as the service account. `upgrade` is not available
-yet: to change the binary, uninstall and install again.
+`PATH`. `restart` and `install` run `run --check`, which checks the ACLs of what `run` opens (the binaries, the
+configuration and token files, the log folder) before the configuration: `NT SERVICE\reverse-tunnel` needs a plain
+allow (not a conditional, object or compound one), its own or a group every service has (Everyone, SERVICE and
+others), and no deny ACE may name anyone.
+`upgrade` is not available yet: to change the binary, uninstall and install again.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe

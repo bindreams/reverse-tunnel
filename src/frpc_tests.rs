@@ -34,7 +34,7 @@ fn proxy(out: &str, name: &str) -> String {
 #[test]
 fn render_transport() {
     let p = Paths::testing("root");
-    let ca = serde_json::to_string(p.config_dir.join("bridge.pem").to_str().unwrap()).unwrap();
+    let ca = serde_json::to_string(p.bridge_pem().to_str().unwrap()).unwrap();
     let out = render(&Config::parse(YAML).unwrap(), WS_PORT, &p);
     for line in [
         "serverAddr = \"tunnel.example.test\"",
@@ -95,11 +95,7 @@ fn frpc_verify_accepts_render() {
     let frpc = fetch(host_pin().unwrap(), dir.path()).unwrap();
     let paths = Paths::testing(dir.path());
     std::fs::create_dir(&paths.config_dir).unwrap();
-    std::fs::write(
-        paths.config_dir.join("bridge.pem"),
-        include_str!("../server/testdata/bridge.pem"),
-    )
-    .unwrap();
+    std::fs::write(paths.bridge_pem(), include_str!("../server/testdata/bridge.pem")).unwrap();
     let toml = dir.path().join("frpc.toml");
     let out = render(&Config::parse(YAML).unwrap(), WS_PORT, &paths);
     std::fs::write(&toml, out).unwrap();

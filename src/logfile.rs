@@ -15,6 +15,9 @@ use jiff::{Unit, Zoned};
 
 use crate::output::eprintln_best_effort;
 
+/// What a rotated log's name ends with.
+pub const ROTATED: &str = ".1";
+
 /// The size at which a log is rotated.
 pub const ROTATE_AT: u64 = 10 * 1024 * 1024;
 
@@ -96,7 +99,7 @@ impl Active {
 
     fn rotate(&mut self) -> Result<()> {
         let mut old = OsString::from(&self.path);
-        old.push(".1");
+        old.push(ROTATED);
         // A missing log was already renamed by a rotation that then failed to open the new one.
         match fs::rename(&self.path, &old) {
             Err(err) if err.kind() != ErrorKind::NotFound => {
