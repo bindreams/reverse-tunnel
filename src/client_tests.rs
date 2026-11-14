@@ -70,3 +70,12 @@ fn there_is_no_block_unless_the_service_named_ssh_is_tcp() {
         .is_none()
     );
 }
+
+#[test]
+fn the_readme_has_the_heading_the_printed_link_points_at() {
+    let readme = include_str!("../README.md");
+    assert!(
+        readme.lines().any(|line| line == "## Set up a client"),
+        "the printed `#set-up-a-client` anchor has no heading in README.md"
+    );
+}

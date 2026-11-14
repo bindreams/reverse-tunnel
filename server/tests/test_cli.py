@@ -58,10 +58,15 @@ def docker_down(folder, build=False):
 
 @pytest.fixture
 def docker(tmp_path, monkeypatch):
-    """A fake `docker`, alone on PATH: logs its arguments, prints $FAKE_STDOUT and $FAKE_STDERR, exits $FAKE_EXIT."""
+    """A fake `docker`, alone on PATH: logs its arguments, prints $FAKE_STDOUT and $FAKE_STDERR, exits $FAKE_EXIT;
+    `docker rm` prints $FAKE_RM_STDERR and exits $FAKE_RM_EXIT instead."""
     exe = tmp_path / "bin" / "docker"
     exe.parent.mkdir()
-    exe.write_text('#!/bin/sh\necho "$@" >> "$0.log"\necho "$FAKE_STDOUT"\necho "$FAKE_STDERR" >&2\nexit "${FAKE_EXIT:-0}"\n')
+    exe.write_text(
+        '#!/bin/sh\necho "$@" >> "$0.log"\n'
+        'if [ "$1" = rm ]; then echo "$FAKE_RM_STDERR" >&2; exit "${FAKE_RM_EXIT:-0}"; fi\n'
+        'echo "$FAKE_STDOUT"\necho "$FAKE_STDERR" >&2\nexit "${FAKE_EXIT:-0}"\n'
+    )
     exe.chmod(0o755)
     monkeypatch.setenv("PATH", str(exe.parent))
     return exe
@@ -362,33 +367,49 @@ def test_network_exists_reports_docker_failure(docker, tmp_path, monkeypatch):
         compose.network_exists("gateway")
 
 
-def test_compose_up_never_recreates_a_running_frps(docker, tmp_path, monkeypatch):
+HELD = "cannot remove container: container is running: stop the container before removing or force remove"
+
+
+def test_compose_up_leaves_whether_to_recreate_frps_to_the_daemon(docker, tmp_path, monkeypatch):
     base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml"
-    plugin = "--no-deps reverse-tunnel-plugin"
-    probe = "ps -q --status running reverse-tunnel-frps"
+    plugin = f"{base} up -d --no-deps reverse-tunnel-plugin"
+    frps = f"{base} up -d --no-recreate reverse-tunnel-frps"
+    listing = f"{base} ps -a -q reverse-tunnel-frps"
     log = Path(f"{docker}.log")
 
-    def calls(*lines):
-        return "".join(f"{base} {line}\n" for line in lines)
+    # Not `init`.
+    assert compose.compose_up(tmp_path) is None
+    assert log.read_text().splitlines() == [plugin, frps]
 
-    # Not `init`: no probe and no build; a running frps is kept, a stopped or absent one is started as it is.
-    # COMPOSE_FILE, COMPOSE_PROJECT_NAME and the like must not redirect it.
-    assert not compose.compose_up(tmp_path)
-    assert log.read_text() == calls(f"up -d {plugin}", "up -d --no-recreate reverse-tunnel-frps")
-
-    # `init`, frps absent or stopped (nothing running to drop): both images are built and frps comes up as built.
+    # `init`, no frps container: the images are built and frps comes up from the new one.
     log.unlink()
-    assert not compose.compose_up(tmp_path, build=True)
-    assert log.read_text() == calls(probe, f"up -d --build {plugin}", "up -d --build reverse-tunnel-frps")
+    assert compose.compose_up(tmp_path, build=True) is False
+    assert log.read_text().splitlines() == [f"{base} build", listing, plugin, frps]
 
-    # `init`, frps running: only the plugin is built; frps is not recreated, and the caller is told.
+    # `init`, a container the daemon lets go (stopped): removed by ID, without -f, so frps is recreated.
     log.unlink()
     monkeypatch.setenv("FAKE_STDOUT", "0123abcd")
-    assert compose.compose_up(tmp_path, build=True)
-    assert log.read_text() == calls(probe, f"up -d --build {plugin}", "up -d --no-recreate reverse-tunnel-frps")
+    assert compose.compose_up(tmp_path, build=True) is False
+    assert log.read_text().splitlines() == [f"{base} build", listing, "rm 0123abcd", plugin, frps]
+
+    # `init`, a container the daemon refuses (running, paused or restarting): kept, and the caller is told.
+    log.unlink()
+    monkeypatch.setenv("FAKE_RM_EXIT", "1")
+    monkeypatch.setenv("FAKE_RM_STDERR", HELD)
+    assert compose.compose_up(tmp_path, build=True) is True
+    assert log.read_text().splitlines() == [f"{base} build", listing, "rm 0123abcd", plugin, frps]
 
 
-def test_a_failed_frps_probe_shows_dockers_stderr_and_brings_nothing_up(docker, tmp_path, monkeypatch, capfd):
+def test_a_remove_that_fails_for_another_reason_stops_the_bring_up(docker, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_STDOUT", "0123abcd")
+    monkeypatch.setenv("FAKE_RM_EXIT", "1")
+    monkeypatch.setenv("FAKE_RM_STDERR", "Error response from daemon: permission denied")
+    with pytest.raises(OSError, match="permission denied"):
+        compose.compose_up(tmp_path, build=True)
+    assert " up " not in Path(f"{docker}.log").read_text()
+
+
+def test_a_failed_build_shows_dockers_stderr_and_brings_nothing_up(docker, tmp_path, monkeypatch, capfd):
     monkeypatch.setenv("FAKE_EXIT", "1")
     monkeypatch.setenv("FAKE_STDERR", "Cannot connect to the Docker daemon")
     with pytest.raises(subprocess.CalledProcessError):

@@ -128,6 +128,52 @@ fn registration_line() {
 }
 
 #[test]
+fn registration_is_the_register_line_then_the_ssh_block() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let token = fs::read_to_string(machine.paths.host_token()).unwrap();
+    let line = super::registration_line("myhost", token.trim());
+
+    let text = registration(&machine.paths).unwrap();
+    let block = client::instructions(&Config::load(&machine.config()).unwrap()).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "Register this host on the bridge by running:
+    {line}
+
+{block}"
+        )
+    );
+    assert!(text.ends_with('\n'));
+}
+
+#[test]
+fn registration_has_no_ssh_block_without_an_ssh_tcp_service() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let web = "host: myhost
+bridge: tunnel.example.test
+services:
+  web:
+    port: 80
+    type: http
+";
+    fs::write(machine.config(), web).unwrap();
+    let token = fs::read_to_string(machine.paths.host_token()).unwrap();
+    let line = super::registration_line("myhost", token.trim());
+
+    assert_eq!(
+        registration(&machine.paths).unwrap(),
+        format!(
+            "Register this host on the bridge by running:
+    {line}
+"
+        )
+    );
+}
+
+#[test]
 fn first_config_has_ssh_default() {
     let machine = Machine::new();
     assert!(machine.settings(Some("myhost"), Some(CODE)));

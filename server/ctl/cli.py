@@ -138,9 +138,8 @@ class Command(NamedTuple):
     # Edits the registries in place and returns text to print: before the bring-up, or after it for `bootstrap`.
     handler: Callable
     help: str
-    arguments: dict[str, str]  # the help of each argument
-    # The command that makes a folder a bridge: it runs in a folder with no `state/`, builds the images, and prints its
-    # text last, below docker's output.
+    arguments: dict[str, str]
+    # True for `init`: runs in a folder with no `state/`, and its text prints after the bring-up.
     bootstrap: bool = False
 
 
@@ -228,7 +227,7 @@ def _run(args) -> None:
             print(out)  # after the write, which may fail; before the reload, which may too
         try:
             atomic_write(GENERATED, render_compose(hosts, aliases, domain).encode(), 0o644)
-            frps_running = compose.compose_up(Path.cwd(), build=command.bootstrap)
+            frps_kept = compose.compose_up(Path.cwd(), build=command.bootstrap)
         except (OSError, ValueError, subprocess.CalledProcessError) as e:
             updated = "the registry is updated but " if (hosts, aliases) != (old_hosts, old_aliases) else ""
             retry = (
@@ -238,7 +237,7 @@ def _run(args) -> None:
             )
             raise CtlError(f"{updated}the bridge was not brought up ({e}); {retry}") from e
         if command.bootstrap:
-            if frps_running:
+            if frps_kept:
                 print(FRPS_KEPT)
             if out:
                 print(out)
