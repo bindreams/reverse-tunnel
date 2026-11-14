@@ -41,6 +41,11 @@ impl Paths {
         self.secrets_dir.join("host.token")
     }
 
+    /// frpc's log, which the supervisor writes and `logs` and `status` read.
+    pub fn frpc_log(&self) -> PathBuf {
+        self.log_dir.join(LOG_FRPC)
+    }
+
     /// Paths for tests: fixed names under `root`, and no link.
     pub fn testing(root: impl AsRef<Path>) -> Paths {
         let root = root.as_ref();

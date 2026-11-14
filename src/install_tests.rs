@@ -202,6 +202,54 @@ fn first_config_has_ssh_default() {
     assert_eq!(cfg.services.len(), 1);
 }
 
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Logs a version that made them narrower left, with their rotated files, are made readable by everyone.
+#[cfg(unix)]
+#[test]
+fn install_widens_the_logs_an_older_version_made() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.log_dir).unwrap();
+    let logs: Vec<PathBuf> = ["frpc.log", "frpc.log.1", "supervisor.log", "supervisor.log.1"]
+        .map(|name| machine.paths.log_dir.join(name))
+        .into();
+    for log in &logs {
+        fs::write(log, "").unwrap();
+        fs::set_permissions(log, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    machine.settings(Some("myhost"), Some(CODE));
+
+    for log in &logs {
+        assert_eq!(mode_of(log), 0o644, "{}", log.display());
+    }
+}
+
+/// `logs/` is the service account's: a link put in place of a log is not followed to change what it points at.
+#[cfg(unix)]
+#[test]
+fn install_does_not_follow_a_link_where_a_log_is() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.log_dir).unwrap();
+    let target = machine.dir.path().join("target");
+    fs::write(&target, "").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&target, machine.paths.frpc_log()).unwrap();
+
+    let err = write_settings(&machine.paths, &machine.account, Some("myhost"), None).unwrap_err();
+
+    assert!(format!("{err:#}").contains("frpc.log"), "{err:#}");
+    assert_eq!(mode_of(&target), 0o600);
+}
+
 #[test]
 fn uninstall_prints_revoke_line() {
     let machine = Machine::new();

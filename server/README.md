@@ -62,6 +62,11 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
   neighbouring entry when `ctl` adds or removes one; a comment at the end of an entry's line stays with it.
 - If the plugin is down, connected tunnels keep running, and logins and new names are refused until it is back.
 - `ctl revoke` does not cut the host's current session; it prints the command that does.
+- frps's API (port 7500) listens on the frps container's own loopback only, without a password; `uv run ctl list` asks
+  it by running `wget` inside that container, and waits at most 15 seconds for an answer. When frps does not answer on its API,
+  `ctl list` says `unknown` and why: a frps created before this version has not read the API settings, and
+  `docker compose restart reverse-tunnel-frps` makes it read them (it drops every tunnel once); right after a start it
+  may not listen yet.
 - Services behind frps always see `X-Forwarded-Proto: http`, even over HTTPS.
 
 ## Layout

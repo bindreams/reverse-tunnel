@@ -863,13 +863,45 @@ fn register(manager: &dyn ServiceManager, spec: &DaemonSpec, paths: &Paths) -> R
     }
 }
 
+/// Unix: makes the logs and their rotated files readable by everyone, as `logfile::open` makes new ones; those from a
+/// version that left them narrower would stay so until they rotate. `logs/` belongs to the service account, so each
+/// file is opened without following a link, and only a regular file is changed.
+#[cfg(unix)]
+fn widen_logs(paths: &Paths) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    for name in [crate::paths::LOG_SUPERVISOR, crate::paths::LOG_FRPC] {
+        let log = paths.log_dir.join(name);
+        for path in [crate::logfile::rotated(&log), log] {
+            // `O_NONBLOCK`: a FIFO put there must not hold the open.
+            let opened = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path);
+            let file = match opened {
+                Ok(file) => file,
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => return Err(err).with_context(|| format!("opening {}", path.display())),
+            };
+            if file.metadata()?.is_file() {
+                crate::files::apply(&file, PUBLIC_FILE)
+                    .with_context(|| format!("making {} readable", path.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Creates the directories and writes `config.yaml`, `bridge.pem` and the two tokens, each with its final mode and
 /// owner. A first run writes `config.yaml` and `secrets/host.token`, both create-new; with `join`, every run
 /// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
     let secret = Perm::new(0o640).group(*account);
     make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
+    // Readable by everyone: the logs in it are (`logfile::open`).
     make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))?;
+    #[cfg(unix)]
+    widen_logs(paths)?;
 
     let config = paths.config_file();
     let created = !config.try_exists()? && create_config(paths, host, join)?;

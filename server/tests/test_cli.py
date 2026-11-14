@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +28,7 @@ CHILD = """
 import sys
 from ctl import cli, compose
 compose.compose_up = lambda folder, build=False: False
+compose.frps_clients = lambda folder: "[]"
 compose.network_exists = lambda name: True
 cli.resolve = lambda name: True
 sys.exit(cli.main(sys.argv[1:]))
@@ -40,6 +42,7 @@ def bridge(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     reloads = []
     monkeypatch.setattr(compose, "compose_up", lambda folder, build=False: reloads.append((folder, build)) or False)
+    monkeypatch.setattr(compose, "frps_clients", lambda folder: "[]")
     monkeypatch.setattr(compose, "network_exists", lambda name: True)
     monkeypatch.setattr(cli, "resolve", lambda name: True)
     return reloads
@@ -63,6 +66,7 @@ def docker(tmp_path, monkeypatch):
     exe.parent.mkdir()
     exe.write_text(
         '#!/bin/sh\necho "$@" >> "$0.log"\n'
+        'if [ -n "$FAKE_HANG" ]; then while :; do :; done; fi\n'
         'echo "$FAKE_STDOUT"\necho "$FAKE_STDERR" >&2\nexit "${FAKE_EXIT:-0}"\n'
     )
     exe.chmod(0o755)
@@ -501,3 +505,169 @@ def test_failed_registry_write_prints_nothing(inited, monkeypatch, capsys):
 def test_cert_is_valid_from_yesterday():
     cert = x509.load_pem_x509_certificate(certs.make_cert(T)[0].encode())
     assert cert.not_valid_before_utc < datetime.now(UTC) - timedelta(hours=23)
+
+
+def clients(*entries):
+    return json.dumps([{"user": "x", "online": True, "lastConnectedAt": 5} | entry for entry in entries])
+
+
+def test_list_prints_the_registry_then_who_is_online_and_since_when(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+    cli.main(["add", "db", H2])
+    answer = clients(
+        {"user": "web", "lastConnectedAt": 86400},
+        {"user": "web", "lastConnectedAt": 90000},
+        {"user": "db", "online": False},
+        {"user": "stranger"},
+    )
+    monkeypatch.setattr(compose, "frps_clients", lambda folder: answer)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"host db {H2}",
+        f"host web {H}",
+        "presence db offline",
+        "presence web online since 1970-01-02 00:00:00 UTC",
+    ]
+
+
+def test_list_asks_frps_after_the_bring_up(inited, monkeypatch):
+    cli.main(["add", "web", H])
+    calls = []
+    monkeypatch.setattr(compose, "compose_up", lambda folder, build=False: calls.append("up") or False)
+    monkeypatch.setattr(compose, "frps_clients", lambda folder: calls.append("ask") or "[]")
+    assert cli.main(["list"]) == 0
+    assert calls == ["up", "ask"]
+
+
+def test_list_asks_frps_with_the_registry_lock_released(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+
+    def ask(folder):
+        fd = os.open("state/lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # BlockingIOError while `list` still holds it
+        finally:
+            os.close(fd)
+        return "[]"
+
+    monkeypatch.setattr(compose, "frps_clients", ask)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    assert capsys.readouterr().out.splitlines() == [f"host web {H}", "presence web offline"]
+
+
+def test_a_failed_bring_up_still_lists_the_registry_then_the_error(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+    monkeypatch.setattr(compose, "compose_up", docker_down)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 1
+    out, err = capsys.readouterr()
+    assert out == f"host web {H}\n"
+    assert "the bridge was not brought up" in err
+
+
+def test_list_with_an_frps_that_does_not_listen_says_unknown_and_to_restart_it(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+
+    def refused(folder):
+        raise compose.FrpsApiMissing("wget: can't connect to remote host (127.0.0.1): Connection refused")
+
+    monkeypatch.setattr(compose, "frps_clients", refused)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    out, err = capsys.readouterr()
+    assert out == f"host web {H}\npresence web unknown\n"
+    assert "Connection refused" in err
+    assert "created before this version, `docker compose restart reverse-tunnel-frps`" in err
+    assert "may not listen yet" in err
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "",
+        "not json",
+        "{}",
+        '{"error": "x"}',
+        "[1]",
+        '[{"online": true, "lastConnectedAt": 5}]',
+        '[{"user": "web", "lastConnectedAt": 5}]',
+        '[{"user": "web", "online": "yes", "lastConnectedAt": 5}]',
+        '[{"user": 7, "online": true, "lastConnectedAt": 5}]',
+        '[{"user": "web", "online": true}]',
+        '[{"user": "web", "online": true, "lastConnectedAt": "5"}]',
+        '[{"user": "web", "online": true, "lastConnectedAt": true}]',
+        '[{"user": "web", "online": true, "lastConnectedAt": 1e30}]',
+        '[{"user": "web", "online": true, "lastConnectedAt": 99999999999999999999}]',
+    ],
+)
+def test_an_unusable_answer_from_frps_says_unknown_with_its_reason_and_no_restart_hint(
+    inited, monkeypatch, capsys, answer
+):
+    cli.main(["add", "web", H])
+    monkeypatch.setattr(compose, "frps_clients", lambda folder: answer)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    out, err = capsys.readouterr()
+    assert out == f"host web {H}\npresence web unknown\n"
+    assert "frps's answer" in err and "restart" not in err
+
+
+def test_list_when_frps_cannot_be_asked_says_unknown_with_its_reason_and_no_restart_hint(inited, monkeypatch, capsys):
+    cli.main(["add", "web", H])
+
+    def not_running(folder):
+        raise compose.DockerError("service reverse-tunnel-frps is not running")
+
+    monkeypatch.setattr(compose, "frps_clients", not_running)
+    capsys.readouterr()
+    assert cli.main(["list"]) == 0
+    out, err = capsys.readouterr()
+    assert out == f"host web {H}\npresence web unknown\n"
+    assert "is not running" in err and "restart" not in err
+
+
+def test_the_api_address_ctl_asks_is_the_one_frps_listens_on():
+    frps = tomllib.loads((Path(__file__).parent.parent / "etc" / "frps.toml").read_text())
+    assert (frps["webServer"]["addr"], frps["webServer"]["port"]) == (compose.FRPS_API_ADDR, compose.FRPS_API_PORT)
+
+
+def test_frps_clients_asks_frps_to_read_its_own_loopback_api(docker, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_STDOUT", "[]")
+    assert compose.frps_clients(tmp_path).strip() == "[]"
+    base = "compose -p reverse-tunnel -f compose.yaml -f compose.generated.yaml"
+    assert Path(f"{docker}.log").read_text().splitlines() == [
+        f"{base} exec -T reverse-tunnel-frps wget -T 10 -qO- http://127.0.0.1:7500/api/clients"
+    ]
+
+
+def test_frps_clients_tells_a_refused_connection_from_other_failures(docker, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    monkeypatch.setenv("FAKE_STDERR", "wget: can't connect to remote host (127.0.0.1): Connection refused")
+    with pytest.raises(compose.FrpsApiMissing):
+        compose.frps_clients(tmp_path)
+
+    monkeypatch.setenv("FAKE_STDERR", "service reverse-tunnel-frps is not running")
+    with pytest.raises(compose.DockerError, match="is not running") as raised:
+        compose.frps_clients(tmp_path)
+    assert not isinstance(raised.value, compose.FrpsApiMissing)
+
+
+def test_frps_clients_says_when_frps_did_not_answer(docker, tmp_path, monkeypatch):
+    """The text is what busybox `wget -T` prints for a listener that accepts and never answers (the CI bridge job
+    checks it against the real one)."""
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    monkeypatch.setenv("FAKE_STDERR", "wget: download timed out")
+    with pytest.raises(compose.DockerError, match="frps did not answer within 10 s") as raised:
+        compose.frps_clients(tmp_path)
+    assert not isinstance(raised.value, compose.FrpsApiMissing)
+
+
+def test_frps_clients_gives_up_on_a_docker_that_hangs(docker, tmp_path, monkeypatch):
+    """`wget -T` bounds only `wget`: a `docker compose exec` that never returns is stopped by the caller's limit."""
+    monkeypatch.setenv("FAKE_HANG", "1")
+    monkeypatch.setattr(compose, "EXEC_WITHIN", 1)
+    with pytest.raises(compose.DockerError, match="frps did not answer within 1 s") as raised:
+        compose.frps_clients(tmp_path)
+    assert not isinstance(raised.value, compose.FrpsApiMissing)

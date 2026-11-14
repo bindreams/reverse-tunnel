@@ -124,7 +124,8 @@ can.
 uv run ctl alias movies.yourdomain.tld jellyfin.myhost.tunnel.example.com
 ```
 
-`uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts and aliases.
+`uv run ctl unalias <public name>` removes it, and `uv run ctl list` shows the hosts and aliases, then a `presence` line
+per host: `online since` when, `offline` at the bridge, or `unknown` with the reason on stderr.
 
 ### Jellyfin
 
@@ -150,7 +151,8 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 
 | Command | What it does |
 |---|---|
-| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain, and which bridge it trusts: one `certificate:` line per certificate in `bridge.pem`, two during a rotation. No `sudo`. |
+| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain, which bridge it trusts (one `certificate:` line per certificate in `bridge.pem`, two during a rotation), and the last 10 lines of `frpc.log`, or `no log yet`; a service that is not running says they are from its last run. No `sudo`. |
+| `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. When rotations may have removed lines before it could show them (its output stalled while the log rotated more than once), it says so on stderr. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
 | `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then restarts the service so it reads it again. Works over the tunnel. |
@@ -168,7 +170,13 @@ service: running (pid 1234), enabled at boot
 host: myhost
 bridge: tunnel.example.com
 certificate: SHA-256 AB:CD:...
+frpc log (last 10 lines; `reverse-tunnel logs` shows it all):
+[...] login to server success, get run id [...]
+...
 ```
+
+`status` does not interpret the log: `login to server success` in it means the host is connected, and a refusal says why
+("host not registered", "token mismatch").
 
 The files:
 
@@ -178,12 +186,10 @@ The files:
 | Logs | `/var/log/reverse-tunnel/` | `/Library/Logs/reverse-tunnel/` |
 | Binary, frpc | `/usr/local/lib/reverse-tunnel/` | `/usr/local/lib/reverse-tunnel/` |
 
-The service creates its logs under the service manager's umask (022 by default, set by systemd's `UMask=` or launchd's
-`Umask`), so anyone on the machine can read them, for example `less /var/log/reverse-tunnel/frpc.log` on Linux or
-`less /Library/Logs/reverse-tunnel/frpc.log` on macOS; where that umask is stricter, read them with `sudo`.
-`frpc.log` is the tunnel's: `login to server success` means the host is connected, and a refusal says why ("host not
-registered", "token mismatch"). `supervisor.log` is the service's own, with one local time stamp per line. Each log is
-rotated at 10 MB to `<name>.1`, replacing the previous one.
+Anyone on the machine can read the logs, with `reverse-tunnel logs` or directly (`less /var/log/reverse-tunnel/frpc.log`
+on Linux, `less /Library/Logs/reverse-tunnel/frpc.log` on macOS): nothing secret is in them. `frpc.log` is the tunnel's;
+`supervisor.log` is the service's own, with one local time stamp per line, and `reverse-tunnel logs` does not show it.
+Each log is rotated at 10 MB to `<name>.1`, replacing the previous one; `logs` shows only the current file.
 
 ### Upgrade
 

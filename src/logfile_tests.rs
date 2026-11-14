@@ -7,8 +7,8 @@ fn unix_resolves_iana_zone_names() {
         .expect("Europe/Berlin is not found: is the system's tzdata installed?");
 }
 
-/// Logs are 0644 so that, under a service's default umask, anyone on the machine can read them. The umask is
-/// process-wide, so the test re-runs itself in a child under `umask 000`.
+/// Logs are 0644 so that anyone on the machine can read them, whatever the service's umask. The umask is
+/// process-wide, so the test re-runs itself in a child under `umask 077`.
 #[cfg(unix)]
 #[test]
 fn log_files_are_created_0644() {
@@ -30,7 +30,7 @@ fn log_files_are_created_0644() {
 
     let dir = tempfile::tempdir().unwrap();
     let status = Command::new("sh")
-        .args(["-c", "umask 000; exec \"$0\" log_files_are_created_0644"])
+        .args(["-c", "umask 077; exec \"$0\" log_files_are_created_0644"])
         .arg(std::env::current_exe().unwrap())
         .env(CHILD, dir.path())
         .status()
@@ -40,4 +40,23 @@ fn log_files_are_created_0644() {
         let mode = fs::metadata(dir.path().join(name)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o644, "{name}");
     }
+}
+
+/// Only a file that `open` creates is made 0644: one that exists keeps the mode its owner gave it.
+#[cfg(unix)]
+#[test]
+fn an_existing_log_keeps_its_mode() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::LogFile;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.log");
+    fs::write(&path, "").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    LogFile::open(path.clone(), 10).unwrap();
+
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
 }
