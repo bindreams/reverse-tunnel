@@ -253,7 +253,7 @@ pub fn removal_script(copy: &Path, log: &Path, dir: &Path, name: &str, leftovers
 /// One loop of the removal script: `delete`, then `done`, which ends the loop (`exit /b 0`) when what `delete` deletes
 /// is gone, then a pause, and again, with no end otherwise. A `for /l` ends in no other way than `exit /b`, which ends
 /// the `cmd` it runs in, so the loop has a `cmd` of its own and the script goes on after it. The pause is `ping`, as
-/// `timeout` needs a console, which a task has none of. `/d` keeps AutoRun commands out of the loop.
+/// `timeout` needs a console, which a task has none of. Its `cmd` takes `SWITCHES`, as the task's own does.
 ///
 /// The loop is no quoted argument, which the outer `cmd` would parse with its quotes toggled by the paths' own. It is
 /// the loop's text with each `cmd` metacharacter that is outside double quotes escaped with `^`: the outer `cmd`
@@ -269,14 +269,18 @@ fn until_gone(delete: &str, done: &str) -> String {
         }
         escaped.push(c);
     }
-    format!("cmd /d /e:on /v:off /c {escaped}")
+    format!("cmd {SWITCHES} /c {escaped}")
 }
 
+/// The switches of every `cmd` the removal runs: no AutoRun command runs as SYSTEM (`/d`), and the machine's
+/// `Command Processor` settings cannot turn command extensions off (`for /l`, `exit /b`) or delayed expansion on (a `!`
+/// in a path) (`/e:on /v:off`).
+const SWITCHES: &str = "/d /e:on /v:off";
+
 /// What `cmd.exe` is given to run `script`: everything between the outer quotes is the command, whatever quotes it
-/// holds (`/s`), no AutoRun command runs as SYSTEM (`/d`), and the machine's `Command Processor` settings cannot turn
-/// command extensions off or delayed expansion on (`/e:on /v:off`).
+/// holds (`/s`), with `SWITCHES`.
 fn cmd_arguments(script: &str) -> String {
-    format!(r#"/d /e:on /v:off /s /c "{script}""#)
+    format!(r#"{SWITCHES} /s /c "{script}""#)
 }
 
 /// The definition of a task with no trigger that runs `script` as SYSTEM, however long it takes and whatever the power.

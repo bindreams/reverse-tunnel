@@ -109,7 +109,7 @@ fn a_loop_deletes_a_directory_whose_name_holds_the_metacharacters_of_cmd() {
 
     // Each of these, outside quotes, would split or alter a line that the outer `cmd` parses.
     let parent = tempfile::tempdir().unwrap();
-    let dir = parent.path().join("a & b ^ (c) d");
+    let dir = parent.path().join("a & b ^ (c) ! d");
     fs::create_dir(&dir).unwrap();
     let dir_str = dir.display();
 
