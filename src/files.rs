@@ -17,8 +17,6 @@ use anyhow::{Context, Result, ensure};
 use crate::account::Account;
 use crate::output::eprintln_best_effort;
 #[cfg(windows)]
-use crate::processes;
-#[cfg(windows)]
 use crate::schtasks;
 #[cfg(windows)]
 use crate::security::{self, Descriptor, OWNED_BY_ADMINISTRATORS};
@@ -115,8 +113,8 @@ impl Perm {
 pub enum Replace<'a> {
     Always,
     Never,
-    /// Like `Always`, and on Windows a `dest` that Windows refuses to overwrite because it runs is renamed into this
-    /// directory as a leftover (see `move_aside`) first. On Unix a running file is replaced like any other.
+    /// Like `Always`, and on Windows a `dest` that Windows refuses to overwrite (access denied) and lets be renamed is
+    /// renamed into this directory as a leftover (see `move_aside`) first. On Unix it is replaced like any other.
     OrMoveAside(&'a Path),
 }
 
@@ -335,9 +333,10 @@ fn is_refused_for_an_open_file(_path: &Path, _err: &io::Error) -> bool {
 /// `dest` is never partial and never briefly readable by others. The data and then the directory are synced. A `dest`
 /// that another process holds open waits until it is closed (see `OpenElsewhere`).
 ///
-/// With `Replace::OrMoveAside`, the old `dest` is moved aside only once the new one is written and synced, and only when
-/// it is a regular file that a process runs (see `processes::runs_image`); it is put back if the new one cannot be put
-/// in its place.
+/// With `Replace::OrMoveAside`, a replace that Windows refuses with access denied, and not because another process has
+/// `dest` open (that waits, as above), is answered by moving the old `dest` aside (see `persist_over_refused`) once the
+/// new one is written and synced; the old one is put back if the new one cannot be put in its place. A refused
+/// rename is the error.
 pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> Result<WriteOutcome> {
     let dir = dest.parent().expect("dest is inside a directory");
     let mut file = tempfile::NamedTempFile::new_in(dir)
@@ -345,18 +344,14 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
     apply(file.as_file(), perm)?;
     file.write_all(data)?;
     file.as_file().sync_all()?;
-    // Whether `dest` runs is looked at once, before anything is tried: a refusal is then an error, not a prompt to look
-    // again.
-    #[cfg(windows)]
-    if let Replace::OrMoveAside(leftovers) = replace
-        && runs_as_a_file(dest)?
-    {
-        persist_over_running(file, dest, leftovers)?;
-        return Ok(WriteOutcome::Written);
-    }
     match (replace, persist_waiting(file, dest, replace == Replace::Never)) {
         (Replace::Never, Err(err)) if err.error.kind() == ErrorKind::AlreadyExists => {
             return Ok(WriteOutcome::Existed);
+        }
+        #[cfg(windows)]
+        (Replace::OrMoveAside(leftovers), Err(err)) if err.error.kind() == ErrorKind::PermissionDenied => {
+            persist_over_refused(err.file, dest, leftovers)?;
+            return Ok(WriteOutcome::Written);
         }
         (_, Err(err)) => return Err(err).with_context(|| format!("writing {}", dest.display())),
         (_, Ok(())) => {}
@@ -389,23 +384,16 @@ fn persist_waiting(
     }
 }
 
-/// Windows: whether `dest` is a regular file that a process runs, which is what makes Windows refuse to replace or
-/// delete it, and the only file that is moved aside instead (see `move_aside`). A directory, a read-only file and an ACL
-/// that denies it are refused the same way, and none of them is moved.
+/// Windows: moves the file `dest`, which Windows refused to replace, into `leftovers` and puts `file` in its place. If
+/// that fails, `dest` is put back. Between the two renames there is no file at `dest`, so it is only for a file that no
+/// service start needs, like the binary on the `PATH`. Two renames, because Windows refuses to replace or delete a
+/// running image even with a POSIX-semantics rename (error 5), and allows renaming it.
 #[cfg(windows)]
-pub fn runs_as_a_file(dest: &Path) -> Result<bool> {
-    let is_file = fs::symlink_metadata(dest).is_ok_and(|entry| entry.is_file());
-    Ok(is_file && processes::runs_image(dest)?)
-}
-
-/// Windows: moves the file `dest`, which runs, into `leftovers` and puts `file` in its place. If that fails, `dest` is
-/// put back. Between the two renames there is no file at `dest`, so it is only for a file that no service start needs,
-/// like the binary on the `PATH`. Two renames, because Windows refuses to replace or delete a running image even with a
-/// POSIX-semantics rename (error 5), and allows renaming it.
-#[cfg(windows)]
-fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
+fn persist_over_refused(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
     let writing = || format!("writing {}", dest.display());
-    let aside = move_aside(dest, leftovers).with_context(writing)?;
+    let aside = move_aside(dest, leftovers)
+        .context("replacing it was refused (access denied), and so was moving it aside")
+        .with_context(writing)?;
     let Err(err) = persist_waiting(file, dest, false) else {
         return Ok(());
     };
@@ -421,7 +409,7 @@ fn persist_over_running(file: tempfile::NamedTempFile, dest: &Path, leftovers: &
 }
 
 /// Windows: renames the file `path` into `leftovers`, keeping its name (see `schtasks::leftover_name`), and returns the
-/// new path. Windows will not delete a running image, and lets it be renamed. A file there is deleted once it can be:
+/// new path. Windows refuses to delete a running image, and lets it be renamed. A file there is deleted once it can be:
 /// by the next `install` or `upgrade`, or by a removal. A `path` that another process holds open waits (see
 /// `OpenElsewhere`).
 #[cfg(windows)]

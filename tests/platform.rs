@@ -1170,7 +1170,8 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     let new_image = machine.image();
     assert_eq!(new_image, service::image(&machine.paths, &newer));
     assert_eq!(fs::read(&new_image).unwrap(), newer);
-    assert!(reverse_tunnel::processes::runs_image(&new_image).unwrap());
+    let running = machine.status().pid.expect("a running service has a pid");
+    assert_eq!(windows::image_of(running), fs::canonicalize(&new_image).unwrap());
     assert_eq!(fs::read(&old_image).unwrap(), outgoing);
     assert_eq!(fs::read(leftover_of_the_binary(&machine)).unwrap(), outgoing);
     for process in &old_processes {
@@ -1234,7 +1235,8 @@ fn the_kill_after_a_changed_command_has_the_manager_start_the_new_host() {
         let status = machine.status();
         status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
     });
-    assert!(reverse_tunnel::processes::runs_image(&image).unwrap());
+    let running = machine.status().pid.expect("a running service has a pid");
+    assert_eq!(windows::image_of(running), fs::canonicalize(&image).unwrap());
 }
 
 /// Windows: the `install` that `upgrade` runs from its download cannot delete the download, which it is running: it
@@ -1918,7 +1920,7 @@ fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
     let advice = stderr
         .split("to finish it ")
         .nth(1)
-        .and_then(|rest| rest.split(": it is not a running file").next());
+        .and_then(|rest| rest.split(": it is not a regular file").next());
     assert_eq!(
         advice,
         Some(install::rerun_uninstall(&machine.paths).as_str()),

@@ -2,10 +2,12 @@
 //! standard user, the machine's `Path` and the leftover images a removal renames.
 
 use std::cell::Cell;
+use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
 
@@ -31,7 +33,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
 use windows_sys::Win32::System::Threading::{
     INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    WaitForSingleObject,
+    QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, RegType};
@@ -121,6 +123,33 @@ impl Watched {
         let waited = unsafe { WaitForSingleObject(self.0.as_raw_handle(), INFINITE) };
         assert_eq!(waited, WAIT_OBJECT_0, "{}", std::io::Error::last_os_error());
     }
+}
+
+/// The file that process `pid` runs, as `fs::canonicalize` gives it.
+pub fn image_of(pid: u32) -> PathBuf {
+    // SAFETY: plain calls with live pointers; the handle is owned, so it is closed once.
+    let name = unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        assert!(
+            !process.is_null(),
+            "opening process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let process = OwnedHandle::from_raw_handle(process);
+        // The longest path Windows has.
+        let mut name = vec![0u16; 32_768];
+        let mut length = name.len() as u32;
+        let read = QueryFullProcessImageNameW(process.as_raw_handle(), 0, name.as_mut_ptr(), &mut length);
+        assert_ne!(
+            read,
+            0,
+            "reading the image of process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        name.truncate(length as usize);
+        name
+    };
+    fs::canonicalize(OsString::from_wide(&name)).unwrap()
 }
 
 /// What `class` says of the token of process `pid`.

@@ -1,11 +1,7 @@
-//! Windows: the processes of a service, which `install`'s removal waits for, and which process runs an image.
+//! Windows: the processes of a service, which `install`'s removal waits for.
 
-use std::ffi::OsString;
-use std::fs;
 use std::io;
-use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 
 use anyhow::{Context, Result, anyhow};
@@ -18,7 +14,7 @@ use windows_sys::Win32::System::RemoteDesktop::{
 };
 use windows_sys::Win32::System::Threading::{
     INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    QueryFullProcessImageNameW, WaitForSingleObject,
+    WaitForSingleObject,
 };
 
 use crate::account;
@@ -266,65 +262,6 @@ fn user_of(process: HANDLE) -> io::Result<Sid> {
     }
     // SAFETY: Windows wrote a `TOKEN_USER` whose SID points into `buffer`.
     Ok(unsafe { Sid::copy_of((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) })
-}
-
-/// The images that the processes of the system run, as of one listing: which of several files run is asked of one
-/// moment, not of as many as there are files. For one file, `runs_image` lists only if it has to.
-pub struct RunningImages(Vec<PathBuf>);
-
-impl RunningImages {
-    /// The images of the processes now. A process that cannot be opened, or whose image cannot be read, is not counted:
-    /// those are the protected processes of the system, which do not run a file of this installation.
-    pub fn now() -> Result<RunningImages> {
-        let buffer = Buffer::list().context("listing the processes")?;
-        Ok(RunningImages(
-            buffer
-                .entries()
-                .iter()
-                .filter_map(|entry| image_of(entry.ProcessId))
-                .collect(),
-        ))
-    }
-
-    /// Whether a process of the listing runs the image `path`. The images are compared as files (the same path, whatever
-    /// the case or the short names).
-    pub fn runs(&self, path: &Path) -> Result<bool> {
-        let image = fs::canonicalize(path).with_context(|| format!("looking at {}", path.display()))?;
-        Ok(self.0.contains(&image))
-    }
-}
-
-/// Whether any process runs the image `path`, which Windows will not overwrite or delete while it does. The images are
-/// compared as files (the same path, whatever the case or the short names). The processes are not listed for a `path`
-/// that cannot be looked at. For several files, see `RunningImages`.
-pub fn runs_image(path: &Path) -> Result<bool> {
-    let image = fs::canonicalize(path).with_context(|| format!("looking at {}", path.display()))?;
-    let buffer = Buffer::list().context("listing the processes")?;
-    Ok(buffer
-        .entries()
-        .iter()
-        .any(|entry| image_of(entry.ProcessId).is_some_and(|runs| runs == image)))
-}
-
-/// The file that process `pid` runs, as `fs::canonicalize` gives it; none if the process has ended, cannot be opened or
-/// read, or its image is gone.
-fn image_of(pid: u32) -> Option<PathBuf> {
-    // SAFETY: a plain call.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if process.is_null() {
-        return None;
-    }
-    // SAFETY: a handle that this function owns.
-    let process = unsafe { OwnedHandle::from_raw_handle(process) };
-    // The longest path Windows has.
-    let mut name = vec![0u16; 32_768];
-    let mut length = name.len() as u32;
-    // SAFETY: `name` has room for `length` units, which Windows lowers to what it wrote.
-    let read = unsafe { QueryFullProcessImageNameW(process.as_raw_handle(), 0, name.as_mut_ptr(), &mut length) };
-    if read == 0 {
-        return None;
-    }
-    fs::canonicalize(OsString::from_wide(&name[..length as usize])).ok()
 }
 
 /// Waits, with no cap, until every one of `processes` has ended.

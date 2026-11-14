@@ -177,10 +177,10 @@ fn connect() -> Result<ITaskFolder> {
     }
 }
 
-/// What a leftover's name starts with. A leftover is a file that runs, which a removal could not delete and an
-/// `install` or `upgrade` could not replace, and so renamed (see `files::move_aside`): `.reverse-tunnel.<id>.<the name
-/// it had>`, in the folder that holds the bin dir. The next `install` or `upgrade` deletes it once it can, and the
-/// removal task's last step deletes every such file (see `removal_script`).
+/// What a leftover's name starts with. A leftover is a file that Windows refused to delete (a removal) or replace (an
+/// `install` or `upgrade`), as it does a running one, and so renamed (see `files::move_aside`):
+/// `.reverse-tunnel.<id>.<the name it had>`, in the folder that holds the bin dir. The next `install` or
+/// `upgrade` deletes it once it can, and the removal task's last step deletes every such file (see `removal_script`).
 const LEFTOVER_PREFIX: &str = ".reverse-tunnel.";
 
 /// The leftover file that renames the file called `original`, called `id`.

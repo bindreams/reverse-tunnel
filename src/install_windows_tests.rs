@@ -245,7 +245,7 @@ fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_o
     let [why] = kept.as_slice() else {
         panic!("it still runs: {kept:?}")
     };
-    assert!(format!("{why:#}").contains("may still run"), "{why:#}");
+    assert!(format!("{why:#}").contains("each `install` tries again"), "{why:#}");
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
     drop(running);
     assert!(delete_what_can_be(leftover_images(&paths).unwrap()).is_empty());
@@ -253,7 +253,7 @@ fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_o
 }
 
 #[test]
-fn the_sweep_keeps_the_registered_image_and_the_running_one_and_deletes_the_other_old_images() {
+fn the_sweep_keeps_the_registered_image_and_deletes_the_other_old_images_or_renames_one_that_runs() {
     let (_dir, paths) = installed();
     let image = |binary: &[u8]| service::image(&paths, binary);
     let (registered, old, previous) = (image(b"registered"), image(b"old"), image(b"previous"));
@@ -265,14 +265,16 @@ fn the_sweep_keeps_the_registered_image_and_the_running_one_and_deletes_the_othe
 
     sweep_old_images(&paths, &registered);
 
-    assert_eq!([&registered, &previous, &other].map(|file| file.exists()), [true; 3]);
-    assert!(!old.exists());
-    drop(running);
-    sweep_old_images(&paths, &registered);
+    assert_eq!([&registered, &other].map(|file| file.exists()), [true; 2]);
+    assert!(!old.exists() && !previous.exists());
+    // The image that runs is a leftover, whose name is the image's, and is deleted once it has exited.
     assert_eq!(
-        [&registered, &previous, &other].map(|file| file.exists()),
-        [true, false, true]
+        kept_names(&paths),
+        [previous.file_name().unwrap().to_string_lossy().into_owned()]
     );
+    drop(running);
+    assert!(delete_what_can_be(leftover_images(&paths).unwrap()).is_empty());
+    assert_eq!(kept_names(&paths), Vec::<String>::new());
 }
 
 #[test]
@@ -418,6 +420,66 @@ fn a_running_file_that_cannot_be_renamed_fails_the_removal_naming_it() {
     let err = format!(
         "{:#}",
         remove_saying_what_it_moved_aside(&paths.bin_dir, &dir.path().join("missing")).unwrap_err()
+    );
+
+    assert!(err.contains("frpc-0.1.exe"), "{err}");
+    assert!(err.contains("moving it to"), "{err}");
+    assert!(stuck.exists());
+    assert!(leftover_images(&paths).unwrap().is_empty());
+}
+
+#[test]
+fn a_read_only_file_is_deleted_and_nothing_is_left() {
+    let (_dir, paths) = installed();
+    let file = paths.bin_dir.join("frpc-0.1.exe");
+    fs::write(&file, "").unwrap();
+    let mut readonly = fs::metadata(&file).unwrap().permissions();
+    readonly.set_readonly(true);
+    fs::set_permissions(&file, readonly).unwrap();
+
+    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+
+    assert!(!paths.bin_dir.exists());
+    assert!(leftover_images(&paths).unwrap().is_empty());
+}
+
+/// Gives `path` the protected DACL `sddl` until it drops, which restores `restored`.
+struct Acl<'a> {
+    path: &'a Path,
+    restored: &'static str,
+}
+
+impl<'a> Acl<'a> {
+    fn set(path: &'a Path, sddl: &str, restored: &'static str) -> Acl<'a> {
+        crate::security::Descriptor::parse(sddl).unwrap().apply(path).unwrap();
+        Acl { path, restored }
+    }
+}
+
+impl Drop for Acl<'_> {
+    fn drop(&mut self) {
+        crate::security::Descriptor::parse(self.restored)
+            .unwrap()
+            .apply(self.path)
+            .unwrap();
+    }
+}
+
+/// Measures that a rename needs the same right as a delete: with DELETE on the file and FILE_DELETE_CHILD on its
+/// directory both denied, the delete is refused with access denied and so is the rename into the leftover folder.
+#[test]
+fn a_file_that_its_acl_will_neither_delete_nor_rename_fails_the_removal_and_leaves_no_leftover() {
+    let (_dir, paths) = installed();
+    let stuck = paths.bin_dir.join("frpc-0.1.exe");
+    fs::write(&stuck, "").unwrap();
+    // What the removal may do to a file is DELETE on it or FILE_DELETE_CHILD on its directory: deny Everyone both. The
+    // directory's own ACE is not inherited, so the other files keep the full access it gives them.
+    let _dir_denied = Acl::set(&paths.bin_dir, "D:P(D;;DC;;;WD)(A;OICI;FA;;;WD)", "D:P(A;OICI;FA;;;WD)");
+    let _file_denied = Acl::set(&stuck, "D:P(D;;SD;;;WD)(A;;FA;;;WD)", "D:P(A;;FA;;;WD)");
+
+    let err = format!(
+        "{:#}",
+        remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
     );
 
     assert!(err.contains("frpc-0.1.exe"), "{err}");

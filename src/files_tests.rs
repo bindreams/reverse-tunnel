@@ -140,20 +140,7 @@ fn a_running_file_stays_where_it_is_when_it_cannot_be_moved_aside() {
 }
 
 #[test]
-fn a_directory_is_refused_and_not_moved_aside() {
-    let (dir, bin) = bin();
-    let dest = bin.join("x.exe");
-    fs::create_dir(&dest).unwrap();
-    fs::write(dest.join("inside"), "").unwrap();
-
-    write_atomic(&dest, b"new", Perm::executable(), Replace::OrMoveAside(dir.path())).unwrap_err();
-
-    assert!(dest.join("inside").exists());
-    assert_eq!(leftovers_in(dir.path()), Vec::<String>::new());
-}
-
-#[test]
-fn a_file_that_is_refused_for_another_reason_is_not_moved_aside() {
+fn a_read_only_file_that_windows_refuses_to_replace_is_moved_aside_and_the_leftover_can_be_deleted() {
     let (dir, bin) = bin();
     let dest = bin.join("x.exe");
     fs::write(&dest, "old").unwrap();
@@ -161,11 +148,12 @@ fn a_file_that_is_refused_for_another_reason_is_not_moved_aside() {
     readonly.set_readonly(true);
     fs::set_permissions(&dest, readonly).unwrap();
 
-    let err = write_atomic(&dest, b"new", Perm::executable(), Replace::OrMoveAside(dir.path())).unwrap_err();
+    write_atomic(&dest, b"new", Perm::executable(), Replace::OrMoveAside(dir.path())).unwrap();
 
-    assert!(format!("{err:#}").contains(&dest.display().to_string()), "{err:#}");
-    assert_eq!(fs::read(&dest).unwrap(), b"old");
-    assert_eq!(leftovers_in(dir.path()), Vec::<String>::new());
+    assert_eq!(fs::read(&dest).unwrap(), b"new");
+    let aside = leftovers_in(dir.path());
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    remove_entry(&dir.path().join(&aside[0])).unwrap();
 }
 
 #[test]
