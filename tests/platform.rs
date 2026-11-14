@@ -576,6 +576,34 @@ fn reinstall_changes_nothing() {
     assert_eq!((status.state, status.pid), (State::Running, supervisor));
 }
 
+/// A hand edit of the installed binary's ACL (Windows) or mode (Unix) does not outlive a reinstall of the same binary:
+/// the service may run it again.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+fn reinstall_puts_the_installed_binarys_access_back() {
+    let machine = Machine::begin();
+    let code = join_code("tunnel.example.test");
+    machine.install(&code);
+    let exe = service::exe(&machine.paths);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(windows)]
+    reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
+        .unwrap()
+        .apply(&exe)
+        .unwrap();
+
+    machine.install(&code);
+
+    #[cfg(unix)]
+    assert_eq!(mode_of(&exe), 0o755);
+    #[cfg(windows)]
+    reverse_tunnel::access::check(&machine.paths, &exe).unwrap();
+}
+
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 fn rejoin_takes_effect() {
@@ -1172,16 +1200,13 @@ fn restart_checks_every_path_run_opens() {
     let no_service = reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)").unwrap();
     let mut broken = Vec::new();
 
-    // The log folder's files exist: the service made them.
     for need in reverse_tunnel::access::opens(&machine.paths, &service::exe(&machine.paths)) {
-        if !need.path.exists() {
+        // A file `run` makes is missing if it has not made it (a rotated log); any other path must be there.
+        if need.made_by_run && !need.path.exists() {
             continue;
         }
         no_service.apply(&need.path).unwrap();
-        let shown = need.path.display().to_string();
-        if !broken.contains(&shown) {
-            broken.push(shown);
-        }
+        broken.push(need.path.display().to_string());
 
         let failed = Command::new(BIN).arg("restart").output().unwrap();
 
@@ -1213,6 +1238,11 @@ fn restart_refuses_a_config_the_service_account_cannot_read() {
     let before = machine.status();
     let config = machine.paths.config_file();
     let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
+    // The message names the account as the system names the SID, or by the product's name where it does not.
+    let named = reverse_tunnel::security::Sid::parse(&service)
+        .unwrap()
+        .name()
+        .unwrap_or_else(|_| service::ACCOUNT.to_string());
     for (acl, says) in [
         (
             format!("D:P(D;;FR;;;{service})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)"),
@@ -1231,7 +1261,7 @@ fn restart_refuses_a_config_the_service_account_cannot_read() {
         assert!(
             !failed.status.success()
                 && stderr.contains(&config.display().to_string())
-                && stderr.contains(service::ACCOUNT)
+                && stderr.contains(&named)
                 && stderr.contains(says),
             "restart should refuse {} ({says}): {stderr}",
             config.display()

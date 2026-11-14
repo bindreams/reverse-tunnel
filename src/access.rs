@@ -7,6 +7,7 @@ use anyhow::{Context, Result, ensure};
 use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ADD_FILE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_READ_ATTRIBUTES,
 };
 
 use crate::account;
@@ -29,6 +30,9 @@ pub const CREDITED: [(&str, &str); 5] = [
     ("S-1-5-80-0", "ALL SERVICES"),
 ];
 
+/// CREATOR OWNER: in an ACE that files inherit, whoever makes the file.
+const CREATOR_OWNER: &str = "S-1-3-0";
+
 /// A right that `run` needs, and the word for it in a failure.
 pub type Right = (u32, &'static str);
 const READ: Right = (FILE_GENERIC_READ, "read");
@@ -41,8 +45,12 @@ const NEW_FILE: Right = (
     FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE,
     "read, write and delete",
 );
-/// Of a log: `run` appends to it and renames it over `<log>.1`.
-const LOG: Right = (FILE_GENERIC_WRITE | DELETE, "write to and delete");
+/// Of a log: `run` appends to it, reads its size from the open file (`LogFile::open`: FILE_READ_ATTRIBUTES, which
+/// FILE_GENERIC_WRITE lacks) and renames it over `<log>.1`.
+const LOG: Right = (
+    FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES | DELETE,
+    "write to, read the size of and delete",
+);
 const ROTATED_LOG: Right = (DELETE, "delete");
 const RENDERED: Right = (FILE_GENERIC_READ | FILE_GENERIC_WRITE, "read and write");
 
@@ -75,8 +83,9 @@ impl Need {
     }
 }
 
-/// Every path `run` opens, with what it needs of each; `exe` is the binary the service will run: the installed one,
-/// or, at an `install` that replaces it, the staged copy that is then put in its place with the same descriptor. `run`
+/// Every path `run` opens, with what it needs of each; `exe` is the binary the service will run: the installed one, or,
+/// at an `install`, the staged copy, which gets the access that `install` gives the installed binary (it inherits the
+/// bin dir's ACL, as the installed one is made to). `run`
 /// lists no directory, and Windows lets a service through a directory it has no right to (SeChangeNotifyPrivilege,
 /// enabled in the service's token: asserted by the platform test of `CREDITED`), so a directory is here only where
 /// `run` makes files: the log directory, where it creates `supervisor.log`, `frpc.log` and `frpc.toml`, appends to the
@@ -173,10 +182,12 @@ pub enum Barrier {
 /// What stands in the way of `who` (each SID with its name) having all of `needs` of an object, and its files all of
 /// `inherits`, as the DACL `aces` gives it: there is no deny ACE at all (inherit-only ones too, which the object's
 /// contents get), the allows for `who` add up to `needs`, and those that files inherit add up to `inherits`. Allows
-/// for the object's contents only count for nothing towards `needs`. A sufficient condition, not AccessCheck: it
+/// for the object's contents only count for nothing towards `needs`; an allow for CREATOR OWNER that files inherit
+/// counts towards `inherits` (the service owns what it makes). A sufficient condition, not AccessCheck: it
 /// refuses a DACL whose order would let the account through, and ignores the owner and privileges.
 fn barrier_of(aces: &[Ace], who: &[(Sid, &str)], needs: u32, inherits: u32) -> Option<Barrier> {
     let (mut allowed, mut inherited) = (0, 0);
+    let creator_owner = Sid::parse(CREATOR_OWNER).expect("CREATOR_OWNER is a valid SID");
     for ace in aces {
         if !ace.allows {
             let name = ace.sid.name().or_else(|_| ace.sid.text());
@@ -184,14 +195,18 @@ fn barrier_of(aces: &[Ace], who: &[(Sid, &str)], needs: u32, inherits: u32) -> O
                 name.unwrap_or_else(|err| format!("an SID that cannot be read ({err})")),
             ));
         }
+        let rights = file_rights(ace.mask);
         if who.iter().any(|(sid, _)| *sid == ace.sid) {
-            let rights = file_rights(ace.mask);
             if !ace.inherit_only {
                 allowed |= rights;
             }
             if ace.object_inherit {
                 inherited |= rights;
             }
+        } else if ace.object_inherit && ace.sid == creator_owner {
+            // Files the service makes are its own, which CREATOR OWNER becomes in them. It is nothing in the
+            // directory itself, so it adds nothing to `allowed`.
+            inherited |= rights;
         }
     }
     if allowed & needs != needs {

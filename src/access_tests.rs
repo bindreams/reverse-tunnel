@@ -1,6 +1,7 @@
 use windows_sys::Win32::Foundation::{GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    DELETE, FILE_ADD_FILE, FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_READ_ATTRIBUTES,
 };
 
 use super::*;
@@ -9,6 +10,7 @@ const SERVICE: &str = "S-1-5-80-1-2-3-4-5";
 const EVERYONE: &str = "S-1-1-0";
 const USERS: &str = "S-1-5-32-545";
 const ADMINISTRATORS: &str = "S-1-5-32-544";
+const CREATOR_OWNER: &str = "S-1-3-0";
 
 fn ace(allows: bool, sid: &str, mask: u32) -> Ace {
     Ace {
@@ -81,6 +83,12 @@ fn an_allow_of_generic_rights_counts_as_the_file_rights_they_map_to() {
     }
 }
 
+/// What a deny of `sid` says: the name Windows gives the SID, else its text.
+fn named(sid: &str) -> String {
+    let sid = Sid::parse(sid).unwrap();
+    sid.name().or_else(|_| sid.text()).unwrap()
+}
+
 #[test]
 fn any_deny_ace_is_a_barrier_naming_its_sid_whoever_it_names_and_whatever_it_denies() {
     for sid in [SERVICE, EVERYONE, ADMINISTRATORS] {
@@ -88,17 +96,22 @@ fn any_deny_ace_is_a_barrier_naming_its_sid_whoever_it_names_and_whatever_it_den
 
         let found = barrier(&aces, FILE_GENERIC_READ);
 
-        assert!(matches!(found, Some(Barrier::Denied(_))), "{sid}: {found:?}");
+        assert!(
+            matches!(&found, Some(Barrier::Denied(by)) if *by == named(sid)),
+            "{sid}: {found:?}"
+        );
     }
     let other_rights = [
         ace(false, ADMINISTRATORS, FILE_GENERIC_WRITE & !FILE_GENERIC_READ),
         ace(true, SERVICE, FILE_GENERIC_READ),
     ];
 
-    assert!(matches!(
-        barrier(&other_rights, FILE_GENERIC_READ),
-        Some(Barrier::Denied(_))
-    ));
+    let found = barrier(&other_rights, FILE_GENERIC_READ);
+
+    assert!(
+        matches!(&found, Some(Barrier::Denied(by)) if *by == named(ADMINISTRATORS)),
+        "{found:?}"
+    );
 }
 
 #[test]
@@ -147,11 +160,8 @@ fn a_deny_names_the_account_or_group_and_only_an_sid_that_has_no_name_by_its_tex
 
     assert_eq!(denied(SERVICE), SERVICE);
     assert!(!denied(EVERYONE).contains("S-1-"), "{}", denied(EVERYONE));
-    assert!(
-        denied(ADMINISTRATORS).ends_with("Administrators"),
-        "{}",
-        denied(ADMINISTRATORS)
-    );
+    assert_eq!(denied(ADMINISTRATORS), named(ADMINISTRATORS));
+    assert!(!denied(ADMINISTRATORS).contains("S-1-"), "{}", denied(ADMINISTRATORS));
 }
 
 #[test]
@@ -179,4 +189,55 @@ fn what_files_made_in_a_directory_inherit_is_judged_by_the_allows_they_inherit()
         matches!(not_inherited, Some(Barrier::NotInherited)),
         "{not_inherited:?}"
     );
+}
+
+#[test]
+fn an_existing_log_needs_the_right_to_read_its_attributes_which_opening_it_uses() {
+    let without = ace(true, SERVICE, (FILE_GENERIC_WRITE | DELETE) & !FILE_READ_ATTRIBUTES);
+    let with = ace(true, SERVICE, FILE_GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES);
+
+    let found = barrier(&[without], LOG.0);
+
+    assert!(matches!(found, Some(Barrier::NotAllowed)), "{found:?}");
+    assert!(barrier(&[with], LOG.0).is_none());
+}
+
+#[test]
+fn creator_owner_allow_that_files_inherit_counts_for_the_files_the_service_makes() {
+    let creator_owner = |object_inherit| Ace {
+        object_inherit,
+        inherit_only: true,
+        ..ace(true, CREATOR_OWNER, FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+    };
+    let add_files = ace(true, SERVICE, FILE_ADD_FILE);
+    let files_get = FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE;
+
+    let inherited = barrier_of(&[creator_owner(true), add_files], &who(), FILE_ADD_FILE, files_get);
+    let not_inherited = barrier_of(
+        &[creator_owner(false), ace(true, SERVICE, FILE_ADD_FILE)],
+        &who(),
+        FILE_ADD_FILE,
+        files_get,
+    );
+    let for_the_directory = barrier_of(&[creator_owner(true)], &who(), FILE_ADD_FILE, 0);
+
+    assert!(inherited.is_none(), "{inherited:?}");
+    assert!(
+        matches!(not_inherited, Some(Barrier::NotInherited)),
+        "{not_inherited:?}"
+    );
+    assert!(
+        matches!(for_the_directory, Some(Barrier::NotAllowed)),
+        "{for_the_directory:?}"
+    );
+}
+
+#[test]
+fn a_directory_with_no_dacl_is_refused_for_what_its_files_get() {
+    // `aces_of` reports a missing DACL as full access for Everyone, which no file inherits.
+    let no_dacl = ace(true, EVERYONE, FILE_ALL_ACCESS);
+
+    let found = barrier_of(&[no_dacl], &who(), FILE_ADD_FILE, FILE_GENERIC_WRITE);
+
+    assert!(matches!(found, Some(Barrier::NotInherited)), "{found:?}");
 }

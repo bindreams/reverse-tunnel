@@ -20,7 +20,9 @@ use crate::account::{self, Account};
 #[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::{Config, valid_label};
-use crate::files::{Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, write_atomic};
+use crate::files::{
+    Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, restore, write_atomic,
+};
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
@@ -901,11 +903,11 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing, and has `binary`, the new one, check the settings as
-/// `run_as` (see `ops::check`): from a copy staged in the bin dir where `run_as` can run it, removed whatever the
-/// outcome, or, if the installed binary already is `binary`, from the installed one, which `place_binaries` keeps with
-/// the descriptor it has, so that is the one whose access the check must judge. A fetch needs no restart: a new frpc
-/// version only arrives with a new binary, which `place_binaries` marks.
+/// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
+/// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
+/// the outcome. It has the access the installed binary is given (`place_binaries`), so what is checked is what the
+/// service will run. A fetch needs no restart: a new frpc version only arrives with a new binary, which
+/// `place_binaries` marks.
 fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
@@ -917,21 +919,20 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
     if !download::tools(paths).frpc.try_exists()? {
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
-    const WHAT: &str = "the new binary's `run --check`";
-    let installed = service::exe(paths);
-    if fs::read(&installed).is_ok_and(|current| current == binary) {
-        return ops::check(paths, &installed, run_as, WHAT);
-    }
     let staged = upgrade::stage(paths, binary)?;
-    let checked = ops::check(paths, &staged, run_as, WHAT);
+    let checked = ops::check(paths, &staged, run_as, "the new binary's `run --check`");
     upgrade::discard(&staged);
     checked
 }
 
-/// Puts the binary `binary` and the symlink in place. Whether the binary changed.
+/// Puts the binary `binary` and the symlink in place. Whether the binary changed. A binary that did not change gets
+/// the access a new one has (`files::restore`), so a hand-edited ACL or mode does not outlive a reinstall.
 fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     let exe = service::exe(paths);
     let changed = replace_if_changed(paths, &exe, binary, Perm::EXECUTABLE)?;
+    if !changed {
+        restore(&exe, Perm::EXECUTABLE)?;
+    }
     clean_bin_dir(paths)?;
     #[cfg(windows)]
     for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {

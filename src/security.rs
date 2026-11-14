@@ -13,11 +13,12 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
     GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
+use windows_sys::Win32::Security::SID_NAME_USE;
 use windows_sys::Win32::Security::{
     ACE_HEADER, ACE_INHERITED_OBJECT_TYPE_PRESENT, ACE_OBJECT_TYPE_PRESENT, ACL_SIZE_INFORMATION, AclSizeInformation,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetSecurityDescriptorDacl,
-    GetSecurityDescriptorOwner, INHERIT_ONLY_ACE, LookupAccountSidW, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES,
+    GetSecurityDescriptorOwner, INHERIT_ONLY_ACE, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_ATTRIBUTES, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
 use windows_sys::Win32::System::SystemServices::{
@@ -27,6 +28,20 @@ use windows_sys::Win32::System::SystemServices::{
 
 /// A descriptor that names only an owner: Administrators.
 pub const OWNED_BY_ADMINISTRATORS: &str = "O:BA";
+
+#[link(name = "sechost", kind = "raw-dylib")]
+unsafe extern "system" {
+    /// `LookupAccountSidW` for the local machine's own and well-known accounts only: it never asks a domain controller,
+    /// so it cannot wait on the network. (windows-sys has no binding for it.)
+    fn LookupAccountSidLocalW(
+        sid: PSID,
+        name: *mut u16,
+        name_len: *mut u32,
+        domain: *mut u16,
+        domain_len: *mut u32,
+        kind: *mut SID_NAME_USE,
+    ) -> i32;
+}
 
 /// What Windows allocated with `LocalAlloc`, freed when it drops.
 struct Local(*mut c_void);
@@ -86,6 +101,11 @@ impl Descriptor {
     /// Gives `path` this descriptor's owner, if it has one, and its DACL, if it has one, as a protected DACL; what the
     /// object contains inherits it.
     pub fn apply(&self, path: &Path) -> io::Result<()> {
+        self.set(path, PROTECTED_DACL_SECURITY_INFORMATION)
+    }
+
+    /// `apply`, with `protection` the DACL's: protected, or unprotected so that it also gets what the parent gives.
+    fn set(&self, path: &Path, protection: u32) -> io::Result<()> {
         let (mut owner, mut dacl, mut present, mut defaulted) = (null_mut(), null_mut(), 0, 0);
         // SAFETY: the descriptor is live, and the out pointers are live; both results point into the descriptor.
         let found = unsafe {
@@ -100,7 +120,7 @@ impl Descriptor {
             info |= OWNER_SECURITY_INFORMATION;
         }
         if present != 0 {
-            info |= DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+            info |= DACL_SECURITY_INFORMATION | protection;
         }
         // SAFETY: the path is NUL-terminated, and `owner` and `dacl` are null or point into the live descriptor.
         match unsafe {
@@ -118,6 +138,13 @@ impl Descriptor {
             code => Err(os_error(code)),
         }
     }
+}
+
+/// Gives `path` the DACL that its parent's inheritable ACEs make, and none of its own: what a file made there has. Any
+/// edit of its DACL goes, a protected DACL included. The owner stays.
+pub fn inherit_dacl(path: &Path) -> io::Result<()> {
+    // An empty DACL, unprotected: Windows adds the inherited ACEs to it.
+    Descriptor::parse("D:")?.set(path, UNPROTECTED_DACL_SECURITY_INFORMATION)
 }
 
 /// The SID of `path`'s owner, as `S-1-5-...`.
@@ -317,14 +344,14 @@ impl Sid {
         unsafe { string_of_sid(self.as_psid()) }
     }
 
-    /// The account or group this SID names, as `DOMAIN\Name` (`Name` for a well-known one such as Everyone). Fails if
-    /// Windows knows no such account.
+    /// The account or group this SID names, as `DOMAIN\Name` (`Name` for a well-known one such as Everyone), if it is a
+    /// local or well-known one: a domain account is not looked up, which could wait on the network. Fails if Windows
+    /// knows no such account here.
     pub fn name(&self) -> io::Result<String> {
         let (mut name_len, mut domain_len, mut kind) = (0, 0, 0);
         // SAFETY: `self` is a valid SID; with no buffers the call only reports the sizes it needs.
         unsafe {
-            LookupAccountSidW(
-                null(),
+            LookupAccountSidLocalW(
                 self.as_psid(),
                 null_mut(),
                 &mut name_len,
@@ -336,8 +363,7 @@ impl Sid {
         let (mut name, mut domain) = (vec![0u16; name_len as usize], vec![0u16; domain_len as usize]);
         // SAFETY: the buffers are as long as the lengths that are passed, which Windows then sets to what it wrote.
         let found = unsafe {
-            LookupAccountSidW(
-                null(),
+            LookupAccountSidLocalW(
                 self.as_psid(),
                 name.as_mut_ptr(),
                 &mut name_len,

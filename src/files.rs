@@ -125,6 +125,21 @@ pub fn apply(file: &File, perm: Perm) -> Result<()> {
     Ok(())
 }
 
+/// Gives the existing file `path` what a file written there with `perm` has: on Unix `perm`'s mode and owner, on
+/// Windows the ACL its directory gives, whatever ACEs it had (its owner stays).
+pub fn restore(path: &Path, perm: Perm) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        apply(&file, perm).with_context(|| format!("setting the mode and owner of {}", path.display()))
+    }
+    #[cfg(windows)]
+    {
+        let _ = perm;
+        security::inherit_dacl(path).with_context(|| format!("resetting the ACL of {}", path.display()))
+    }
+}
+
 /// Creates `path` if it is missing (not its parents), then gives it `perm`, whatever it had. A new directory is
 /// owner-only until then, so it is never wider than its final mode, whatever the umask. Fails if something else is
 /// there, a link to a directory included.

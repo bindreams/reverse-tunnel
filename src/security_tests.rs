@@ -135,6 +135,35 @@ fn an_ace_is_read_up_to_its_size_and_never_past_it() {
 
 #[test]
 fn a_sid_is_named_by_the_account_it_belongs_to_and_not_by_a_made_up_one() {
-    assert_eq!(Sid::parse("S-1-1-0").unwrap().name().unwrap(), "Everyone");
+    let everyone = Sid::parse("S-1-1-0").unwrap();
+    // The name is the system's, which a localized Windows gives in its language: only that it is a name.
+    assert!(!everyone.name().unwrap().is_empty() && everyone.name().unwrap() != everyone.text().unwrap());
     assert!(Sid::parse("S-1-5-80-1-2-3-4-5").unwrap().name().is_err());
+}
+
+#[test]
+fn a_file_given_inherit_dacl_has_what_its_directory_gives_and_no_edit_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    Descriptor::parse("D:P(A;OICI;FA;;;AU)(A;OICI;FR;;;WD)")
+        .unwrap()
+        .apply(dir.path())
+        .unwrap();
+    let file = dir.path().join("exe");
+    std::fs::write(&file, "").unwrap();
+    Descriptor::parse("D:P(A;;FA;;;SY)").unwrap().apply(&file).unwrap();
+    assert_eq!(
+        summary(aces_of(&file).unwrap()),
+        [(true, false, 0x1f01ff, "S-1-5-18".to_string())]
+    );
+
+    inherit_dacl(&file).unwrap();
+
+    let found = summary(aces_of(&file).unwrap());
+    assert_eq!(
+        found,
+        [
+            (true, false, 0x1f01ff, "S-1-5-11".to_string()),
+            (true, false, 0x120089, "S-1-1-0".to_string()),
+        ]
+    );
 }
