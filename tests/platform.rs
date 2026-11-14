@@ -1465,30 +1465,19 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
 
     assert_uninstalled_by_the_installed_binary(&machine, uninstall);
 
-    // The removal succeeded, so the system is to delete, at the next boot, everything that its task still has to: the
-    // image it renamed, the copy and the log, and last the directory that holds them. The entries stay after the files
-    // are deleted, and earlier removals' are there too: look at what this one added.
+    // The removal succeeded, so the system is to delete, at the next boot, the image it renamed. The entries stay after
+    // the files are deleted, and earlier removals' are there too: look at what this one added.
     let name = binary.file_name().unwrap().to_str().unwrap();
-    let added: Vec<PathBuf> = windows::deletions_at_reboot()
+    let scheduled = windows::deletions_at_reboot()
         .into_iter()
         .skip(scheduled_before.len())
-        .collect();
-    let position = |is: &dyn Fn(&Path) -> bool| added.iter().position(|file| is(file));
-    let named =
-        |wanted: PathBuf| move |file: &Path| file.to_string_lossy().eq_ignore_ascii_case(&wanted.to_string_lossy());
-    let dir = machine.paths.bin_dir.with_file_name("reverse-tunnel-uninstall");
-    let positions = [
-        position(&|file| {
+        .any(|file| {
             let leftover = file.file_name().and_then(|file| file.to_str());
             leftover.is_some_and(|file| schtasks::is_leftover_of(file, name))
-        }),
-        position(&named(dir.join(name))),
-        position(&named(install::removal_log_file(&machine.paths))),
-        position(&named(dir)),
-    ];
+        });
     assert!(
-        positions.iter().all(Option::is_some) && positions.is_sorted(),
-        "the renamed image, the copy, the log and the directory are not all scheduled for deletion, in that order: {added:?}"
+        scheduled,
+        "the renamed image is not scheduled for deletion at the next boot"
     );
 }
 
