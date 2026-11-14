@@ -20,10 +20,15 @@ use crate::account::{self, Account};
 #[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::{Config, valid_label};
+#[cfg(windows)]
+use crate::files::is_access_denied;
 use crate::files::{
-    Perm, Replace, WriteOutcome, make_dir, make_missing_dirs, open_file, remove_entry, restore_binary, write_atomic,
+    Perm, Replace, WriteOutcome, hex_of_random_bytes, make_dir, make_missing_dirs, name_of, open_file, remove_entry,
+    remove_file, restore_binary, same_name, strip_prefix, write_atomic,
 };
 use crate::join::{self, JoinInfo};
+#[cfg(windows)]
+use crate::leftovers;
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
 #[cfg(windows)]
@@ -98,9 +103,9 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     };
 
     let account = account::ensure(service::ACCOUNT)?;
-    let new = env::current_exe().context("finding this binary")?;
+    let new = Binary::read(paths, &env::current_exe().context("finding this binary")?)?;
     apply(
-        &*service::manager(paths)?,
+        &*service::registering_manager(&new.image)?,
         &account,
         paths,
         &new,
@@ -110,28 +115,51 @@ pub fn install(opts: InstallOpts) -> Result<()> {
     )
 }
 
-/// What `install` does once it holds the lock and knows its inputs. `new` is the binary being installed. `changed`: an
-/// earlier run changed something that has not been restarted yet.
+/// The binary that `install` puts in place, and the file the service runs it from (see `service::image`).
+struct Binary {
+    bytes: Vec<u8>,
+    image: PathBuf,
+}
+
+impl Binary {
+    /// The binary at `from`.
+    fn read(paths: &Paths, from: &Path) -> Result<Binary> {
+        let bytes = fs::read(from).with_context(|| format!("reading {}", from.display()))?;
+        Ok(Binary {
+            image: service::image(paths, &bytes),
+            bytes,
+        })
+    }
+}
+
+/// What `install` does once it holds the lock and knows its inputs. `new` is the binary being installed, which
+/// `manager` registers as the service's host. `changed`: an earlier run changed something that has not been restarted
+/// yet.
 fn apply(
     manager: &dyn ServiceManager,
     account: &Account,
     paths: &Paths,
-    new: &Path,
+    new: &Binary,
     host: Option<&str>,
     join: Option<&JoinInfo>,
     mut changed: bool,
 ) -> Result<()> {
-    let spec = service::spec(paths)?;
-    let binary = fs::read(new).with_context(|| format!("reading {}", new.display()))?;
+    let spec = service::spec(&new.image)?;
     // The check reads the settings (as the account, except on Windows), so they are written first; the binary and the
-    // unit come after it, so a rejected binary leaves both as they were. The binary is in place before the unit: on
-    // Windows it is the unit's host, which the manager looks at.
+    // unit come after it, so a rejected binary leaves both as they were. The image goes in before the unit: on
+    // Windows it is the unit's host path, which the manager reads.
     changed |= write_settings(paths, account, host, join)?;
-    verify_tools(paths, &binary, Some(*account))?;
-    changed |= place_binaries(paths, &binary)?;
-    #[cfg(windows)]
-    system_path::add(&paths.bin_dir)?;
+    verify_tools(paths, &new.bytes, Some(*account))?;
+    changed |= place_binaries(paths, new)?;
     changed |= register(manager, &spec, paths)?;
+    // Only now: until the service is registered on the new image, it is registered on the old one, which may be the
+    // binary on the `PATH`.
+    #[cfg(windows)]
+    {
+        place_path_copy(paths, new)?;
+        system_path::add(&paths.bin_dir)?;
+        say_kept(sweep_old_images(paths, &new.image));
+    }
 
     println!(
         "Register this host on the bridge by running:\n    {}",
@@ -297,18 +325,18 @@ impl Removal {
 }
 
 /// A started removal: its directory, which it deletes when it has succeeded, and the folder that holds the leftover
-/// files it leaves when it fails (see `leftover_dir`).
+/// files it leaves when it fails (see `leftovers`).
 #[cfg(windows)]
 struct Removal {
     dir: PathBuf,
-    leftovers: PathBuf,
+    leftover_dir: PathBuf,
 }
 
 /// What the removal's task says of how it went, or none while it runs. A task that is gone deleted itself, which it
 /// does after the directory; one that ended has the code of the step that failed (see `removal_script`).
 #[cfg(windows)]
-fn removal_outcome(state: TaskState, dir_present: bool, leftovers: &Path) -> Option<WaitOutcome> {
-    let leftovers = schtasks::leftover_pattern(leftovers);
+fn removal_outcome(state: TaskState, dir_present: bool, leftover_dir: &Path) -> Option<WaitOutcome> {
+    let pattern = leftovers::pattern(leftover_dir);
     let failed = |why: String| Some(WaitOutcome::Failed(why));
     match state {
         TaskState::Running => None,
@@ -320,7 +348,7 @@ fn removal_outcome(state: TaskState, dir_present: bool, leftovers: &Path) -> Opt
             "the removal is done, but its task is still registered: delete it with `schtasks /Delete /TN {}`. The files \
              that remain ({}) can be deleted by hand once this `uninstall` has exited",
             schtasks::REMOVAL,
-            leftovers.display()
+            pattern.display()
         ))),
         TaskState::Ended(code) => failed(format!("the removal's task ended with {code:#x}")),
     }
@@ -334,7 +362,7 @@ impl Removal {
     fn wait(self) -> Result<WaitOutcome> {
         loop {
             let state = schtasks::state(schtasks::REMOVAL)?;
-            if let Some(outcome) = removal_outcome(state, self.dir.try_exists()?, &self.leftovers) {
+            if let Some(outcome) = removal_outcome(state, self.dir.try_exists()?, &self.leftover_dir) {
                 return Ok(outcome);
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -389,16 +417,15 @@ fn spawn_finish(exe: &Path, _paths: &Paths) -> Result<Removal> {
 
 /// Windows: a one-time scheduled task run by SYSTEM, since an OpenSSH session ends everything it started, and no job
 /// object can be left. It runs a copy of `exe` from `removal_dir`, with the output in the log, and if the removal
-/// succeeded deletes the directory and then itself, and then the files that a removal renamed (see
-/// `schtasks::removal_script`). What a failed removal left in `removal_dir`, `exe` included, goes by the rule of
-/// `remove_or_rename`.
+/// succeeded deletes the directory and then itself, and then the leftovers (see `schtasks::removal_script`). What a
+/// failed removal left in `removal_dir`, `exe` included, becomes a leftover if it cannot be deleted (see `leftovers`).
 #[cfg(windows)]
 fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let dir = removal_dir(paths);
-    let leftovers = leftover_dir(paths)?;
+    let leftover_dir = leftovers::dir(paths)?;
     // Open before the directory is cleared: `exe` may be the copy that a failed removal left in it.
     let mut source = fs::File::open(exe).with_context(|| format!("opening {}", exe.display()))?;
-    remove_or_rename(&dir, leftovers)?;
+    remove_saying_what_it_moved_aside(&dir, leftover_dir)?;
     make_dir(&dir, Perm::new(0o700))?;
     // Named as the installed binary is, whatever `exe` is called.
     let copy = dir.join(
@@ -409,11 +436,11 @@ fn spawn_finish(exe: &Path, paths: &Paths) -> Result<Removal> {
     let mut target = fs::File::create_new(&copy).with_context(|| format!("creating {}", copy.display()))?;
     io::copy(&mut source, &mut target).with_context(|| format!("copying {}", copy.display()))?;
     drop(target);
-    let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL, leftovers);
+    let script = schtasks::removal_script(&copy, &removal_log_file(paths), &dir, schtasks::REMOVAL, leftover_dir);
     schtasks::start(schtasks::REMOVAL, &script)?;
     Ok(Removal {
         dir,
-        leftovers: leftovers.to_path_buf(),
+        leftover_dir: leftover_dir.to_path_buf(),
     })
 }
 
@@ -451,8 +478,8 @@ pub fn rerun_uninstall(paths: &Paths) -> String {
 }
 
 /// How to run `uninstall` again: by the command on the `PATH`, or, once the installed binary is gone, by any
-/// `reverse-tunnel` binary, which includes the leftover images of the installed binary in the folder that holds the bin
-/// dir (see `remove_or_rename`): a removal that ran from the installed binary may have left that as the only copy.
+/// `reverse-tunnel` binary, which includes the leftovers of the installed binary (see
+/// `leftovers::images_of_the_binary`).
 #[cfg(windows)]
 pub fn rerun_uninstall(paths: &Paths) -> String {
     if service::exe(paths).exists() {
@@ -463,7 +490,7 @@ pub fn rerun_uninstall(paths: &Paths) -> String {
         .to_string();
     }
     // Advice: a folder that cannot be listed has no image to name.
-    let images = leftover_images_of_the_binary(paths).unwrap_or_default();
+    let images = leftovers::images_of_the_binary(paths).unwrap_or_default();
     if images.is_empty() {
         return "run `uninstall` in an elevated prompt with any `reverse-tunnel` binary (the installed one is gone)"
             .to_string();
@@ -528,43 +555,6 @@ fn refuse_deleted_working_directory(paths: &Paths, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Windows: the folder that holds the bin dir, `%ProgramFiles%`, where a removal puts what it cannot delete (see
-/// `remove_or_rename`). Only administrators can write to it, and the removal leaves it alone.
-#[cfg(windows)]
-fn leftover_dir(paths: &Paths) -> Result<&Path> {
-    paths.bin_dir.parent().context("the bin dir has no parent")
-}
-
-/// Windows: the leftover files that earlier removals renamed (see `remove_or_rename`), which a removal's task deletes
-/// once they can be.
-#[cfg(windows)]
-pub fn leftover_images(paths: &Paths) -> Result<Vec<PathBuf>> {
-    let dir = leftover_dir(paths)?;
-    let mut images = Vec::new();
-    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-        if schtasks::is_leftover(&entry.file_name().to_string_lossy()) {
-            images.push(entry.path());
-        }
-    }
-    images.sort();
-    Ok(images)
-}
-
-/// Windows: the leftover files that kept the name of the installed binary, which can be run with `uninstall`: a removal
-/// that ran from the installed binary may have left that as the only copy.
-#[cfg(windows)]
-pub fn leftover_images_of_the_binary(paths: &Paths) -> Result<Vec<PathBuf>> {
-    let binary = service::exe(paths);
-    let binary = binary.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-    let mut images = leftover_images(paths)?;
-    images.retain(|image| {
-        let name = image.file_name().and_then(|name| name.to_str());
-        name.is_some_and(|name| schtasks::is_leftover_of(name, binary))
-    });
-    Ok(images)
-}
-
 /// Removes the service, then the files and the account. Repeating it finishes what a failed run left.
 pub fn finish_uninstall(paths: &Paths) -> Result<()> {
     let _lock = lock(paths)?;
@@ -611,15 +601,23 @@ fn remove_link(paths: &Paths) -> Result<()> {
     }
 }
 
-/// Windows: removes `path` (see `remove_entry`). A running image cannot be deleted, so a regular file directly in `path`
-/// that cannot be is renamed into `leftovers` keeping its name (see `schtasks::leftover_name`); the removal's task
-/// deletes it once it exits (a removal that succeeds also asks for it to be deleted at the next boot, see
-/// `delete_leftover_images_at_reboot`). A file that can be neither deleted nor renamed fails the removal naming both errors;
-/// directories, junctions and links are never renamed, since the task's `del` could not delete them.
+/// Windows: like `remove_entry`, but a file directly in `path` that Windows refuses to delete is moved aside (see
+/// `delete_or_move_aside`) and said so on stdout. Directories, junctions and links are never moved, and fail the
+/// removal.
 #[cfg(windows)]
-fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
+fn remove_saying_what_it_moved_aside(path: &Path, leftover_dir: &Path) -> Result<()> {
+    let delete = |file: &Path| -> Result<()> {
+        if let Some(to) = delete_or_move_aside(file, leftover_dir, remove_entry)? {
+            output::println_best_effort(&format!(
+                "{}: deleting it was refused (access denied), {MOVED_IT_TO} {}, where the removal's task deletes it",
+                file.display(),
+                to.display()
+            ));
+        }
+        Ok(())
+    };
     if !fs::symlink_metadata(path).is_ok_and(|entry| entry.is_dir()) {
-        return delete_or_rename(path, leftovers);
+        return delete(path);
     }
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
@@ -627,18 +625,18 @@ fn remove_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
     };
     for entry in entries {
-        delete_or_rename(&entry?.path(), leftovers)?;
+        delete(&entry?.path())?;
     }
     remove_entry(path)
 }
 
-/// Windows: once the removal has succeeded, has the system delete the leftover images (see `remove_or_rename`) at the
-/// next boot. The task sweeps them after it has deleted itself, so possibly after `uninstall` has returned, and a reboot
-/// before then would orphan them. Scheduling earlier would delete, after a failed removal, the renamed binary that the
-/// rerun advice names. A failure is printed and does not fail the removal.
+/// Windows: once the removal has succeeded, has the system delete the leftovers (see `leftovers`) at the next boot. The
+/// task sweeps them after it has deleted itself, so possibly after `uninstall` has returned, and a reboot before then
+/// would orphan them. Scheduling earlier would delete, after a failed removal, the renamed binary that the rerun advice
+/// names. A failure is printed and does not fail the removal.
 #[cfg(windows)]
 fn delete_leftover_images_at_reboot(paths: &Paths) {
-    let images = leftover_images(paths).unwrap_or_else(|err| {
+    let images = leftovers::images(paths).unwrap_or_else(|err| {
         output::eprintln_best_effort(&format!("{err:#}: nothing is scheduled for deletion at the next boot"));
         Vec::new()
     });
@@ -667,34 +665,97 @@ fn delete_at_reboot(path: &Path) -> Result<()> {
 
 /// What the removal says, before where, when it renamed a file that it could not delete.
 #[cfg(windows)]
-pub const MOVED_IT_TO: &str = "moved it to";
+pub const MOVED_IT_TO: &str = "so it was moved to";
 
-/// Windows: deletes `path` (see `remove_entry`), or if it cannot be, renames it (see `remove_or_rename`).
+/// Windows: deletes `path` with `delete` (`remove_entry`, or `remove_file` where only a file may go). When Windows
+/// refuses with access denied, which a running image gets and which another process holding it open does not (that
+/// waits), `path` is renamed into `leftover_dir` (see `leftovers::move_aside`, which moves only a regular file) and its
+/// new path returned. A refused rename, or a `path` that is not a regular file, is an error that has the OS's answer to
+/// the delete and to the move, and nothing is moved. A `path` not found after the delete was refused is done: `None`.
+/// A delete-pending file whose metadata read is refused is an error. Any other failure is an error. Nothing asks
+/// whether a process runs `path`: the OS's answer decides.
 #[cfg(windows)]
-fn delete_or_rename(path: &Path, leftovers: &Path) -> Result<()> {
-    let Err(refused) = remove_entry(path) else {
-        return Ok(());
+fn delete_or_move_aside(
+    path: &Path,
+    leftover_dir: &Path,
+    delete: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Option<PathBuf>> {
+    let refused = match delete(path) {
+        Ok(()) => return Ok(None),
+        Err(err) if is_access_denied(&err) => err,
+        Err(err) => return Err(err),
     };
-    match fs::symlink_metadata(path) {
-        Ok(entry) if entry.is_file() => {}
-        Ok(_) => return Err(refused.context("it is not a regular file, so it is not renamed")),
-        Err(stat) => return Err(refused.context(format!("it is not renamed, since reading what it is failed: {stat}"))),
+    match leftovers::move_aside(path, leftover_dir) {
+        Ok(to) => Ok(Some(to)),
+        Err(_) if fs::symlink_metadata(path).is_err_and(|err| err.kind() == ErrorKind::NotFound) => Ok(None),
+        Err(moving) => Err(leftovers::refused_and_not_moved(refused, &moving)),
     }
-    let original = path.file_name().context("the file has no name")?;
-    let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
-    fs::rename(path, &to).map_err(|err| anyhow!("{refused:#}; moving it to {}: {err}", to.display()))?;
-    output::println_best_effort(&format!(
-        "{refused:#}: {MOVED_IT_TO} {}, where the removal's task deletes it",
-        to.display()
-    ));
-    Ok(())
+}
+
+/// Removes the file `path` (never a directory), which may be running; on Windows see `delete_or_move_aside`.
+fn remove_file_that_may_run(paths: &Paths, path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    return delete_or_move_aside(path, leftovers::dir(paths)?, remove_file).map(drop);
+    #[cfg(not(windows))]
+    {
+        let _ = paths;
+        remove_file(path)
+    }
+}
+
+/// Windows: deletes the service images (see `service::image`) in the bin dir other than `registered`, the one that the
+/// service is registered on, once `register` has moved it there: nothing before that may delete the image it names.
+/// The previous build's image still runs when this runs, since the restart that ends it comes after (see
+/// `delete_or_move_aside`). The sweep goes on past every failure, and returns one error for each, with the path and the
+/// cause, except that a failure to read the directory ends it.
+#[cfg(windows)]
+fn sweep_old_images(paths: &Paths, registered: &Path) -> Vec<anyhow::Error> {
+    let reading = || format!("reading {}", paths.bin_dir.display());
+    let listing = match fs::read_dir(&paths.bin_dir) {
+        Ok(listing) => listing,
+        Err(err) => return vec![anyhow::Error::new(err).context(reading())],
+    };
+    let mut old = Vec::new();
+    for entry in listing {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            // A listing that fails once can fail on every step after it.
+            Err(err) => return vec![anyhow::Error::new(err).context(reading())],
+        };
+        let name = name_of(&path);
+        if service::is_image(name) && !same_name(name, name_of(registered)) {
+            old.push(path);
+        }
+    }
+    let leftover_dir = match leftovers::dir(paths) {
+        Ok(leftover_dir) => leftover_dir,
+        Err(err) => return vec![err],
+    };
+    let mut kept = Vec::new();
+    for image in old {
+        let swept = match leftovers::is_there_to_delete(&image) {
+            Ok(true) => delete_or_move_aside(&image, leftover_dir, remove_file).map(drop),
+            Ok(false) => Ok(()),
+            Err(err) => Err(err),
+        };
+        kept.extend(swept.err());
+    }
+    kept
+}
+
+/// Prints what a sweep kept, one line for each.
+#[cfg(windows)]
+fn say_kept(kept: Vec<anyhow::Error>) {
+    for err in kept {
+        output::eprintln_best_effort(&format!("{err:#}"));
+    }
 }
 
 /// Removes the bin dir, the config dir's contents, the marker, the config dir and, last, the logs. On Windows what in
-/// the bin dir cannot be deleted is renamed (see `remove_or_rename`).
+/// the bin dir cannot be deleted is moved aside (see `delete_or_move_aside`).
 fn remove_files(paths: &Paths) -> Result<()> {
     #[cfg(windows)]
-    let bin_dir = remove_or_rename(&paths.bin_dir, leftover_dir(paths)?);
+    let bin_dir = remove_saying_what_it_moved_aside(&paths.bin_dir, leftovers::dir(paths)?);
     #[cfg(not(windows))]
     let bin_dir = remove_entry(&paths.bin_dir);
     bin_dir?;
@@ -703,7 +764,7 @@ fn remove_files(paths: &Paths) -> Result<()> {
         Ok(entries) => {
             for entry in entries {
                 let path = entry?.path();
-                if path != marker {
+                if !same_name(name_of(&path), name_of(&marker)) {
                     remove_entry(&path)?;
                 }
             }
@@ -714,13 +775,6 @@ fn remove_files(paths: &Paths) -> Result<()> {
     remove_entry(&marker)?;
     remove_entry(&paths.config_dir)?;
     remove_entry(&paths.log_dir)
-}
-
-/// The hex digits of `N` random bytes from the OS.
-fn hex_of_random_bytes<const N: usize>() -> Result<String> {
-    let mut random = [0u8; N];
-    getrandom::fill(&mut random).context("reading random bytes from the OS")?;
-    Ok(hex::encode(random))
 }
 
 /// Whether a join code is needed: some file it provides is missing.
@@ -825,11 +879,23 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
     if let Some(join) = join {
         if !created {
             let text = fs::read_to_string(&config).with_context(|| format!("reading {}", config.display()))?;
-            changed |= replace_if_changed(paths, &config, with_bridge(&text, &join.domain, &config)?, PUBLIC_FILE)?;
+            changed |= replace_if_changed(
+                Some(paths),
+                &config,
+                with_bridge(&text, &join.domain, &config)?,
+                PUBLIC_FILE,
+                Replace::Always,
+            )?;
         }
-        changed |= replace_if_changed(paths, &paths.bridge_pem(), &join.cert_pem, PUBLIC_FILE)?;
+        changed |= replace_if_changed(
+            Some(paths),
+            &paths.bridge_pem(),
+            &join.cert_pem,
+            PUBLIC_FILE,
+            Replace::Always,
+        )?;
         let token = format!("{}\n", join.token);
-        changed |= replace_if_changed(paths, &paths.bridge_token(), token, secret)?;
+        changed |= replace_if_changed(Some(paths), &paths.bridge_token(), token, secret, Replace::Always)?;
     }
 
     let host_token = paths.host_token();
@@ -858,14 +924,23 @@ fn create_config(paths: &Paths, host: Option<&str>, join: Option<&JoinInfo>) -> 
     Ok(written == WriteOutcome::Written)
 }
 
-/// Replaces `dest` with `data` unless it holds it already. Whether it wrote.
-fn replace_if_changed(paths: &Paths, dest: &Path, data: impl AsRef<[u8]>, perm: Perm) -> Result<bool> {
+/// Replaces `dest` with `data` unless it holds it already. Whether it wrote. With `pending`, a write is first marked as
+/// one that the service has not picked up (see `mark_pending`).
+fn replace_if_changed(
+    pending: Option<&Paths>,
+    dest: &Path,
+    data: impl AsRef<[u8]>,
+    perm: Perm,
+    replace: Replace,
+) -> Result<bool> {
     let data = data.as_ref();
     if fs::read(dest).is_ok_and(|current| current == data) {
         return Ok(false);
     }
-    mark_pending(paths)?;
-    write_atomic(dest, data, perm, Replace::Always)?;
+    if let Some(paths) = pending {
+        mark_pending(paths)?;
+    }
+    write_atomic(dest, data, perm, replace)?;
     Ok(true)
 }
 
@@ -923,19 +998,22 @@ fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result
         download::fetch(download::host_pin()?, &paths.bin_dir)?;
     }
     let staged = upgrade::stage(paths, binary)?;
-    let checked = ops::check(paths, &staged, run_as, "the new binary's `run --check`");
+    let checked = ops::check(&staged, run_as, "the new binary's `run --check`");
     upgrade::discard(&staged);
     checked
 }
 
-/// Puts the binary `binary` and the symlink in place. Whether the binary changed. A hand-edited ACL, mode or owner of
-/// an unchanged binary does not outlive a reinstall.
-fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
-    let exe = service::exe(paths);
-    let changed = replace_if_changed(paths, &exe, binary, Perm::executable())?;
-    if !changed {
-        restore_binary(&exe)?;
-    }
+/// Puts the binary and the symlink in place, and on Windows the service's image instead of the binary: nothing deletes
+/// or moves aside the image that the registered service names (see `sweep_old_images`), and the binary on the `PATH` is
+/// placed once the service is registered (see `place_path_copy`). Whether anything changed.
+fn place_binaries(paths: &Paths, new: &Binary) -> Result<bool> {
+    // Before this run moves anything aside: what is left then is not this run's.
+    #[cfg(windows)]
+    say_kept(leftovers::delete_what_can_be(leftovers::images(paths)?));
+    #[cfg(windows)]
+    let changed = place_binary(Some(paths), &new.image, &new.bytes, Replace::Always)?;
+    #[cfg(not(windows))]
+    let changed = place_binary(Some(paths), &service::exe(paths), &new.bytes, Replace::Always)?;
     clean_bin_dir(paths)?;
     #[cfg(windows)]
     for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("reading {}", paths.bin_dir.display()))? {
@@ -943,25 +1021,46 @@ fn place_binaries(paths: &Paths, binary: &[u8]) -> Result<bool> {
     }
     #[cfg(unix)]
     if let Some(link) = &paths.link {
-        point_link(link, &exe)?;
+        point_link(link, &service::exe(paths))?;
+    }
+    Ok(changed)
+}
+
+/// Windows: replaces the binary on the `PATH`, which runs when this is an `upgrade` run from it and is where a service
+/// of an earlier build is registered until `register` moves it. Windows will not overwrite a running image, and lets it
+/// be renamed (see `Replace::OrMoveAside`). The service runs its image, so a change here is no reason to restart it.
+#[cfg(windows)]
+fn place_path_copy(paths: &Paths, new: &Binary) -> Result<()> {
+    let exe = service::exe(paths);
+    place_binary(None, &exe, &new.bytes, Replace::OrMoveAside(leftovers::dir(paths)?))?;
+    crate::files::own_by_administrators(&exe)
+}
+
+/// Puts `binary` at `dest`, unless it is there. Whether it changed, and with `pending` that is marked (see
+/// `replace_if_changed`). A hand-edited ACL, mode or owner of an unchanged binary does not outlive a reinstall.
+fn place_binary(pending: Option<&Paths>, dest: &Path, binary: &[u8], replace: Replace) -> Result<bool> {
+    let changed = replace_if_changed(pending, dest, binary, Perm::executable(), replace)?;
+    if !changed {
+        restore_binary(dest)?;
     }
     Ok(changed)
 }
 
 /// Removes from the bin dir the frpc versions that are not the current one, temp files a crashed write left, and the
-/// copies `upgrade` ran from (`upgrade-*`), this process's own among them.
+/// copies `upgrade` ran from (`upgrade-*`), this process's own among them. On Windows what Windows refuses to delete (a
+/// running old frpc or this process's image) is moved aside (see `remove_file_that_may_run`). A staged copy that cannot
+/// be removed is a warning.
 fn clean_bin_dir(paths: &Paths) -> Result<()> {
     let current = download::tools(paths).frpc;
     for entry in fs::read_dir(&paths.bin_dir)? {
         let path = entry?.path();
-        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        let stale = path != current && (name.starts_with("frpc-") || name.starts_with(".tmp"));
-        if name.starts_with(upgrade::STAGED) {
-            // An `install` run from a copy deletes its own running image, which Windows refuses; that is not worth
-            // failing `install` over.
-            upgrade::discard(&path);
+        let name = name_of(&path);
+        let starts = |prefix| strip_prefix(name, prefix).is_some();
+        let stale = !same_name(name, name_of(&current)) && (starts("frpc-") || starts(".tmp"));
+        if starts(upgrade::STAGED) {
+            upgrade::warn_if_kept(remove_file_that_may_run(paths, &path));
         } else if stale {
-            remove_entry(&path)?;
+            remove_file_that_may_run(paths, &path)?;
         }
     }
     Ok(())

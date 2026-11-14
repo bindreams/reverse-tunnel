@@ -36,7 +36,12 @@ pub fn stage(paths: &Paths, binary: &[u8]) -> Result<PathBuf> {
 
 /// Removes a staged copy. A failure is a warning: the next `install` sweeps the bin dir.
 pub fn discard(staged: &Path) {
-    if let Err(err) = remove_entry(staged) {
+    warn_if_kept(remove_entry(staged));
+}
+
+/// Says that a staged copy `removed` failed to remove is safe to delete by hand.
+pub fn warn_if_kept(removed: Result<()>) {
+    if let Err(err) = removed {
         eprintln!("{err:#}; it is safe to delete");
     }
 }

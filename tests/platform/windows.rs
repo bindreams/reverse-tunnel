@@ -2,20 +2,22 @@
 //! standard user, the machine's `Path` and the leftover images a removal renames.
 
 use std::cell::Cell;
+use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::ptr::{null, null_mut};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use reverse_tunnel::account;
-use reverse_tunnel::install;
+use reverse_tunnel::leftovers;
 use reverse_tunnel::security::{Sid, owner_of};
 use reverse_tunnel::system_path;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, LocalFree};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, LocalFree, WAIT_OBJECT_0};
 use windows_sys::Win32::Security::Authorization::{
     GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID,
     TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
@@ -29,7 +31,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows_sys::Win32::System::SystemServices::{SE_GROUP_ENABLED, SE_GROUP_USE_FOR_DENY_ONLY};
-use windows_sys::Win32::System::Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::System::Threading::{
+    INFINITE, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, WaitForSingleObject,
+};
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, RegType};
 
@@ -93,6 +98,58 @@ pub fn effective_rights(path: &Path, trustee_sid: &Sid) -> u32 {
         LocalFree(descriptor);
     }
     rights
+}
+
+/// A handle to a process, opened while it runs. Unlike the process's id or image name, which the system reuses, it
+/// never stands for another process, so waiting on it waits for that process alone.
+pub struct Watched(OwnedHandle);
+
+pub fn watch(pid: u32) -> Watched {
+    // SAFETY: a plain call; the handle is owned from here on.
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    assert!(
+        !handle.is_null(),
+        "opening process {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: a handle that nothing else owns.
+    Watched(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+impl Watched {
+    /// Waits, with no cap, until the process has exited.
+    pub fn wait_until_exited(&self) {
+        // SAFETY: a live handle, opened with `SYNCHRONIZE`.
+        let waited = unsafe { WaitForSingleObject(self.0.as_raw_handle(), INFINITE) };
+        assert_eq!(waited, WAIT_OBJECT_0, "{}", std::io::Error::last_os_error());
+    }
+}
+
+/// The file that process `pid` runs, as `fs::canonicalize` gives it.
+pub fn image_of(pid: u32) -> PathBuf {
+    // SAFETY: plain calls with live pointers; the handle is owned, so it is closed once.
+    let name = unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        assert!(
+            !process.is_null(),
+            "opening process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        let process = OwnedHandle::from_raw_handle(process);
+        // The longest path Windows has.
+        let mut name = vec![0u16; 32_768];
+        let mut length = name.len() as u32;
+        let read = QueryFullProcessImageNameW(process.as_raw_handle(), 0, name.as_mut_ptr(), &mut length);
+        assert_ne!(
+            read,
+            0,
+            "reading the image of process {pid}: {}",
+            std::io::Error::last_os_error()
+        );
+        name.truncate(length as usize);
+        name
+    };
+    fs::canonicalize(OsString::from_wide(&name)).unwrap()
 }
 
 /// What `class` says of the token of process `pid`.
@@ -220,7 +277,8 @@ pub fn assert_installed_as_specified(machine: &Machine) {
             has_no_access(secret, sid);
         }
     }
-    for binary in [&paths.bin_dir, &service::exe(paths)] {
+    let image = machine.image();
+    for binary in [&paths.bin_dir, &service::exe(paths), &image] {
         is(binary, ADMINISTRATORS, FULL);
         is(binary, EVERYONE, READ_EXECUTE);
         for sid in [EVERYONE, USERS, AUTHENTICATED_USERS, &service_sid] {
@@ -234,6 +292,7 @@ pub fn assert_installed_as_specified(machine: &Machine) {
         &paths.log_dir,
         &paths.bin_dir,
         &service::exe(paths),
+        &image,
         &frpc,
     ] {
         assert_eq!(owner_of(owned).unwrap(), ADMINISTRATORS, "owner of {}", owned.display());
@@ -426,9 +485,9 @@ pub fn fresh_path() -> String {
     system_path::expand(&machine_path()).unwrap()
 }
 
-/// Waits, with no cap, until the removal's task has deleted every file matching `schtasks::leftover_pattern`.
+/// Waits, with no cap, until the removal's task has deleted every file matching `leftovers::pattern`.
 pub fn wait_until_no_leftover_image_is_left(machine: &Machine) {
     wait_until("the leftover images are deleted", || {
-        install::leftover_images(&machine.paths).unwrap().is_empty()
+        leftovers::images(&machine.paths).unwrap().is_empty()
     });
 }

@@ -24,7 +24,11 @@ use goetia::spec::Id;
 #[cfg(unix)]
 use reverse_tunnel::account::{self, Account};
 use reverse_tunnel::command;
+#[cfg(windows)]
+use reverse_tunnel::files;
 use reverse_tunnel::install;
+#[cfg(windows)]
+use reverse_tunnel::leftovers;
 use reverse_tunnel::paths::Paths;
 #[cfg(windows)]
 use reverse_tunnel::schtasks::{self, TaskState};
@@ -256,6 +260,11 @@ impl Machine {
         self.manager.status(&self.id).unwrap()
     }
 
+    /// The file the installed service runs: on Windows the one the service manager has it registered on.
+    fn image(&self) -> PathBuf {
+        service::installed_image(&*self.manager, &self.paths).unwrap()
+    }
+
     /// Has root write `config.yaml` anew, readable by root only: a check run as root would pass it, and the service
     /// account cannot read it. Returns its path.
     #[cfg(unix)]
@@ -325,7 +334,7 @@ impl Drop for Machine {
         {
             let _ = schtasks::delete(schtasks::REMOVAL);
             let _ = fs::remove_dir_all(self.paths.bin_dir.with_file_name("reverse-tunnel-uninstall"));
-            for image in install::leftover_images(&self.paths).unwrap_or_default() {
+            for image in leftovers::images(&self.paths).unwrap_or_default() {
                 let _ = fs::remove_file(image);
             }
         }
@@ -584,10 +593,7 @@ fn reinstall_puts_the_installed_binarys_access_back() {
     let machine = Machine::begin();
     let code = join_code("tunnel.example.test");
     machine.install(&code);
-    let binaries = [
-        service::exe(&machine.paths),
-        reverse_tunnel::download::tools(&machine.paths).frpc,
-    ];
+    let binaries = [machine.image(), reverse_tunnel::download::tools(&machine.paths).frpc];
     #[cfg(unix)]
     for binary in &binaries {
         let meta = fs::metadata(binary).unwrap();
@@ -1003,10 +1009,13 @@ fn a_failed_removal_logs_where_uninstall_says() {
     }
 }
 
-/// The leftover image that was the installed binary: the one leftover whose original name is its name.
+/// The leftover image that was the installed binary: the one leftover whose original name is its name (an image of
+/// an earlier build is a leftover of the binary too, see `leftovers::images_of_the_binary`).
 #[cfg(windows)]
 fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
-    let images = install::leftover_images_of_the_binary(&machine.paths).unwrap();
+    let name = service::exe(&machine.paths).file_name().unwrap().to_os_string();
+    let mut images = leftovers::images_of_the_binary(&machine.paths).unwrap();
+    images.retain(|image| leftovers::is_leftover_of(image.file_name().unwrap(), &name));
     let [image] = images.as_slice() else {
         panic!("expected one leftover image of the binary, found {images:?}")
     };
@@ -1067,23 +1076,12 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
     let rendered = machine.paths.log_dir.join("frpc.toml");
     wait_until("the supervisor renders its first start", || rendered.exists());
 
-    // A file copied over the link makes the rejoin fail after it wrote the new bridge files. On Windows there is no
-    // link, and a different binary cannot replace the one the running service holds (`upgrade` will).
+    // A directory where the host token was makes the rejoin fail, after it wrote the new bridge files.
     let rejoin = join_code("new.example.test");
-    #[cfg(unix)]
-    let (blocker, mut failing) = {
-        let link = machine.paths.link.as_ref().unwrap();
-        fs::remove_file(link).unwrap();
-        fs::write(link, "").unwrap();
-        (link.clone(), machine.install_command(&rejoin))
-    };
-    #[cfg(windows)]
-    let (blocker, mut failing, _scratch) = {
-        let (scratch, newer) = newer_build();
-        let mut install = Command::new(&newer);
-        install.args(["install", "--host", "testhost", "--join", &rejoin]);
-        (service::exe(&machine.paths), install, scratch)
-    };
+    let blocker = machine.paths.host_token();
+    fs::remove_file(&blocker).unwrap();
+    fs::create_dir(&blocker).unwrap();
+    let mut failing = machine.install_command(&rejoin);
     let failed = failing.output().unwrap();
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
@@ -1096,8 +1094,7 @@ fn when_a_rejoin_fails_the_rerun_restarts_the_service() {
         token, "token-for-new.example.test\n",
         "the rejoin failed before it wrote the bridge files"
     );
-    #[cfg(unix)]
-    fs::remove_file(&blocker).unwrap();
+    fs::remove_dir(&blocker).unwrap();
 
     machine.install(&rejoin);
 
@@ -1125,6 +1122,160 @@ fn upgrade_from_local_build() {
         status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
     });
     assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
+}
+
+/// Windows: the images that were the binary on the `PATH`, and the copies `upgrade` ran from, which a running process
+/// kept from being deleted, so they were renamed aside: every leftover and every `upgrade-*` file in the bin dir.
+#[cfg(windows)]
+fn upgrade_remnants(machine: &Machine) -> Vec<PathBuf> {
+    let staged = fs::read_dir(&machine.paths.bin_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(upgrade::STAGED));
+    leftovers::images(&machine.paths)
+        .unwrap()
+        .into_iter()
+        .chain(staged)
+        .collect()
+}
+
+/// Windows: `upgrade` writes the new build as an image of its own, moves the service onto it and restarts it, and the
+/// next `install`, once the old image has exited, deletes the old one. Run by the binary on the `PATH`, which is the
+/// one thing `upgrade` replaces that runs: it is renamed aside, and the next `install` deletes that too.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the_old_one() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+    let outgoing = fs::read(service::exe(&machine.paths)).unwrap();
+    let old_image = machine.image();
+    // Handles to every service process (running the old image), so waiting on them waits on those processes alone.
+    let old_pids: Vec<u32> = processes()
+        .iter()
+        .filter(|process| process.owner == service_owner())
+        .map(|process| process.pid)
+        .collect();
+    assert!(old_pids.contains(&supervisor), "{old_pids:?}");
+    let old_processes: Vec<windows::Watched> = old_pids.into_iter().map(windows::watch).collect();
+    let (_scratch, path) = newer_build();
+    let newer = fs::read(&path).unwrap();
+
+    let mut upgrade = Command::new(service::exe(&machine.paths));
+    upgrade.arg("upgrade").arg("--from").arg(&path);
+    machine.run_ok(upgrade);
+
+    wait_until("the manager runs a new supervisor", || {
+        let status = machine.status();
+        status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
+    });
+    assert_eq!(fs::read(service::exe(&machine.paths)).unwrap(), newer);
+    let new_image = machine.image();
+    assert_eq!(new_image, service::image(&machine.paths, &newer));
+    assert_eq!(fs::read(&new_image).unwrap(), newer);
+    let running = machine.status().pid.expect("a running service has a pid");
+    assert_eq!(windows::image_of(running), fs::canonicalize(&new_image).unwrap());
+    assert!(!old_image.exists(), "{} is still there", old_image.display());
+    let old_name = old_image.file_name().unwrap().to_os_string();
+    let renamed: Vec<_> = leftovers::images(&machine.paths)
+        .unwrap()
+        .into_iter()
+        .filter(|image| leftovers::is_leftover_of(image.file_name().unwrap(), &old_name))
+        .collect();
+    let [renamed] = renamed.as_slice() else {
+        panic!("expected one leftover of the old image, found {renamed:?}")
+    };
+    assert_eq!(fs::read(renamed).unwrap(), outgoing);
+    assert_eq!(fs::read(leftover_of_the_binary(&machine)).unwrap(), outgoing);
+    for process in &old_processes {
+        process.wait_until_exited();
+    }
+    let mut sweep = Command::new(service::exe(&machine.paths));
+    sweep.arg("install");
+    machine.run_ok(sweep);
+    assert_eq!(upgrade_remnants(&machine), Vec::<PathBuf>::new());
+}
+
+/// Windows: has goetia register the running service again with `image`, a copy of this build in the bin dir, as its
+/// host and in its command, as an `install` of another binary does. Returns the image.
+#[cfg(windows)]
+fn move_the_service_onto_a_copy(machine: &Machine) -> PathBuf {
+    let image = machine.paths.bin_dir.join("reverse-tunnel-copy.exe");
+    let (data, perm) = (fs::read(BIN).unwrap(), files::Perm::executable());
+    files::write_atomic(&image, &data, perm, files::Replace::Always).unwrap();
+    files::own_by_administrators(&image).unwrap();
+    let outcome = service::registering_manager(&image)
+        .unwrap()
+        .install(&service::spec(&image).unwrap(), false)
+        .unwrap();
+    assert!(matches!(outcome, goetia::decide::Outcome::Update { .. }), "{outcome:?}");
+    image
+}
+
+/// Windows: goetia's `install` with a changed command (another host path) on a running service changes the host the
+/// service manager has, and does not stop the service. `upgrade` relies on it: the new binary is a new image.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn a_changed_command_moves_a_running_service_onto_another_host_without_stopping_it() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+
+    let image = move_the_service_onto_a_copy(&machine);
+
+    let status = machine.status();
+    assert_eq!((status.state, status.pid), (State::Running, Some(supervisor)));
+    let registered = output_of("sc.exe", &["qc", service::ID]);
+    assert!(registered.contains(image.to_str().unwrap()), "{registered}");
+}
+
+/// Windows: the kill that `restart` does makes the service manager start the host that a changed command moved the
+/// service onto.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_kill_after_a_changed_command_has_the_manager_start_the_new_host() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let supervisor = machine.status().pid.expect("a running service has a pid");
+    let image = move_the_service_onto_a_copy(&machine);
+
+    machine.manager.kill(&machine.id).unwrap();
+
+    wait_until("the manager runs a new host", || {
+        let status = machine.status();
+        status.state == State::Running && status.pid.is_some_and(|pid| pid != supervisor)
+    });
+    let running = machine.status().pid.expect("a running service has a pid");
+    assert_eq!(windows::image_of(running), fs::canonicalize(&image).unwrap());
+}
+
+/// Windows: the `install` that `upgrade` runs from its download cannot delete the download, which it is running: it
+/// moves it aside without a warning about it, and the next `install` deletes it.
+#[test]
+#[ignore = "installs a real service; CI's platform job runs it"]
+#[cfg(windows)]
+fn the_install_run_from_the_staged_download_leaves_nothing_after_the_next_install() {
+    let machine = Machine::begin();
+    machine.install(&join_code("tunnel.example.test"));
+    let staged = upgrade::stage(&machine.paths, &fs::read(BIN).unwrap()).unwrap();
+
+    let out = Command::new(&staged).arg("install").output().unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Waiting for a process that holds a file open is said on stderr; nothing else is.
+    let said: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.ends_with(reverse_tunnel::files::OPEN_ELSEWHERE_LINE))
+        .collect();
+    assert!(out.status.success() && said.is_empty(), "{stderr}");
+    assert!(!staged.exists(), "{} is still in the bin dir", staged.display());
+    let mut sweep = Command::new(service::exe(&machine.paths));
+    sweep.arg("install");
+    machine.run_ok(sweep);
+    assert_eq!(upgrade_remnants(&machine), Vec::<PathBuf>::new());
 }
 
 /// Whether `stderr` says that the check refused `config`: unreadable by the service account, or, on Windows where the
@@ -1233,10 +1384,7 @@ fn restart_checks_every_path_run_opens() {
     }
     let mut broken = Vec::new();
 
-    let (exe, frpc) = (
-        service::exe(&machine.paths),
-        reverse_tunnel::download::tools(&machine.paths).frpc,
-    );
+    let (exe, frpc) = (machine.image(), reverse_tunnel::download::tools(&machine.paths).frpc);
     for need in reverse_tunnel::access::opens(&machine.paths, &exe, &frpc) {
         assert!(need.path.exists(), "{} is missing", need.path.display());
         no_service.apply(&need.path).unwrap();
@@ -1498,45 +1646,89 @@ impl Drop for TaskGuard {
     }
 }
 
-/// A delete of a file that another process holds open without delete sharing waits until that process lets go, and says
-/// so once. The delete runs in a child, which is this test run again with the path in `CHILD`: its stderr is what shows
-/// that the delete was refused, so the handle is closed only after that.
-#[test]
-#[ignore = "run by CI's platform job"]
+/// Runs `operation` in a child (this test run again, named `test`; path in `CHILD`) on a file this process holds open
+/// without delete sharing. The handle is closed only after the child's stderr shows it was refused, then `finished`
+/// says what the operation was to do.
 #[cfg(windows)]
-fn a_delete_waits_for_the_process_that_holds_the_file_open() {
-    const CHILD: &str = "RT_DELETE_THIS";
+fn operation_waits_for_the_process_that_holds_the_file_open(
+    test: &str,
+    operation: fn(&Path),
+    finished: fn(&Path) -> bool,
+) {
+    const CHILD: &str = "RT_OPERATE_ON_THIS";
     if let Some(path) = env::var_os(CHILD) {
-        reverse_tunnel::files::remove_entry(Path::new(&path)).unwrap();
+        operation(Path::new(&path));
         return;
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("held.txt");
-    fs::write(&path, "").unwrap();
+    fs::write(&path, "old").unwrap();
     let held = held::open_held(&path);
     let mut child = Command::new(env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "--nocapture"])
-        .arg("a_delete_waits_for_the_process_that_holds_the_file_open")
+        .args(["--ignored", "--exact", "--nocapture", test])
         .env(CHILD, &path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let named = path.display().to_string();
+    let mut said = Vec::new();
     let refused = BufReader::new(child.stderr.take().unwrap())
         .lines()
         .map_while(Result::ok)
+        .inspect(|line| said.push(line.clone()))
         .any(|line| line.contains(&named) && line.contains("waiting until"));
-    assert!(refused, "the delete did not say that it waits");
-    assert!(path.exists(), "the delete took the file while it was held open");
+    assert!(refused, "the operation did not say that it waits: {said:?}");
+    assert!(
+        !finished(&path) && fs::read(&path).unwrap() == b"old",
+        "the operation went on while the file was held open"
+    );
 
     drop(held);
 
     assert!(
         child.wait().unwrap().success(),
-        "the delete failed after the file was let go"
+        "the operation failed after the file was let go"
     );
-    assert!(!path.exists(), "the file is still there");
+    assert!(finished(&path), "the operation did not finish");
+}
+
+#[test]
+#[ignore = "run by CI's platform job"]
+#[cfg(windows)]
+fn a_delete_waits_for_the_process_that_holds_the_file_open() {
+    operation_waits_for_the_process_that_holds_the_file_open(
+        "a_delete_waits_for_the_process_that_holds_the_file_open",
+        |path| reverse_tunnel::files::remove_entry(path).unwrap(),
+        |path| !path.exists(),
+    );
+}
+
+#[test]
+#[ignore = "run by CI's platform job"]
+#[cfg(windows)]
+fn a_replace_waits_for_the_process_that_holds_the_file_open() {
+    use reverse_tunnel::files::{Perm, Replace, write_atomic};
+    operation_waits_for_the_process_that_holds_the_file_open(
+        "a_replace_waits_for_the_process_that_holds_the_file_open",
+        |path| {
+            write_atomic(path, b"new", Perm::new(0o600), Replace::Always).unwrap();
+        },
+        |path| fs::read(path).is_ok_and(|content| content == b"new"),
+    );
+}
+
+#[test]
+#[ignore = "run by CI's platform job"]
+#[cfg(windows)]
+fn a_move_aside_waits_for_the_process_that_holds_the_file_open() {
+    operation_waits_for_the_process_that_holds_the_file_open(
+        "a_move_aside_waits_for_the_process_that_holds_the_file_open",
+        |path| {
+            reverse_tunnel::leftovers::move_aside(path, path.parent().unwrap()).unwrap();
+        },
+        |path| !path.exists(),
+    );
 }
 
 /// The removal's task is registered as SYSTEM: `whoami` in it says so.
@@ -1638,11 +1830,12 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
 
     // The removal succeeded, so the system is to delete, at the next boot, the image it renamed. Earlier removals'
     // entries are there too: the image's name is unique by its random id, so it is one not scheduled before.
-    let name = binary.file_name().unwrap().to_str().unwrap();
+    let name = binary.file_name().unwrap();
     assert!(
         windows::names_scheduled_at_reboot()
             .iter()
-            .any(|scheduled| schtasks::is_leftover_of(scheduled, name) && !scheduled_before.contains(scheduled)),
+            .any(|scheduled| leftovers::is_leftover_of(OsStr::new(scheduled), name)
+                && !scheduled_before.contains(scheduled)),
         "the renamed image is not scheduled for deletion at the next boot"
     );
 }
@@ -1695,7 +1888,7 @@ fn uninstall_run_by_name_through_the_path_removes_the_host_and_the_binary() {
 fn a_later_removal_deletes_the_leftover_image_of_an_earlier_one() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    let leftover = machine.paths.bin_dir.parent().unwrap().join(schtasks::leftover_name(
+    let leftover = machine.paths.bin_dir.parent().unwrap().join(leftovers::name(
         "earlier",
         service::exe(&machine.paths).file_name().unwrap(),
     ));
@@ -1739,13 +1932,13 @@ fn a_removal_that_cannot_start_leaves_the_binary_in_place() {
     let advice = stderr
         .split("to finish it ")
         .nth(1)
-        .and_then(|rest| rest.split(": it is not a regular file").next());
+        .and_then(|rest| rest.split(": moving it aside failed (").next());
     assert_eq!(
         advice,
         Some(install::rerun_uninstall(&machine.paths).as_str()),
         "{stderr}"
     );
-    assert!(install::leftover_images(&machine.paths).unwrap().is_empty());
+    assert!(leftovers::images(&machine.paths).unwrap().is_empty());
 }
 
 /// A process's working directory keeps that directory from being deleted, and the shell that started `uninstall` stays
@@ -1789,12 +1982,10 @@ fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
     let kept = tempfile::tempdir_in(r"C:\Users\Public").unwrap();
     let image = kept
         .path()
-        .join(schtasks::leftover_name("test", OsStr::new("reverse-tunnel.exe")));
+        .join(leftovers::name("test", OsStr::new("reverse-tunnel.exe")));
     fs::copy(BIN, &image).unwrap();
     // Hidden, system and read-only: `del` skips such a file unless it is told to ignore attributes.
-    let hidden = kept
-        .path()
-        .join(schtasks::leftover_name("hidden", OsStr::new("frpc-0.1.exe")));
+    let hidden = kept.path().join(leftovers::name("hidden", OsStr::new("frpc-0.1.exe")));
     fs::write(&hidden, "").unwrap();
     output_of("attrib", &["+h", "+s", "+r", hidden.to_str().unwrap()]);
     // A running image: `del` fails until the test lets go.

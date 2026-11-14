@@ -37,7 +37,9 @@ fn status_shows_domain_and_fingerprint_not_token() {
     fs::write(paths.bridge_token(), "frps-secret\n").unwrap();
     fs::write(paths.host_token(), "host-secret\n").unwrap();
     let manager = Fake::default();
-    manager.install(&service::spec(&paths).unwrap(), false).unwrap();
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
 
     let text = status_text(&manager, &paths);
 
@@ -57,7 +59,7 @@ fn host_checked_by_stub(outcome: &str) -> (TempDir, Paths, Fake) {
     fs::create_dir(&paths.bin_dir).unwrap();
     let exe = service::exe(&paths);
     crate::test_stub::copy_to(&exe);
-    let env: String = service::spec(&paths)
+    let env: String = service::spec(&service::exe(&paths))
         .unwrap()
         .env
         .iter()
@@ -71,7 +73,7 @@ fn host_checked_by_stub(outcome: &str) -> (TempDir, Paths, Fake) {
     )
     .unwrap();
     let manager = Fake::default();
-    let spec = service::spec(&paths).unwrap();
+    let spec = service::spec(&service::exe(&paths)).unwrap();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
     fs::write(pending_file(&paths), "").unwrap();
@@ -91,7 +93,7 @@ fn as_current_user() -> Option<crate::account::Account> {
 fn restart_with_a_failing_check_leaves_the_service_alone() {
     let (_dir, paths, manager) = host_checked_by_stub("fail");
 
-    let err = check_and_restart_as(&manager, &paths, as_current_user()).unwrap_err();
+    let err = check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user()).unwrap_err();
 
     let text = format!("{err:#}");
     assert!(
@@ -112,7 +114,7 @@ fn restart_with_a_passing_check_kills_the_service() {
     let (_dir, paths, manager) = host_checked_by_stub("pass");
     let id = service::id();
 
-    check_and_restart_as(&manager, &paths, as_current_user()).unwrap();
+    check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user()).unwrap();
 
     assert_eq!(manager.calls(), [("kill", id.to_string())]);
     assert!(!pending_file(&paths).exists());
@@ -123,7 +125,7 @@ fn restart_with_a_passing_check_kills_the_service() {
 fn restart_that_fails_puts_the_marker_back() {
     let (_dir, paths, _) = host_checked_by_stub("pass");
     // Never installed: the kill fails with something other than NotRunning.
-    let err = check_and_restart_as(&Fake::default(), &paths, as_current_user()).unwrap_err();
+    let err = check_and_restart_as(&Fake::default(), &paths, &service::exe(&paths), as_current_user()).unwrap_err();
 
     let text = format!("{err:#}");
     assert!(text.contains("the service was not restarted"), "{text}");
@@ -137,7 +139,7 @@ fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
     let (_dir, paths, _) = host_checked_by_stub("pass");
     // The marker cannot be written without its directory.
     fs::remove_dir_all(&paths.config_dir).unwrap();
-    let err = check_and_restart_as(&Fake::default(), &paths, as_current_user()).unwrap_err();
+    let err = check_and_restart_as(&Fake::default(), &paths, &service::exe(&paths), as_current_user()).unwrap_err();
 
     let text = format!("{err:#}");
     assert!(text.contains("the service was not restarted"), "{text}");
@@ -148,7 +150,7 @@ fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
 fn restart_says_whether_it_killed_or_started_the_service() {
     let (_dir, paths) = host();
     let manager = Fake::default();
-    let spec = service::spec(&paths).unwrap();
+    let spec = service::spec(&service::exe(&paths)).unwrap();
     manager.install(&spec, false).unwrap();
     let id = &spec.id;
 
@@ -166,6 +168,26 @@ fn restart_without_the_installed_binary_says_the_service_is_not_installed() {
 
     // Not the account lookup's message: the account database can still answer for an account just removed.
     assert_eq!(err.to_string(), "the service is not installed");
+    assert_eq!(manager.calls(), []);
+}
+
+#[cfg(windows)]
+#[test]
+fn restart_names_the_registered_image_that_is_missing() {
+    let (_dir, paths) = host();
+    let manager = Fake::default();
+    let image = service::image(&paths, b"gone");
+    manager.install(&service::spec(&image).unwrap(), false).unwrap();
+
+    let err = check_and_restart(&manager, &paths).unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "the service is registered on {}, which is missing: run `install` again",
+            image.display()
+        )
+    );
     assert_eq!(manager.calls(), []);
 }
 

@@ -59,7 +59,6 @@ whose path contains `%`, which Windows reads as a variable in the commands that 
 configuration and token files, the log folder) before the configuration: `NT SERVICE\reverse-tunnel` needs a plain
 allow (not a conditional, object or compound one), its own or a group every service has (Everyone, SERVICE and
 others), and no deny ACE may name anyone.
-`upgrade` is not available yet: to change the binary, uninstall and install again.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe
@@ -189,6 +188,14 @@ ends when the service restarts, and the host reconnects on the new version. Befo
 new version against this host's settings, and a failure leaves the old version running. It prints the registration
 line again; the host is already registered, so ignore it. A version that passes the check and cannot carry SSH locks a
 tunnel-only host out until someone is at the machine.
+
+**Windows**: run `reverse-tunnel upgrade` from an elevated prompt, without `sudo`. Windows will not overwrite or delete a
+running program, so each build is installed as a file of its own, `%ProgramFiles%\reverse-tunnel\reverse-tunnel-<SHA-256
+of the build>.exe`; `install` moves the service onto the new one and the restart runs it. The next `install` or `upgrade`
+deletes the earlier builds' files once the processes that run them have exited. The command you ran, on the `PATH`
+(`reverse-tunnel.exe`), and the downloaded copy `install` runs from, may be running too: Windows lets a running program
+be renamed, so they are renamed to `%ProgramFiles%\.reverse-tunnel.*` and deleted the same way. `uninstall` deletes all
+of them.
 
 ### Uninstall
 
