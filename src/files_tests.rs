@@ -133,7 +133,10 @@ fn a_running_file_stays_where_it_is_when_it_cannot_be_moved_aside() {
     )
     .unwrap_err();
 
-    assert!(format!("{err:#}").contains("moving it to"), "{err:#}");
+    let err = format!("{err:#}");
+    assert!(err.contains("moving it to"), "{err}");
+    // The replace's answer (access denied) and the rename's (no such path).
+    assert!(err.contains("(os error 5)") && err.contains("(os error 3)"), "{err}");
     assert_eq!(fs::read(&dest).unwrap(), old);
     // No temp file is left beside it.
     assert_eq!(fs::read_dir(&bin).unwrap().count(), 1);
@@ -154,6 +157,18 @@ fn a_read_only_file_that_windows_refuses_to_replace_is_moved_aside_and_the_lefto
     let aside = leftovers_in(dir.path());
     assert_eq!(aside.len(), 1, "{aside:?}");
     remove_entry(&dir.path().join(&aside[0])).unwrap();
+}
+
+#[test]
+fn removing_a_file_leaves_a_directory_at_its_path_alone() {
+    let (_dir, bin) = bin();
+    let dir = bin.join("x.exe");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("inside"), "").unwrap();
+
+    remove_file(&dir).unwrap_err();
+
+    assert!(dir.join("inside").exists());
 }
 
 #[test]

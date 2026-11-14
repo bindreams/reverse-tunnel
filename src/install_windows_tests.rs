@@ -424,6 +424,8 @@ fn a_running_file_that_cannot_be_renamed_fails_the_removal_naming_it() {
 
     assert!(err.contains("frpc-0.1.exe"), "{err}");
     assert!(err.contains("moving it to"), "{err}");
+    // The delete's answer (access denied) and the rename's (no such path).
+    assert!(err.contains("(os error 5)") && err.contains("(os error 3)"), "{err}");
     assert!(stuck.exists());
     assert!(leftover_images(&paths).unwrap().is_empty());
 }
@@ -466,21 +468,41 @@ impl Drop for Acl<'_> {
 }
 
 /// Measured on CI, where the removal runs as an elevated administrator: a file whose ACL denies DELETE on it, in a
-/// directory whose ACL denies FILE_DELETE_CHILD, is deleted all the same, so nothing is refused and nothing is moved
-/// aside.
+/// directory whose ACL denies FILE_DELETE_CHILD, is refused both a delete and a rename. The removal fails with an
+/// error that names the file and both answers, the file stays, and no leftover is made.
 #[test]
-fn a_file_whose_acl_denies_its_delete_is_deleted_by_an_administrators_removal_and_nothing_is_left() {
+fn a_file_that_its_acl_will_neither_delete_nor_rename_fails_the_removal_naming_both_refusals() {
     let (_dir, paths) = installed();
     let stuck = paths.bin_dir.join("frpc-0.1.exe");
     fs::write(&stuck, "").unwrap();
-    // What the removal may do to a file is DELETE on it or FILE_DELETE_CHILD on its directory: deny Everyone both. The
-    // directory's own ACE is not inherited, so the other files keep the full access it gives them.
-    let _dir_denied = Acl::set(&paths.bin_dir, "D:P(D;;DC;;;WD)(A;OICI;FA;;;WD)", "D:P(A;OICI;FA;;;WD)");
+    // The directory's own ACE is not inherited, so the other files keep the full access it gives them.
+    let _dir_denied = Acl::set(&paths.bin_dir, "D:P(D;;DT;;;WD)(A;OICI;FA;;;WD)", "D:P(A;OICI;FA;;;WD)");
     let _file_denied = Acl::set(&stuck, "D:P(D;;SD;;;WD)(A;;FA;;;WD)", "D:P(A;;FA;;;WD)");
 
-    remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap();
+    let err = format!(
+        "{:#}",
+        remove_saying_what_it_moved_aside(&paths.bin_dir, leftover_dir(&paths).unwrap()).unwrap_err()
+    );
 
-    assert!(!paths.bin_dir.exists());
+    assert!(err.contains("frpc-0.1.exe") && err.contains("moving it to"), "{err}");
+    assert_eq!(
+        err.matches("(os error 5)").count(),
+        2,
+        "the delete's and the rename's: {err}"
+    );
+    assert!(stuck.exists());
+    assert!(leftover_images(&paths).unwrap().is_empty());
+}
+
+#[test]
+fn a_file_whose_delete_was_refused_and_is_gone_when_looked_at_is_deleted() {
+    let (dir, paths) = installed();
+    let gone = paths.bin_dir.join("gone.exe");
+    let refused = |_: &Path| Err(io::Error::from(ErrorKind::PermissionDenied).into());
+
+    let moved = delete_or_move_aside(&gone, dir.path(), refused).unwrap();
+
+    assert_eq!(moved, None);
     assert!(leftover_images(&paths).unwrap().is_empty());
 }
 

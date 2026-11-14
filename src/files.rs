@@ -257,12 +257,26 @@ pub fn make_missing_dirs(path: &Path, perm: Perm) -> Result<()> {
 /// that watches files) makes the removal wait until it closes it: the removal is tried again, with no limit, and the
 /// first time says on stderr that it waits (see `OpenElsewhere`). Every other failure is an error.
 pub fn remove_entry(path: &Path) -> Result<()> {
+    remove_waiting(path, true)
+}
+
+/// Removes the file or link `path`, unless it is already gone, and waits like `remove_entry`. Never a directory: one at
+/// `path`, even one that replaced a file a moment ago, is an error and is left as it is.
+pub fn remove_file(path: &Path) -> Result<()> {
+    remove_waiting(path, false)
+}
+
+fn remove_waiting(path: &Path, directories_too: bool) -> Result<()> {
     let mut wait = OpenElsewhere::default();
     loop {
-        let removed = match fs::symlink_metadata(path) {
-            Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
-            Ok(_) => fs::remove_file(path),
-            Err(err) => Err(err),
+        let removed = if directories_too {
+            match fs::symlink_metadata(path) {
+                Ok(entry) if entry.is_dir() => fs::remove_dir_all(path),
+                Ok(_) => fs::remove_file(path),
+                Err(err) => Err(err),
+            }
+        } else {
+            fs::remove_file(path)
         };
         match removed {
             Err(err) if wait.waited_for(path, &err) => {}
@@ -272,6 +286,26 @@ pub fn remove_entry(path: &Path) -> Result<()> {
             _ => return Ok(()),
         }
     }
+}
+
+/// Whether `err`, or the `io::Error` it wraps, is the OS refusing an operation for lack of access.
+pub fn is_access_denied(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<io::Error>()
+        .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied)
+}
+
+/// Windows: `Err` naming `path` unless it is a regular file, not a directory, junction or link (a link is not
+/// followed); `otherwise` says what is then not done, in "... is not a regular file, so it is `otherwise`". A `path`
+/// that cannot be looked at is an error too.
+#[cfg(windows)]
+pub fn require_regular_file(path: &Path, otherwise: &str) -> Result<()> {
+    let entry = fs::symlink_metadata(path).with_context(|| format!("looking at {}", path.display()))?;
+    ensure!(
+        entry.is_file(),
+        "{} is not a regular file, so it is {otherwise}",
+        path.display()
+    );
+    Ok(())
 }
 
 /// What follows the path in the line that says a wait (see `OpenElsewhere`).
@@ -335,8 +369,8 @@ fn is_refused_for_an_open_file(_path: &Path, _err: &io::Error) -> bool {
 ///
 /// With `Replace::OrMoveAside`, a replace that Windows refuses with access denied, and not because another process has
 /// `dest` open (that waits, as above), is answered by moving the old `dest` aside (see `persist_over_refused`) once the
-/// new one is written and synced; the old one is put back if the new one cannot be put in its place. A refused
-/// rename is the error.
+/// new one is written and synced; the old one is put back if the new one cannot be put in its place. A refused move is
+/// an error that names the refused replace and the refused move.
 pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> Result<WriteOutcome> {
     let dir = dest.parent().expect("dest is inside a directory");
     let mut file = tempfile::NamedTempFile::new_in(dir)
@@ -350,7 +384,7 @@ pub fn write_atomic(dest: &Path, data: &[u8], perm: Perm, replace: Replace) -> R
         }
         #[cfg(windows)]
         (Replace::OrMoveAside(leftovers), Err(err)) if err.error.kind() == ErrorKind::PermissionDenied => {
-            persist_over_refused(err.file, dest, leftovers)?;
+            persist_over_refused(err.file, dest, leftovers, err.error)?;
             return Ok(WriteOutcome::Written);
         }
         (_, Err(err)) => return Err(err).with_context(|| format!("writing {}", dest.display())),
@@ -384,16 +418,25 @@ fn persist_waiting(
     }
 }
 
-/// Windows: moves the file `dest`, which Windows refused to replace, into `leftovers` and puts `file` in its place. If
-/// that fails, `dest` is put back. Between the two renames there is no file at `dest`, so it is only for a file that no
-/// service start needs, like the binary on the `PATH`. Two renames, because Windows refuses to replace or delete a
-/// running image even with a POSIX-semantics rename (error 5), and allows renaming it.
+/// Windows: moves the file `dest`, which Windows refused to replace with `refused`, into `leftovers` and puts `file` in
+/// its place. If that fails, `dest` is put back. Between the two renames there is no file at `dest`, so it is only for a
+/// file that no service start needs, like the binary on the `PATH`. Two renames, because Windows refuses to replace or
+/// delete a running image even with a POSIX-semantics rename (error 5), and allows renaming it. A refused move is an
+/// error that has both answers.
 #[cfg(windows)]
-fn persist_over_refused(file: tempfile::NamedTempFile, dest: &Path, leftovers: &Path) -> Result<()> {
+fn persist_over_refused(
+    file: tempfile::NamedTempFile,
+    dest: &Path,
+    leftovers: &Path,
+    refused: io::Error,
+) -> Result<()> {
     let writing = || format!("writing {}", dest.display());
-    let aside = move_aside(dest, leftovers)
-        .context("replacing it was refused (access denied), and moving it aside failed")
-        .with_context(writing)?;
+    let aside = move_aside(dest, leftovers).map_err(|moving| {
+        anyhow::anyhow!(
+            "{}: replacing it was refused ({refused}); moving it aside failed too: {moving:#}",
+            writing()
+        )
+    })?;
     let Err(err) = persist_waiting(file, dest, false) else {
         return Ok(());
     };
@@ -408,12 +451,6 @@ fn persist_over_refused(file: tempfile::NamedTempFile, dest: &Path, leftovers: &
     }
 }
 
-/// Windows: whether `path` is a regular file, not a directory, junction or link (a link is not followed).
-#[cfg(windows)]
-pub fn is_regular_file(path: &Path) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|entry| entry.is_file())
-}
-
 /// Windows: renames the file `path` into `leftovers`, keeping its name (see `schtasks::leftover_name`), and returns the
 /// new path. Windows refuses to delete a running image, and lets it be renamed. A file there is deleted once it can be:
 /// by the next `install` or `upgrade`, or by a removal. Only a regular file is moved aside, since only a file is an
@@ -421,11 +458,7 @@ pub fn is_regular_file(path: &Path) -> bool {
 /// moved. A `path` that another process holds open waits (see `OpenElsewhere`).
 #[cfg(windows)]
 pub fn move_aside(path: &Path, leftovers: &Path) -> Result<std::path::PathBuf> {
-    ensure!(
-        is_regular_file(path),
-        "{} is not a regular file, so it is not moved aside",
-        path.display()
-    );
+    require_regular_file(path, "not moved aside")?;
     let original = path.file_name().context("the file has no name")?;
     let to = leftovers.join(schtasks::leftover_name(&hex_of_random_bytes::<16>()?, original));
     let mut wait = OpenElsewhere::default();

@@ -25,7 +25,7 @@ use crate::files::{
     restore_binary, write_atomic,
 };
 #[cfg(windows)]
-use crate::files::{is_regular_file, move_aside};
+use crate::files::{is_access_denied, move_aside, remove_file, require_regular_file};
 use crate::join::{self, JoinInfo};
 use crate::ops::{mark_pending, pending_file};
 use crate::paths::Paths;
@@ -552,8 +552,8 @@ fn refuse_deleted_working_directory(paths: &Paths, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Windows: the folder that holds the bin dir, `%ProgramFiles%`, where a removal, an `install` and an `upgrade` put what
-/// they cannot delete or replace because it runs (see `move_aside`). Only administrators can write to it, and the
+/// Windows: the folder that holds the bin dir, `%ProgramFiles%`, where a removal, an `install` and an `upgrade` put the
+/// files whose delete or replace Windows refused (see `move_aside`). Only administrators can write to it, and the
 /// removal leaves it alone.
 #[cfg(windows)]
 fn leftover_dir(paths: &Paths) -> Result<&Path> {
@@ -645,9 +645,9 @@ fn remove_link(paths: &Paths) -> Result<()> {
 #[cfg(windows)]
 fn remove_saying_what_it_moved_aside(path: &Path, leftovers: &Path) -> Result<()> {
     let delete = |file: &Path| -> Result<()> {
-        if let Some(to) = delete_or_move_aside(file, leftovers)? {
+        if let Some(to) = delete_or_move_aside(file, leftovers, remove_entry)? {
             output::println_best_effort(&format!(
-                "{}: deleting it was refused (access denied), so {MOVED_IT_TO} {}, where the removal's task deletes it",
+                "{}: deleting it was refused (access denied), {MOVED_IT_TO} {}, where the removal's task deletes it",
                 file.display(),
                 to.display()
             ));
@@ -703,55 +703,43 @@ fn delete_at_reboot(path: &Path) -> Result<()> {
 
 /// What the removal says, before where, when it renamed a file that it could not delete.
 #[cfg(windows)]
-pub const MOVED_IT_TO: &str = "moved it to";
+pub const MOVED_IT_TO: &str = "so it was moved to";
 
-/// Windows: deletes `path` (see `remove_entry`). When Windows refuses with access denied, which a running image gets
-/// and which another process holding it open does not (that waits), `path` is renamed into `leftovers` (see
-/// `move_aside`, which moves only a regular file) and its new path returned; a leftover is deleted once it can be. A
-/// refused rename, or a `path` that is not a regular file, is an error naming `path` and the OS's answer, and nothing
-/// is moved. Any other failure is an error. Nothing asks whether a process runs `path`: the OS's answer decides.
+/// Windows: deletes `path` with `delete` (`remove_entry`, or `remove_file` where only a file may go). When Windows
+/// refuses with access denied, which a running image gets and which another process holding it open does not (that
+/// waits), `path` is renamed into `leftovers` (see `move_aside`, which moves only a regular file) and its new path
+/// returned; a leftover is deleted once it can be. A refused rename, or a `path` that is not a regular file, is an error
+/// that has the OS's answer to the delete and to the move, and nothing is moved. A `path` that is gone by then, as one
+/// that another delete is already finishing is, is deleted: `None`. Any other failure is an error. Nothing asks whether
+/// a process runs `path`: the OS's answer decides.
 #[cfg(windows)]
-fn delete_or_move_aside(path: &Path, leftovers: &Path) -> Result<Option<PathBuf>> {
-    let err = match remove_entry(path) {
+fn delete_or_move_aside(
+    path: &Path,
+    leftovers: &Path,
+    delete: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Option<PathBuf>> {
+    let refused = match delete(path) {
         Ok(()) => return Ok(None),
-        Err(err) => err,
+        Err(err) if is_access_denied(&err) => err,
+        Err(err) => return Err(err),
     };
-    let refused = err
-        .downcast_ref::<io::Error>()
-        .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied);
-    if !refused {
-        return Err(err);
+    match move_aside(path, leftovers) {
+        Ok(to) => Ok(Some(to)),
+        Err(_) if fs::symlink_metadata(path).is_err_and(|err| err.kind() == ErrorKind::NotFound) => Ok(None),
+        Err(moving) => Err(anyhow::anyhow!("{refused:#}; moving it aside failed too: {moving:#}")),
     }
-    move_aside(path, leftovers).map(Some).with_context(|| {
-        format!(
-            "{}: deleting it was refused (access denied), and moving it aside failed",
-            path.display()
-        )
-    })
 }
 
 /// Removes the file `path`, which the service or this run may be running: on Windows one that Windows refuses to
 /// delete is moved aside as a leftover (see `delete_or_move_aside`), which the next `install` deletes once it can.
 fn remove_file_that_may_run(paths: &Paths, path: &Path) -> Result<()> {
     #[cfg(windows)]
-    return delete_or_move_aside(path, leftover_dir(paths)?).map(drop);
+    return delete_or_move_aside(path, leftover_dir(paths)?, remove_entry).map(drop);
     #[cfg(not(windows))]
     {
         let _ = paths;
         remove_entry(path)
     }
-}
-
-/// Windows: `Err` naming `path` unless it is a regular file, the only kind deleted or moved aside as an image (a link
-/// is not followed).
-#[cfg(windows)]
-fn require_regular_file(path: &Path) -> Result<()> {
-    ensure!(
-        is_regular_file(path),
-        "{} is not a regular file, so it is never deleted",
-        path.display()
-    );
-    Ok(())
 }
 
 /// Windows: deletes the files `images` (leftovers, see `move_aside`), all of them whatever happens to one, and moves
@@ -761,15 +749,12 @@ fn require_regular_file(path: &Path) -> Result<()> {
 fn delete_what_can_be(images: Vec<PathBuf>) -> Vec<anyhow::Error> {
     let mut kept = Vec::new();
     for image in images {
-        if let Err(err) = require_regular_file(&image) {
+        if let Err(err) = require_regular_file(&image, "never deleted") {
             kept.push(err);
             continue;
         }
-        let Err(err) = remove_entry(&image) else { continue };
-        let refused = err
-            .downcast_ref::<io::Error>()
-            .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied);
-        kept.push(if refused {
+        let Err(err) = remove_file(&image) else { continue };
+        kept.push(if is_access_denied(&err) {
             err.context("Windows refused to delete it (access denied); each `install` tries again")
         } else {
             err
@@ -807,7 +792,11 @@ fn sweep_old_images(paths: &Paths, registered: &Path) {
         }
     }
     for image in old {
-        if let Err(err) = require_regular_file(&image).and_then(|()| remove_file_that_may_run(paths, &image)) {
+        let swept = leftover_dir(paths).and_then(|leftovers| {
+            require_regular_file(&image, "never deleted")?;
+            delete_or_move_aside(&image, leftovers, remove_file).map(drop)
+        });
+        if let Err(err) = swept {
             say(format!("{err:#}"));
         }
     }
