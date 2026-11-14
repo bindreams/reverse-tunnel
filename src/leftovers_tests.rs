@@ -12,38 +12,35 @@ fn a_leftover_keeps_the_name_of_the_file_it_was() {
 
 #[test]
 fn a_leftover_is_what_the_pattern_matches_whatever_the_case() {
-    let name = name("ab12", OsStr::new("frpc-0.1.exe")).to_string_lossy().into_owned();
+    let name = name("ab12", OsStr::new("frpc-0.1.exe"));
 
     assert!(is_leftover(&name));
-    assert!(is_leftover(name.to_uppercase()));
-    assert!(!is_leftover("reverse-tunnel.exe"));
-    assert!(!is_leftover("x.reverse-tunnel.ab12.exe"));
+    assert!(is_leftover(&name.to_ascii_uppercase()));
+    assert!(!is_leftover(OsStr::new("reverse-tunnel.exe")));
+    assert!(!is_leftover(OsStr::new("x.reverse-tunnel.ab12.exe")));
 }
 
 #[test]
 fn a_leftover_gives_back_the_name_it_kept() {
-    let name = name("ab12", OsStr::new("a.b.exe")).to_string_lossy().into_owned();
+    let name = name("ab12", OsStr::new("a.b.exe"));
 
-    assert_eq!(kept_name(OsStr::new(&name)), Some(OsStr::new("a.b.exe")));
+    assert_eq!(kept_name(&name), Some(OsStr::new("a.b.exe")));
     assert_eq!(kept_name(OsStr::new("a.b.exe")), None);
 }
 
 #[test]
 fn a_leftover_is_of_a_file_by_the_name_it_kept_whatever_the_case() {
-    let ours = name("ab12", OsStr::new("reverse-tunnel.exe"))
-        .to_string_lossy()
-        .into_owned();
-    let frpc = name("ab12", OsStr::new("frpc-0.1.exe")).to_string_lossy().into_owned();
+    let original = OsStr::new("reverse-tunnel.exe");
+    let ours = name("ab12", original);
+    let frpc = name("ab12", OsStr::new("frpc-0.1.exe"));
 
-    assert!(is_leftover_of(&ours, "reverse-tunnel.exe"));
-    assert!(is_leftover_of(ours.to_uppercase(), "reverse-tunnel.exe"));
-    assert!(!is_leftover_of(&frpc, "reverse-tunnel.exe"));
+    assert!(is_leftover_of(&ours, original));
+    assert!(is_leftover_of(&ours.to_ascii_uppercase(), original));
+    assert!(!is_leftover_of(&frpc, original));
     // A name that only ends like the original is another file.
-    let longer = name("ab12", OsStr::new("old-reverse-tunnel.exe"))
-        .to_string_lossy()
-        .into_owned();
-    assert!(!is_leftover_of(&longer, "reverse-tunnel.exe"));
-    assert!(!is_leftover_of("reverse-tunnel.exe", "reverse-tunnel.exe"));
+    let longer = name("ab12", OsStr::new("old-reverse-tunnel.exe"));
+    assert!(!is_leftover_of(&longer, original));
+    assert!(!is_leftover_of(original, original));
 }
 
 /// Paths under a temp dir, which is also the folder that holds the bin dir (see `dir`), with the installed binary in

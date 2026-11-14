@@ -59,11 +59,13 @@ fn every_build_runs_from_the_installed_binary() {
 #[cfg(windows)]
 #[test]
 fn only_a_file_named_by_a_digest_is_an_image() {
+    use std::ffi::OsStr;
+
     let named = |digest: &str| format!("reverse-tunnel-{digest}.exe");
 
-    assert!(is_image(named(EMPTY_DIGEST)));
+    assert!(is_image(OsStr::new(&named(EMPTY_DIGEST))));
     // Windows names are case-insensitive.
-    assert!(is_image(named(EMPTY_DIGEST).to_uppercase()));
+    assert!(is_image(OsStr::new(&named(EMPTY_DIGEST).to_uppercase())));
     for other in [
         "reverse-tunnel.exe".to_string(),
         named(&EMPTY_DIGEST[1..]),
@@ -72,7 +74,7 @@ fn only_a_file_named_by_a_digest_is_an_image() {
         format!("reverse-tunnel-{EMPTY_DIGEST}"),
         "frpc-0.71.1.exe".to_string(),
     ] {
-        assert!(!is_image(&other), "{other}");
+        assert!(!is_image(OsStr::new(&other)), "{other}");
     }
 }
 

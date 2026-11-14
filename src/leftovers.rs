@@ -33,19 +33,19 @@ pub fn pattern(dir: &Path) -> PathBuf {
 }
 
 /// Whether the file called `name` is a leftover: whether `pattern` matches it.
-pub fn is_leftover(name: impl AsRef<OsStr>) -> bool {
-    strip_prefix(name.as_ref(), PREFIX).is_some()
+pub fn is_leftover(name: &OsStr) -> bool {
+    strip_prefix(name, PREFIX).is_some()
 }
 
 /// Whether the file called `name` is a leftover of a file that was called `original`.
-pub fn is_leftover_of(name: impl AsRef<OsStr>, original: impl AsRef<OsStr>) -> bool {
-    kept_name(name.as_ref()).is_some_and(|kept| same_name(kept, original.as_ref()))
+pub fn is_leftover_of(name: &OsStr, original: &OsStr) -> bool {
+    kept_name(name).is_some_and(|kept| same_name(kept, original))
 }
 
 /// The name that the leftover called `name` had, if it is a leftover.
 pub fn kept_name(name: &OsStr) -> Option<&OsStr> {
     // The id is hex, so the first dot ends it.
-    split_once(strip_prefix(name, PREFIX)?, '.').map(|(_id, kept)| kept)
+    split_once(strip_prefix(name, PREFIX)?, b'.').map(|(_id, kept)| kept)
 }
 
 /// The folder that holds the bin dir, where leftovers go.
@@ -81,7 +81,7 @@ pub fn images(paths: &Paths) -> Result<Vec<PathBuf>> {
     let mut images = Vec::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-        if is_leftover(entry.file_name()) {
+        if is_leftover(&entry.file_name()) {
             images.push(entry.path());
         }
     }

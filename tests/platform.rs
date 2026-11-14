@@ -1013,11 +1013,7 @@ fn a_failed_removal_logs_where_uninstall_says() {
 /// an earlier build is a leftover of the binary too, see `leftovers::images_of_the_binary`).
 #[cfg(windows)]
 fn leftover_of_the_binary(machine: &Machine) -> PathBuf {
-    let name = service::exe(&machine.paths)
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let name = service::exe(&machine.paths).file_name().unwrap().to_os_string();
     let mut images = leftovers::images_of_the_binary(&machine.paths).unwrap();
     images.retain(|image| leftovers::is_leftover_of(image.file_name().unwrap(), &name));
     let [image] = images.as_slice() else {
@@ -1181,7 +1177,7 @@ fn upgrade_moves_the_service_onto_the_new_image_and_the_next_install_deletes_the
     let running = machine.status().pid.expect("a running service has a pid");
     assert_eq!(windows::image_of(running), fs::canonicalize(&new_image).unwrap());
     assert!(!old_image.exists(), "{} is still there", old_image.display());
-    let old_name = old_image.file_name().unwrap().to_string_lossy().into_owned();
+    let old_name = old_image.file_name().unwrap().to_os_string();
     let renamed: Vec<_> = leftovers::images(&machine.paths)
         .unwrap()
         .into_iter()
@@ -1834,11 +1830,12 @@ fn uninstall_run_by_the_installed_binary_by_its_path_removes_the_host_and_the_bi
 
     // The removal succeeded, so the system is to delete, at the next boot, the image it renamed. Earlier removals'
     // entries are there too: the image's name is unique by its random id, so it is one not scheduled before.
-    let name = binary.file_name().unwrap().to_str().unwrap();
+    let name = binary.file_name().unwrap();
     assert!(
         windows::names_scheduled_at_reboot()
             .iter()
-            .any(|scheduled| leftovers::is_leftover_of(scheduled, name) && !scheduled_before.contains(scheduled)),
+            .any(|scheduled| leftovers::is_leftover_of(OsStr::new(scheduled), name)
+                && !scheduled_before.contains(scheduled)),
         "the renamed image is not scheduled for deletion at the next boot"
     );
 }

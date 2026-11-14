@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -209,11 +210,11 @@ fn uninstall_runs_with_its_working_directory_elsewhere() {
 use crate::held::running;
 
 /// The leftovers in `paths`' leftover folder, by the name each kept.
-fn kept_names(paths: &Paths) -> Vec<String> {
+fn kept_names(paths: &Paths) -> Vec<OsString> {
     let images = leftovers::images(paths).unwrap();
     let names = images.iter().map(|image| image.file_name().unwrap());
     names
-        .map(|name| leftovers::kept_name(name).unwrap().to_string_lossy().into_owned())
+        .map(|name| leftovers::kept_name(name).unwrap().to_os_string())
         .collect()
 }
 
@@ -235,7 +236,7 @@ fn a_staged_copy_that_runs_is_moved_aside_by_the_sweep_and_deleted_by_the_next_o
     assert_eq!(kept_names(&paths), ["upgrade-x.exe"]);
     drop(running);
     assert!(leftovers::delete_what_can_be(leftovers::images(&paths).unwrap()).is_empty());
-    assert_eq!(kept_names(&paths), Vec::<String>::new());
+    assert_eq!(kept_names(&paths), Vec::<OsString>::new());
 }
 
 #[test]
@@ -254,13 +255,10 @@ fn the_sweep_keeps_the_registered_image_and_deletes_the_other_old_images_or_rena
     assert_eq!([&registered, &other].map(|file| file.exists()), [true; 2]);
     assert!(!old.exists() && !previous.exists());
     // The image that runs is a leftover, whose name is the image's, and is deleted once it has exited.
-    assert_eq!(
-        kept_names(&paths),
-        [previous.file_name().unwrap().to_string_lossy().into_owned()]
-    );
+    assert_eq!(kept_names(&paths), [previous.file_name().unwrap()]);
     drop(running);
     assert!(leftovers::delete_what_can_be(leftovers::images(&paths).unwrap()).is_empty());
-    assert_eq!(kept_names(&paths), Vec::<String>::new());
+    assert_eq!(kept_names(&paths), Vec::<OsString>::new());
 }
 
 #[test]
@@ -291,8 +289,8 @@ fn a_failed_removal_keeps_the_marker_whatever_the_case_of_its_name() {
     for path in others.iter().chain([&marker]) {
         fs::write(path, "").unwrap();
     }
-    // What fails is the first of these that the listing reaches after the marker, so the removal reaches the marker
-    // first, in whatever order the file system lists.
+    // What fails is the file that the listing reaches right after the marker, so the removal reaches the marker first.
+    // That relies on the marker not being listed last, and fails loudly if it is.
     let listed: Vec<_> = fs::read_dir(&paths.config_dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -369,8 +367,8 @@ fn a_running_image_in_the_bin_dir_is_renamed_next_to_it_and_the_rest_is_deleted(
         panic!("expected one image: {images:?}")
     };
     assert_eq!(image.parent(), Some(dir.path()));
-    let name = image.file_name().unwrap().to_string_lossy().into_owned();
-    assert!(leftovers::is_leftover_of(&name, "frpc-0.1.exe"), "{name}");
+    let name = image.file_name().unwrap();
+    assert!(leftovers::is_leftover_of(name, OsStr::new("frpc-0.1.exe")), "{name:?}");
 }
 
 #[test]
@@ -396,11 +394,11 @@ fn only_the_bin_dir_has_a_running_image_renamed() {
         .iter()
         .map(|image| {
             assert_eq!(image.parent(), Some(dir.path()));
-            image.file_name().unwrap().to_string_lossy().into_owned()
+            image.file_name().unwrap().to_os_string()
         })
         .collect();
     assert!(
-        names.len() == 1 && leftovers::is_leftover_of(&names[0], "a.exe"),
+        names.len() == 1 && leftovers::is_leftover_of(&names[0], OsStr::new("a.exe")),
         "{names:?}"
     );
 }

@@ -66,12 +66,9 @@ fn bin() -> (tempfile::TempDir, PathBuf) {
     (dir, bin)
 }
 
-fn leftovers_in(dir: &Path) -> Vec<String> {
+fn leftovers_in(dir: &Path) -> Vec<OsString> {
     let names = fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name());
-    names
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| leftovers::is_leftover(name))
-        .collect()
+    names.filter(|name| leftovers::is_leftover(name)).collect()
 }
 
 #[test]
@@ -87,7 +84,7 @@ fn a_running_file_is_moved_aside_once_the_new_one_is_written() {
     assert_eq!(fs::read(&dest).unwrap(), b"new");
     let aside = leftovers_in(dir.path());
     assert!(
-        aside.len() == 1 && leftovers::is_leftover_of(&aside[0], "x.exe"),
+        aside.len() == 1 && leftovers::is_leftover_of(&aside[0], OsStr::new("x.exe")),
         "{aside:?}"
     );
     assert_eq!(fs::read(dir.path().join(&aside[0])).unwrap(), old);
@@ -103,7 +100,7 @@ fn a_file_that_does_not_run_is_replaced_in_place() {
     write_atomic(&dest, b"new", Perm::executable(), Replace::OrMoveAside(dir.path())).unwrap();
 
     assert_eq!(fs::read(&dest).unwrap(), b"new");
-    assert_eq!(leftovers_in(dir.path()), Vec::<String>::new());
+    assert_eq!(leftovers_in(dir.path()), Vec::<OsString>::new());
 }
 
 #[test]
@@ -185,7 +182,7 @@ fn a_file_held_open_with_delete_sharing_is_replaced_in_place_and_not_moved_aside
     write_atomic(&dest, b"new", Perm::executable(), Replace::OrMoveAside(dir.path())).unwrap();
 
     assert_eq!(fs::read(&dest).unwrap(), b"new");
-    assert_eq!(leftovers_in(dir.path()), Vec::<String>::new());
+    assert_eq!(leftovers_in(dir.path()), Vec::<OsString>::new());
 }
 
 #[test]
@@ -225,10 +222,8 @@ fn a_file_renamed_over_has_exactly_the_name_it_was_given_whatever_the_length() {
 
 #[test]
 fn names_are_the_same_by_the_case_rule_of_the_platform() {
-    let (lower, upper) = (Path::new("bin/frpc-1.exe"), Path::new("BIN/FRPC-1.EXE"));
     let (name_lower, name_upper) = (OsStr::new("frpc-1.exe"), OsStr::new("FRPC-1.EXE"));
 
-    assert_eq!(same_path(lower, upper), cfg!(windows));
     assert_eq!(same_name(name_lower, name_upper), cfg!(windows));
     assert_eq!(
         strip_prefix(name_upper, "frpc-"),
@@ -238,23 +233,20 @@ fn names_are_the_same_by_the_case_rule_of_the_platform() {
         strip_suffix(name_upper, ".exe"),
         cfg!(windows).then_some(OsStr::new("FRPC-1"))
     );
-    assert!(same_path(lower, lower) && !same_path(lower, Path::new("bin/frpc-2.exe")));
-    // `components()` ignores the separator, how many there are and a trailing one; more components are another path.
-    assert!(same_path(Path::new("bin/frpc.exe"), Path::new("bin//frpc.exe/")));
-    assert!(!same_path(Path::new("bin"), Path::new("bin/frpc.exe")));
+    assert!(same_name(name_lower, name_lower) && !same_name(name_lower, OsStr::new("frpc-2.exe")));
     assert_eq!(strip_prefix(name_lower, "frpc-"), Some(OsStr::new("1.exe")));
     assert_eq!(strip_prefix(OsStr::new("x"), "frpc-"), None);
     assert_eq!(strip_suffix(OsStr::new("x"), "frpc-"), None);
     assert_eq!(
-        split_once(OsStr::new("ab12.a.b.exe"), '.'),
+        split_once(OsStr::new("ab12.a.b.exe"), b'.'),
         Some((OsStr::new("ab12"), OsStr::new("a.b.exe")))
     );
-    assert_eq!(split_once(OsStr::new("ab12"), '.'), None);
+    assert_eq!(split_once(OsStr::new("ab12"), b'.'), None);
 }
 
 #[test]
 fn only_ascii_case_is_folded() {
-    // Only ASCII case is folded, so these are different names everywhere.
+    // Only ASCII case is folded: Windows itself folds these, this rule does not.
     assert!(!same_name(OsStr::new("\u{e9}.exe"), OsStr::new("\u{c9}.exe")));
     assert!(same_name(OsStr::new("\u{e9}.exe"), OsStr::new("\u{e9}.exe")));
 }

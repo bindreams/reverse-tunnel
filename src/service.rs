@@ -58,10 +58,11 @@ pub fn image(paths: &Paths, binary: &[u8]) -> PathBuf {
     }
 }
 
-/// Windows: whether `name` is that of a service image (see `image`) of some build. ASCII case does not count (see `files::same_name`).
+/// Windows: whether `name` is that of a service image (see `image`) of some build. ASCII case does not count (see
+/// `files::same_name`).
 #[cfg(windows)]
-pub fn is_image(name: impl AsRef<std::ffi::OsStr>) -> bool {
-    let Some(rest) = strip_prefix(name.as_ref(), IMAGE_PREFIX) else {
+pub fn is_image(name: &std::ffi::OsStr) -> bool {
+    let Some(rest) = strip_prefix(name, IMAGE_PREFIX) else {
         return false;
     };
     let Some(digest) = strip_suffix(rest, EXE_SUFFIX) else {

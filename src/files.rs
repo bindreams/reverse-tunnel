@@ -290,13 +290,14 @@ pub fn is_access_denied(err: &anyhow::Error) -> bool {
 }
 
 /// Whether `a` and `b` are the same name. On Windows ASCII case is folded and nothing else; on Unix the comparison is
-/// exact. The one rule for whether a listed entry is the expected one.
+/// exact. The one rule for whether a listed entry is the expected one. Windows file systems also treat non-ASCII case
+/// variants as one file, which this rule does not: it is for the names the product writes, which are ASCII.
 pub fn same_name(a: &OsStr, b: &OsStr) -> bool {
     same_bytes(a.as_encoded_bytes(), b.as_encoded_bytes())
 }
 
-/// The bytes of two names, by the rule of `same_name`. Windows names are WTF-8 here, where an ASCII byte is only ever an
-/// ASCII character, so folding bytes folds exactly the ASCII characters.
+/// The bytes of two names, by the rule of `same_name`. Windows names are WTF-8 here, where an ASCII byte is only ever
+/// an ASCII character, so folding bytes folds exactly the ASCII characters.
 fn same_bytes(a: &[u8], b: &[u8]) -> bool {
     if cfg!(windows) {
         a.eq_ignore_ascii_case(b)
@@ -305,51 +306,45 @@ fn same_bytes(a: &[u8], b: &[u8]) -> bool {
     }
 }
 
-/// Whether `a` and `b` are the same path: the same components, each the same name. As `components()` does, this ignores
-/// which separator is used and how many, and a trailing one.
-pub fn same_path(a: &Path, b: &Path) -> bool {
-    let (mut a, mut b) = (a.components(), b.components());
-    loop {
-        match (a.next(), b.next()) {
-            (None, None) => return true,
-            (Some(a), Some(b)) if same_name(a.as_os_str(), b.as_os_str()) => {}
-            _ => return false,
-        }
-    }
-}
-
 /// The last component of `path`: its file name, whatever the bytes of it, or an empty name if it has none.
 pub fn name_of(path: &Path) -> &OsStr {
     path.file_name().unwrap_or_default()
 }
 
-/// The name made of `part`, bytes of a name that the caller cut only next to text it matched with a `&str` or an ASCII
-/// character (so on a UTF-8 boundary).
-fn name_of_part(part: &[u8]) -> &OsStr {
-    // SAFETY: `from_encoded_bytes_unchecked` requires a cut of a name's bytes on a UTF-8 boundary, which is what the
-    // callers (`strip_prefix`, `strip_suffix`, `split_once`) make.
+/// The name made of `part`, bytes of a name.
+///
+/// # Safety
+/// `part` is a slice of a name's `as_encoded_bytes` that starts and ends on a boundary of the name's text: each end is
+/// the end of the name or next to an ASCII character (or a matched ASCII fragment) of it.
+unsafe fn name_of_part(part: &[u8]) -> &OsStr {
+    // SAFETY: the caller guarantees the boundaries, the only requirement of `from_encoded_bytes_unchecked`.
     unsafe { OsStr::from_encoded_bytes_unchecked(part) }
 }
 
-/// `name` without the start `prefix`, if it has it, by the rule of `same_name`.
+/// `name` without the start `prefix`, which is ASCII, if it has it, by the rule of `same_name`.
 pub fn strip_prefix<'a>(name: &'a OsStr, prefix: &str) -> Option<&'a OsStr> {
+    assert!(prefix.is_ascii(), "{prefix:?} is not ASCII");
     let (start, rest) = name.as_encoded_bytes().split_at_checked(prefix.len())?;
-    same_bytes(start, prefix.as_bytes()).then(|| name_of_part(rest))
+    // SAFETY: `rest` starts right after `start`, which matched the ASCII `prefix`; it ends with the name.
+    same_bytes(start, prefix.as_bytes()).then(|| unsafe { name_of_part(rest) })
 }
 
-/// `name` without the end `suffix`, if it has it, by the rule of `same_name`.
+/// `name` without the end `suffix`, which is ASCII, if it has it, by the rule of `same_name`.
 pub fn strip_suffix<'a>(name: &'a OsStr, suffix: &str) -> Option<&'a OsStr> {
+    assert!(suffix.is_ascii(), "{suffix:?} is not ASCII");
     let bytes = name.as_encoded_bytes();
-    let (rest, end) = bytes.split_at_checked(bytes.len().checked_sub(suffix.len())?)?;
-    same_bytes(end, suffix.as_bytes()).then(|| name_of_part(rest))
+    let (rest, end) = bytes.split_at(bytes.len().checked_sub(suffix.len())?);
+    // SAFETY: `rest` starts with the name and ends right before `end`, which matched the ASCII `suffix`.
+    same_bytes(end, suffix.as_bytes()).then(|| unsafe { name_of_part(rest) })
 }
 
-/// `name` split at its first `sep`, an ASCII character, into what comes before and after it.
-pub fn split_once(name: &OsStr, sep: char) -> Option<(&OsStr, &OsStr)> {
-    debug_assert!(sep.is_ascii());
+/// `name` split at its first `sep`, an ASCII byte, into what comes before and after it.
+pub fn split_once(name: &OsStr, sep: u8) -> Option<(&OsStr, &OsStr)> {
+    assert!(sep.is_ascii(), "{sep:#x} is not ASCII");
     let bytes = name.as_encoded_bytes();
-    let at = bytes.iter().position(|&byte| byte == sep as u8)?;
-    Some((name_of_part(&bytes[..at]), name_of_part(&bytes[at + 1..])))
+    let at = bytes.iter().position(|&byte| byte == sep)?;
+    // SAFETY: both parts are cut next to the ASCII byte `sep` that was found at `at`, and the name's ends are its own.
+    Some(unsafe { (name_of_part(&bytes[..at]), name_of_part(&bytes[at + 1..])) })
 }
 
 /// Whether `err`, or the `io::Error` it wraps, is the OS saying that the path is not there.
