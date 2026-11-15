@@ -73,10 +73,14 @@ fn check_and_restart_as(
             Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
         })
     })?;
-    // After a kill, the service manager's restart is not something to report: it may not come (start limits).
-    if outcome == RestartOutcome::Started {
-        writeln_best_effort(out, "The service was not running; it is started.");
-    }
+    // What this command did, not what the manager will do: its restart may not come (start limits).
+    writeln_best_effort(
+        out,
+        match outcome {
+            RestartOutcome::Killed => "The service was killed so that its service manager restarts it.",
+            RestartOutcome::Started => "The service was not running; it is started.",
+        },
+    );
     Ok(())
 }
 
@@ -163,7 +167,8 @@ fn service_identity() -> Result<Option<RunAs>> {
 /// How `restart` had the service run again.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
-    /// It was running: the kill was sent, and its service manager starts it again, which may not have happened yet.
+    /// It was running: the kill was sent, for its service manager to start it again (not yet, or not at all if a start
+    /// limit stops it).
     Killed,
     /// It was not running: the kill found nothing, and it was started.
     Started,
@@ -186,8 +191,8 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Said before the restart, which is a start when the service is not running: true either way, and warns a session
-/// over the tunnel, which the kill ends.
+/// Said before the restart (a start when the service is not running); warns a session over the tunnel, which the kill
+/// ends.
 pub const RESTART_NOTICE: &str =
     "Applying the changes; if you are connected through this tunnel, the connection drops now...";
 
@@ -212,7 +217,7 @@ pub fn restart_pending(
     })
 }
 
-/// Has the service run again. It is killed, and the manager starts it again; it is never stopped first, because run
+/// Has the service run again. It is killed for the manager to start it again; it is never stopped first, because run
 /// over the tunnel the stop cuts this session and the start never comes. A service that is not running is started.
 pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
     match manager.kill(id) {

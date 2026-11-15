@@ -291,8 +291,28 @@ fn restart_with_a_passing_check_kills_the_service() {
 
     assert_eq!(manager.calls(), [("kill", id.to_string())]);
     assert!(!pending_file(&paths).exists());
-    assert_eq!(String::from_utf8(said.text).unwrap(), format!("{RESTART_NOTICE}\n"));
+    assert_eq!(
+        String::from_utf8(said.text).unwrap(),
+        format!("{RESTART_NOTICE}\nThe service was killed so that its service manager restarts it.\n")
+    );
     assert_eq!(said.at_first_write, Some(0), "said before the kill");
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_of_a_service_that_is_not_running_starts_it_and_says_so() {
+    let (_dir, paths, manager) = host_checked_by_stub("pass");
+    let id = service::id();
+    manager.seed_state(id.as_str(), State::Stopped);
+    let mut said = Vec::new();
+
+    check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user(), &mut said).unwrap();
+
+    assert_eq!(manager.status(&id).unwrap().state, State::Running);
+    assert_eq!(
+        String::from_utf8(said).unwrap(),
+        format!("{RESTART_NOTICE}\nThe service was not running; it is started.\n")
+    );
 }
 
 /// The notice is out while the marker is still there, so that waiting on a stalled stdout cannot lose the marker; the

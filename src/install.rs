@@ -146,7 +146,8 @@ pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut D
 }
 
 /// What `install` ends with: that the running binary's version is installed. Best-effort, like the progress lines: the
-/// files are in place by now, so a closed stdout does not fail the install.
+/// files are in place by now, and the restart may have ended a session over the tunnel, so a closed stdout does not
+/// fail the install.
 fn closing<I: BufRead, O: Write, P: Write>(dialog: &mut Dialog<I, O, P>) {
     let line = format!("Reverse-tunnel v{} has been installed!", env!("CARGO_PKG_VERSION"));
     output::writeln_best_effort(dialog.out(), &line);
