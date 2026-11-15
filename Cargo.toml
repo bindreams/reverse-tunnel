@@ -1,6 +1,6 @@
 [package]
 name = "reverse-tunnel"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Host tool for reverse-tunnel: supervises frpc to publish this machine's services through the bridge"
 license = "AGPL-3.0-only"
