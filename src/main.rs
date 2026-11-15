@@ -137,7 +137,7 @@ fn run() -> Result<ExitCode> {
         }
         Command::Restart => {
             require_root()?;
-            ops::check_and_restart(&*service::manager(&paths)?, &paths)?;
+            ops::check_and_restart(&*service::manager(&paths)?, &paths, &mut io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {

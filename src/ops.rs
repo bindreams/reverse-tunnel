@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
 use crate::install::refuse_while_uninstalling;
 use crate::logs;
-use crate::output::println_best_effort;
+use crate::output::{println_best_effort, writeln_best_effort};
 use crate::paths::Paths;
 use crate::service;
 
@@ -39,7 +39,7 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 
 /// Has the service read its configuration again, after the installed binary has checked it as the service account: a
 /// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
-pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
+pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     refuse_while_uninstalling(paths)?;
     // Not decided from the account database, which can answer for an account that has just been removed.
     let exe = service::installed_image(manager, paths)?;
@@ -51,26 +51,32 @@ pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<
     );
     #[cfg(not(windows))]
     ensure!(exe.try_exists()?, "the service is not installed");
-    check_and_restart_as(manager, paths, &exe, service_identity()?)
+    check_and_restart_as(manager, paths, &exe, service_identity()?, out)
 }
 
 /// `check_and_restart`, with the check run as `run_as` (`None`: as the caller), of the installed binary `exe`.
-fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, exe: &Path, run_as: Option<RunAs>) -> Result<()> {
+fn check_and_restart_as(
+    manager: &dyn ServiceManager,
+    paths: &Paths,
+    exe: &Path,
+    run_as: Option<RunAs>,
+    out: &mut impl Write,
+) -> Result<()> {
     check(
         exe,
         run_as,
         &format!("the installed binary `{}`'s `run --check`", exe.display()),
     )?;
-    let outcome = restart_pending(manager, &service::id(), paths, || {}).map_err(|failed| {
+    writeln_best_effort(out, RESTART_NOTICE);
+    let outcome = restart_pending(manager, &service::id(), paths).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
             Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
         })
     })?;
-    println_best_effort(match outcome {
-        RestartOutcome::Killed => "The service is restarting.",
-        RestartOutcome::Started => "The service was not running; it is started.",
-    });
+    if outcome == RestartOutcome::Started {
+        writeln_best_effort(out, "The service was not running; it is started.");
+    }
     Ok(())
 }
 
@@ -179,19 +185,18 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// What a caller of `restart_pending` prints before it: true whether the service was running or not, and for a
+/// session over the tunnel, which the kill ends.
+pub const RESTART_NOTICE: &str =
+    "Starting the service; if you are connected through this tunnel, the connection drops now...";
+
 /// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
-/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up. `before_kill` runs
-/// once nothing else stands between it and the kill.
-pub fn restart_pending(
-    manager: &dyn ServiceManager,
-    id: &Id,
-    paths: &Paths,
-    before_kill: impl FnOnce(),
-) -> Result<RestartOutcome, NotRestarted> {
+/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up. The caller
+/// prints `RESTART_NOTICE` before calling.
+pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> Result<RestartOutcome, NotRestarted> {
     if let Err(error) = remove_entry(&pending_file(paths)) {
         return Err(NotRestarted { error, marker: Ok(()) });
     }
-    before_kill();
     restart(manager, id).map_err(|error| NotRestarted {
         error,
         marker: mark_pending(paths),

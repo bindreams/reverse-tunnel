@@ -42,6 +42,7 @@ Setting up a system-wide reverse tunnel service.
 Hostname [minicooper]:
 Join code (run `uv run ctl join-code` on the bridge; an empty line gives up):
 Downloading frpc v0.71.1...
+Starting the service; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
 service: running (pid 1234), enabled at boot
 host: minicooper
@@ -51,8 +52,9 @@ certificate: SHA-256 AB:CD:...
 [...]
 ```
 
-Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts. A
-first install only starts the service, so it has no restart to announce.
+Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts.
+So is the start of the service, on a first install, an upgrade and `reverse-tunnel restart` alike: if you are connected
+through this tunnel, the connection drops at that line.
 
 Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The join
 code may be pasted wrapped over several lines. On a host that already has a `config.yaml`, `install` asks no host name
@@ -179,7 +181,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 | `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. When rotations may have removed lines before it could show them (its output stalled while the log rotated more than once), it says so on stderr. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
-| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then restarts the service so it reads it again. Works over the tunnel. |
+| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops and restarts the service so it reads it again. Works over the tunnel. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
 
@@ -219,7 +221,7 @@ Each log is rotated at 10 MB to `<name>.1`, replacing the previous one; `logs` s
 ### Upgrade
 
 `sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: `install` says,
-right before it restarts a running service, that an SSH session through this tunnel will drop. Over the tunnel your
+before it restarts the service, that a connection through this tunnel will drop. Over the tunnel your
 session drops at the restart, and that line may or may not reach you; the host reconnects on the new version, and
 `reverse-tunnel status` shows the result once you are back. Before it replaces anything it checks the new version
 against this host's settings, and a failure leaves the old version running. It prints a line before the steps that take
@@ -230,7 +232,7 @@ whole of what `upgrade` ends with:
 $ sudo reverse-tunnel upgrade
 Checking for a new version...
 Downloading v0.1.1...
-Restarting the service; an SSH session through this tunnel will drop...
+Starting the service; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
 service: running (pid 1234), enabled at boot
 host: myhost

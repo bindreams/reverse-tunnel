@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::Kind;
-use crate::test_support::{CODE, host_dirs, wrapped};
+use crate::test_support::{CODE, NotesCalls, host_dirs, wrapped};
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
@@ -504,8 +504,6 @@ fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
     assert!(stale.join("inside").exists());
 }
 
-const RESTARTING: &str = "Restarting the service; an SSH session through this tunnel will drop...\n";
-
 #[test]
 fn unchanged_install_leaves_a_running_service_alone() {
     let machine = Machine::new();
@@ -529,51 +527,57 @@ fn unchanged_install_leaves_a_running_service_alone() {
     assert_eq!(said, b"", "nothing restarts, so nothing is announced");
 }
 
+/// The notice comes first on a first install too: the service is not running, and the kill finds nothing.
 #[test]
 fn kill_not_running_starts() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
-
-    let mut said = Vec::new();
+    let mut said = NotesCalls::new(&manager);
 
     pick_up(
         &manager,
         &spec.id,
         &machine.paths,
         true,
-        &mut said_by_install_with(&mut said),
+        &mut Dialog::new(Cursor::new(""), &mut said, Vec::new(), false),
     )
     .unwrap();
 
     assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
-    // A first install only starts the service: no session is cut, so nothing is announced.
-    assert_eq!(said, b"");
+    assert_eq!(
+        String::from_utf8(said.text).unwrap(),
+        format!("{}\n", ops::RESTART_NOTICE)
+    );
+    assert_eq!(said.calls_at_first_write, Some(0), "said before the kill and the start");
     let id = spec.id.to_string();
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
 }
 
 #[test]
-fn restarting_a_running_service_is_announced() {
+fn restarting_a_running_service_is_announced_before_the_kill() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
-
-    let mut said = Vec::new();
+    let mut said = NotesCalls::new(&manager);
 
     pick_up(
         &manager,
         &spec.id,
         &machine.paths,
         true,
-        &mut said_by_install_with(&mut said),
+        &mut Dialog::new(Cursor::new(""), &mut said, Vec::new(), false),
     )
     .unwrap();
 
-    assert_eq!(String::from_utf8(said).unwrap(), RESTARTING);
+    assert_eq!(
+        String::from_utf8(said.text).unwrap(),
+        format!("{}\n", ops::RESTART_NOTICE)
+    );
+    assert_eq!(said.calls_at_first_write, Some(0), "said before the kill");
     assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
 }
 
@@ -581,7 +585,18 @@ fn restarting_a_running_service_is_announced() {
 fn restart_failure_is_retried_by_install() {
     let machine = Machine::new();
     // Never installed: the kill fails with something other than NotRunning.
-    let err = pick_up(&Fake::default(), &service::id(), &machine.paths, true, &mut no_dialog()).unwrap_err();
+    let mut said = Vec::new();
+    let err = pick_up(
+        &Fake::default(),
+        &service::id(),
+        &machine.paths,
+        true,
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap_err();
+
+    // The notice went out before the restart that failed.
+    assert_eq!(String::from_utf8(said).unwrap(), format!("{}\n", ops::RESTART_NOTICE));
 
     assert!(
         format!("{err:#}").contains("run `reverse-tunnel install` again"),

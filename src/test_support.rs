@@ -1,7 +1,11 @@
 //! Fixtures shared by unit tests of several modules.
 
 use std::fs;
+#[cfg(unix)]
+use std::io::{self, Write};
 
+#[cfg(unix)]
+use goetia::manager::fake::Fake;
 use tempfile::TempDir;
 
 use crate::paths::Paths;
@@ -24,4 +28,38 @@ pub fn host_dirs() -> (TempDir, Paths) {
     let paths = Paths::testing(dir.path());
     fs::create_dir(&paths.config_dir).unwrap();
     (dir, paths)
+}
+
+/// A writer that notes how many calls the fake manager had received when the first byte was written, to show that
+/// something was printed before a call.
+#[cfg(unix)]
+pub struct NotesCalls<'a> {
+    manager: &'a Fake,
+    pub text: Vec<u8>,
+    pub calls_at_first_write: Option<usize>,
+}
+
+#[cfg(unix)]
+impl<'a> NotesCalls<'a> {
+    pub fn new(manager: &'a Fake) -> Self {
+        NotesCalls {
+            manager,
+            text: Vec::new(),
+            calls_at_first_write: None,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Write for NotesCalls<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.calls_at_first_write
+            .get_or_insert_with(|| self.manager.calls().len());
+        self.text.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }

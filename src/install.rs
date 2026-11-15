@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use goetia::decide::Outcome;
-use goetia::manager::{Budget, ServiceManager, State};
+use goetia::manager::{Budget, ServiceManager};
 use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
@@ -1186,9 +1186,8 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 }
 
 /// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is
-/// started, which leaves a running service alone. A restart of a running service is announced right before the kill,
-/// since over the tunnel it ends the session; a failure to print the line does not stop it. A service that is not
-/// running is only started, which ends nothing.
+/// started, which leaves a running service alone. A change is announced before the restart, whatever the service was
+/// doing, since over the tunnel it ends the session; a failure to print the line does not stop it.
 fn pick_up<I: BufRead, O: Write, P: Write>(
     manager: &dyn ServiceManager,
     id: &Id,
@@ -1200,12 +1199,8 @@ fn pick_up<I: BufRead, O: Write, P: Write>(
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }
-    let announce = || {
-        if manager.status(id).is_ok_and(|status| status.state == State::Running) {
-            let _ = dialog.say("Restarting the service; an SSH session through this tunnel will drop...");
-        }
-    };
-    let Err(failed) = ops::restart_pending(manager, id, paths, announce) else {
+    let _ = dialog.say(ops::RESTART_NOTICE);
+    let Err(failed) = ops::restart_pending(manager, id, paths) else {
         return Ok(());
     };
     let err = failed.error;
