@@ -21,8 +21,8 @@ All commands run in this folder.
    `uv run ctl join-code` prints it again. Every other `ctl` command also starts whatever of the bridge is not running.
    No `ctl` command builds for, removes or recreates an existing `reverse-tunnel-frps` container, which would drop
    every tunnel; it starts a stopped one as it is, and `init` says so when it finds one. To apply a change to its
-   image, `compose.yaml` or `.env` on purpose, run `docker compose up -d --build reverse-tunnel-frps`, which drops
-   every tunnel if it is running (`docker compose restart` applies none of these).
+   image, `compose.yaml`, `.env` or `etc/` on purpose, run
+   `docker compose up -d --build --force-recreate reverse-tunnel-frps`, which drops every tunnel.
 
 Joining a host and publishing a service: see the main README. The commands are `uv run ctl add`, `revoke`, `alias`,
 `unalias`, `list`; `uv run ctl <command> --help` says what each takes.
@@ -39,6 +39,19 @@ After `uv run ctl add`, the host is registered; the next step is to reach it fro
   `%ProgramData%\reverse-tunnel\logs` on Windows) shows `login to server success`. "host not registered" means
   `uv run ctl add` has not been run for it.
 
+## Upgrade
+
+In this folder, a git checkout of the bridge:
+
+1. `git fetch --tags && git checkout <new tag>`. Hosts upgrade on their own schedule, with `reverse-tunnel upgrade`.
+2. `uv run ctl init` checks the network and DNS, builds and updates the plugin, and prints the join code again. It
+   keeps an existing `reverse-tunnel-frps`. If it fails, fix what it names and run it again before going on.
+3. `docker compose up -d --build --force-recreate reverse-tunnel-frps` builds frps and starts it again from the new
+   image, `compose.yaml`, `.env` and `etc/`. It drops every tunnel once.
+4. `uv run ctl list` shows each host `online since` its reconnection, and `offline` until then. Right after step 3
+   frps may not answer yet, and presence is `unknown`: run it again. If it stays `unknown`, `docker compose ps -a` shows
+   whether frps keeps restarting, and `docker compose logs reverse-tunnel-frps` says why.
+
 ## Teardown
 
 `docker compose down` removes the containers and the private network; `.env`, `tls/` and `state/` stay, so
@@ -47,8 +60,8 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 
 ## Footguns
 
-- Restarting or recreating `reverse-tunnel-frps` drops every tunnel once; hosts reconnect on their own. `etc/` is
-  mounted but frps reads it only at start, so after a `git pull` that changed it, run
+- Restarting or recreating `reverse-tunnel-frps` drops every tunnel once; hosts reconnect on their own. frps reads
+  `etc/` only at start: after a change to it outside an [upgrade](#upgrade), run
   `docker compose restart reverse-tunnel-frps`.
 - Every host trusts the certificate in `tls/trust.pem`. Deleting `tls/` or replacing the certificate outside the
   procedure below locks every host out; `ctl` refuses to regenerate it.
