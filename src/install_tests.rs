@@ -555,9 +555,9 @@ fn kill_not_running_starts() {
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
 }
 
-/// The start after the kill has the service running again when `pick_up` returns, so the status that follows shows it.
+/// A running service is killed, for its manager to start again, after the notice.
 #[test]
-fn restarting_a_running_service_is_announced_before_the_kill_and_ends_with_it_running() {
+fn restarting_a_running_service_is_announced_before_the_kill() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
@@ -579,9 +579,7 @@ fn restarting_a_running_service_is_announced_before_the_kill_and_ends_with_it_ru
         format!("{}\n", ops::RESTART_NOTICE)
     );
     assert_eq!(said.at_first_write, Some(0), "said before the kill");
-    let id = spec.id.to_string();
-    assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
-    assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
+    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
 }
 
 #[test]
