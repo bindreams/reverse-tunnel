@@ -67,16 +67,19 @@ fn check_and_restart_as(
         run_as,
         &format!("the installed binary `{}`'s `run --check`", exe.display()),
     )?;
-    writeln_best_effort(out, RESTART_NOTICE);
-    let outcome = restart_pending(manager, &service::id(), paths).map_err(|failed| {
+    let outcome = restart_pending(manager, &service::id(), paths, out).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
             Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
         })
     })?;
-    if outcome == RestartOutcome::Started {
-        writeln_best_effort(out, "The service was not running; it is started.");
-    }
+    writeln_best_effort(
+        out,
+        match outcome {
+            RestartOutcome::Killed => "The service was restarted.",
+            RestartOutcome::Started => "The service was not running; it is started.",
+        },
+    );
     Ok(())
 }
 
@@ -185,18 +188,26 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// What a caller of `restart_pending` prints before it: true whether the service was running or not, and for a
-/// session over the tunnel, which the kill ends.
+/// What `restart_pending` says before it restarts: true whether the service was running or not, and for a session over
+/// the tunnel, which the kill ends.
 pub const RESTART_NOTICE: &str =
     "Starting the service; if you are connected through this tunnel, the connection drops now...";
 
 /// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
-/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up. The caller
-/// prints `RESTART_NOTICE` before calling.
-pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> Result<RestartOutcome, NotRestarted> {
+/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up. Once the marker is
+/// removed it writes `RESTART_NOTICE` to `out` and flushes, then kills: a failed removal prints nothing. A failure to
+/// print does not stop the restart.
+pub fn restart_pending(
+    manager: &dyn ServiceManager,
+    id: &Id,
+    paths: &Paths,
+    out: &mut impl Write,
+) -> Result<RestartOutcome, NotRestarted> {
     if let Err(error) = remove_entry(&pending_file(paths)) {
         return Err(NotRestarted { error, marker: Ok(()) });
     }
+    writeln_best_effort(out, RESTART_NOTICE);
+    let _ = out.flush();
     restart(manager, id).map_err(|error| NotRestarted {
         error,
         marker: mark_pending(paths),

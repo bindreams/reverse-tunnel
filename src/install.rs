@@ -1186,8 +1186,8 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 }
 
 /// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is
-/// started, which leaves a running service alone. A change is announced before the restart, whatever the service was
-/// doing, since over the tunnel it ends the session; a failure to print the line does not stop it.
+/// started, which leaves a running service alone. `restart_pending` announces the restart before it, whatever the
+/// service was doing, since over the tunnel it ends the session.
 fn pick_up<I: BufRead, O: Write, P: Write>(
     manager: &dyn ServiceManager,
     id: &Id,
@@ -1199,8 +1199,7 @@ fn pick_up<I: BufRead, O: Write, P: Write>(
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }
-    let _ = dialog.say(ops::RESTART_NOTICE);
-    let Err(failed) = ops::restart_pending(manager, id, paths) else {
+    let Err(failed) = ops::restart_pending(manager, id, paths, &mut dialog.out) else {
         return Ok(());
     };
     let err = failed.error;
