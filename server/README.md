@@ -47,10 +47,10 @@ In this folder, a git checkout of the bridge:
 2. `uv run ctl init` checks the network and DNS, builds and updates the plugin, and prints the join code again. It
    keeps an existing `reverse-tunnel-frps`. If it fails, fix what it names and run it again before going on.
 3. `docker compose up -d --build --force-recreate reverse-tunnel-frps` builds frps and starts it again from the new
-   image, `compose.yaml`, `.env` and `etc/`. It drops every tunnel once. If frps does not start,
-   `docker compose logs reverse-tunnel-frps` says why; to go back, check out the previous tag and repeat steps 2 and 3.
-4. `uv run ctl list` shows each host `online since` its reconnection. Right after step 3 frps may not answer yet, and
-   presence is `unknown`: run it again.
+   image, `compose.yaml`, `.env` and `etc/`. It drops every tunnel once.
+4. `uv run ctl list` shows each host `online since` its reconnection, and `offline` until then. Right after step 3
+   frps may not answer yet, and presence is `unknown`: run it again. If it stays `unknown`, `docker compose ps` shows
+   whether frps keeps restarting, and `docker compose logs reverse-tunnel-frps` says why.
 
 ## Teardown
 
