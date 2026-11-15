@@ -259,7 +259,12 @@ pub fn assert_installed_as_specified(machine: &Machine) {
     };
     let tokens = [machine.paths.bridge_token(), machine.paths.host_token()];
 
-    for public in [paths.config_dir.clone(), paths.config_file(), paths.bridge_pem()] {
+    for public in [
+        paths.config_dir.clone(),
+        paths.config_file(),
+        paths.bridge_pem(),
+        paths.host_token_hash(),
+    ] {
         is(&public, SYSTEM, FULL);
         is(&public, ADMINISTRATORS, FULL);
         is(&public, EVERYONE, READ_EXECUTE);

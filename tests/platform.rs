@@ -459,6 +459,7 @@ fn assert_installed_as_specified(machine: &Machine) {
         (paths.config_dir.clone(), 0o755),
         (paths.config_file(), 0o644),
         (paths.bridge_pem(), 0o644),
+        (paths.host_token_hash(), 0o644),
         (paths.log_dir.clone(), 0o755),
         (paths.secrets_dir.clone(), secrets_dir_mode),
         (machine.paths.bridge_token(), 0o640),
@@ -487,7 +488,7 @@ fn assert_installed_as_specified(machine: &Machine) {
         link.display()
     );
 
-    for readable in [paths.config_file(), paths.bridge_pem()] {
+    for readable in [paths.config_file(), paths.bridge_pem(), paths.host_token_hash()] {
         assert!(
             machine.probe("cat", &readable),
             "{} is not readable by everyone",
@@ -1584,6 +1585,7 @@ fn status_needs_no_elevation() {
     );
     assert!(out.status.success(), "status as an unelevated user: {status}{stderr}");
     assert!(status.contains("service: running"), "{status}");
+    assert!(status.contains("\nhash: sha256:"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
     assert!(status.contains("frpc log"), "{status}");
@@ -1681,6 +1683,7 @@ fn status_needs_no_elevation() {
 
     let status = as_probe("status");
     assert!(status.contains("service: running"), "{status}");
+    assert!(status.contains("\nhash: sha256:"), "{status}");
     assert!(status.contains("bridge: tunnel.example.test"), "{status}");
     assert!(status.contains("certificate: SHA-256 "), "{status}");
 }

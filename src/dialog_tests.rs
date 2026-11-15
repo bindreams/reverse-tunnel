@@ -69,8 +69,7 @@ fn the_questions_go_to_stderr_and_the_results_to_stdout() {
     assert!(asked.ends_with(PROMPT), "{asked}");
 
     dialog.show_host("myhost").unwrap();
-    dialog.ready("the line\n").unwrap();
-    assert_eq!(said(&dialog), "Hostname: myhost\nthe line\n");
+    assert_eq!(said(&dialog), "Hostname: myhost\n");
 }
 
 #[test]

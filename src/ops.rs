@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::files::{Perm, open_file, remove_entry};
 use crate::install::refuse_while_uninstalling;
 use crate::logs;
-use crate::output::println_best_effort;
+use crate::output::{println_best_effort, writeln_best_effort};
 use crate::paths::Paths;
 use crate::service;
 
@@ -39,7 +39,7 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 
 /// Has the service read its configuration again, after the installed binary has checked it as the service account: a
 /// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
-pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<()> {
+pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     refuse_while_uninstalling(paths)?;
     // Not decided from the account database, which can answer for an account that has just been removed.
     let exe = service::installed_image(manager, paths)?;
@@ -51,26 +51,36 @@ pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths) -> Result<
     );
     #[cfg(not(windows))]
     ensure!(exe.try_exists()?, "the service is not installed");
-    check_and_restart_as(manager, paths, &exe, service_identity()?)
+    check_and_restart_as(manager, paths, &exe, service_identity()?, out)
 }
 
 /// `check_and_restart`, with the check run as `run_as` (`None`: as the caller), of the installed binary `exe`.
-fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, exe: &Path, run_as: Option<RunAs>) -> Result<()> {
+fn check_and_restart_as(
+    manager: &dyn ServiceManager,
+    paths: &Paths,
+    exe: &Path,
+    run_as: Option<RunAs>,
+    out: &mut impl Write,
+) -> Result<()> {
     check(
         exe,
         run_as,
         &format!("the installed binary `{}`'s `run --check`", exe.display()),
     )?;
-    let outcome = restart_pending(manager, &service::id(), paths).map_err(|failed| {
+    let outcome = restart_pending(manager, &service::id(), paths, out).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
             Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
         })
     })?;
-    println_best_effort(match outcome {
-        RestartOutcome::Killed => "The service is restarting.",
-        RestartOutcome::Started => "The service was not running; it is started.",
-    });
+    // What this command did, not what the manager will do: its restart may not come (start limits).
+    writeln_best_effort(
+        out,
+        match outcome {
+            RestartOutcome::Killed => "The service was killed so that its service manager restarts it.",
+            RestartOutcome::Started => "The service was not running; it is started.",
+        },
+    );
     Ok(())
 }
 
@@ -157,6 +167,8 @@ fn service_identity() -> Result<Option<RunAs>> {
 /// How `restart` had the service run again.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
+    /// It was running: the kill was sent, for its service manager to start it again (not yet, or not at all if a start
+    /// limit stops it).
     Killed,
     /// It was not running: the kill found nothing, and it was started.
     Started,
@@ -179,9 +191,23 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
-/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up.
-pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> Result<RestartOutcome, NotRestarted> {
+/// Said before the restart (a start when the service is not running); warns a session over the tunnel, which the kill
+/// ends.
+pub const RESTART_NOTICE: &str =
+    "Applying the changes; if you are connected through this tunnel, the connection drops now...";
+
+/// `restart` for a service that must run what is in place now. Writes `RESTART_NOTICE` to `out` and flushes it, then
+/// removes the restart marker and kills with nothing between: the marker survives whatever the write waits on, and
+/// nothing that runs after the kill is sure to run. The marker is put back if the service was not picked up. A print
+/// failure does not stop the restart; a failed removal does, after the notice.
+pub fn restart_pending(
+    manager: &dyn ServiceManager,
+    id: &Id,
+    paths: &Paths,
+    out: &mut impl Write,
+) -> Result<RestartOutcome, NotRestarted> {
+    writeln_best_effort(out, RESTART_NOTICE);
+    let _ = out.flush();
     if let Err(error) = remove_entry(&pending_file(paths)) {
         return Err(NotRestarted { error, marker: Ok(()) });
     }
@@ -191,7 +217,7 @@ pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> 
     })
 }
 
-/// Has the service run again. It is killed, and the manager starts it again; it is never stopped first, because run
+/// Has the service run again. It is killed for the manager to start it again; it is never stopped first, because run
 /// over the tunnel the stop cuts this session and the start never comes. A service that is not running is started.
 pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
     match manager.kill(id) {
@@ -204,7 +230,7 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
     }
 }
 
-/// Never prints a token: the log it ends with holds none.
+/// Never prints a token, only the hash of the host's (see `recorded_hash`): the log it ends with holds none.
 pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     let state = manager.status(&service::id())?;
     let word = match state.state {
@@ -228,13 +254,30 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     )?;
 
     let config = Config::load(&paths.config_file())?;
-    writeln!(out, "host: {}\nbridge: {}", config.host, config.bridge)?;
+    let hash = match recorded_hash(paths) {
+        Ok(Some(hash)) => hash,
+        Ok(None) => "not recorded yet; run `reverse-tunnel install` (elevated) to record it".to_string(),
+        Err(err) => format!("{err:#}"),
+    };
+    writeln!(out, "host: {}\nhash: {hash}", config.host)?;
+    writeln!(out, "bridge: {}", config.bridge)?;
     let pem_path = paths.bridge_pem();
     let pem = fs::read_to_string(&pem_path).with_context(|| format!("reading {}", pem_path.display()))?;
     for fingerprint in fingerprints(&pem).with_context(|| format!("in {}", pem_path.display()))? {
         writeln!(out, "certificate: SHA-256 {fingerprint}")?;
     }
     write_log_tail(&paths.frpc_log(), state.state, out)
+}
+
+/// The host token's hash that `install` recorded, which `ctl add` takes with the host's name, or `None` if absent (an
+/// older install; `status` cannot read the token). A read error is returned and shown on the `hash:` line.
+fn recorded_hash(paths: &Paths) -> Result<Option<String>> {
+    let file = paths.host_token_hash();
+    match fs::read_to_string(&file) {
+        Ok(hash) => Ok(Some(hash.trim().to_string())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", file.display())),
+    }
 }
 
 /// The last `logs::TAIL` lines of frpc's log under a header, as they are; a service that is not running says they are

@@ -6,6 +6,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::service;
+use crate::test_support::NotesAtFirstWrite;
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 /// SHA-256 of `CERT`'s DER.
@@ -48,6 +49,72 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(text.contains("stopped"), "{text}");
     assert!(!text.contains("secret"), "{text}");
     assert!(text.ends_with("frpc log: no log yet\n"), "{text}");
+}
+
+const TOKEN_HASH: &str = "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55";
+
+/// The two arguments of `ctl add` are the `host` and `hash` lines, in that order, so that they read as one.
+#[test]
+fn status_shows_the_recorded_hash_right_after_the_host() {
+    let (_dir, paths) = host();
+    fs::write(paths.host_token_hash(), format!("{TOKEN_HASH}\n")).unwrap();
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
+
+    let text = status_text(&manager, &paths);
+
+    assert!(
+        text.contains(&format!(
+            "\nhost: testhost\nhash: {TOKEN_HASH}\nbridge: tunnel.example.test\n"
+        )),
+        "{text}"
+    );
+}
+
+/// An install from before the hash was recorded: `status` has no admin rights to compute it, and says what records it.
+#[test]
+fn status_says_when_the_hash_is_not_recorded_yet() {
+    let (_dir, paths) = host();
+    fs::write(paths.host_token(), "host-secret\n").unwrap();
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
+
+    let text = status_text(&manager, &paths);
+
+    assert!(
+        text.contains(
+            "\nhost: testhost\nhash: not recorded yet; run `reverse-tunnel install` (elevated) to record it\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("sha256:"),
+        "status must not compute the hash from the token: {text}"
+    );
+}
+
+/// A hash file that is there but cannot be read (here, a directory) is said so on the `hash:` line, as the log's is, and
+/// the rest of `status` is still shown.
+#[test]
+fn status_says_when_the_hash_file_cannot_be_read() {
+    let (_dir, paths) = host();
+    fs::create_dir(paths.host_token_hash()).unwrap();
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
+
+    let text = status_text(&manager, &paths);
+
+    let (_, rest) = text.split_once("\nhost: testhost\nhash: ").unwrap();
+    let (said, rest) = rest.split_once('\n').unwrap();
+    assert!(said.contains("host-token.hash"), "{text}");
+    assert!(rest.starts_with("bridge: tunnel.example.test\n"), "{text}");
+    assert!(text.contains(FINGERPRINT), "{text}");
 }
 
 /// The host's `status` with the service in `state`, after `make_log` has made what is at frpc's log's path.
@@ -190,7 +257,14 @@ fn as_current_user() -> Option<crate::account::Account> {
 fn restart_with_a_failing_check_leaves_the_service_alone() {
     let (_dir, paths, manager) = host_checked_by_stub("fail");
 
-    let err = check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user()).unwrap_err();
+    let err = check_and_restart_as(
+        &manager,
+        &paths,
+        &service::exe(&paths),
+        as_current_user(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
 
     let text = format!("{err:#}");
     assert!(
@@ -211,10 +285,94 @@ fn restart_with_a_passing_check_kills_the_service() {
     let (_dir, paths, manager) = host_checked_by_stub("pass");
     let id = service::id();
 
-    check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user()).unwrap();
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
+
+    check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user(), &mut said).unwrap();
 
     assert_eq!(manager.calls(), [("kill", id.to_string())]);
     assert!(!pending_file(&paths).exists());
+    assert_eq!(
+        String::from_utf8(said.text).unwrap(),
+        format!("{RESTART_NOTICE}\nThe service was killed so that its service manager restarts it.\n")
+    );
+    assert_eq!(said.at_first_write, Some(0), "said before the kill");
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_of_a_service_that_is_not_running_starts_it_and_says_so() {
+    let (_dir, paths, manager) = host_checked_by_stub("pass");
+    let id = service::id();
+    manager.seed_state(id.as_str(), State::Stopped);
+    let mut said = Vec::new();
+
+    check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user(), &mut said).unwrap();
+
+    assert_eq!(manager.status(&id).unwrap().state, State::Running);
+    assert_eq!(
+        String::from_utf8(said).unwrap(),
+        format!("{RESTART_NOTICE}\nThe service was not running; it is started.\n")
+    );
+}
+
+/// The notice is out while the marker is still there, so that waiting on a stalled stdout cannot lose the marker; the
+/// marker is gone before the kill, so that a session cut by the kill has both.
+#[test]
+fn restart_pending_says_the_notice_then_removes_the_marker_then_restarts() {
+    let (_dir, paths) = host();
+    mark_pending(&paths).unwrap();
+    let manager = Fake::default();
+    let spec = service::spec(&service::exe(&paths)).unwrap();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+    let mut said = NotesAtFirstWrite::new(|| (pending_file(&paths).exists(), manager.calls().len()));
+
+    let outcome = restart_pending(&manager, &spec.id, &paths, &mut said).ok().unwrap();
+
+    assert_eq!(outcome, RestartOutcome::Killed);
+    assert!(!pending_file(&paths).exists());
+    assert_eq!(String::from_utf8(said.text).unwrap(), format!("{RESTART_NOTICE}\n"));
+    assert_eq!(
+        said.at_first_write,
+        Some((true, 0)),
+        "said with the marker there, before the kill"
+    );
+    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
+}
+
+/// `paths` whose restart marker cannot be removed: removing it fails with something but NotFound, which is success.
+fn with_an_unremovable_marker(paths: Paths) -> Paths {
+    #[cfg(unix)]
+    {
+        // The config dir is a file.
+        fs::remove_dir_all(&paths.config_dir).unwrap();
+        fs::write(&paths.config_dir, "").unwrap();
+        paths
+    }
+    #[cfg(windows)]
+    {
+        // A name Windows refuses (ERROR_INVALID_NAME).
+        let mut paths = paths;
+        paths.config_dir = paths.config_dir.with_file_name("no?such");
+        paths
+    }
+}
+
+/// A marker that cannot be removed ends the restart after the notice, which came first: with an error, and no kill.
+#[test]
+fn restart_pending_fails_after_the_notice_when_the_marker_cannot_be_removed() {
+    let (_dir, paths) = host();
+    let paths = with_an_unremovable_marker(paths);
+    let manager = Fake::default();
+    let spec = service::spec(&service::exe(&paths)).unwrap();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
+
+    assert!(restart_pending(&manager, &spec.id, &paths, &mut said).is_err());
+
+    assert_eq!(String::from_utf8(said.text).unwrap(), format!("{RESTART_NOTICE}\n"));
+    assert_eq!(manager.calls(), []);
 }
 
 #[cfg(unix)]
@@ -222,7 +380,14 @@ fn restart_with_a_passing_check_kills_the_service() {
 fn restart_that_fails_puts_the_marker_back() {
     let (_dir, paths, _) = host_checked_by_stub("pass");
     // Never installed: the kill fails with something other than NotRunning.
-    let err = check_and_restart_as(&Fake::default(), &paths, &service::exe(&paths), as_current_user()).unwrap_err();
+    let err = check_and_restart_as(
+        &Fake::default(),
+        &paths,
+        &service::exe(&paths),
+        as_current_user(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
 
     let text = format!("{err:#}");
     assert!(text.contains("the service was not restarted"), "{text}");
@@ -236,7 +401,14 @@ fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
     let (_dir, paths, _) = host_checked_by_stub("pass");
     // The marker cannot be written without its directory.
     fs::remove_dir_all(&paths.config_dir).unwrap();
-    let err = check_and_restart_as(&Fake::default(), &paths, &service::exe(&paths), as_current_user()).unwrap_err();
+    let err = check_and_restart_as(
+        &Fake::default(),
+        &paths,
+        &service::exe(&paths),
+        as_current_user(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
 
     let text = format!("{err:#}");
     assert!(text.contains("the service was not restarted"), "{text}");
@@ -252,7 +424,7 @@ fn restart_says_whether_it_killed_or_started_the_service() {
     let id = &spec.id;
 
     assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Started);
-    manager.seed_state(id.as_str(), State::Running);
+    assert_eq!(manager.status(id).unwrap().state, State::Running);
     assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Killed);
 }
 
@@ -261,7 +433,7 @@ fn restart_without_the_installed_binary_says_the_service_is_not_installed() {
     let (_dir, paths) = host();
     let manager = Fake::default();
 
-    let err = check_and_restart(&manager, &paths).unwrap_err();
+    let err = check_and_restart(&manager, &paths, &mut Vec::new()).unwrap_err();
 
     // Not the account lookup's message: the account database can still answer for an account just removed.
     assert_eq!(err.to_string(), "the service is not installed");
@@ -276,7 +448,7 @@ fn restart_names_the_registered_image_that_is_missing() {
     let image = service::image(&paths, b"gone");
     manager.install(&service::spec(&image).unwrap(), false).unwrap();
 
-    let err = check_and_restart(&manager, &paths).unwrap_err();
+    let err = check_and_restart(&manager, &paths, &mut Vec::new()).unwrap_err();
 
     assert_eq!(
         err.to_string(),
@@ -296,7 +468,7 @@ fn restart_refuses_while_an_uninstall_has_not_finished() {
     fs::write(paths.config_dir.join("uninstalling"), "").unwrap();
     let manager = Fake::default();
 
-    let err = check_and_restart(&manager, &paths).unwrap_err();
+    let err = check_and_restart(&manager, &paths, &mut Vec::new()).unwrap_err();
 
     assert!(
         err.to_string().starts_with("an uninstall is in progress or failed"),

@@ -65,10 +65,9 @@ impl<I: BufRead, O: Write, P: Write> Dialog<I, O, P> {
         Ok(())
     }
 
-    /// Prints what `install` ends with, to the results.
-    pub fn ready(&mut self, text: &str) -> Result<()> {
-        write!(self.out, "{text}")?;
-        Ok(())
+    /// Where the results go, for what prints itself.
+    pub fn out(&mut self) -> &mut O {
+        &mut self.out
     }
 
     pub fn interactive(&self) -> bool {

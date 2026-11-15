@@ -13,6 +13,7 @@ pub fn eprintln_best_effort(message: &str) {
     writeln_best_effort(&mut std::io::stderr(), message);
 }
 
-fn writeln_best_effort(out: &mut impl Write, message: &str) {
+/// Prints a line to `out` whose write failure is ignored (see the module).
+pub fn writeln_best_effort(out: &mut impl Write, message: &str) {
     let _ = writeln!(out, "{message}");
 }

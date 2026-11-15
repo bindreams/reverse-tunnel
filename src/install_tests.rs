@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::Kind;
-use crate::test_support::{CODE, host_dirs, wrapped};
+use crate::test_support::{CODE, Closed, NotesAtFirstWrite, host_dirs, wrapped};
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
@@ -83,79 +83,120 @@ fn token_file_format() {
 }
 
 #[test]
-fn registration_line() {
-    let token = "0".repeat(64);
-    let line = super::registration_line("myhost", &token);
-    assert_eq!(line, format!("uv run ctl add myhost {}", join::token_hash(&token)));
-}
-
-const ZERO_TOKEN_HASH: &str = "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55";
-
-/// A machine whose host token is 64 zeros and whose config is `config`.
-fn machine_with(config: &str) -> Machine {
+fn the_hash_of_the_host_token_is_recorded_for_everyone_to_read() {
     let machine = Machine::new();
     machine.settings(Some("myhost"), Some(CODE));
-    fs::write(
-        machine.paths.host_token(),
-        "0".repeat(64)
-            + "
-",
+
+    let token = fs::read_to_string(machine.paths.host_token()).unwrap();
+    let hash = fs::read_to_string(machine.paths.host_token_hash()).unwrap();
+    assert_eq!(hash, format!("{}\n", join::token_hash(token.trim())));
+    assert_eq!(mode_of(&machine.paths.host_token_hash()), 0o644);
+}
+
+/// Whatever is in the file, and whether it is there (an install from before it was recorded), `install` records the
+/// hash of the token it has, so that the file cannot disagree with the token.
+#[test]
+fn the_recorded_hash_is_made_to_agree_with_the_token_on_every_install() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let right = fs::read_to_string(machine.paths.host_token_hash()).unwrap();
+
+    fs::write(machine.paths.host_token_hash(), "sha256:stale\n").unwrap();
+    machine.settings(None, Some(CODE));
+    assert_eq!(fs::read_to_string(machine.paths.host_token_hash()).unwrap(), right);
+
+    fs::remove_file(machine.paths.host_token_hash()).unwrap();
+    machine.settings(None, None);
+    assert_eq!(fs::read_to_string(machine.paths.host_token_hash()).unwrap(), right);
+}
+
+/// Recording the hash is no reason to restart the service: it does not read the file.
+#[test]
+fn recording_the_hash_alone_changes_nothing_the_service_reads() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    fs::remove_file(machine.paths.host_token_hash()).unwrap();
+
+    assert!(!machine.settings(None, Some(CODE)));
+}
+
+fn said_by_install_with(out: &mut Vec<u8>) -> Dialog<Cursor<&'static str>, &mut Vec<u8>, Vec<u8>> {
+    Dialog::new(Cursor::new(""), out, Vec::new(), false)
+}
+
+/// `install` ends with this line and nothing else: what the person needs next (the host and the hash to register) is
+/// `reverse-tunnel status`'s to show.
+#[test]
+fn install_ends_with_the_installed_line_only() {
+    let mut said = Vec::new();
+
+    closing(&mut said_by_install_with(&mut said));
+
+    assert_eq!(
+        String::from_utf8(said).unwrap(),
+        format!("Reverse-tunnel v{} has been installed!\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+/// An frpc whose download fails by construction, with no port or network involved: its scheme is not one `ureq`
+/// speaks, and its host is under `.invalid`, which never resolves.
+fn pin_nobody_serves() -> download::Pin {
+    download::Pin {
+        name: "frpc",
+        version: "9.9.9",
+        target: "x86_64-unknown-linux-gnu",
+        url: "ftp://frpc.invalid/frp.tar.gz",
+        sha256: "",
+        member: "frpc",
+    }
+}
+
+#[test]
+fn the_frpc_download_is_announced_before_it_starts() {
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.bin_dir).unwrap();
+    let mut said = Vec::new();
+
+    let err = ensure_frpc(
+        &machine.paths,
+        &pin_nobody_serves(),
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("frp.tar.gz"), "{err:#}");
+    assert_eq!(String::from_utf8(said).unwrap(), "Downloading frpc v9.9.9...\n");
+}
+
+/// The line is information: a closed stdout does not stop the download that follows it.
+#[test]
+fn a_closed_stdout_does_not_stop_the_frpc_download() {
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.bin_dir).unwrap();
+
+    let err = ensure_frpc(
+        &machine.paths,
+        &pin_nobody_serves(),
+        &mut Dialog::new(Cursor::new(""), Closed, Vec::new(), false),
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("frp.tar.gz"), "{err:#}");
+}
+
+#[test]
+fn an_frpc_that_is_in_place_is_not_downloaded_or_announced() {
+    let machine = installed_machine();
+    let mut said = Vec::new();
+
+    ensure_frpc(
+        &machine.paths,
+        &pin_nobody_serves(),
+        &mut said_by_install_with(&mut said),
     )
     .unwrap();
-    fs::write(machine.config(), config).unwrap();
-    machine
-}
 
-#[test]
-fn registration_is_the_register_line_then_the_ssh_block() {
-    let machine = machine_with(
-        "host: myhost
-bridge: tunnel.example.test
-services:
-  ssh:
-    port: 22
-    type: tcp
-",
-    );
-    let expected = format!(
-        "Host is ready! Run this command on the bridge to accept the host:
-  uv run ctl add myhost {ZERO_TOKEN_HASH}
-
-To reach this host with ssh from another machine, add this to ~/.ssh/config there (it needs websocat; the README's \"Set up a client\" has the details: https://github.com/bindreams/reverse-tunnel#set-up-a-client):
-
-Host myhost
-    HostName ssh.myhost.tunnel.example.test
-    ProxyCommand websocat --binary wss://%h/
-"
-    );
-    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
-}
-
-#[test]
-fn registration_has_no_ssh_block_without_an_ssh_tcp_service() {
-    let machine = machine_with(
-        "host: myhost
-bridge: tunnel.example.test
-services:
-  web:
-    port: 80
-    type: http
-",
-    );
-    let expected = format!(
-        "Host is ready! Run this command on the bridge to accept the host:
-  uv run ctl add myhost {ZERO_TOKEN_HASH}
-"
-    );
-    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
-}
-
-#[test]
-fn registration_of_an_existing_config_does_not_claim_the_host_is_new() {
-    let machine = machine_with("host: myhost\nbridge: tunnel.example.test\nservices: {}\n");
-    let expected =
-        format!("If the bridge does not know this host yet, run:\n  uv run ctl add myhost {ZERO_TOKEN_HASH}\n");
-    assert_eq!(registration(&machine.paths, false).unwrap(), expected);
+    assert_eq!(said, b"");
 }
 
 #[test]
@@ -440,40 +481,129 @@ fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
 }
 
 #[test]
-fn unchanged_install_leaves_a_running_service_alone() {
+fn unchanged_install_leaves_a_running_service_alone_and_says_nothing() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
 
-    pick_up(&manager, &spec.id, &machine.paths, false).unwrap();
+    let mut said = Vec::new();
+
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        false,
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap();
 
     assert_eq!(manager.calls(), [("start", spec.id.to_string())]);
+    assert_eq!(said, b"");
 }
 
+/// A start can take a while, so it is announced; nothing runs, so there is no connection to warn.
+#[test]
+fn unchanged_install_announces_the_start_of_a_service_that_is_not_running() {
+    let machine = Machine::new();
+    let spec = service::spec(&service::exe(&machine.paths)).unwrap();
+    let manager = Fake::default();
+    manager.install(&spec, false).unwrap();
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
+
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        false,
+        &mut Dialog::new(Cursor::new(""), &mut said, Vec::new(), false),
+    )
+    .unwrap();
+
+    assert_eq!(String::from_utf8(said.text).unwrap(), "Starting the service...\n");
+    assert_eq!(said.at_first_write, Some(0), "said before the start");
+    assert_eq!(manager.calls(), [("start", spec.id.to_string())]);
+    assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
+}
+
+/// The notice comes first on a first install too: the service is not running, and the kill finds nothing.
 #[test]
 fn kill_not_running_starts() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
 
-    pick_up(&manager, &spec.id, &machine.paths, true).unwrap();
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        true,
+        &mut Dialog::new(Cursor::new(""), &mut said, Vec::new(), false),
+    )
+    .unwrap();
 
     assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
+    assert_eq!(
+        String::from_utf8(said.text).unwrap(),
+        format!("{}\n", ops::RESTART_NOTICE)
+    );
+    assert_eq!(said.at_first_write, Some(0), "said before the kill and the start");
     let id = spec.id.to_string();
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
+}
+
+/// A running service is killed, for its manager to start again, after the notice.
+#[test]
+fn restarting_a_running_service_is_announced_before_the_kill() {
+    let machine = Machine::new();
+    let spec = service::spec(&service::exe(&machine.paths)).unwrap();
+    let manager = Fake::default();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
+
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        true,
+        &mut Dialog::new(Cursor::new(""), &mut said, Vec::new(), false),
+    )
+    .unwrap();
+
+    assert_eq!(
+        String::from_utf8(said.text).unwrap(),
+        format!("{}\n", ops::RESTART_NOTICE)
+    );
+    assert_eq!(said.at_first_write, Some(0), "said before the kill");
+    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
 }
 
 #[test]
 fn restart_failure_is_retried_by_install() {
     let machine = Machine::new();
     // Never installed: the kill fails with something other than NotRunning.
-    let err = pick_up(&Fake::default(), &service::id(), &machine.paths, true).unwrap_err();
+    let mut said = Vec::new();
+    let err = pick_up(
+        &Fake::default(),
+        &service::id(),
+        &machine.paths,
+        true,
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap_err();
+
+    assert_eq!(String::from_utf8(said).unwrap(), format!("{}\n", ops::RESTART_NOTICE));
 
     assert!(
         format!("{err:#}").contains("run `reverse-tunnel install` again"),
+        "{err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains("`reverse-tunnel status` shows the host and hash"),
         "{err:#}"
     );
     assert!(pending_file(&machine.paths).exists());
@@ -485,9 +615,13 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     let id = service::id();
     // The marker cannot be written without its directory; the kill fails, as the service was never installed.
     fs::remove_dir_all(&machine.paths.config_dir).unwrap();
-    let err = pick_up(&Fake::default(), &id, &machine.paths, true).unwrap_err();
+    let err = pick_up(&Fake::default(), &id, &machine.paths, true, &mut no_dialog()).unwrap_err();
 
     let text = format!("{err:#}");
+    assert!(
+        text.contains("`reverse-tunnel status` shows the host and hash"),
+        "{text}"
+    );
     assert!(text.contains("the service was not restarted"), "{text}");
     assert!(text.contains("restart-pending"), "{text}");
     // The failure of the restart itself is there too: without it the operator is not told why.
