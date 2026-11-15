@@ -339,16 +339,15 @@ def stack(tmp_path_factory):
     stack.ssh_config.write_text(client_template())
 
     installed = run("sudo", BUILT, "install", "--host", HOST, "--join", code).stdout
-    # The start is announced before it happens, and the status comes after the install line.
+    # The start is announced before it happens, and the "installed!" line is the last.
     lines = installed.splitlines()
-    starting, done, service = (
-        next((i for i, line in enumerate(lines) if line.startswith(prefix)), -1)
-        for prefix in ("Starting the service", "Reverse-tunnel v", "service: ")
-    )
-    assert 0 <= starting < done < service, f"install's lines missing or out of order:\n{installed}"
-    # The arguments of `ctl add` are the `host` and `hash` lines of the status that `install` ends with.
-    registration = re.search(r"^host: (\S+)\nhash: (sha256:[0-9a-f]{64})$", installed, re.M)
-    assert registration, f"no `host` and `hash` lines in the install output:\n{installed}"
+    starting = next((i for i, line in enumerate(lines) if line.startswith("Starting the service")), -1)
+    assert 0 <= starting < len(lines) - 1, f"install's notice is missing or not before its last line:\n{installed}"
+    assert lines[-1].startswith("Reverse-tunnel v") and "has been installed!" in lines[-1], installed
+    # The arguments of `ctl add` are the `host` and `hash` lines of `status`.
+    status = run(INSTALLED, "status").stdout
+    registration = re.search(r"^host: (\S+)\nhash: (sha256:[0-9a-f]{64})$", status, re.M)
+    assert registration, f"no `host` and `hash` lines in the status:\n{status}"
     stack.registration = registration.groups()
     stack.stub_port = server.server_address[1]
     run("sudo", "tee", "-a", "/etc/reverse-tunnel/config.yaml", input=http_service("web", stack.stub_port))

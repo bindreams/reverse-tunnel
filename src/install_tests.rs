@@ -124,78 +124,18 @@ fn said_by_install_with(out: &mut Vec<u8>) -> Dialog<Cursor<&'static str>, &mut 
     Dialog::new(Cursor::new(""), out, Vec::new(), false)
 }
 
-/// The files are in place and the service is restarted when `closing` runs: whatever fails in it is said on stderr, and
-/// nothing is returned for `install` to fail with. Here `status` fails, as there is no `config.yaml` to read.
+/// `install` ends with this line and nothing else: what the person needs next (the host and the hash to register) is
+/// `reverse-tunnel status`'s to show.
 #[test]
-fn a_failure_in_the_closing_output_is_said_on_stderr_and_does_not_fail_install() {
-    let machine = Machine::new();
-    let manager = Fake::default();
-    manager
-        .install(&service::spec(&service::exe(&machine.paths)).unwrap(), false)
-        .unwrap();
-    let (mut said, mut warned) = (Vec::new(), Vec::new());
-
-    closing(
-        &manager,
-        &machine.paths,
-        &mut Dialog::new(Cursor::new(""), &mut said, &mut warned, false),
-    );
-
-    let (said, warned) = (String::from_utf8(said).unwrap(), String::from_utf8(warned).unwrap());
-    assert!(said.starts_with("Reverse-tunnel v"), "{said}");
-    assert!(
-        warned.contains("the install is done, but showing its status failed"),
-        "{warned}"
-    );
-    assert!(!warned.contains("`reverse-tunnel status`"), "{warned}");
-    assert!(warned.contains("config.yaml"), "{warned}");
-}
-
-/// The first line of the closing output fails: that is said on stderr, with where the output is, and `status` is not
-/// run, since nothing could show what it prints.
-#[test]
-fn a_failure_of_the_installed_line_is_said_on_stderr_and_skips_status() {
-    let machine = Machine::new();
-    let mut warned = Vec::new();
-
-    closing(
-        &Fake::default(),
-        &machine.paths,
-        &mut Dialog::new(Cursor::new(""), Closed, &mut warned, false),
-    );
-
-    let warned = String::from_utf8(warned).unwrap();
-    assert!(
-        warned.contains("the install is done, but its closing output failed"),
-        "{warned}"
-    );
-    assert!(warned.contains("`reverse-tunnel status` shows it"), "{warned}");
-    assert!(!warned.contains("showing its status failed"), "{warned}");
-}
-
-/// `install` is complete without `status` and without the README: what it ends with is `status`'s output, from the same
-/// function, below the line that says it worked.
-#[test]
-fn install_ends_with_installed_and_what_status_prints() {
-    let machine = Machine::new();
-    machine.settings(Some("myhost"), Some(CODE));
-    let manager = Fake::default();
-    manager
-        .install(&service::spec(&service::exe(&machine.paths)).unwrap(), false)
-        .unwrap();
-
+fn install_ends_with_the_installed_line_only() {
     let mut said = Vec::new();
-    closing(&manager, &machine.paths, &mut said_by_install_with(&mut said));
 
-    let mut status = Vec::new();
-    ops::status(&manager, &machine.paths, &mut status).unwrap();
-    let expected = format!(
-        "Reverse-tunnel v{} has been installed!\n{}",
-        env!("CARGO_PKG_VERSION"),
-        String::from_utf8(status).unwrap()
+    closing(&mut said_by_install_with(&mut said));
+
+    assert_eq!(
+        String::from_utf8(said).unwrap(),
+        format!("Reverse-tunnel v{} has been installed!\n", env!("CARGO_PKG_VERSION"))
     );
-    assert_eq!(String::from_utf8(said).unwrap(), expected);
-    assert!(expected.contains("\nhash: sha256:"), "{expected}");
 }
 
 /// An frpc whose download fails by construction, with no port or network involved: its scheme is not one `ureq`

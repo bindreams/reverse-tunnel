@@ -32,8 +32,8 @@ chmod +x reverse-tunnel
 sudo ./reverse-tunnel install
 ```
 
-`install` asks for the host name and the join code, prints where the config is saved, and ends with what `reverse-tunnel
-status` prints:
+`install` asks for the host name and the join code, prints where the config is saved, and ends with the line that says
+it is installed:
 
 ```
 $ sudo ./reverse-tunnel install
@@ -44,21 +44,13 @@ Join code (run `uv run ctl join-code` on the bridge; an empty line gives up):
 Downloading frpc v0.71.1...
 Starting the service; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
-service: running (pid 1234), enabled at boot
-host: minicooper
-hash: sha256:...
-bridge: tunnel.example.com
-certificate: SHA-256 AB:CD:...
-[...]
 ```
 
 Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts.
 So is the start of the service by `install`, `upgrade` and `reverse-tunnel restart`: a restart, which kills the service
-and starts it again, says that the connection through the tunnel drops. An `install` that changed nothing says
-`Starting the service...` only if it finds the service not running.
-`install` ends with the service running again, so the status it prints is of the new process, and
-`reverse-tunnel restart` says afterwards what it did. Over the tunnel the connection drops at the restart, so that line
-and the ones after it may not reach you.
+for its service manager to start again, says that the connection through the tunnel drops. An `install` that changed
+nothing says `Starting the service...` only if it finds the service not running. Over the tunnel the connection drops at
+the restart, so the lines after the notice may not reach you.
 
 Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The join
 code may be pasted wrapped over several lines. On a host that already has a `config.yaml`, `install` asks no host name
@@ -70,8 +62,8 @@ For a script, pass `--host NAME` and `--join CODE`: a value given is not asked f
 stderr are both terminals; otherwise a value that is needed and missing is an error that names the flags and gives the
 command to run, and `install` does not wait for input. It installs and starts the service.
 
-Register the host on the bridge: in the bridge folder run `uv run ctl add HOST HASH`, with the `host` and `hash` from
-install's output, or from `reverse-tunnel status` (the hash is no secret; the token it comes from is never shown). The
+Register the host on the bridge: in the bridge folder run `uv run ctl add HOST HASH`, with the `host` and `hash` that
+`reverse-tunnel status` shows (the hash is no secret; the token it comes from is never shown). The
 `hash` is what `install` last recorded, so a token you replaced by hand shows its old hash until `install` runs again.
 [Set up a client](#set-up-a-client) is the next step. Until you register it, the host is refused ("host not
 registered" in its `frpc.log`) and retries on its own; once you have, it connects with no restart. A host installed
@@ -185,7 +177,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 | `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. When rotations may have removed lines before it could show them (its output stalled while the log rotated more than once), it says so on stderr. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
-| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops, kills the service and starts it again with the new settings (it returns once the service runs), and says so. Works over the tunnel. |
+| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops and kills the service, which its service manager starts again with the new settings; it says so. Works over the tunnel. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
 
@@ -238,9 +230,6 @@ Checking for a new version...
 Downloading v0.1.1...
 Starting the service; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
-service: running (pid 1234), enabled at boot
-host: myhost
-[...]
 ```
 
 A version that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.

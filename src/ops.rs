@@ -7,8 +7,6 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::thread;
-use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -78,7 +76,7 @@ fn check_and_restart_as(
     writeln_best_effort(
         out,
         match outcome {
-            RestartOutcome::Restarted => "The service was restarted.",
+            RestartOutcome::Killed => "The service was stopped; its service manager starts it again.",
             RestartOutcome::Started => "The service was not running; it is started.",
         },
     );
@@ -168,8 +166,7 @@ fn service_identity() -> Result<Option<RunAs>> {
 /// How `restart` had the service run again.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
-    /// It was running: it was killed, and it runs again.
-    Restarted,
+    Killed,
     /// It was not running: the kill found nothing, and it was started.
     Started,
 }
@@ -190,9 +187,6 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     open_file(&pending_file(paths), Perm::new(0o600), false)?;
     Ok(())
 }
-
-/// How often `wait_until_gone` reads the status again.
-const KILL_POLL: Duration = Duration::from_millis(100);
 
 /// Said before the restart; true whether or not the service was running, and warns a session over the tunnel, which the
 /// kill ends.
@@ -220,37 +214,17 @@ pub fn restart_pending(
     })
 }
 
-/// Has the service run again. It is killed, never stopped first, because run over the tunnel the stop cuts this session
-/// and the start never comes, and if this process dies after the kill the manager's restart policy still brings the
-/// service back. systemd and launchd return from the kill once the signal is sent, so the killed process is waited
-/// for (`wait_until_gone`) before the start, which waits until the service runs, so that what follows sees the new
-/// process. If the manager's own restart got there first, the start finds it running. A service that is not running
-/// is started.
+/// Has the service run again. It is killed, and the manager starts it again; it is never stopped first, because run
+/// over the tunnel the stop cuts this session and the start never comes. A service that is not running is started.
 pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
-    let killed = manager.status(id)?.pid;
     match manager.kill(id) {
-        Ok(()) => {
-            wait_until_gone(manager, id, killed)?;
-            manager.start(id, Budget::Unbounded)?;
-            Ok(RestartOutcome::Restarted)
-        }
+        Ok(()) => Ok(RestartOutcome::Killed),
         Err(err) if matches!(err.cause(), goetia::Error::NotRunning { .. }) => {
             manager.start(id, Budget::Unbounded)?;
             Ok(RestartOutcome::Started)
         }
         Err(err) => Err(err.into()),
     }
-}
-
-/// Waits, with no cap, until the manager's status no longer reports `pid`, the process that was killed (none known:
-/// nothing to wait for). It ends because the kill is SIGKILL. A status that cannot be read is an error, and the
-/// manager's restart policy then brings the service back.
-fn wait_until_gone(manager: &dyn ServiceManager, id: &Id, pid: Option<u32>) -> Result<()> {
-    let Some(pid) = pid else { return Ok(()) };
-    while manager.status(id)?.pid == Some(pid) {
-        thread::sleep(KILL_POLL);
-    }
-    Ok(())
 }
 
 /// Never prints a token, only the hash of the host's (see `recorded_hash`): the log it ends with holds none.

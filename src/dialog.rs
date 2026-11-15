@@ -1,4 +1,4 @@
-//! What `install` asks the person at the terminal, line by line, and what it prints.
+//! What `install` asks the person at the terminal, line by line, and what it prints while it does.
 //!
 //! The questions go to stderr, so that stdout holds only the results.
 
@@ -63,19 +63,6 @@ impl<I: BufRead, O: Write, P: Write> Dialog<I, O, P> {
     pub fn show_host(&mut self, host: &str) -> Result<()> {
         writeln!(self.out, "Hostname: {host}")?;
         Ok(())
-    }
-
-    /// Prints a line to the results: what `install` is about to do, or has done. On the terminal `out` is stdout, a
-    /// line-buffered writer, so the line is written when this returns.
-    pub fn say(&mut self, line: &str) -> Result<()> {
-        writeln!(self.out, "{line}")?;
-        Ok(())
-    }
-
-    /// Prints a line to stderr, for what went wrong after `install` had done its work. A write failure is ignored: there
-    /// is nothing left to report it to.
-    pub fn warn(&mut self, line: &str) {
-        let _ = writeln!(self.prompts, "{line}");
     }
 
     /// Where the results go, for what prints itself.

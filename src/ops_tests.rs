@@ -281,7 +281,7 @@ fn restart_with_a_failing_check_leaves_the_service_alone() {
 /// service runs.
 #[cfg(unix)]
 #[test]
-fn restart_with_a_passing_check_restarts_the_service() {
+fn restart_with_a_passing_check_kills_the_service() {
     let (_dir, paths, manager) = host_checked_by_stub("pass");
     let id = service::id();
 
@@ -289,11 +289,11 @@ fn restart_with_a_passing_check_restarts_the_service() {
 
     check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user(), &mut said).unwrap();
 
-    assert_eq!(manager.calls(), [("kill", id.to_string()), ("start", id.to_string())]);
+    assert_eq!(manager.calls(), [("kill", id.to_string())]);
     assert!(!pending_file(&paths).exists());
     assert_eq!(
         String::from_utf8(said.text).unwrap(),
-        format!("{RESTART_NOTICE}\nThe service was restarted.\n")
+        format!("{RESTART_NOTICE}\nThe service was stopped; its service manager starts it again.\n")
     );
     assert_eq!(said.at_first_write, Some(0), "said before the kill");
 }
@@ -312,7 +312,7 @@ fn restart_pending_says_the_notice_then_removes_the_marker_then_restarts() {
 
     let outcome = restart_pending(&manager, &spec.id, &paths, &mut said).ok().unwrap();
 
-    assert_eq!(outcome, RestartOutcome::Restarted);
+    assert_eq!(outcome, RestartOutcome::Killed);
     assert!(!pending_file(&paths).exists());
     assert_eq!(String::from_utf8(said.text).unwrap(), format!("{RESTART_NOTICE}\n"));
     assert_eq!(
@@ -320,8 +320,7 @@ fn restart_pending_says_the_notice_then_removes_the_marker_then_restarts() {
         Some((true, 0)),
         "said with the marker there, before the kill"
     );
-    let id = spec.id.to_string();
-    assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
+    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
 }
 
 /// `paths` whose restart marker cannot be removed: removing it fails with something but NotFound, which is success.
@@ -400,7 +399,7 @@ fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
 }
 
 #[test]
-fn restart_starts_a_service_it_killed_and_one_that_was_not_running() {
+fn restart_says_whether_it_killed_or_started_the_service() {
     let (_dir, paths) = host();
     let manager = Fake::default();
     let spec = service::spec(&service::exe(&paths)).unwrap();
@@ -408,11 +407,8 @@ fn restart_starts_a_service_it_killed_and_one_that_was_not_running() {
     let id = &spec.id;
 
     assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Started);
-    assert_eq!(manager.calls(), [("kill", id.to_string()), ("start", id.to_string())]);
     manager.seed_state(id.as_str(), State::Running);
-    assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Restarted);
-    // The Fake's kill leaves a service failed, as a manager does until its own restart: the start has it running.
-    assert_eq!(manager.status(id).unwrap().state, State::Running);
+    assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Killed);
 }
 
 #[test]

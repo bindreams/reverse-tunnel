@@ -91,8 +91,8 @@ pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
 }
 
 /// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything `install`
-/// writes changed. Asks what it needs through `dialog`, after checking the flags, and ends with what `status` prints
-/// (see `closing`): its output stands on its own.
+/// writes changed. Asks what it needs through `dialog`, after checking the flags, and ends with the line that says it
+/// is installed (see `closing`); `reverse-tunnel status` shows the host and hash to register on the bridge.
 pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut Dialog<I, O, P>) -> Result<()> {
     let paths = &opts.paths;
     let (host, join) = dialog::flags(opts.host.as_deref(), opts.join.as_deref())?;
@@ -141,26 +141,15 @@ pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut D
     )?;
     manager.enable(&id)?;
     pick_up(&*manager, &id, paths, changed, dialog)?;
-    closing(&*manager, paths, dialog);
+    closing(dialog);
     Ok(())
 }
 
-/// What `install` ends with: that the running binary's version is installed, then what `status` prints, from the same
-/// function. The files are in place and the service is restarted by now, so a failure here is reported on stderr and
-/// does not fail the install.
-fn closing<I: BufRead, O: Write, P: Write>(manager: &dyn ServiceManager, paths: &Paths, dialog: &mut Dialog<I, O, P>) {
-    let said = dialog.say(&format!(
-        "Reverse-tunnel v{} has been installed!",
-        env!("CARGO_PKG_VERSION")
-    ));
-    if let Err(err) = said {
-        dialog.warn(&format!(
-            "the install is done, but its closing output failed: {err:#}; `reverse-tunnel status` shows it"
-        ));
-    } else if let Err(err) = ops::status(manager, paths, dialog.out()) {
-        // `status` is what failed, so it is not what to send the user to.
-        dialog.warn(&format!("the install is done, but showing its status failed: {err:#}"));
-    }
+/// What `install` ends with: that the running binary's version is installed. Best-effort, like the progress lines: the
+/// files are in place and the service is restarted by now, so a closed stdout does not fail the install.
+fn closing<I: BufRead, O: Write, P: Write>(dialog: &mut Dialog<I, O, P>) {
+    let line = format!("Reverse-tunnel v{} has been installed!", env!("CARGO_PKG_VERSION"));
+    output::writeln_best_effort(dialog.out(), &line);
 }
 
 /// A host keeps its name: `asked`, from `--host`, must be the name in `config`.
