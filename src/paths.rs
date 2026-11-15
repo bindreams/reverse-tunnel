@@ -11,7 +11,7 @@ pub const FRPC_CONFIG: &str = "frpc.toml";
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub bin_dir: PathBuf,
-    /// `config.yaml` and `bridge.pem`, readable by everyone.
+    /// `config.yaml`, `bridge.pem` and `host-token.hash`, readable by everyone.
     pub config_dir: PathBuf,
     /// `bridge.token` and `host.token`, readable by administrators and the service account.
     pub secrets_dir: PathBuf,
@@ -39,6 +39,12 @@ impl Paths {
 
     pub fn host_token(&self) -> PathBuf {
         self.secrets_dir.join("host.token")
+    }
+
+    /// The host token's hash in the bridge's registry form (`join::token_hash`): not a secret, so `status` shows it to
+    /// whoever may run it.
+    pub fn host_token_hash(&self) -> PathBuf {
+        self.config_dir.join("host-token.hash")
     }
 
     /// frpc's log, which the supervisor writes and `logs` and `status` read.

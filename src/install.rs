@@ -19,7 +19,6 @@ use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
 use crate::account::{self, Account};
-use crate::client;
 #[cfg(target_os = "linux")]
 use crate::command;
 use crate::config::Config;
@@ -92,8 +91,8 @@ pub(crate) fn refuse_while_uninstalling(paths: &Paths) -> Result<()> {
 }
 
 /// Installs, or updates, the service so that it runs this binary, and starts it, or restarts it if anything `install`
-/// writes changed. Asks what it needs through `dialog`, after checking the flags, and prints the line that accepts the
-/// host on the bridge.
+/// writes changed. Asks what it needs through `dialog`, after checking the flags, and ends with what `status` prints
+/// (see `closing`): its output stands on its own.
 pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut Dialog<I, O, P>) -> Result<()> {
     let paths = &opts.paths;
     let (host, join) = dialog::flags(opts.host.as_deref(), opts.join.as_deref())?;
@@ -129,6 +128,7 @@ pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut D
 
     let account = account::ensure(service::ACCOUNT)?;
     let new = Binary::read(paths, &env::current_exe().context("finding this binary")?)?;
+    fetch_tools(paths, dialog)?;
     let manager = service::registering_manager(&new.image)?;
     let (id, changed) = set_up(
         &*manager,
@@ -139,10 +139,23 @@ pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut D
         join.as_ref(),
         changed,
     )?;
-    // Before the restart: an upgrade over the tunnel can cut the session there, and this is what its operator needs.
-    dialog.ready(&registration(paths, new_config)?)?;
     manager.enable(&id)?;
-    pick_up(&*manager, &id, paths, changed)
+    pick_up(&*manager, &id, paths, changed)?;
+    closing(&*manager, paths, dialog)
+}
+
+/// What `install` ends with: that the running binary's version is installed, then what `status` prints, from the same
+/// function, so that `install` needs no other command to show how it went.
+fn closing<I: BufRead, O: Write, P: Write>(
+    manager: &dyn ServiceManager,
+    paths: &Paths,
+    dialog: &mut Dialog<I, O, P>,
+) -> Result<()> {
+    dialog.say(&format!(
+        "Reverse-tunnel v{} has been installed!",
+        env!("CARGO_PKG_VERSION")
+    ))?;
+    ops::status(manager, paths, dialog.out())
 }
 
 /// A host keeps its name: `asked`, from `--host`, must be the name in `config`.
@@ -962,7 +975,19 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
     for file in [paths.host_token(), paths.bridge_token()] {
         open_file(&file, secret, false)?;
     }
+    record_host_token_hash(paths)?;
     Ok(changed)
+}
+
+/// Writes the hash of the host token, which is no secret, where `status` reads it without the right to read the token
+/// (see `Paths::host_token_hash`). On every run, from the token that is there: it cannot disagree with it, and an
+/// install from before the hash was recorded gets it. The service does not read it, so it never counts as a change.
+fn record_host_token_hash(paths: &Paths) -> Result<()> {
+    let token_file = paths.host_token();
+    let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
+    let hash = format!("{}\n", join::token_hash(token.trim()));
+    replace_if_changed(None, &paths.host_token_hash(), hash, PUBLIC_FILE, Replace::Always)?;
+    Ok(())
 }
 
 /// Writes a first `config.yaml` publishing ssh. False if it appeared meanwhile.
@@ -1032,25 +1057,38 @@ fn with_bridge(text: &str, domain: &str, file: &Path) -> Result<String> {
     Ok(rewritten)
 }
 
-/// Makes the bin dir, fetches the pinned frpc if it is missing, and has a copy of `binary`, the new one, staged in the
-/// bin dir where `run_as` can run it, check the settings as `run_as` (see `ops::check`). The copy is removed whatever
-/// the outcome. A kept frpc is restored (`restore_binary`). The staged copy gets the installed binary's access, so the
-/// check sees what the service will run. A fetch needs no restart: a new frpc version only arrives with a new binary,
-/// which `place_binaries` marks.
-fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
+/// Makes the bin dir and fetches the pinned frpc if it is missing, before anything else is written: the binary that
+/// names it is not put in place unless it can be fetched. A fetch needs no restart: a new frpc version only arrives
+/// with a new binary, which `place_binaries` marks.
+fn fetch_tools<I: BufRead, O: Write, P: Write>(paths: &Paths, dialog: &mut Dialog<I, O, P>) -> Result<()> {
     let parents = [paths.bin_dir.parent(), paths.link.as_deref().and_then(Path::parent)];
     for parent in parents.into_iter().flatten() {
         make_missing_dirs(parent, PUBLIC_DIR)?;
     }
     make_dir(&paths.bin_dir, PUBLIC_DIR)?;
+    ensure_frpc(paths, download::host_pin()?, dialog)
+}
 
-    // The pinned frpc first: the binary that names it is not put in place unless it can be fetched.
+/// Has the frpc `pin` names in the bin dir: a kept one is restored (`restore_binary`), a missing one is fetched, after a
+/// line that says so.
+fn ensure_frpc<I: BufRead, O: Write, P: Write>(
+    paths: &Paths,
+    pin: &download::Pin,
+    dialog: &mut Dialog<I, O, P>,
+) -> Result<()> {
     let frpc = download::tools(paths).frpc;
     if frpc.try_exists()? {
-        restore_binary(&frpc)?;
-    } else {
-        download::fetch(download::host_pin()?, &paths.bin_dir)?;
+        return restore_binary(&frpc);
     }
+    dialog.say(&format!("Downloading {} v{}...", pin.name, pin.version))?;
+    download::fetch(pin, &paths.bin_dir)?;
+    Ok(())
+}
+
+/// Has a copy of `binary`, the new one, staged in the bin dir where `run_as` can run it, check the settings as `run_as`
+/// (see `ops::check`). The copy is removed whatever the outcome. The staged copy gets the installed binary's access, so
+/// the check sees what the service will run.
+fn verify_tools(paths: &Paths, binary: &[u8], run_as: Option<Account>) -> Result<()> {
     let staged = upgrade::stage(paths, binary)?;
     let checked = ops::check(&staged, run_as, "the new binary's `run --check`");
     upgrade::discard(&staged);
@@ -1133,30 +1171,6 @@ fn point_link(link: &Path, target: &Path) -> Result<()> {
         Err(err) => return Err(err).with_context(|| format!("reading the link {}", link.display())),
     }
     symlink(target, link).with_context(|| format!("linking {}", link.display()))
-}
-
-/// What `install` prints once the host is set up: the line that accepts it on the bridge, then, if the host publishes
-/// ssh, how to reach it. `new`: the config was just created. Ends in a newline.
-fn registration(paths: &Paths, new: bool) -> Result<String> {
-    let cfg = Config::load(&paths.config_file())?;
-    let token_file = paths.host_token();
-    let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
-    let line = registration_line(&cfg.host, token.trim());
-    let intro = if new {
-        "Host is ready! Run this command on the bridge to accept the host:"
-    } else {
-        "If the bridge does not know this host yet, run:"
-    };
-    let mut text = format!("{intro}\n  {line}\n");
-    if let Some(client) = client::instructions(&cfg) {
-        text.push('\n');
-        text.push_str(&client);
-    }
-    Ok(text)
-}
-
-fn registration_line(host: &str, token: &str) -> String {
-    format!("uv run ctl add {host} {}", join::token_hash(token))
 }
 
 fn revoke_line(paths: &Paths) -> Result<String> {

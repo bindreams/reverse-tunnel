@@ -1,4 +1,4 @@
-//! What `install` asks the person at the terminal, line by line, and what it prints while it does.
+//! What `install` asks the person at the terminal, line by line, and what it prints.
 //!
 //! The questions go to stderr, so that stdout holds only the results.
 
@@ -65,10 +65,15 @@ impl<I: BufRead, O: Write, P: Write> Dialog<I, O, P> {
         Ok(())
     }
 
-    /// Prints what `install` ends with, to the results.
-    pub fn ready(&mut self, text: &str) -> Result<()> {
-        write!(self.out, "{text}")?;
+    /// Prints a line to the results: what `install` is about to do, or has done.
+    pub fn say(&mut self, line: &str) -> Result<()> {
+        writeln!(self.out, "{line}")?;
         Ok(())
+    }
+
+    /// Where the results go, for what prints itself.
+    pub fn out(&mut self) -> &mut O {
+        &mut self.out
     }
 
     pub fn interactive(&self) -> bool {

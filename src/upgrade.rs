@@ -47,15 +47,16 @@ pub fn warn_if_kept(removed: Result<()>) {
 }
 
 /// Runs `install` of the binary at `from`, or of the latest release's for this platform, checked against the
-/// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service.
-pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
+/// release's `SHA256SUMS`. That `install` checks the new settings, replaces the binary and restarts the service, and
+/// ends the output. A line to `out` precedes each step of the release's download (see `fetch_release`).
+pub fn upgrade(paths: &Paths, from: Option<&Path>, out: &mut impl Write) -> Result<()> {
     let Some(from) = from else {
         ensure!(
             paths.bin_dir.try_exists()?,
             "{} does not exist: is reverse-tunnel installed?",
             paths.bin_dir.display()
         );
-        let binary = fetch_release(RELEASES, &asset_name(host_target()?))?;
+        let binary = fetch_release(RELEASES, &asset_name(host_target()?), out)?;
         let staged = stage(paths, &binary).context("staging the release")?;
         let installed = install_with(&staged);
         if installed.is_err() {
@@ -68,7 +69,7 @@ pub fn upgrade(paths: &Paths, from: Option<&Path>) -> Result<()> {
     install_with(&from)
 }
 
-/// Runs `exe install` with this terminal: its warnings and the registration line are for the operator.
+/// Runs `exe install` with this terminal: what it prints is what `upgrade` ends with.
 fn install_with(exe: &Path) -> Result<()> {
     let status = cosca::run([exe.as_os_str(), "install".as_ref()])
         .status()
@@ -77,9 +78,11 @@ fn install_with(exe: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The latest release's `asset`. Resolves the tag once so the binary and `SHA256SUMS` come from the same release.
-fn fetch_release(releases: &str, asset: &str) -> Result<Vec<u8>> {
+/// The latest release's `asset`. Resolves the tag once so the binary and `SHA256SUMS` come from the same release. Says
+/// on `out` that it checks, then which release it downloads, before it does.
+fn fetch_release(releases: &str, asset: &str, out: &mut impl Write) -> Result<Vec<u8>> {
     let latest = format!("{releases}/latest");
+    writeln!(out, "Checking for a new version...")?;
     let ended = resolve(&latest, STALL)?;
     // GitHub sends `releases/latest` to the page of the latest release, or to the list of releases when there is none.
     let tag = ended
@@ -88,6 +91,7 @@ fn fetch_release(releases: &str, asset: &str) -> Result<Vec<u8>> {
         .filter(|tag| !tag.is_empty() && !tag.contains(['/', '?', '#']))
         .with_context(|| format!("{latest} led to {ended}, not a release page: is a release published?"))?;
 
+    writeln!(out, "Downloading {tag}...")?;
     let url = |name: &str| format!("{releases}/download/{tag}/{name}");
     let sums =
         String::from_utf8(download(&url(SUMS_FILE), STALL)?).with_context(|| format!("{SUMS_FILE} is not text"))?;

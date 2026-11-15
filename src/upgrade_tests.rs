@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -90,12 +90,45 @@ fn fetch_release_resolves_the_tag_once() {
         ),
     ]);
 
-    let got = fetch_release(&base, ASSET).unwrap();
+    let got = fetch_release(&base, ASSET, &mut io::sink()).unwrap();
 
     assert_eq!(got, BINARY);
     let seen = seen.lock().unwrap();
     assert_eq!(seen[..2], ["HEAD /releases/latest", "HEAD /releases/tag/v7"]);
     assert!(seen[2..].iter().all(|request| request.contains(download)), "{seen:?}");
+}
+
+/// `fetch_release`'s output when it ends in `result`, from a server that has `routes`.
+fn said_while_fetching(routes: Vec<Route>) -> (String, Result<Vec<u8>>) {
+    let (base, _) = serve(routes);
+    let mut out = Vec::new();
+    let fetched = fetch_release(&base, ASSET, &mut out);
+    (String::from_utf8(out).unwrap(), fetched)
+}
+
+#[test]
+fn the_check_is_announced_before_it_is_made_and_the_download_before_it_starts() {
+    // Each line is there although the step after it fails: it was said before that step.
+    let (said, fetched) = said_while_fetching(vec![("/releases/latest", 404, None, vec![])]);
+    fetched.unwrap_err();
+    assert_eq!(
+        said,
+        "Checking for a new version...
+"
+    );
+
+    let (said, fetched) = said_while_fetching(vec![
+        ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
+        ("/releases/tag/v7", 200, None, b"the release page".to_vec()),
+        ("/releases/download/v7/SHA256SUMS", 404, None, vec![]),
+    ]);
+    fetched.unwrap_err();
+    assert_eq!(
+        said,
+        "Checking for a new version...
+Downloading v7...
+"
+    );
 }
 
 #[test]
@@ -117,7 +150,7 @@ fn upgrade_rejects_bad_release_digest() {
         ),
     ]);
 
-    let err = fetch_release(&base, ASSET).unwrap_err();
+    let err = fetch_release(&base, ASSET, &mut io::sink()).unwrap_err();
 
     let (listed, served) = (
         hex::encode(Sha256::digest(BINARY)),
@@ -135,7 +168,7 @@ fn upgrade_http_error() {
         ("/releases/download/v7/SHA256SUMS", 404, None, vec![]),
     ]);
 
-    let err = fetch_release(&base, ASSET).unwrap_err();
+    let err = fetch_release(&base, ASSET, &mut io::sink()).unwrap_err();
 
     let err = format!("{err:#}");
     assert!(
@@ -153,7 +186,7 @@ fn upgrade_needs_a_published_release() {
             (ended, 200, None, vec![]),
         ]);
 
-        let err = fetch_release(&base, ASSET).unwrap_err();
+        let err = fetch_release(&base, ASSET, &mut io::sink()).unwrap_err();
 
         assert!(err.to_string().contains("not a release page"), "{ended}: {err:#}");
     }

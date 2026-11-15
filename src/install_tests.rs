@@ -83,79 +83,117 @@ fn token_file_format() {
 }
 
 #[test]
-fn registration_line() {
-    let token = "0".repeat(64);
-    let line = super::registration_line("myhost", &token);
-    assert_eq!(line, format!("uv run ctl add myhost {}", join::token_hash(&token)));
-}
-
-const ZERO_TOKEN_HASH: &str = "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55";
-
-/// A machine whose host token is 64 zeros and whose config is `config`.
-fn machine_with(config: &str) -> Machine {
+fn the_hash_of_the_host_token_is_recorded_for_everyone_to_read() {
     let machine = Machine::new();
     machine.settings(Some("myhost"), Some(CODE));
-    fs::write(
-        machine.paths.host_token(),
-        "0".repeat(64)
-            + "
-",
+
+    let token = fs::read_to_string(machine.paths.host_token()).unwrap();
+    let hash = fs::read_to_string(machine.paths.host_token_hash()).unwrap();
+    assert_eq!(hash, format!("{}\n", join::token_hash(token.trim())));
+    assert_eq!(mode_of(&machine.paths.host_token_hash()), 0o644);
+}
+
+/// Whatever is in the file, and whether it is there (an install from before it was recorded), `install` records the
+/// hash of the token it has, so that the file cannot disagree with the token.
+#[test]
+fn the_recorded_hash_is_made_to_agree_with_the_token_on_every_install() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let right = fs::read_to_string(machine.paths.host_token_hash()).unwrap();
+
+    fs::write(machine.paths.host_token_hash(), "sha256:stale\n").unwrap();
+    machine.settings(None, Some(CODE));
+    assert_eq!(fs::read_to_string(machine.paths.host_token_hash()).unwrap(), right);
+
+    fs::remove_file(machine.paths.host_token_hash()).unwrap();
+    machine.settings(None, None);
+    assert_eq!(fs::read_to_string(machine.paths.host_token_hash()).unwrap(), right);
+}
+
+/// Recording the hash is no reason to restart the service: it does not read the file.
+#[test]
+fn recording_the_hash_alone_changes_nothing_the_service_reads() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    fs::remove_file(machine.paths.host_token_hash()).unwrap();
+
+    assert!(!machine.settings(None, Some(CODE)));
+}
+
+fn said_by_install_with(out: &mut Vec<u8>) -> Dialog<Cursor<&'static str>, &mut Vec<u8>, Vec<u8>> {
+    Dialog::new(Cursor::new(""), out, Vec::new(), false)
+}
+
+/// `install` is complete without `status` and without the README: what it ends with is `status`'s output, from the same
+/// function, below the line that says it worked.
+#[test]
+fn install_ends_with_installed_and_what_status_prints() {
+    let machine = Machine::new();
+    machine.settings(Some("myhost"), Some(CODE));
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&machine.paths)).unwrap(), false)
+        .unwrap();
+
+    let mut said = Vec::new();
+    closing(&manager, &machine.paths, &mut said_by_install_with(&mut said)).unwrap();
+
+    let mut status = Vec::new();
+    ops::status(&manager, &machine.paths, &mut status).unwrap();
+    let expected = format!(
+        "Reverse-tunnel v{} has been installed!\n{}",
+        env!("CARGO_PKG_VERSION"),
+        String::from_utf8(status).unwrap()
+    );
+    assert_eq!(String::from_utf8(said).unwrap(), expected);
+    assert!(expected.contains("\nhash: sha256:"), "{expected}");
+}
+
+fn pin_nobody_serves() -> download::Pin {
+    // The port of a listener that is gone: the connection is refused at once.
+    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/frp.tar.gz", gone.local_addr().unwrap()).leak();
+    download::Pin {
+        name: "frpc",
+        version: "9.9.9",
+        target: "x86_64-unknown-linux-gnu",
+        url,
+        sha256: "",
+        member: "frpc",
+    }
+}
+
+#[test]
+fn the_frpc_download_is_announced_before_it_starts() {
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.bin_dir).unwrap();
+    let mut said = Vec::new();
+
+    // The download fails (see `pin_nobody_serves`): the line is there because it came first.
+    let err = ensure_frpc(
+        &machine.paths,
+        &pin_nobody_serves(),
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("frp.tar.gz"), "{err:#}");
+    assert_eq!(String::from_utf8(said).unwrap(), "Downloading frpc v9.9.9...\n");
+}
+
+#[test]
+fn an_frpc_that_is_in_place_is_not_downloaded_or_announced() {
+    let machine = installed_machine();
+    let mut said = Vec::new();
+
+    ensure_frpc(
+        &machine.paths,
+        &pin_nobody_serves(),
+        &mut said_by_install_with(&mut said),
     )
     .unwrap();
-    fs::write(machine.config(), config).unwrap();
-    machine
-}
 
-#[test]
-fn registration_is_the_register_line_then_the_ssh_block() {
-    let machine = machine_with(
-        "host: myhost
-bridge: tunnel.example.test
-services:
-  ssh:
-    port: 22
-    type: tcp
-",
-    );
-    let expected = format!(
-        "Host is ready! Run this command on the bridge to accept the host:
-  uv run ctl add myhost {ZERO_TOKEN_HASH}
-
-To reach this host with ssh from another machine, add this to ~/.ssh/config there (it needs websocat; the README's \"Set up a client\" has the details: https://github.com/bindreams/reverse-tunnel#set-up-a-client):
-
-Host myhost
-    HostName ssh.myhost.tunnel.example.test
-    ProxyCommand websocat --binary wss://%h/
-"
-    );
-    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
-}
-
-#[test]
-fn registration_has_no_ssh_block_without_an_ssh_tcp_service() {
-    let machine = machine_with(
-        "host: myhost
-bridge: tunnel.example.test
-services:
-  web:
-    port: 80
-    type: http
-",
-    );
-    let expected = format!(
-        "Host is ready! Run this command on the bridge to accept the host:
-  uv run ctl add myhost {ZERO_TOKEN_HASH}
-"
-    );
-    assert_eq!(registration(&machine.paths, true).unwrap(), expected);
-}
-
-#[test]
-fn registration_of_an_existing_config_does_not_claim_the_host_is_new() {
-    let machine = machine_with("host: myhost\nbridge: tunnel.example.test\nservices: {}\n");
-    let expected =
-        format!("If the bridge does not know this host yet, run:\n  uv run ctl add myhost {ZERO_TOKEN_HASH}\n");
-    assert_eq!(registration(&machine.paths, false).unwrap(), expected);
+    assert_eq!(said, b"");
 }
 
 #[test]

@@ -219,10 +219,10 @@ COMMANDS = {
     ),
     "add": Command(
         _add,
-        "Register a host, so the bridge lets it in. Run the line that `reverse-tunnel install` printed on the host.",
+        "Register a host, so the bridge lets it in. Take its host and hash from `reverse-tunnel status` on the host.",
         {
-            "host": "the host's name, the first word after `ctl add` in the line `reverse-tunnel install` printed",
-            "hash": "the host's token hash, `sha256:` and 64 hex digits, the last word of the same line",
+            "host": "the host's name: the `host:` line of `reverse-tunnel status` on the host",
+            "hash": "the host's token hash, `sha256:` and 64 hex digits: the `hash:` line of the same output",
         },
     ),
     "revoke": Command(

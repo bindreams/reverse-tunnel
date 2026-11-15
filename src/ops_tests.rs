@@ -50,6 +50,52 @@ fn status_shows_domain_and_fingerprint_not_token() {
     assert!(text.ends_with("frpc log: no log yet\n"), "{text}");
 }
 
+const TOKEN_HASH: &str = "sha256:60e05bd1b195af2f94112fa7197a5c88289058840ce7c6df9693756bc6250f55";
+
+/// The two arguments of `ctl add` are the `host` and `hash` lines, in that order, so that they read as one.
+#[test]
+fn status_shows_the_recorded_hash_right_after_the_host() {
+    let (_dir, paths) = host();
+    fs::write(paths.host_token_hash(), format!("{TOKEN_HASH}\n")).unwrap();
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
+
+    let text = status_text(&manager, &paths);
+
+    assert!(
+        text.contains(&format!(
+            "\nhost: testhost\nhash: {TOKEN_HASH}\nbridge: tunnel.example.test\n"
+        )),
+        "{text}"
+    );
+}
+
+/// An install from before the hash was recorded: `status` has no admin rights to compute it, and says what records it.
+#[test]
+fn status_says_when_the_hash_is_not_recorded_yet() {
+    let (_dir, paths) = host();
+    fs::write(paths.host_token(), "host-secret\n").unwrap();
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
+
+    let text = status_text(&manager, &paths);
+
+    assert!(
+        text.contains(
+            "\nhost: testhost\nhash: not recorded yet; run `reverse-tunnel install` (elevated) to record it\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        !text.contains("sha256:"),
+        "status must not compute the hash from the token: {text}"
+    );
+}
+
 /// The host's `status` with the service in `state`, after `make_log` has made what is at frpc's log's path.
 fn status_with(state: State, make_log: impl FnOnce(&Path)) -> String {
     let (_dir, paths) = host();
