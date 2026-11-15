@@ -42,15 +42,15 @@ Setting up a system-wide reverse tunnel service.
 Hostname [minicooper]:
 Join code (run `uv run ctl join-code` on the bridge; an empty line gives up):
 Downloading frpc v0.71.1...
-Starting the service; if you are connected through this tunnel, the connection drops now...
+Restarting the service; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
 ```
 
 Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts.
-So is the start of the service by `install`, `upgrade` and `reverse-tunnel restart`: a restart, which kills the service
-for its service manager to start again, says that the connection through the tunnel drops. An `install` that changed
-nothing says `Starting the service...` only if it finds the service not running. Over the tunnel the connection drops at
-the restart, so the lines after the notice may not reach you.
+So is the restart of the service by `install`, `upgrade` and `reverse-tunnel restart`, which kills it for its service
+manager to start again (on a first install it is a start) and says that the connection through the tunnel drops. An
+`install` that changed nothing says `Starting the service...` only if it finds the service not running. Over the tunnel
+the connection drops at the restart, so the lines after the notice may not reach you.
 
 Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The join
 code may be pasted wrapped over several lines. On a host that already has a `config.yaml`, `install` asks no host name
@@ -228,7 +228,7 @@ whole of what `upgrade` ends with:
 $ sudo reverse-tunnel upgrade
 Checking for a new version...
 Downloading v0.1.1...
-Starting the service; if you are connected through this tunnel, the connection drops now...
+Restarting the service; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
 ```
 

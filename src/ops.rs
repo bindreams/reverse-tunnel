@@ -76,7 +76,7 @@ fn check_and_restart_as(
     writeln_best_effort(
         out,
         match outcome {
-            RestartOutcome::Killed => "The service was stopped; its service manager starts it again.",
+            RestartOutcome::Killed => "The service is restarting: its service manager starts it again.",
             RestartOutcome::Started => "The service was not running; it is started.",
         },
     );
@@ -166,6 +166,7 @@ fn service_identity() -> Result<Option<RunAs>> {
 /// How `restart` had the service run again.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
+    /// It was running: the kill was sent, and its service manager starts it again, which may not have happened yet.
     Killed,
     /// It was not running: the kill found nothing, and it was started.
     Started,
@@ -188,10 +189,10 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Said before the restart; true whether or not the service was running, and warns a session over the tunnel, which the
-/// kill ends.
+/// Said before the restart; warns a session over the tunnel, which the kill ends. On a first install, where nothing
+/// runs yet, the restart is a start.
 pub const RESTART_NOTICE: &str =
-    "Starting the service; if you are connected through this tunnel, the connection drops now...";
+    "Restarting the service; if you are connected through this tunnel, the connection drops now...";
 
 /// `restart` for a service that must run what is in place now. Writes `RESTART_NOTICE` to `out` and flushes it, then
 /// removes the restart marker and kills with nothing between: the marker survives whatever the write waits on, and
