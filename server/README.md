@@ -39,6 +39,21 @@ After `uv run ctl add`, the host is registered; the next step is to reach it fro
   `%ProgramData%\reverse-tunnel\logs` on Windows) shows `login to server success`. "host not registered" means
   `uv run ctl add` has not been run for it.
 
+## Upgrade
+
+In this folder, a git checkout of the bridge:
+
+1. `git describe --tags` names the release running now; `git fetch --tags && git checkout <new tag>` moves to the
+   new one. Hosts upgrade on their own schedule, with `reverse-tunnel upgrade`.
+2. `uv run ctl init` builds and updates the plugin. It keeps a running `reverse-tunnel-frps` as it is, and says so.
+3. Apply frps's changes. Each of these drops every tunnel once; hosts reconnect on their own.
+   - `docker compose up -d --build reverse-tunnel-frps` applies a change to its image, `compose.yaml` or `.env`. It
+     prints `Recreated` when there was one, and `Running` when there was none.
+   - frps reads `etc/` only at start. If `git diff --stat <old tag> <new tag> -- etc` lists a file and frps was not
+     recreated, run `docker compose restart reverse-tunnel-frps`.
+4. `uv run ctl list` shows each host's presence. `unknown` for every host, with a reason about frps's API, means frps
+   has not read the new `etc/`: see step 3.
+
 ## Teardown
 
 `docker compose down` removes the containers and the private network; `.env`, `tls/` and `state/` stay, so
@@ -47,8 +62,8 @@ retry forever; uninstall them with `reverse-tunnel uninstall`.
 
 ## Footguns
 
-- Restarting or recreating `reverse-tunnel-frps` drops every tunnel once; hosts reconnect on their own. `etc/` is
-  mounted but frps reads it only at start, so after a `git pull` that changed it, run
+- Restarting or recreating `reverse-tunnel-frps` drops every tunnel once; hosts reconnect on their own. frps reads
+  `etc/` only at start: after any change to it, not only an [upgrade](#upgrade), run
   `docker compose restart reverse-tunnel-frps`.
 - Every host trusts the certificate in `tls/trust.pem`. Deleting `tls/` or replacing the certificate outside the
   procedure below locks every host out; `ctl` refuses to regenerate it.
