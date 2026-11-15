@@ -7,6 +7,8 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -189,6 +191,9 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// How often `wait_until_gone` reads the status again.
+const KILL_POLL: Duration = Duration::from_millis(100);
+
 /// Said before the restart; true whether or not the service was running, and warns a session over the tunnel, which the
 /// kill ends.
 pub const RESTART_NOTICE: &str =
@@ -216,12 +221,16 @@ pub fn restart_pending(
 }
 
 /// Has the service run again. It is killed, never stopped first, because run over the tunnel the stop cuts this session
-/// and the start never comes; then it is started, which waits until it runs, so that what follows sees the new process.
-/// If the manager's own restart after the kill got there first, the start finds it running. A service that is not
-/// running is started.
+/// and the start never comes, and if this process dies after the kill the manager's restart policy still brings the
+/// service back. systemd and launchd return from the kill once the signal is sent, so the killed process is waited
+/// for (`wait_until_gone`) before the start, which waits until the service runs, so that what follows sees the new
+/// process. If the manager's own restart got there first, the start finds it running. A service that is not running
+/// is started.
 pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
+    let killed = manager.status(id)?.pid;
     match manager.kill(id) {
         Ok(()) => {
+            wait_until_gone(manager, id, killed)?;
             manager.start(id, Budget::Unbounded)?;
             Ok(RestartOutcome::Restarted)
         }
@@ -231,6 +240,17 @@ pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> 
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Waits, with no cap, until the manager's status no longer reports `pid`, the process that was killed (none known:
+/// nothing to wait for). It ends because the kill is SIGKILL. A status that cannot be read is an error, and the
+/// manager's restart policy then brings the service back.
+fn wait_until_gone(manager: &dyn ServiceManager, id: &Id, pid: Option<u32>) -> Result<()> {
+    let Some(pid) = pid else { return Ok(()) };
+    while manager.status(id)?.pid == Some(pid) {
+        thread::sleep(KILL_POLL);
+    }
+    Ok(())
 }
 
 /// Never prints a token, only the hash of the host's (see `recorded_hash`): the log it ends with holds none.

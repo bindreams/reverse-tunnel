@@ -54,8 +54,8 @@ certificate: SHA-256 AB:CD:...
 
 Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts.
 So is the start of the service by `install`, `upgrade` and `reverse-tunnel restart`: a restart, which kills the service
-and starts it again, says that the connection through the tunnel drops; when nothing changed, a service that is not running
-is started after `Starting the service...`, and one that is running is left alone, in silence.
+and starts it again, says that the connection through the tunnel drops. An `install` that changed nothing says
+`Starting the service...` only if it finds the service not running.
 `install` ends with the service running again, so the status it prints is of the new process, and
 `reverse-tunnel restart` says afterwards what it did. Over the tunnel the connection drops at the restart, so that line
 and the ones after it may not reach you.

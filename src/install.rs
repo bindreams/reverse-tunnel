@@ -1186,8 +1186,8 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 }
 
 /// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, after announcing it
-/// (`RESTART_NOTICE`), whatever the service was doing, since over the tunnel it ends the session. Without a change it is
-/// started, which leaves a running service alone and silent; one that is not running is announced, as the start can
+/// (`RESTART_NOTICE`), whatever the service was doing, since over the tunnel it ends the session. Without a change it
+/// is started, which leaves a running service alone and silent; one that is not running is announced, as the start can
 /// take a while. Nothing drops then, so the line has no warning.
 fn pick_up<I: BufRead, O: Write, P: Write>(
     manager: &dyn ServiceManager,
