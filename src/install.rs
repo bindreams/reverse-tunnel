@@ -1199,7 +1199,7 @@ fn pick_up<I: BufRead, O: Write, P: Write>(
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }
-    let Err(failed) = ops::restart_pending(manager, id, paths, &mut dialog.out) else {
+    let Err(failed) = ops::restart_pending(manager, id, paths, dialog.out()) else {
         return Ok(());
     };
     let err = failed.error;

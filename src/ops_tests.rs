@@ -294,7 +294,7 @@ fn restart_with_a_passing_check_kills_the_service() {
     // The notice comes before the kill: a restart over the tunnel ends the session that would read more.
     assert_eq!(
         String::from_utf8(said.text).unwrap(),
-        format!("{RESTART_NOTICE}\nThe service was restarted.\n")
+        format!("{RESTART_NOTICE}\nThe service was stopped; its service manager starts it again.\n")
     );
     assert_eq!(said.calls_at_first_write, Some(0), "said before the kill");
 }

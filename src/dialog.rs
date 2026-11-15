@@ -15,8 +15,7 @@ const HOST_RULE: &str = "lowercase letters, digits and hyphens, not starting or 
 
 pub struct Dialog<I, O, P> {
     input: I,
-    /// The results; `pick_up` hands it to `restart_pending`.
-    pub(crate) out: O,
+    out: O,
     prompts: P,
     interactive: bool,
 }

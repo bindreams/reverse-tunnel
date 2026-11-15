@@ -76,7 +76,7 @@ fn check_and_restart_as(
     writeln_best_effort(
         out,
         match outcome {
-            RestartOutcome::Killed => "The service was restarted.",
+            RestartOutcome::Killed => "The service was stopped; its service manager starts it again.",
             RestartOutcome::Started => "The service was not running; it is started.",
         },
     );
@@ -195,7 +195,8 @@ pub const RESTART_NOTICE: &str =
 
 /// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
 /// nothing that runs after the kill is sure to run; it is put back if the service was not picked up. Once the marker is
-/// removed it writes `RESTART_NOTICE` to `out` and flushes, then kills: a failed removal prints nothing. A failure to
+/// removed it writes `RESTART_NOTICE` to `out` and flushes it out of this process (a session the kill ends may still
+/// lose it), then kills: a failed removal prints nothing. A failure to
 /// print does not stop the restart.
 pub fn restart_pending(
     manager: &dyn ServiceManager,
