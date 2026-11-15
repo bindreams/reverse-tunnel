@@ -679,14 +679,17 @@ fn rejoin_takes_effect() {
     machine.install(&join_code("old.example.test"));
     let rendered = machine.paths.log_dir.join("frpc.toml");
     wait_until("the supervisor renders its first start", || rendered.exists());
-    let supervisor = machine.status().pid;
+    let supervisor = machine.status().pid.expect("a running service has a pid");
 
     machine.install(&join_code("new.example.test"));
 
+    // At once, with no wait: `install` returns with the new process running, as the status it ends with shows.
+    let status = machine.status();
+    assert_eq!(status.state, State::Running);
+    assert!(status.pid.is_some_and(|pid| pid != supervisor), "{:?}", status.pid);
     wait_until("the supervisor starts again with the new domain", || {
         fs::read_to_string(&rendered).is_ok_and(|text| text.contains("serverAddr = \"new.example.test\""))
     });
-    assert_ne!(machine.status().pid, supervisor);
 }
 
 /// Runs `session` (which must run `uninstall`, on an installed machine), after `begin` has been given it, until the

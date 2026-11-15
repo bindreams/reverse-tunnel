@@ -6,7 +6,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::service;
-use crate::test_support::NotesCalls;
+use crate::test_support::NotesAtFirstWrite;
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 /// SHA-256 of `CERT`'s DER.
@@ -281,62 +281,81 @@ fn restart_with_a_failing_check_leaves_the_service_alone() {
 /// service runs.
 #[cfg(unix)]
 #[test]
-fn restart_with_a_passing_check_kills_the_service() {
+fn restart_with_a_passing_check_restarts_the_service() {
     let (_dir, paths, manager) = host_checked_by_stub("pass");
     let id = service::id();
 
-    let mut said = NotesCalls::new(&manager);
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
 
     check_and_restart_as(&manager, &paths, &service::exe(&paths), as_current_user(), &mut said).unwrap();
 
-    assert_eq!(manager.calls(), [("kill", id.to_string())]);
+    assert_eq!(manager.calls(), [("kill", id.to_string()), ("start", id.to_string())]);
     assert!(!pending_file(&paths).exists());
-    // The notice comes before the kill: a restart over the tunnel ends the session that would read more.
     assert_eq!(
         String::from_utf8(said.text).unwrap(),
-        format!("{RESTART_NOTICE}\nThe service was stopped; its service manager starts it again.\n")
+        format!("{RESTART_NOTICE}\nThe service was restarted.\n")
     );
-    assert_eq!(said.calls_at_first_write, Some(0), "said before the kill");
+    assert_eq!(said.at_first_write, Some(0), "said before the kill");
 }
 
-/// The marker is gone and the notice is out before the kill, so that a session cut by the kill has both.
+/// The notice is out while the marker is still there, so that waiting on a stalled stdout cannot lose the marker; the
+/// marker is gone before the kill, so that a session cut by the kill has both.
 #[test]
-fn restart_pending_removes_the_marker_then_says_the_notice_then_kills() {
+fn restart_pending_says_the_notice_then_removes_the_marker_then_restarts() {
     let (_dir, paths) = host();
     mark_pending(&paths).unwrap();
     let manager = Fake::default();
     let spec = service::spec(&service::exe(&paths)).unwrap();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
-    let mut said = NotesCalls::new(&manager);
+    let mut said = NotesAtFirstWrite::new(|| (pending_file(&paths).exists(), manager.calls().len()));
 
     let outcome = restart_pending(&manager, &spec.id, &paths, &mut said).ok().unwrap();
 
-    assert_eq!(outcome, RestartOutcome::Killed);
+    assert_eq!(outcome, RestartOutcome::Restarted);
     assert!(!pending_file(&paths).exists());
     assert_eq!(String::from_utf8(said.text).unwrap(), format!("{RESTART_NOTICE}\n"));
-    assert_eq!(said.calls_at_first_write, Some(0), "said before the kill");
-    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
+    assert_eq!(
+        said.at_first_write,
+        Some((true, 0)),
+        "said with the marker there, before the kill"
+    );
+    let id = spec.id.to_string();
+    assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
 }
 
-/// A marker that cannot be removed ends it before the notice: nothing is said and nothing is killed.
-#[cfg(unix)]
+/// `paths` whose restart marker cannot be removed: removing it fails with something but NotFound, which is success.
+fn with_an_unremovable_marker(paths: Paths) -> Paths {
+    #[cfg(unix)]
+    {
+        // The config dir is a file.
+        fs::remove_dir_all(&paths.config_dir).unwrap();
+        fs::write(&paths.config_dir, "").unwrap();
+        paths
+    }
+    #[cfg(windows)]
+    {
+        // A name Windows refuses (ERROR_INVALID_NAME).
+        let mut paths = paths;
+        paths.config_dir = paths.config_dir.with_file_name("no?such");
+        paths
+    }
+}
+
+/// A marker that cannot be removed ends the restart after the notice, which came first: with an error, and no kill.
 #[test]
-fn restart_pending_says_nothing_when_the_marker_cannot_be_removed() {
+fn restart_pending_fails_after_the_notice_when_the_marker_cannot_be_removed() {
     let (_dir, paths) = host();
-    // The config dir is a file, so the marker's path is not a path: removing it fails with something but NotFound.
-    fs::remove_dir_all(&paths.config_dir).unwrap();
-    fs::write(&paths.config_dir, "").unwrap();
+    let paths = with_an_unremovable_marker(paths);
     let manager = Fake::default();
     let spec = service::spec(&service::exe(&paths)).unwrap();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
-    let mut said = NotesCalls::new(&manager);
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
 
     assert!(restart_pending(&manager, &spec.id, &paths, &mut said).is_err());
 
-    assert_eq!(said.text, b"");
-    assert_eq!(said.calls_at_first_write, None);
+    assert_eq!(String::from_utf8(said.text).unwrap(), format!("{RESTART_NOTICE}\n"));
     assert_eq!(manager.calls(), []);
 }
 
@@ -381,7 +400,7 @@ fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
 }
 
 #[test]
-fn restart_says_whether_it_killed_or_started_the_service() {
+fn restart_starts_a_service_it_killed_and_one_that_was_not_running() {
     let (_dir, paths) = host();
     let manager = Fake::default();
     let spec = service::spec(&service::exe(&paths)).unwrap();
@@ -389,8 +408,11 @@ fn restart_says_whether_it_killed_or_started_the_service() {
     let id = &spec.id;
 
     assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Started);
+    assert_eq!(manager.calls(), [("kill", id.to_string()), ("start", id.to_string())]);
     manager.seed_state(id.as_str(), State::Running);
-    assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Killed);
+    assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Restarted);
+    // The Fake's kill leaves a service failed, as a manager does until its own restart: the start has it running.
+    assert_eq!(manager.status(id).unwrap().state, State::Running);
 }
 
 #[test]

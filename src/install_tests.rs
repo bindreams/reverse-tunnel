@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::config::Kind;
-use crate::test_support::{CODE, NotesCalls, host_dirs, wrapped};
+use crate::test_support::{CODE, Closed, NotesAtFirstWrite, host_dirs, wrapped};
 
 const CERT: &str = include_str!("../server/testdata/bridge.pem");
 
@@ -147,9 +147,30 @@ fn a_failure_in_the_closing_output_is_said_on_stderr_and_does_not_fail_install()
         warned.contains("the install is done, but showing its status failed"),
         "{warned}"
     );
-    // `status` is what failed: the warning does not send the user to it.
     assert!(!warned.contains("`reverse-tunnel status`"), "{warned}");
     assert!(warned.contains("config.yaml"), "{warned}");
+}
+
+/// The first line of the closing output fails: that is said on stderr, with where the output is, and `status` is not
+/// run, since nothing could show what it prints.
+#[test]
+fn a_failure_of_the_installed_line_is_said_on_stderr_and_skips_status() {
+    let machine = Machine::new();
+    let mut warned = Vec::new();
+
+    closing(
+        &Fake::default(),
+        &machine.paths,
+        &mut Dialog::new(Cursor::new(""), Closed, &mut warned, false),
+    );
+
+    let warned = String::from_utf8(warned).unwrap();
+    assert!(
+        warned.contains("the install is done, but its closing output failed"),
+        "{warned}"
+    );
+    assert!(warned.contains("`reverse-tunnel status` shows it"), "{warned}");
+    assert!(!warned.contains("showing its status failed"), "{warned}");
 }
 
 /// `install` is complete without `status` and without the README: what it ends with is `status`'s output, from the same
@@ -196,7 +217,6 @@ fn the_frpc_download_is_announced_before_it_starts() {
     fs::create_dir(&machine.paths.bin_dir).unwrap();
     let mut said = Vec::new();
 
-    // The download fails (see `pin_nobody_serves`): the line is there because it came first.
     let err = ensure_frpc(
         &machine.paths,
         &pin_nobody_serves(),
@@ -206,6 +226,22 @@ fn the_frpc_download_is_announced_before_it_starts() {
 
     assert!(format!("{err:#}").contains("frp.tar.gz"), "{err:#}");
     assert_eq!(String::from_utf8(said).unwrap(), "Downloading frpc v9.9.9...\n");
+}
+
+/// The line is information: a closed stdout does not stop the download that follows it.
+#[test]
+fn a_closed_stdout_does_not_stop_the_frpc_download() {
+    let machine = Machine::new();
+    fs::create_dir(&machine.paths.bin_dir).unwrap();
+
+    let err = ensure_frpc(
+        &machine.paths,
+        &pin_nobody_serves(),
+        &mut Dialog::new(Cursor::new(""), Closed, Vec::new(), false),
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("frp.tar.gz"), "{err:#}");
 }
 
 #[test]
@@ -505,7 +541,7 @@ fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
 }
 
 #[test]
-fn unchanged_install_leaves_a_running_service_alone() {
+fn unchanged_install_leaves_a_running_service_alone_and_says_nothing() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
@@ -524,7 +560,31 @@ fn unchanged_install_leaves_a_running_service_alone() {
     .unwrap();
 
     assert_eq!(manager.calls(), [("start", spec.id.to_string())]);
-    assert_eq!(said, b"", "nothing restarts, so nothing is announced");
+    assert_eq!(said, b"");
+}
+
+/// A start can take a while, so it is announced; nothing runs, so there is no connection to warn.
+#[test]
+fn unchanged_install_announces_the_start_of_a_service_that_is_not_running() {
+    let machine = Machine::new();
+    let spec = service::spec(&service::exe(&machine.paths)).unwrap();
+    let manager = Fake::default();
+    manager.install(&spec, false).unwrap();
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
+
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        false,
+        &mut Dialog::new(Cursor::new(""), &mut said, Vec::new(), false),
+    )
+    .unwrap();
+
+    assert_eq!(String::from_utf8(said.text).unwrap(), "Starting the service...\n");
+    assert_eq!(said.at_first_write, Some(0), "said before the start");
+    assert_eq!(manager.calls(), [("start", spec.id.to_string())]);
+    assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
 }
 
 /// The notice comes first on a first install too: the service is not running, and the kill finds nothing.
@@ -534,7 +594,7 @@ fn kill_not_running_starts() {
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
-    let mut said = NotesCalls::new(&manager);
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
 
     pick_up(
         &manager,
@@ -550,19 +610,20 @@ fn kill_not_running_starts() {
         String::from_utf8(said.text).unwrap(),
         format!("{}\n", ops::RESTART_NOTICE)
     );
-    assert_eq!(said.calls_at_first_write, Some(0), "said before the kill and the start");
+    assert_eq!(said.at_first_write, Some(0), "said before the kill and the start");
     let id = spec.id.to_string();
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
 }
 
+/// The start after the kill has the service running again when `pick_up` returns, so the status that follows shows it.
 #[test]
-fn restarting_a_running_service_is_announced_before_the_kill() {
+fn restarting_a_running_service_is_announced_before_the_kill_and_ends_with_it_running() {
     let machine = Machine::new();
     let spec = service::spec(&service::exe(&machine.paths)).unwrap();
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
-    let mut said = NotesCalls::new(&manager);
+    let mut said = NotesAtFirstWrite::new(|| manager.calls().len());
 
     pick_up(
         &manager,
@@ -577,8 +638,10 @@ fn restarting_a_running_service_is_announced_before_the_kill() {
         String::from_utf8(said.text).unwrap(),
         format!("{}\n", ops::RESTART_NOTICE)
     );
-    assert_eq!(said.calls_at_first_write, Some(0), "said before the kill");
-    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
+    assert_eq!(said.at_first_write, Some(0), "said before the kill");
+    let id = spec.id.to_string();
+    assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
+    assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
 }
 
 #[test]
@@ -595,14 +658,12 @@ fn restart_failure_is_retried_by_install() {
     )
     .unwrap_err();
 
-    // The notice went out before the restart that failed.
     assert_eq!(String::from_utf8(said).unwrap(), format!("{}\n", ops::RESTART_NOTICE));
 
     assert!(
         format!("{err:#}").contains("run `reverse-tunnel install` again"),
         "{err:#}"
     );
-    // The host and hash are in `status`, whatever became of the restart.
     assert!(
         format!("{err:#}").contains("`reverse-tunnel status` shows the host and hash"),
         "{err:#}"

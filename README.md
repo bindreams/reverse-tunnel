@@ -53,9 +53,12 @@ certificate: SHA-256 AB:CD:...
 ```
 
 Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts.
-So is the start of the service by `install`, `upgrade` and `reverse-tunnel restart` (a restart when it was running), and
-`reverse-tunnel restart` says afterwards what it did. Over the tunnel the connection drops there, so that line and the
-ones after it may not reach you.
+So is the start of the service by `install`, `upgrade` and `reverse-tunnel restart`: a restart, which kills the service
+and starts it again, says that the connection through the tunnel drops; when nothing changed, a service that is not running
+is started after `Starting the service...`, and one that is running is left alone, in silence.
+`install` ends with the service running again, so the status it prints is of the new process, and
+`reverse-tunnel restart` says afterwards what it did. Over the tunnel the connection drops at the restart, so that line
+and the ones after it may not reach you.
 
 Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The join
 code may be pasted wrapped over several lines. On a host that already has a `config.yaml`, `install` asks no host name
@@ -182,7 +185,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 | `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. When rotations may have removed lines before it could show them (its output stalled while the log rotated more than once), it says so on stderr. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
-| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops, stops the service so its manager starts it again with the new settings, and says so. Works over the tunnel. |
+| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops, kills the service and starts it again with the new settings (it returns once the service runs), and says so. Works over the tunnel. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
 

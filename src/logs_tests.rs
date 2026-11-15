@@ -5,6 +5,7 @@ use std::thread;
 
 use super::*;
 use crate::logfile::LogFile;
+use crate::test_support::Closed;
 
 fn shown(path: &Path, lines: Option<usize>) -> String {
     let mut out = Vec::new();
@@ -102,15 +103,6 @@ fn show_without_a_log_says_so() {
 /// `logs | head` closes its input while `logs -f` runs on; that is the reader leaving, not a failure.
 #[test]
 fn show_ends_quietly_when_the_output_is_closed() {
-    struct Closed;
-    impl Write for Closed {
-        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::ErrorKind::BrokenPipe.into())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("frpc.log");
     fs::write(&log, "one\n").unwrap();

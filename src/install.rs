@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use goetia::decide::Outcome;
-use goetia::manager::{Budget, ServiceManager};
+use goetia::manager::{Budget, ServiceManager, State};
 use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
@@ -146,8 +146,8 @@ pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut D
 }
 
 /// What `install` ends with: that the running binary's version is installed, then what `status` prints, from the same
-/// function, so that `install` needs no other command to show how it went. The files are in place and the service is
-/// restarted by now, so a failure here is reported on stderr and does not fail the install.
+/// function. The files are in place and the service is restarted by now, so a failure here is reported on stderr and
+/// does not fail the install.
 fn closing<I: BufRead, O: Write, P: Write>(manager: &dyn ServiceManager, paths: &Paths, dialog: &mut Dialog<I, O, P>) {
     let said = dialog.say(&format!(
         "Reverse-tunnel v{} has been installed!",
@@ -985,8 +985,8 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
 }
 
 /// Writes the hash of the host token, which is no secret, where `status` reads it without the right to read the token
-/// (see `Paths::host_token_hash`). On every run, from the token that is there: it cannot disagree with it, and an
-/// install from before the hash was recorded gets it. The service does not read it, so it never counts as a change.
+/// (see `Paths::host_token_hash`). On every run, from the token that is there, so it cannot disagree with it. The
+/// service does not read it, so it never counts as a change.
 fn record_host_token_hash(paths: &Paths) -> Result<()> {
     let token_file = paths.host_token();
     let token = fs::read_to_string(&token_file).with_context(|| format!("reading {}", token_file.display()))?;
@@ -1085,7 +1085,7 @@ fn ensure_frpc<I: BufRead, O: Write, P: Write>(
     if frpc.try_exists()? {
         return restore_binary(&frpc);
     }
-    dialog.say(&format!("Downloading {} v{}...", pin.name, pin.version))?;
+    output::writeln_best_effort(dialog.out(), &format!("Downloading {} v{}...", pin.name, pin.version));
     download::fetch(pin, &paths.bin_dir)?;
     Ok(())
 }
@@ -1185,9 +1185,10 @@ fn revoke_line(paths: &Paths) -> Result<String> {
     ))
 }
 
-/// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is
-/// started, which leaves a running service alone. `restart_pending` announces the restart before it, whatever the
-/// service was doing, since over the tunnel it ends the session.
+/// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, after announcing it
+/// (`RESTART_NOTICE`), whatever the service was doing, since over the tunnel it ends the session. Without a change it is
+/// started, which leaves a running service alone and silent; one that is not running is announced, as the start can
+/// take a while. Nothing drops then, so the line has no warning.
 fn pick_up<I: BufRead, O: Write, P: Write>(
     manager: &dyn ServiceManager,
     id: &Id,
@@ -1196,6 +1197,10 @@ fn pick_up<I: BufRead, O: Write, P: Write>(
     dialog: &mut Dialog<I, O, P>,
 ) -> Result<()> {
     if !changed {
+        // A status that cannot be read says nothing of a running service: the start that follows reports its own error.
+        if !matches!(manager.status(id), Ok(status) if status.state == State::Running) {
+            output::writeln_best_effort(dialog.out(), "Starting the service...");
+        }
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }

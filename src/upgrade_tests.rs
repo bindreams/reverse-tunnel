@@ -6,6 +6,7 @@ use std::thread;
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::test_support::Closed;
 
 const ASSET: &str = "reverse-tunnel-x86_64-unknown-linux-gnu";
 const BINARY: &[u8] = b"the newer build";
@@ -70,10 +71,9 @@ fn sha256sums_parsing() {
     }
 }
 
-#[test]
-fn fetch_release_resolves_the_tag_once() {
-    let download = "/releases/download/v7";
-    let (base, seen) = serve(vec![
+/// The routes of the release `v7` whose `SHA256SUMS` lists `BINARY`, and which serves `served` as the binary.
+fn release_serving(served: &[u8]) -> Vec<Route> {
+    vec![
         ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
         ("/releases/tag/v7", 200, None, b"the release page".to_vec()),
         (
@@ -86,9 +86,15 @@ fn fetch_release_resolves_the_tag_once() {
             "/releases/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
             200,
             None,
-            BINARY.to_vec(),
+            served.to_vec(),
         ),
-    ]);
+    ]
+}
+
+#[test]
+fn fetch_release_resolves_the_tag_once() {
+    let download = "/releases/download/v7";
+    let (base, seen) = serve(release_serving(BINARY));
 
     let got = fetch_release(&base, ASSET, &mut io::sink()).unwrap();
 
@@ -108,7 +114,6 @@ fn said_while_fetching(routes: Vec<Route>) -> (String, Result<Vec<u8>>) {
 
 #[test]
 fn the_check_is_announced_before_it_is_made_and_the_download_before_it_starts() {
-    // Each line is there although the step after it fails: it was said before that step.
     let (said, fetched) = said_while_fetching(vec![("/releases/latest", 404, None, vec![])]);
     fetched.unwrap_err();
     assert_eq!(said, "Checking for a new version...\n");
@@ -122,24 +127,19 @@ fn the_check_is_announced_before_it_is_made_and_the_download_before_it_starts() 
     assert_eq!(said, "Checking for a new version...\nDownloading v7...\n");
 }
 
+/// The lines are information: a stdout that is closed does not abort an upgrade.
+#[test]
+fn a_closed_stdout_does_not_stop_the_download() {
+    let (base, _) = serve(release_serving(BINARY));
+
+    let got = fetch_release(&base, ASSET, &mut Closed).unwrap();
+
+    assert_eq!(got, BINARY);
+}
+
 #[test]
 fn upgrade_rejects_bad_release_digest() {
-    let (base, _) = serve(vec![
-        ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
-        ("/releases/tag/v7", 200, None, b"the release page".to_vec()),
-        (
-            "/releases/download/v7/SHA256SUMS",
-            200,
-            None,
-            sums_line(BINARY, "  ").into_bytes(),
-        ),
-        (
-            "/releases/download/v7/reverse-tunnel-x86_64-unknown-linux-gnu",
-            200,
-            None,
-            b"a tampered build".to_vec(),
-        ),
-    ]);
+    let (base, _) = serve(release_serving(b"a tampered build"));
 
     let err = fetch_release(&base, ASSET, &mut io::sink()).unwrap_err();
 

@@ -76,7 +76,7 @@ fn check_and_restart_as(
     writeln_best_effort(
         out,
         match outcome {
-            RestartOutcome::Killed => "The service was stopped; its service manager starts it again.",
+            RestartOutcome::Restarted => "The service was restarted.",
             RestartOutcome::Started => "The service was not running; it is started.",
         },
     );
@@ -166,7 +166,8 @@ fn service_identity() -> Result<Option<RunAs>> {
 /// How `restart` had the service run again.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
-    Killed,
+    /// It was running: it was killed, and it runs again.
+    Restarted,
     /// It was not running: the kill found nothing, and it was started.
     Started,
 }
@@ -188,38 +189,42 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// What `restart_pending` says before it restarts: true whether the service was running or not, and for a session over
-/// the tunnel, which the kill ends.
+/// Said before the restart; true whether or not the service was running, and warns a session over the tunnel, which the
+/// kill ends.
 pub const RESTART_NOTICE: &str =
     "Starting the service; if you are connected through this tunnel, the connection drops now...";
 
-/// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
-/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up. Once the marker is
-/// removed it writes `RESTART_NOTICE` to `out` and flushes it out of this process (a session the kill ends may still
-/// lose it), then kills: a failed removal prints nothing. A failure to
-/// print does not stop the restart.
+/// `restart` for a service that must run what is in place now. Writes `RESTART_NOTICE` to `out` and flushes it, then
+/// removes the restart marker and kills with nothing between: the marker survives whatever the write waits on, and
+/// nothing that runs after the kill is sure to run. The marker is put back if the service was not picked up. A print
+/// failure does not stop the restart; a failed removal does, after the notice.
 pub fn restart_pending(
     manager: &dyn ServiceManager,
     id: &Id,
     paths: &Paths,
     out: &mut impl Write,
 ) -> Result<RestartOutcome, NotRestarted> {
+    writeln_best_effort(out, RESTART_NOTICE);
+    let _ = out.flush();
     if let Err(error) = remove_entry(&pending_file(paths)) {
         return Err(NotRestarted { error, marker: Ok(()) });
     }
-    writeln_best_effort(out, RESTART_NOTICE);
-    let _ = out.flush();
     restart(manager, id).map_err(|error| NotRestarted {
         error,
         marker: mark_pending(paths),
     })
 }
 
-/// Has the service run again. It is killed, and the manager starts it again; it is never stopped first, because run
-/// over the tunnel the stop cuts this session and the start never comes. A service that is not running is started.
+/// Has the service run again. It is killed, never stopped first, because run over the tunnel the stop cuts this session
+/// and the start never comes; then it is started, which waits until it runs, so that what follows sees the new process.
+/// If the manager's own restart after the kill got there first, the start finds it running. A service that is not
+/// running is started.
 pub fn restart(manager: &dyn ServiceManager, id: &Id) -> Result<RestartOutcome> {
     match manager.kill(id) {
-        Ok(()) => Ok(RestartOutcome::Killed),
+        Ok(()) => {
+            manager.start(id, Budget::Unbounded)?;
+            Ok(RestartOutcome::Restarted)
+        }
         Err(err) if matches!(err.cause(), goetia::Error::NotRunning { .. }) => {
             manager.start(id, Budget::Unbounded)?;
             Ok(RestartOutcome::Started)
@@ -267,9 +272,8 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     write_log_tail(&paths.frpc_log(), state.state, out)
 }
 
-/// The host token's hash that `install` recorded, which `ctl add` takes with the host's name; `None` for an install from
-/// before it was recorded: the token itself is not for `status` to read. A file that cannot be read is an error, which
-/// `status` says on the line, as the log's is: it still has the rest to show.
+/// The host token's hash that `install` recorded, which `ctl add` takes with the host's name, or `None` if absent (an
+/// older install; `status` cannot read the token). A read error is returned and shown on the `hash:` line.
 fn recorded_hash(paths: &Paths) -> Result<Option<String>> {
     let file = paths.host_token_hash();
     match fs::read_to_string(&file) {

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, ensure};
 
 use crate::download::{STALL, SUMS_FILE, asset_name, download, host_target, resolve, verify_digest};
 use crate::files::{Perm, apply, remove_entry};
+use crate::output::writeln_best_effort;
 use crate::paths::Paths;
 
 const RELEASES: &str = "https://github.com/bindreams/reverse-tunnel/releases";
@@ -79,10 +80,10 @@ fn install_with(exe: &Path) -> Result<()> {
 }
 
 /// The latest release's `asset`. Resolves the tag once so the binary and `SHA256SUMS` come from the same release. Says
-/// on `out` that it checks, then which release it downloads, before it does.
+/// on `out` that it checks, then which release it downloads, before it does; a failed write does not stop it.
 fn fetch_release(releases: &str, asset: &str, out: &mut impl Write) -> Result<Vec<u8>> {
     let latest = format!("{releases}/latest");
-    writeln!(out, "Checking for a new version...")?;
+    writeln_best_effort(out, "Checking for a new version...");
     let ended = resolve(&latest, STALL)?;
     // GitHub sends `releases/latest` to the page of the latest release, or to the list of releases when there is none.
     let tag = ended
@@ -91,7 +92,7 @@ fn fetch_release(releases: &str, asset: &str, out: &mut impl Write) -> Result<Ve
         .filter(|tag| !tag.is_empty() && !tag.contains(['/', '?', '#']))
         .with_context(|| format!("{latest} led to {ended}, not a release page: is a release published?"))?;
 
-    writeln!(out, "Downloading {tag}...")?;
+    writeln_best_effort(out, &format!("Downloading {tag}..."));
     let url = |name: &str| format!("{releases}/download/{tag}/{name}");
     let sums =
         String::from_utf8(download(&url(SUMS_FILE), STALL)?).with_context(|| format!("{SUMS_FILE} is not text"))?;
