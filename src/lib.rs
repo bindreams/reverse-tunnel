@@ -1,7 +1,6 @@
 #[cfg(windows)]
 pub mod access;
 pub mod account;
-pub mod client;
 pub mod command;
 pub mod config;
 pub mod dialog;

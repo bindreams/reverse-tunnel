@@ -339,9 +339,15 @@ def stack(tmp_path_factory):
     stack.ssh_config.write_text(client_template())
 
     installed = run("sudo", BUILT, "install", "--host", HOST, "--join", code).stdout
-    assert client_template() in installed, f"install's ssh-config block is not the README's:\n{installed}"
-    registration = re.search(r"uv run ctl add (\S+) (sha256:[0-9a-f]{64})", installed)
-    assert registration, f"no `ctl add` line in the install output:\n{installed}"
+    # Applying the changes is announced before it happens, and the "installed!" line is the last.
+    lines = installed.splitlines()
+    notice = next((i for i, line in enumerate(lines) if line.startswith("Applying the changes")), -1)
+    assert 0 <= notice < len(lines) - 1, f"install's notice is missing or not before its last line:\n{installed}"
+    assert lines[-1].startswith("Reverse-tunnel v") and "has been installed!" in lines[-1], installed
+    # The arguments of `ctl add` are the `host` and `hash` lines of `status`.
+    status = run(INSTALLED, "status").stdout
+    registration = re.search(r"^host: (\S+)\nhash: (sha256:[0-9a-f]{64})$", status, re.M)
+    assert registration, f"no `host` and `hash` lines in the status:\n{status}"
     stack.registration = registration.groups()
     stack.stub_port = server.server_address[1]
     run("sudo", "tee", "-a", "/etc/reverse-tunnel/config.yaml", input=http_service("web", stack.stub_port))

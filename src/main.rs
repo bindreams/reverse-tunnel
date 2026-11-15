@@ -72,7 +72,8 @@ enum Command {
     Stop,
     /// Checks config.yaml, then restarts the service to apply it; works over the tunnel. Needs root.
     Restart,
-    /// Shows the service's state, the bridge, and the end of frpc's log.
+    /// Shows the service's state, this host's name and token hash (what `ctl add` takes), the bridge, and the end of
+    /// frpc's log.
     Status,
     /// Shows frpc's log, which every local account may read.
     Logs {
@@ -121,7 +122,7 @@ fn run() -> Result<ExitCode> {
         }
         Command::Upgrade { from } => {
             require_root()?;
-            upgrade::upgrade(&paths, from.as_deref())?;
+            upgrade::upgrade(&paths, from.as_deref(), &mut io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Start => {
@@ -136,7 +137,7 @@ fn run() -> Result<ExitCode> {
         }
         Command::Restart => {
             require_root()?;
-            ops::check_and_restart(&*service::manager(&paths)?, &paths)?;
+            ops::check_and_restart(&*service::manager(&paths)?, &paths, &mut io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {

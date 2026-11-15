@@ -32,8 +32,8 @@ chmod +x reverse-tunnel
 sudo ./reverse-tunnel install
 ```
 
-`install` asks for the host name and the join code, and prints where the config is saved and, at the end, what to run on
-the bridge:
+`install` asks for the host name and the join code, prints where the config is saved, and ends with the line that says
+it is installed:
 
 ```
 $ sudo ./reverse-tunnel install
@@ -41,33 +41,41 @@ Setting up a system-wide reverse tunnel service.
   Config is saved to: /etc/reverse-tunnel/config.yaml
 Hostname [minicooper]:
 Join code (run `uv run ctl join-code` on the bridge; an empty line gives up):
-Host is ready! Run this command on the bridge to accept the host:
-  uv run ctl add minicooper sha256:...
+Downloading frpc v0.71.1...
+Applying the changes; if you are connected through this tunnel, the connection drops now...
+Reverse-tunnel v0.1.1 has been installed!
 ```
+
+Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts.
+So is applying the changes, by `install`, `upgrade` and `reverse-tunnel restart`: the service is killed for its
+service manager to start again, or started if it is not running, and the line says the connection through the tunnel
+drops. An `install` that changed nothing says `Starting the service...` only if it finds the service not running. Over
+the tunnel the connection drops at the restart, so the lines after the notice may not reach you.
 
 Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The join
 code may be pasted wrapped over several lines. On a host that already has a `config.yaml`, `install` asks no host name
 and prints neither the "Setting up" lines nor `Hostname:`; it asks for the join code only if the bridge's files are
 missing. A host keeps its name: `--host` with another name fails; to rename, uninstall and install again, accept the
-new name and revoke the old. For such a host the closing line reads "If the bridge does not know this host yet, run:",
-since the bridge may know it already.
+new name and revoke the old.
 
 For a script, pass `--host NAME` and `--join CODE`: a value given is not asked for. `install` asks only if stdin and
 stderr are both terminals; otherwise a value that is needed and missing is an error that names the flags and gives the
-command to run, and `install` does not wait for input. It installs and starts the service, and after the line prints the
-block for reaching the host (see [Set up a client](#set-up-a-client)).
+command to run, and `install` does not wait for input. It installs and starts the service.
 
-Run that line in the bridge folder; it accepts the host, and [Set up a client](#set-up-a-client) is the next
-step. Until you do, the host is refused ("host not registered" in its `frpc.log`) and
-retries on its own; once you have, it connects with no restart. You may delete the downloaded file; `install` put a
-copy in place and linked it as `reverse-tunnel` on the `PATH`.
+Register the host on the bridge: in the bridge folder run `uv run ctl add HOST HASH`, with the `host` and `hash` that
+`reverse-tunnel status` shows (the hash is no secret; the token it comes from is never shown). The
+`hash` is what `install` last recorded, so a token you replaced by hand shows its old hash until `install` runs again.
+[Set up a client](#set-up-a-client) is the next step. Until you register it, the host is refused ("host not
+registered" in its `frpc.log`) and retries on its own; once you have, it connects with no restart. A host installed
+by an earlier version has no `hash` yet: `status` says so, and the next `install` or `upgrade` records it. You may
+delete the downloaded file; `install` put a copy in place and linked it as `reverse-tunnel` on the `PATH`.
 
 By default the host publishes SSH (port 22): the host is reachable at `<host>.T`. `install` is safe to run again; it
 changes only what differs.
 
 **Windows**: download the binary, then run `install` and the other commands that say `sudo` from an administrator
 terminal (right-click Terminal or PowerShell, "Run as administrator"), without `sudo`: Windows' `sudo` opens a new window
-that closes before the line for the bridge can be read. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
+that closes before the output can be read. The service runs as `NT SERVICE\reverse-tunnel`, the host's files are in `%ProgramFiles%\reverse-tunnel` and
 `%ProgramData%\reverse-tunnel`, and `install` puts `%ProgramFiles%\reverse-tunnel` on the system `PATH`: open a new shell
 to run `reverse-tunnel` (on the desktop, sign out and in; an SSH session sees it at once). `install` edits the `PATH` as
 every installer does, by reading it and writing it back: another program that edits it at the same moment can lose one of
@@ -88,7 +96,7 @@ Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/late
 Clients need [websocat](https://github.com/vi/websocat) on their `PATH`: a binary from its
 [releases](https://github.com/vi/websocat/releases), `brew install websocat`, or `cargo install websocat`. Then add
 this to `~/.ssh/config`, with the host's name in place of `myhost` and the tunnel domain in place of
-`tunnel.example.com` (`reverse-tunnel install` prints the block with both filled in):
+`tunnel.example.com`:
 
 ```ssh-config
 Host myhost
@@ -96,9 +104,8 @@ Host myhost
     ProxyCommand websocat --binary wss://%h/
 ```
 
-`ssh myhost` now reaches the host's sshd, at its `ssh` service. (`install` prints the block for the service named `ssh`
-when it is `type: tcp`, whatever its port, and prints none otherwise.) Any other TCP service the host publishes
-(`type: tcp`, below) is reached the same way, at its own `<service>.<host>.T`.
+`ssh myhost` now reaches the host's sshd, at its `ssh` service (when it is `type: tcp`, whatever its port). Any other
+TCP service the host publishes (`type: tcp`, below) is reached the same way, at its own `<service>.<host>.T`.
 
 ## Publish another service
 
@@ -166,11 +173,11 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 
 | Command | What it does |
 |---|---|
-| `reverse-tunnel status` | What the service is doing, the host name, the tunnel domain, which bridge it trusts (one `certificate:` line per certificate in `bridge.pem`, two during a rotation), and the last 10 lines of `frpc.log`, or `no log yet`; a service that is not running says they are from its last run. No `sudo`. |
+| `reverse-tunnel status` | What the service is doing, the host name, its token's hash (the `hash` for `ctl add`), the tunnel domain, which bridge it trusts (one `certificate:` line per certificate in `bridge.pem`, two during a rotation), and the last 10 lines of `frpc.log`, or `no log yet`; a service that is not running says they are from its last run. No `sudo`. |
 | `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. When rotations may have removed lines before it could show them (its output stalled while the log rotated more than once), it says so on stderr. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
-| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then restarts the service so it reads it again. Works over the tunnel. |
+| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops and kills the service for its service manager to start again with the new settings, and says so (a service that was not running is started). Works over the tunnel. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
 
@@ -183,6 +190,7 @@ to run are in [server/README.md](server/README.md#rotating-the-certificate).
 ```
 service: running (pid 1234), enabled at boot
 host: myhost
+hash: sha256:...
 bridge: tunnel.example.com
 certificate: SHA-256 AB:CD:...
 frpc log (last 10 lines; `reverse-tunnel logs` shows it all):
@@ -208,12 +216,23 @@ Each log is rotated at 10 MB to `<name>.1`, replacing the previous one; `logs` s
 
 ### Upgrade
 
-`sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: your session
-ends when the service restarts, and the host reconnects on the new version. Before it replaces anything it checks the
-new version against this host's settings, and a failure leaves the old version running. It runs `install`, which on a
-host that is set up asks nothing and prints only "If the bridge does not know this host yet, run:" with the line for the
-bridge, then the `ssh` block when the host publishes SSH; the host is already registered, so ignore the line. A version
-that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.
+`sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: `install` says,
+before it restarts the service, that a connection through this tunnel will drop. Over the tunnel your
+session drops at the restart, and that line may not reach you; the host reconnects on the new version, and
+`reverse-tunnel status` shows the result once you are back. Before it replaces anything it checks the new version
+against this host's settings, and a failure leaves the old version running. It prints a line before the steps that take
+a while, then runs `install`, which on a host that is set up asks nothing, and whose output is the
+whole of what `upgrade` ends with:
+
+```
+$ sudo reverse-tunnel upgrade
+Checking for a new version...
+Downloading v0.1.1...
+Applying the changes; if you are connected through this tunnel, the connection drops now...
+Reverse-tunnel v0.1.1 has been installed!
+```
+
+A version that passes the check and cannot carry SSH locks a tunnel-only host out until someone is at the machine.
 
 **Windows**: run `reverse-tunnel upgrade` from an elevated prompt, without `sudo`. Windows will not overwrite or delete a
 running program, so each build is installed as a file of its own, `%ProgramFiles%\reverse-tunnel\reverse-tunnel-<SHA-256
