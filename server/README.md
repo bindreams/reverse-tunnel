@@ -49,7 +49,7 @@ In this folder, a git checkout of the bridge:
 3. `docker compose up -d --build --force-recreate reverse-tunnel-frps` builds frps and starts it again from the new
    image, `compose.yaml`, `.env` and `etc/`. It drops every tunnel once.
 4. `uv run ctl list` shows each host `online since` its reconnection, and `offline` until then. Right after step 3
-   frps may not answer yet, and presence is `unknown`: run it again. If it stays `unknown`, `docker compose ps` shows
+   frps may not answer yet, and presence is `unknown`: run it again. If it stays `unknown`, `docker compose ps -a` shows
    whether frps keeps restarting, and `docker compose logs reverse-tunnel-frps` says why.
 
 ## Teardown
