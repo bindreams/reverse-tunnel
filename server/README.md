@@ -21,8 +21,8 @@ All commands run in this folder.
    `uv run ctl join-code` prints it again. Every other `ctl` command also starts whatever of the bridge is not running.
    No `ctl` command builds for, removes or recreates an existing `reverse-tunnel-frps` container, which would drop
    every tunnel; it starts a stopped one as it is, and `init` says so when it finds one. To apply a change to its
-   image, `compose.yaml` or `.env` on purpose, run `docker compose up -d --build reverse-tunnel-frps`, which drops
-   every tunnel if it is running (`docker compose restart` applies none of these).
+   image, `compose.yaml`, `.env` or `etc/` on purpose, run
+   `docker compose up -d --build --force-recreate reverse-tunnel-frps`, which drops every tunnel.
 
 Joining a host and publishing a service: see the main README. The commands are `uv run ctl add`, `revoke`, `alias`,
 `unalias`, `list`; `uv run ctl <command> --help` says what each takes.
@@ -44,12 +44,13 @@ After `uv run ctl add`, the host is registered; the next step is to reach it fro
 In this folder, a git checkout of the bridge:
 
 1. `git fetch --tags && git checkout <new tag>`. Hosts upgrade on their own schedule, with `reverse-tunnel upgrade`.
-2. `uv run ctl init` checks the network and DNS as at bring-up, builds and updates the plugin, and prints the join code
-   again. It keeps an existing `reverse-tunnel-frps` as it is, and says so.
+2. `uv run ctl init` checks the network and DNS, builds and updates the plugin, and prints the join code again. It
+   keeps an existing `reverse-tunnel-frps`. If it fails, fix what it names and run it again before going on.
 3. `docker compose up -d --build --force-recreate reverse-tunnel-frps` builds frps and starts it again from the new
-   image, `compose.yaml`, `.env` and `etc/`, whichever of them changed. It drops every tunnel once; hosts reconnect on
-   their own.
-4. `uv run ctl list` shows each host `online` again once it has reconnected.
+   image, `compose.yaml`, `.env` and `etc/`. It drops every tunnel once. If frps does not start,
+   `docker compose logs reverse-tunnel-frps` says why; to go back, check out the previous tag and repeat steps 2 and 3.
+4. `uv run ctl list` shows each host `online since` its reconnection. Right after step 3 frps may not answer yet, and
+   presence is `unknown`: run it again.
 
 ## Teardown
 

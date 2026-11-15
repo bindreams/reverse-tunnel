@@ -430,7 +430,7 @@ def test_init_says_how_to_apply_a_change_to_a_frps_it_kept(bridge, monkeypatch, 
     lines = capsys.readouterr().out.splitlines()
     assert lines[-1].startswith("rt1:"), "the join code stays last, for copying"
     note = [line for line in lines if "kept as it is" in line]
-    assert len(note) == 1 and "docker compose up -d --build reverse-tunnel-frps" in note[0]
+    assert len(note) == 1 and "docker compose up -d --build --force-recreate reverse-tunnel-frps" in note[0]
     assert "tunnel" in note[0] and "restart" not in note[0]
 
 
