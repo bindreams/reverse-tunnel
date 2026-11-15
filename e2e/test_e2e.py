@@ -339,6 +339,13 @@ def stack(tmp_path_factory):
     stack.ssh_config.write_text(client_template())
 
     installed = run("sudo", BUILT, "install", "--host", HOST, "--join", code).stdout
+    # The start is announced before it happens, and the status comes after the install line.
+    lines = installed.splitlines()
+    starting, done, service = (
+        next(i for i, line in enumerate(lines) if line.startswith(prefix))
+        for prefix in ("Starting the service", "Reverse-tunnel v", "service: ")
+    )
+    assert starting < done < service, f"install's lines out of order:\n{installed}"
     # The arguments of `ctl add` are the `host` and `hash` lines of the status that `install` ends with.
     registration = re.search(r"^host: (\S+)\nhash: (sha256:[0-9a-f]{64})$", installed, re.M)
     assert registration, f"no `host` and `hash` lines in the install output:\n{installed}"
