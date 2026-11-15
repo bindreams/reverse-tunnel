@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use goetia::decide::Outcome;
-use goetia::manager::{Budget, ServiceManager};
+use goetia::manager::{Budget, ServiceManager, State};
 use goetia::spec::{DaemonSpec, Id};
 use named_lock::{NamedLock, NamedLockGuard};
 
@@ -149,16 +149,17 @@ pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut D
 /// function, so that `install` needs no other command to show how it went. The files are in place and the service is
 /// restarted by now, so a failure here is reported on stderr and does not fail the install.
 fn closing<I: BufRead, O: Write, P: Write>(manager: &dyn ServiceManager, paths: &Paths, dialog: &mut Dialog<I, O, P>) {
-    let shown = dialog
-        .say(&format!(
-            "Reverse-tunnel v{} has been installed!",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .and_then(|()| ops::status(manager, paths, dialog.out()));
-    if let Err(err) = shown {
+    let said = dialog.say(&format!(
+        "Reverse-tunnel v{} has been installed!",
+        env!("CARGO_PKG_VERSION")
+    ));
+    if let Err(err) = said {
         dialog.warn(&format!(
             "the install is done, but its closing output failed: {err:#}; `reverse-tunnel status` shows it"
         ));
+    } else if let Err(err) = ops::status(manager, paths, dialog.out()) {
+        // `status` is what failed, so it is not what to send the user to.
+        dialog.warn(&format!("the install is done, but showing its status failed: {err:#}"));
     }
 }
 
@@ -1185,8 +1186,9 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 }
 
 /// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is
-/// started, which leaves a running service alone. A restart is announced first, since over the tunnel it ends the
-/// session; a failure to print the line does not stop it.
+/// started, which leaves a running service alone. A restart of a running service is announced right before the kill,
+/// since over the tunnel it ends the session; a failure to print the line does not stop it. A service that is not
+/// running is only started, which ends nothing.
 fn pick_up<I: BufRead, O: Write, P: Write>(
     manager: &dyn ServiceManager,
     id: &Id,
@@ -1198,8 +1200,12 @@ fn pick_up<I: BufRead, O: Write, P: Write>(
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }
-    let _ = dialog.say("Restarting the service; an SSH session through this tunnel will drop...");
-    let Err(failed) = ops::restart_pending(manager, id, paths) else {
+    let announce = || {
+        if manager.status(id).is_ok_and(|status| status.state == State::Running) {
+            let _ = dialog.say("Restarting the service; an SSH session through this tunnel will drop...");
+        }
+    };
+    let Err(failed) = ops::restart_pending(manager, id, paths, announce) else {
         return Ok(());
     };
     let err = failed.error;

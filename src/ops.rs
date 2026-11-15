@@ -61,7 +61,7 @@ fn check_and_restart_as(manager: &dyn ServiceManager, paths: &Paths, exe: &Path,
         run_as,
         &format!("the installed binary `{}`'s `run --check`", exe.display()),
     )?;
-    let outcome = restart_pending(manager, &service::id(), paths).map_err(|failed| {
+    let outcome = restart_pending(manager, &service::id(), paths, || {}).map_err(|failed| {
         failed.error.context(match failed.marker {
             Ok(()) => "the service was not restarted".to_string(),
             Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
@@ -180,11 +180,18 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
 }
 
 /// `restart` for a service that must run what is in place now. The restart marker is removed just before, since
-/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up.
-pub fn restart_pending(manager: &dyn ServiceManager, id: &Id, paths: &Paths) -> Result<RestartOutcome, NotRestarted> {
+/// nothing that runs after the kill is sure to run; it is put back if the service was not picked up. `before_kill` runs
+/// once nothing else stands between it and the kill.
+pub fn restart_pending(
+    manager: &dyn ServiceManager,
+    id: &Id,
+    paths: &Paths,
+    before_kill: impl FnOnce(),
+) -> Result<RestartOutcome, NotRestarted> {
     if let Err(error) = remove_entry(&pending_file(paths)) {
         return Err(NotRestarted { error, marker: Ok(()) });
     }
+    before_kill();
     restart(manager, id).map_err(|error| NotRestarted {
         error,
         marker: mark_pending(paths),
@@ -228,7 +235,12 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     )?;
 
     let config = Config::load(&paths.config_file())?;
-    writeln!(out, "host: {}\nhash: {}", config.host, recorded_hash(paths))?;
+    let hash = match recorded_hash(paths) {
+        Ok(Some(hash)) => hash,
+        Ok(None) => "not recorded yet; run `reverse-tunnel install` (elevated) to record it".to_string(),
+        Err(err) => format!("{err:#}"),
+    };
+    writeln!(out, "host: {}\nhash: {hash}", config.host)?;
     writeln!(out, "bridge: {}", config.bridge)?;
     let pem_path = paths.bridge_pem();
     let pem = fs::read_to_string(&pem_path).with_context(|| format!("reading {}", pem_path.display()))?;
@@ -238,20 +250,15 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     write_log_tail(&paths.frpc_log(), state.state, out)
 }
 
-/// The host token's hash that `install` recorded, which `ctl add` takes with the host's name. An install from before it
-/// was recorded has none: the token itself is not for `status` to read, so it says what records the hash. A file that
-/// cannot be read is said so, as the log's is: `status` still has the rest to show.
-fn recorded_hash(paths: &Paths) -> String {
+/// The host token's hash that `install` recorded, which `ctl add` takes with the host's name; `None` for an install from
+/// before it was recorded: the token itself is not for `status` to read. A file that cannot be read is an error, which
+/// `status` says on the line, as the log's is: it still has the rest to show.
+fn recorded_hash(paths: &Paths) -> Result<Option<String>> {
     let file = paths.host_token_hash();
     match fs::read_to_string(&file) {
-        Ok(hash) => hash.trim().to_string(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            "not recorded yet; run `reverse-tunnel install` (elevated) to record it".to_string()
-        }
-        Err(err) => format!(
-            "{:#}",
-            anyhow::Error::new(err).context(format!("reading {}", file.display()))
-        ),
+        Ok(hash) => Ok(Some(hash.trim().to_string())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", file.display())),
     }
 }
 

@@ -73,6 +73,29 @@ fn the_questions_go_to_stderr_and_the_results_to_stdout() {
     assert_eq!(said(&dialog), "Hostname: myhost\nthe line\n");
 }
 
+/// A writer that counts the flushes it is given.
+struct Flushes(u32);
+
+impl Write for Flushes {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0 += 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_line_said_is_flushed() {
+    let mut dialog = Dialog::new(Cursor::new(""), Flushes(0), Vec::new(), false);
+
+    dialog.say("the line").unwrap();
+
+    assert_eq!(dialog.out.0, 1);
+}
+
 #[test]
 fn hostname_asks_again_until_it_is_a_valid_name_and_says_the_rule() {
     let mut dialog = dialog("not_valid\n\n-myhost\nmyhost\n", true);

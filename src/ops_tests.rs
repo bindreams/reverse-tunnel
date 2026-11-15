@@ -310,6 +310,30 @@ fn restart_that_fails_without_a_marker_says_install_will_not_notice() {
 }
 
 #[test]
+fn restart_pending_runs_what_comes_before_the_kill_after_the_marker_is_removed() {
+    let (_dir, paths) = host();
+    let manager = Fake::default();
+    let spec = service::spec(&service::exe(&paths)).unwrap();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+    mark_pending(&paths).unwrap();
+    let mut seen = None;
+
+    let outcome = restart_pending(&manager, &spec.id, &paths, || {
+        seen = Some((pending_file(&paths).exists(), manager.calls().len()));
+    });
+
+    assert!(outcome.is_ok());
+
+    assert_eq!(
+        seen,
+        Some((false, 0)),
+        "the marker is gone and the kill has not happened"
+    );
+    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
+}
+
+#[test]
 fn restart_says_whether_it_killed_or_started_the_service() {
     let (_dir, paths) = host();
     let manager = Fake::default();

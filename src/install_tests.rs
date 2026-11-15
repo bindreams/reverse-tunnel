@@ -144,11 +144,12 @@ fn a_failure_in_the_closing_output_is_said_on_stderr_and_does_not_fail_install()
     let (said, warned) = (String::from_utf8(said).unwrap(), String::from_utf8(warned).unwrap());
     assert!(said.starts_with("Reverse-tunnel v"), "{said}");
     assert!(
-        warned.contains("the install is done, but its closing output failed"),
+        warned.contains("the install is done, but showing its status failed"),
         "{warned}"
     );
+    // `status` is what failed: the warning does not send the user to it.
+    assert!(!warned.contains("`reverse-tunnel status`"), "{warned}");
     assert!(warned.contains("config.yaml"), "{warned}");
-    assert!(warned.contains("`reverse-tunnel status`"), "{warned}");
 }
 
 /// `install` is complete without `status` and without the README: what it ends with is `status`'s output, from the same
@@ -547,24 +548,40 @@ fn kill_not_running_starts() {
     .unwrap();
 
     assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
-    assert_eq!(String::from_utf8(said).unwrap(), RESTARTING);
+    // A first install only starts the service: no session is cut, so nothing is announced.
+    assert_eq!(said, b"");
     let id = spec.id.to_string();
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
+}
+
+#[test]
+fn restarting_a_running_service_is_announced() {
+    let machine = Machine::new();
+    let spec = service::spec(&service::exe(&machine.paths)).unwrap();
+    let manager = Fake::default();
+    manager.install(&spec, false).unwrap();
+    manager.seed_state(spec.id.as_str(), State::Running);
+
+    let mut said = Vec::new();
+
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        true,
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap();
+
+    assert_eq!(String::from_utf8(said).unwrap(), RESTARTING);
+    assert_eq!(manager.calls(), [("kill", spec.id.to_string())]);
 }
 
 #[test]
 fn restart_failure_is_retried_by_install() {
     let machine = Machine::new();
     // Never installed: the kill fails with something other than NotRunning.
-    let mut said = Vec::new();
-    let err = pick_up(
-        &Fake::default(),
-        &service::id(),
-        &machine.paths,
-        true,
-        &mut said_by_install_with(&mut said),
-    )
-    .unwrap_err();
+    let err = pick_up(&Fake::default(), &service::id(), &machine.paths, true, &mut no_dialog()).unwrap_err();
 
     assert!(
         format!("{err:#}").contains("run `reverse-tunnel install` again"),
@@ -575,8 +592,6 @@ fn restart_failure_is_retried_by_install() {
         format!("{err:#}").contains("`reverse-tunnel status` shows the host and hash"),
         "{err:#}"
     );
-    // Said before the restart that failed: that is the order that matters over the tunnel.
-    assert_eq!(String::from_utf8(said).unwrap(), RESTARTING);
     assert!(pending_file(&machine.paths).exists());
 }
 

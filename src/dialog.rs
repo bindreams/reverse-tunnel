@@ -65,9 +65,11 @@ impl<I: BufRead, O: Write, P: Write> Dialog<I, O, P> {
         Ok(())
     }
 
-    /// Prints a line to the results: what `install` is about to do, or has done.
+    /// Prints a line to the results and flushes it: what `install` is about to do, or has done. It is out of the
+    /// process's buffer when this returns, whatever the next step does to the process.
     pub fn say(&mut self, line: &str) -> Result<()> {
         writeln!(self.out, "{line}")?;
+        self.out.flush()?;
         Ok(())
     }
 
