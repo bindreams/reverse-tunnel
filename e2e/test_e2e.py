@@ -339,10 +339,10 @@ def stack(tmp_path_factory):
     stack.ssh_config.write_text(client_template())
 
     installed = run("sudo", BUILT, "install", "--host", HOST, "--join", code).stdout
-    # The start is announced before it happens, and the "installed!" line is the last.
+    # Applying the changes is announced before it happens, and the "installed!" line is the last.
     lines = installed.splitlines()
-    starting = next((i for i, line in enumerate(lines) if line.startswith("Restarting the service")), -1)
-    assert 0 <= starting < len(lines) - 1, f"install's notice is missing or not before its last line:\n{installed}"
+    notice = next((i for i, line in enumerate(lines) if line.startswith("Applying the changes")), -1)
+    assert 0 <= notice < len(lines) - 1, f"install's notice is missing or not before its last line:\n{installed}"
     assert lines[-1].startswith("Reverse-tunnel v") and "has been installed!" in lines[-1], installed
     # The arguments of `ctl add` are the `host` and `hash` lines of `status`.
     status = run(INSTALLED, "status").stdout

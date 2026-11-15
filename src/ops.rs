@@ -73,13 +73,10 @@ fn check_and_restart_as(
             Err(write) => format!("the service was not restarted, and `install` will not notice ({write:#})"),
         })
     })?;
-    writeln_best_effort(
-        out,
-        match outcome {
-            RestartOutcome::Killed => "The service is restarting: its service manager starts it again.",
-            RestartOutcome::Started => "The service was not running; it is started.",
-        },
-    );
+    // After a kill, the service manager's restart is not something to report: it may not come (start limits).
+    if outcome == RestartOutcome::Started {
+        writeln_best_effort(out, "The service was not running; it is started.");
+    }
     Ok(())
 }
 
@@ -189,10 +186,10 @@ pub fn mark_pending(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Said before the restart; warns a session over the tunnel, which the kill ends. On a first install, where nothing
-/// runs yet, the restart is a start.
+/// Said before the restart, which is a start when the service is not running: true either way, and warns a session
+/// over the tunnel, which the kill ends.
 pub const RESTART_NOTICE: &str =
-    "Restarting the service; if you are connected through this tunnel, the connection drops now...";
+    "Applying the changes; if you are connected through this tunnel, the connection drops now...";
 
 /// `restart` for a service that must run what is in place now. Writes `RESTART_NOTICE` to `out` and flushes it, then
 /// removes the restart marker and kills with nothing between: the marker survives whatever the write waits on, and

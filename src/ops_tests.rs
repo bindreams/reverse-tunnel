@@ -291,10 +291,7 @@ fn restart_with_a_passing_check_kills_the_service() {
 
     assert_eq!(manager.calls(), [("kill", id.to_string())]);
     assert!(!pending_file(&paths).exists());
-    assert_eq!(
-        String::from_utf8(said.text).unwrap(),
-        format!("{RESTART_NOTICE}\nThe service is restarting: its service manager starts it again.\n")
-    );
+    assert_eq!(String::from_utf8(said.text).unwrap(), format!("{RESTART_NOTICE}\n"));
     assert_eq!(said.at_first_write, Some(0), "said before the kill");
 }
 
@@ -408,7 +405,6 @@ fn restart_says_whether_it_killed_or_started_the_service() {
 
     assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Started);
     assert_eq!(manager.status(id).unwrap().state, State::Running);
-    manager.seed_state(id.as_str(), State::Running);
     assert_eq!(restart(&manager, id).unwrap(), RestartOutcome::Killed);
 }
 

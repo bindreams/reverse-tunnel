@@ -42,15 +42,15 @@ Setting up a system-wide reverse tunnel service.
 Hostname [minicooper]:
 Join code (run `uv run ctl join-code` on the bridge; an empty line gives up):
 Downloading frpc v0.71.1...
-Restarting the service; if you are connected through this tunnel, the connection drops now...
+Applying the changes; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
 ```
 
 Each step that can take a while, such as the download of frpc, is announced by a line ending in `...` before it starts.
-So is the restart of the service by `install`, `upgrade` and `reverse-tunnel restart`, which kills it for its service
-manager to start again (on a first install it is a start) and says that the connection through the tunnel drops. An
-`install` that changed nothing says `Starting the service...` only if it finds the service not running. Over the tunnel
-the connection drops at the restart, so the lines after the notice may not reach you.
+So is applying the changes, by `install`, `upgrade` and `reverse-tunnel restart`: the service is killed for its
+service manager to start again, or started if it is not running, and the line says the connection through the tunnel
+drops. An `install` that changed nothing says `Starting the service...` only if it finds the service not running. Over
+the tunnel the connection drops at the restart, so the lines after the notice may not reach you.
 
 Enter takes the machine's name (its first part, lowercased) as the host name; a name typed is lowercased too. The join
 code may be pasted wrapped over several lines. On a host that already has a `config.yaml`, `install` asks no host name
@@ -177,7 +177,7 @@ be recreated with `--subnet`. Jellyfin then reads the viewer's address from `X-F
 | `reverse-tunnel logs` | Prints `frpc.log`, or with `-n N` its last N lines. With `-f`, it starts with the last 10 lines (or N), then keeps showing lines as they are appended, across a rotation, until you interrupt it; it waits for the log if the service has not made it yet. When rotations may have removed lines before it could show them (its output stalled while the log rotated more than once), it says so on stderr. No `sudo`. |
 | `sudo reverse-tunnel stop` | Stops the service; it starts again at boot. Over the tunnel it ends your session. |
 | `sudo reverse-tunnel start` | Starts the service; it reads `config.yaml` when it starts. |
-| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops and kills the service, which its service manager starts again with the new settings; it says so. Works over the tunnel. |
+| `sudo reverse-tunnel restart` | Checks `config.yaml` as the service's account, then says the connection through the tunnel drops and kills the service, which its service manager starts again with the new settings (a service that was not running is started, and it says so). Works over the tunnel. |
 | `sudo reverse-tunnel upgrade` | Downloads the latest release, checks it against the release's `SHA256SUMS`, and installs it. |
 | `sudo reverse-tunnel uninstall` | Removes the service, its files and its account. |
 
@@ -228,7 +228,7 @@ whole of what `upgrade` ends with:
 $ sudo reverse-tunnel upgrade
 Checking for a new version...
 Downloading v0.1.1...
-Restarting the service; if you are connected through this tunnel, the connection drops now...
+Applying the changes; if you are connected through this tunnel, the connection drops now...
 Reverse-tunnel v0.1.1 has been installed!
 ```
 
