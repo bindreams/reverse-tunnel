@@ -140,22 +140,26 @@ pub fn install<I: BufRead, O: Write, P: Write>(opts: InstallOpts, dialog: &mut D
         changed,
     )?;
     manager.enable(&id)?;
-    pick_up(&*manager, &id, paths, changed)?;
-    closing(&*manager, paths, dialog)
+    pick_up(&*manager, &id, paths, changed, dialog)?;
+    closing(&*manager, paths, dialog);
+    Ok(())
 }
 
 /// What `install` ends with: that the running binary's version is installed, then what `status` prints, from the same
-/// function, so that `install` needs no other command to show how it went.
-fn closing<I: BufRead, O: Write, P: Write>(
-    manager: &dyn ServiceManager,
-    paths: &Paths,
-    dialog: &mut Dialog<I, O, P>,
-) -> Result<()> {
-    dialog.say(&format!(
-        "Reverse-tunnel v{} has been installed!",
-        env!("CARGO_PKG_VERSION")
-    ))?;
-    ops::status(manager, paths, dialog.out())
+/// function, so that `install` needs no other command to show how it went. The files are in place and the service is
+/// restarted by now, so a failure here is reported on stderr and does not fail the install.
+fn closing<I: BufRead, O: Write, P: Write>(manager: &dyn ServiceManager, paths: &Paths, dialog: &mut Dialog<I, O, P>) {
+    let shown = dialog
+        .say(&format!(
+            "Reverse-tunnel v{} has been installed!",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .and_then(|()| ops::status(manager, paths, dialog.out()));
+    if let Err(err) = shown {
+        dialog.warn(&format!(
+            "the install is done, but its closing output failed: {err:#}; `reverse-tunnel status` shows it"
+        ));
+    }
 }
 
 /// A host keeps its name: `asked`, from `--host`, must be the name in `config`.
@@ -1181,17 +1185,26 @@ fn revoke_line(paths: &Paths) -> Result<String> {
 }
 
 /// Has the service run what is now in place: after a change `ops::restart_pending` restarts it, and without one it is
-/// started, which leaves a running service alone.
-fn pick_up(manager: &dyn ServiceManager, id: &Id, paths: &Paths, changed: bool) -> Result<()> {
+/// started, which leaves a running service alone. A restart is announced first, since over the tunnel it ends the
+/// session; a failure to print the line does not stop it.
+fn pick_up<I: BufRead, O: Write, P: Write>(
+    manager: &dyn ServiceManager,
+    id: &Id,
+    paths: &Paths,
+    changed: bool,
+    dialog: &mut Dialog<I, O, P>,
+) -> Result<()> {
     if !changed {
         manager.start(id, Budget::Unbounded)?;
         return Ok(());
     }
+    let _ = dialog.say("Restarting the service; an SSH session through this tunnel will drop...");
     let Err(failed) = ops::restart_pending(manager, id, paths) else {
         return Ok(());
     };
     let err = failed.error;
-    let restart_failed = "the new files are in place, but the service was not restarted";
+    let restart_failed = "the new files are in place, but the service was not restarted (`reverse-tunnel status` shows \
+                          the host and hash to register on the bridge)";
     // The remedy leads because the restart's own error is appended after the last words.
     match failed.marker {
         Ok(()) => Err(err.context(format!("run `reverse-tunnel install` again to retry; {restart_failed}"))),

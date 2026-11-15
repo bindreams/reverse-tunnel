@@ -71,6 +71,12 @@ impl<I: BufRead, O: Write, P: Write> Dialog<I, O, P> {
         Ok(())
     }
 
+    /// Prints a line to stderr, for what went wrong after `install` had done its work. A write failure is ignored: there
+    /// is nothing left to report it to.
+    pub fn warn(&mut self, line: &str) {
+        let _ = writeln!(self.prompts, "{line}");
+    }
+
     /// Where the results go, for what prints itself.
     pub fn out(&mut self) -> &mut O {
         &mut self.out

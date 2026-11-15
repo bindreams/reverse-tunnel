@@ -96,6 +96,26 @@ fn status_says_when_the_hash_is_not_recorded_yet() {
     );
 }
 
+/// A hash file that is there but cannot be read (here, a directory) is said so on the `hash:` line, as the log's is, and
+/// the rest of `status` is still shown.
+#[test]
+fn status_says_when_the_hash_file_cannot_be_read() {
+    let (_dir, paths) = host();
+    fs::create_dir(paths.host_token_hash()).unwrap();
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&paths)).unwrap(), false)
+        .unwrap();
+
+    let text = status_text(&manager, &paths);
+
+    let (_, rest) = text.split_once("\nhost: testhost\nhash: ").unwrap();
+    let (said, rest) = rest.split_once('\n').unwrap();
+    assert!(said.contains("host-token.hash"), "{text}");
+    assert!(rest.starts_with("bridge: tunnel.example.test\n"), "{text}");
+    assert!(text.contains(FINGERPRINT), "{text}");
+}
+
 /// The host's `status` with the service in `state`, after `make_log` has made what is at frpc's log's path.
 fn status_with(state: State, make_log: impl FnOnce(&Path)) -> String {
     let (_dir, paths) = host();

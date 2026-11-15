@@ -228,7 +228,7 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
     )?;
 
     let config = Config::load(&paths.config_file())?;
-    writeln!(out, "host: {}\nhash: {}", config.host, recorded_hash(paths)?)?;
+    writeln!(out, "host: {}\nhash: {}", config.host, recorded_hash(paths))?;
     writeln!(out, "bridge: {}", config.bridge)?;
     let pem_path = paths.bridge_pem();
     let pem = fs::read_to_string(&pem_path).with_context(|| format!("reading {}", pem_path.display()))?;
@@ -239,15 +239,19 @@ pub fn status(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write)
 }
 
 /// The host token's hash that `install` recorded, which `ctl add` takes with the host's name. An install from before it
-/// was recorded has none: the token itself is not for `status` to read, so it says what records the hash.
-fn recorded_hash(paths: &Paths) -> Result<String> {
+/// was recorded has none: the token itself is not for `status` to read, so it says what records the hash. A file that
+/// cannot be read is said so, as the log's is: `status` still has the rest to show.
+fn recorded_hash(paths: &Paths) -> String {
     let file = paths.host_token_hash();
     match fs::read_to_string(&file) {
-        Ok(hash) => Ok(hash.trim().to_string()),
+        Ok(hash) => hash.trim().to_string(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Ok("not recorded yet; run `reverse-tunnel install` (elevated) to record it".to_string())
+            "not recorded yet; run `reverse-tunnel install` (elevated) to record it".to_string()
         }
-        Err(err) => Err(err).with_context(|| format!("reading {}", file.display())),
+        Err(err) => format!(
+            "{:#}",
+            anyhow::Error::new(err).context(format!("reading {}", file.display()))
+        ),
     }
 }
 

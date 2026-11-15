@@ -111,11 +111,7 @@ fn the_check_is_announced_before_it_is_made_and_the_download_before_it_starts() 
     // Each line is there although the step after it fails: it was said before that step.
     let (said, fetched) = said_while_fetching(vec![("/releases/latest", 404, None, vec![])]);
     fetched.unwrap_err();
-    assert_eq!(
-        said,
-        "Checking for a new version...
-"
-    );
+    assert_eq!(said, "Checking for a new version...\n");
 
     let (said, fetched) = said_while_fetching(vec![
         ("/releases/latest", 302, Some("/releases/tag/v7"), vec![]),
@@ -123,12 +119,7 @@ fn the_check_is_announced_before_it_is_made_and_the_download_before_it_starts() 
         ("/releases/download/v7/SHA256SUMS", 404, None, vec![]),
     ]);
     fetched.unwrap_err();
-    assert_eq!(
-        said,
-        "Checking for a new version...
-Downloading v7...
-"
-    );
+    assert_eq!(said, "Checking for a new version...\nDownloading v7...\n");
 }
 
 #[test]

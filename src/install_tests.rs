@@ -124,6 +124,33 @@ fn said_by_install_with(out: &mut Vec<u8>) -> Dialog<Cursor<&'static str>, &mut 
     Dialog::new(Cursor::new(""), out, Vec::new(), false)
 }
 
+/// The files are in place and the service is restarted when `closing` runs: whatever fails in it is said on stderr, and
+/// nothing is returned for `install` to fail with. Here `status` fails, as there is no `config.yaml` to read.
+#[test]
+fn a_failure_in_the_closing_output_is_said_on_stderr_and_does_not_fail_install() {
+    let machine = Machine::new();
+    let manager = Fake::default();
+    manager
+        .install(&service::spec(&service::exe(&machine.paths)).unwrap(), false)
+        .unwrap();
+    let (mut said, mut warned) = (Vec::new(), Vec::new());
+
+    closing(
+        &manager,
+        &machine.paths,
+        &mut Dialog::new(Cursor::new(""), &mut said, &mut warned, false),
+    );
+
+    let (said, warned) = (String::from_utf8(said).unwrap(), String::from_utf8(warned).unwrap());
+    assert!(said.starts_with("Reverse-tunnel v"), "{said}");
+    assert!(
+        warned.contains("the install is done, but its closing output failed"),
+        "{warned}"
+    );
+    assert!(warned.contains("config.yaml"), "{warned}");
+    assert!(warned.contains("`reverse-tunnel status`"), "{warned}");
+}
+
 /// `install` is complete without `status` and without the README: what it ends with is `status`'s output, from the same
 /// function, below the line that says it worked.
 #[test]
@@ -136,7 +163,7 @@ fn install_ends_with_installed_and_what_status_prints() {
         .unwrap();
 
     let mut said = Vec::new();
-    closing(&manager, &machine.paths, &mut said_by_install_with(&mut said)).unwrap();
+    closing(&manager, &machine.paths, &mut said_by_install_with(&mut said));
 
     let mut status = Vec::new();
     ops::status(&manager, &machine.paths, &mut status).unwrap();
@@ -149,15 +176,14 @@ fn install_ends_with_installed_and_what_status_prints() {
     assert!(expected.contains("\nhash: sha256:"), "{expected}");
 }
 
+/// An frpc whose download fails by construction, with no port or network involved: its scheme is not one `ureq`
+/// speaks, and its host is under `.invalid`, which never resolves.
 fn pin_nobody_serves() -> download::Pin {
-    // The port of a listener that is gone: the connection is refused at once.
-    let gone = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/frp.tar.gz", gone.local_addr().unwrap()).leak();
     download::Pin {
         name: "frpc",
         version: "9.9.9",
         target: "x86_64-unknown-linux-gnu",
-        url,
+        url: "ftp://frpc.invalid/frp.tar.gz",
         sha256: "",
         member: "frpc",
     }
@@ -477,6 +503,8 @@ fn bin_dir_cleaning_never_recurses_into_a_directory_that_has_a_stale_name() {
     assert!(stale.join("inside").exists());
 }
 
+const RESTARTING: &str = "Restarting the service; an SSH session through this tunnel will drop...\n";
+
 #[test]
 fn unchanged_install_leaves_a_running_service_alone() {
     let machine = Machine::new();
@@ -485,9 +513,19 @@ fn unchanged_install_leaves_a_running_service_alone() {
     manager.install(&spec, false).unwrap();
     manager.seed_state(spec.id.as_str(), State::Running);
 
-    pick_up(&manager, &spec.id, &machine.paths, false).unwrap();
+    let mut said = Vec::new();
+
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        false,
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap();
 
     assert_eq!(manager.calls(), [("start", spec.id.to_string())]);
+    assert_eq!(said, b"", "nothing restarts, so nothing is announced");
 }
 
 #[test]
@@ -497,9 +535,19 @@ fn kill_not_running_starts() {
     let manager = Fake::default();
     manager.install(&spec, false).unwrap();
 
-    pick_up(&manager, &spec.id, &machine.paths, true).unwrap();
+    let mut said = Vec::new();
+
+    pick_up(
+        &manager,
+        &spec.id,
+        &machine.paths,
+        true,
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap();
 
     assert_eq!(manager.status(&spec.id).unwrap().state, State::Running);
+    assert_eq!(String::from_utf8(said).unwrap(), RESTARTING);
     let id = spec.id.to_string();
     assert_eq!(manager.calls(), [("kill", id.clone()), ("start", id)]);
 }
@@ -508,12 +556,27 @@ fn kill_not_running_starts() {
 fn restart_failure_is_retried_by_install() {
     let machine = Machine::new();
     // Never installed: the kill fails with something other than NotRunning.
-    let err = pick_up(&Fake::default(), &service::id(), &machine.paths, true).unwrap_err();
+    let mut said = Vec::new();
+    let err = pick_up(
+        &Fake::default(),
+        &service::id(),
+        &machine.paths,
+        true,
+        &mut said_by_install_with(&mut said),
+    )
+    .unwrap_err();
 
     assert!(
         format!("{err:#}").contains("run `reverse-tunnel install` again"),
         "{err:#}"
     );
+    // The host and hash are in `status`, whatever became of the restart.
+    assert!(
+        format!("{err:#}").contains("`reverse-tunnel status` shows the host and hash"),
+        "{err:#}"
+    );
+    // Said before the restart that failed: that is the order that matters over the tunnel.
+    assert_eq!(String::from_utf8(said).unwrap(), RESTARTING);
     assert!(pending_file(&machine.paths).exists());
 }
 
@@ -523,9 +586,13 @@ fn restart_failure_is_reported_with_a_marker_that_cannot_be_written_back() {
     let id = service::id();
     // The marker cannot be written without its directory; the kill fails, as the service was never installed.
     fs::remove_dir_all(&machine.paths.config_dir).unwrap();
-    let err = pick_up(&Fake::default(), &id, &machine.paths, true).unwrap_err();
+    let err = pick_up(&Fake::default(), &id, &machine.paths, true, &mut no_dialog()).unwrap_err();
 
     let text = format!("{err:#}");
+    assert!(
+        text.contains("`reverse-tunnel status` shows the host and hash"),
+        "{text}"
+    );
     assert!(text.contains("the service was not restarted"), "{text}");
     assert!(text.contains("restart-pending"), "{text}");
     // The failure of the restart itself is there too: without it the operator is not told why.

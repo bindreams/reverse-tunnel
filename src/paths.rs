@@ -41,8 +41,9 @@ impl Paths {
         self.secrets_dir.join("host.token")
     }
 
-    /// The host token's hash in the bridge's registry form (`join::token_hash`): not a secret, so `status` shows it to
-    /// whoever may run it.
+    /// `install`'s record of the host token's hash in the bridge's registry form (`join::token_hash`), rewritten on
+    /// every `install`. Not a secret, so `status` shows it to whoever may run it. A token replaced by hand has the old
+    /// hash here until `install` runs again.
     pub fn host_token_hash(&self) -> PathBuf {
         self.config_dir.join("host-token.hash")
     }

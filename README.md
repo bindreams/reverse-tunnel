@@ -42,6 +42,7 @@ Setting up a system-wide reverse tunnel service.
 Hostname [minicooper]:
 Join code (run `uv run ctl join-code` on the bridge; an empty line gives up):
 Downloading frpc v0.71.1...
+Restarting the service; an SSH session through this tunnel will drop...
 Reverse-tunnel v0.1.1 has been installed!
 service: running (pid 1234), enabled at boot
 host: minicooper
@@ -64,7 +65,8 @@ stderr are both terminals; otherwise a value that is needed and missing is an er
 command to run, and `install` does not wait for input. It installs and starts the service.
 
 Register the host on the bridge: in the bridge folder run `uv run ctl add HOST HASH`, with the `host` and `hash` from
-install's output, or from `reverse-tunnel status` (the hash is no secret; the token it comes from is never shown).
+install's output, or from `reverse-tunnel status` (the hash is no secret; the token it comes from is never shown). The
+`hash` is what `install` last recorded, so a token you replaced by hand shows its old hash until `install` runs again.
 [Set up a client](#set-up-a-client) is the next step. Until you register it, the host is refused ("host not
 registered" in its `frpc.log`) and retries on its own; once you have, it connects with no restart. A host installed
 by an earlier version has no `hash` yet: `status` says so, and the next `install` or `upgrade` records it. You may
@@ -216,9 +218,10 @@ Each log is rotated at 10 MB to `<name>.1`, replacing the previous one; `logs` s
 
 ### Upgrade
 
-`sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: your session
-ends when the service restarts, and the host reconnects on the new version. Before it replaces anything it checks the
-new version against this host's settings, and a failure leaves the old version running. It prints a line before the
+`sudo reverse-tunnel upgrade` replaces the binary and restarts the service, and it works over the tunnel: `install` says
+that the service restarts, and your session drops at that line; the host reconnects on the new version, and
+`reverse-tunnel status` shows the result once you are back. Before it replaces anything it checks
+the new version against this host's settings, and a failure leaves the old version running. It prints a line before the
 steps that take a while, then runs `install`, which on a host that is set up asks nothing, and whose output is the
 whole of what `upgrade` ends with:
 
@@ -226,6 +229,7 @@ whole of what `upgrade` ends with:
 $ sudo reverse-tunnel upgrade
 Checking for a new version...
 Downloading v0.1.1...
+Restarting the service; an SSH session through this tunnel will drop...
 Reverse-tunnel v0.1.1 has been installed!
 service: running (pid 1234), enabled at boot
 host: myhost
