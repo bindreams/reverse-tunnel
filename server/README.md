@@ -43,16 +43,17 @@ After `uv run ctl add`, the host is registered; the next step is to reach it fro
 
 In this folder, a git checkout of the bridge:
 
-1. `git describe --tags` names the release running now; `git fetch --tags && git checkout <new tag>` moves to the
-   new one. Hosts upgrade on their own schedule, with `reverse-tunnel upgrade`.
-2. `uv run ctl init` builds and updates the plugin. It keeps a running `reverse-tunnel-frps` as it is, and says so.
-3. Apply frps's changes. Each of these drops every tunnel once; hosts reconnect on their own.
+1. `old=$(git rev-parse HEAD) && git fetch --tags && git checkout <new tag>` moves to the new release and keeps the
+   commit it left in `$old`, for step 3. Hosts upgrade on their own schedule, with `reverse-tunnel upgrade`.
+2. `uv run ctl init` checks the network and DNS as at bring-up, builds and updates the plugin, and prints the join code
+   again. It keeps an existing `reverse-tunnel-frps` as it is, and says so.
+3. Apply frps's changes. Applying one drops every tunnel once; hosts reconnect on their own.
    - `docker compose up -d --build reverse-tunnel-frps` applies a change to its image, `compose.yaml` or `.env`. It
-     prints `Recreated` when there was one, and `Running` when there was none.
-   - frps reads `etc/` only at start. If `git diff --stat <old tag> <new tag> -- etc` lists a file and frps was not
-     recreated, run `docker compose restart reverse-tunnel-frps`.
-4. `uv run ctl list` shows each host's presence. `unknown` for every host, with a reason about frps's API, means frps
-   has not read the new `etc/`: see step 3.
+     prints `Recreated` when there was one, and leaves frps alone when there was none.
+   - frps reads `etc/` only at start. If `git diff --stat "$old" HEAD -- etc` lists a file, and frps was neither
+     created in step 2 nor recreated in step 3, run `docker compose restart reverse-tunnel-frps`.
+4. `uv run ctl list` shows each host's presence. Right after a start frps may not answer yet: run it again. `unknown`
+   for every host, with a reason about frps's API, then means frps has not read the new `etc/`: see step 3.
 
 ## Teardown
 
