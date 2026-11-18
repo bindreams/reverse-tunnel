@@ -1,7 +1,6 @@
 //! frpc's log, which `logs` prints and follows and `status` ends with. Every local account may read it: nothing secret
 //! is in it, because frpc.toml holds the tokens as environment placeholders.
 
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -24,42 +23,43 @@ pub fn open(path: &Path) -> Result<Option<File>> {
 }
 
 /// Copies the last `n` lines of `file`, a final line without its newline included, to `out`, and leaves `file` where
-/// they end, so `follow` continues from there with what was appended meanwhile. One pass over the file keeps the offsets of the last `n` line starts, so a long
-/// log is not held in memory.
+/// they end, so `follow` continues from there with what was appended meanwhile. Two passes in constant memory: the first
+/// counts the lines up to where it ends, the second finds where the last `n` of them start.
 pub fn tail(file: &mut File, n: usize, out: &mut impl Write) -> io::Result<()> {
-    file.seek(SeekFrom::End(0))?;
-    if n == 0 {
-        return Ok(());
-    }
     file.seek(SeekFrom::Start(0))?;
-    // Not preallocated by `n`, which may be `usize::MAX`.
-    let mut starts = VecDeque::new();
     let mut reader = BufReader::new(&mut *file);
-    let (mut at, mut line_starts_here) = (0u64, true);
+    let (mut newlines, mut end, mut last) = (0usize, 0u64, b'\n');
     loop {
         let block = reader.fill_buf()?;
+        let Some(&final_byte) = block.last() else { break };
+        newlines += block.iter().filter(|byte| **byte == b'\n').count();
+        (last, end) = (final_byte, end + block.len() as u64);
+        let len = block.len();
+        reader.consume(len);
+    }
+    let mut skip = (newlines + usize::from(last != b'\n')).saturating_sub(n);
+    reader.seek(SeekFrom::Start(0))?;
+    let mut start = 0u64;
+    while skip > 0 {
+        let block = reader.fill_buf()?;
+        // Shorter than at the first pass: truncated meanwhile.
         if block.is_empty() {
             break;
         }
-        for byte in block {
-            if line_starts_here {
-                if starts.len() == n {
-                    starts.pop_front();
-                }
-                starts.push_back(at);
+        let mut taken = block.len();
+        for (at, _) in block.iter().enumerate().filter(|(_, byte)| **byte == b'\n') {
+            skip -= 1;
+            if skip == 0 {
+                taken = at + 1;
+                break;
             }
-            line_starts_here = *byte == b'\n';
-            at += 1;
         }
-        let read = block.len();
-        reader.consume(read);
+        start += taken as u64;
+        reader.consume(taken);
     }
     drop(reader);
-    // Up to where the scan ended: what is appended meanwhile is not among the last `n` lines it found.
-    if let Some(&first) = starts.front() {
-        file.seek(SeekFrom::Start(first))?;
-        io::copy(&mut Read::by_ref(file).take(at - first), out)?;
-    }
+    file.seek(SeekFrom::Start(start))?;
+    io::copy(&mut Read::by_ref(file).take(end.saturating_sub(start)), out)?;
     Ok(())
 }
 
@@ -115,7 +115,7 @@ struct Follower<'a> {
 impl Follower<'_> {
     /// Prints what has been appended since the last call, and when the log has been replaced, the rest of the file it
     /// replaced and then the new one. What only a file it never held got (one that a second rotation moved on, or the
-    /// log rotated before it was found) is not shown: `<log>.1` has it.
+    /// log rotated before it was found) is not shown: `<log>.1` has it if it was the one file between, else it is gone.
     fn poll(&mut self, out: &mut impl Write) -> Result<()> {
         if self.file.is_none() {
             self.file = open(self.path)?;
