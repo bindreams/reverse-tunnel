@@ -2,14 +2,6 @@ use super::*;
 
 const DIR: &str = r"C:\Program Files\reverse-tunnel";
 
-fn with_entry(path: &str, dir: &str) -> Option<String> {
-    super::with_entry(path, dir).unwrap()
-}
-
-fn without_entry(path: &str, dir: &str) -> Option<String> {
-    super::without_entry(path, dir).unwrap()
-}
-
 #[test]
 fn a_directory_is_appended_after_the_entries_there() {
     assert_eq!(
@@ -38,38 +30,17 @@ fn removing_the_directory_that_was_added_gives_the_path_back_exactly() {
 }
 
 #[test]
-fn a_directory_that_is_named_already_is_not_added_whatever_its_case_or_a_trailing_backslash() {
-    for named in [
-        DIR.to_string(),
-        DIR.to_uppercase(),
-        format!(r"{DIR}\"),
-        format!("\"{DIR}\""),
-    ] {
-        assert_eq!(
-            with_entry(&format!(r"C:\Windows;{named};C:\Tools"), DIR),
-            None,
-            "{named}"
-        );
-    }
-}
-
-#[test]
 fn an_entry_that_only_starts_with_the_directory_does_not_name_it() {
     let longer = format!("{DIR}-old");
-    assert_eq!(
-        with_entry(&longer, DIR).unwrap(),
-        format!("{longer};{DIR}"),
-        "a longer name is another directory"
-    );
+    assert_eq!(with_entry(&longer, DIR).unwrap(), format!("{longer};{DIR}"));
     assert_eq!(without_entry(&longer, DIR), None);
     assert_eq!(without_entry(&format!(r"{DIR}\bin"), DIR), None);
 }
 
 #[test]
-fn every_entry_that_names_the_directory_is_removed_and_nothing_else_changes() {
-    let path = format!(r"C:\Windows;;{DIR};C:\Tools\;{}\;%SystemRoot%\x;", DIR.to_lowercase());
+fn every_entry_equal_to_the_directory_is_removed_and_nothing_else_changes() {
+    let path = format!(r"C:\Windows;;{DIR};C:\Tools\;{DIR};%SystemRoot%\x;");
 
-    // The empty entries stay as they were.
     assert_eq!(
         without_entry(&path, DIR).unwrap(),
         r"C:\Windows;;C:\Tools\;%SystemRoot%\x;"
@@ -106,45 +77,15 @@ fn a_path_value_survives_being_stored_and_read_back() {
 }
 
 #[test]
-fn an_entry_that_names_the_directory_through_an_environment_variable_names_it() {
-    let program_files = std::env::var("ProgramFiles").unwrap();
-    let dir = format!(r"{program_files}\reverse-tunnel");
-
-    assert_eq!(with_entry(r"%ProgramFiles%\reverse-tunnel;C:\Tools", &dir), None);
-    assert_eq!(with_entry(r"%PROGRAMFILES%\Reverse-Tunnel\", &dir), None);
-    assert_eq!(
-        without_entry(r"C:\Tools;%ProgramFiles%\reverse-tunnel", &dir).unwrap(),
-        r"C:\Tools"
-    );
-    // A variable that is not set stays as it is, and names nothing.
-    assert_eq!(
-        with_entry(r"%NoSuchVariableForReverseTunnel%\reverse-tunnel", &dir).unwrap(),
-        format!(r"%NoSuchVariableForReverseTunnel%\reverse-tunnel;{dir}")
-    );
-}
-
-#[test]
-fn an_entry_that_cannot_be_expanded_is_compared_as_written() {
-    let failed = || Err(anyhow!("expanding failed"));
-
-    assert_eq!(compared_entry(r#" "C:\Tools\" "#, failed()), r"c:\tools");
-    assert_eq!(
-        compared_entry(r"%A%\X", Ok(r"C:\Expanded\X".to_string())),
-        r"c:\expanded\x"
-    );
-    // The directory is written literally, so a literal compare finds it.
-    assert_eq!(compared_entry(DIR, failed()), compared_dir(DIR).unwrap());
-}
-
-#[test]
-fn whitespace_and_quotes_around_an_entry_do_not_change_what_it_names() {
-    for named in [
-        format!("  {DIR}"),
-        format!("{DIR}\t "),
-        format!(r#" "{DIR}\" "#),
-        format!(r#""  {DIR}  ""#),
+fn an_entry_written_another_way_is_not_ours() {
+    for other in [
+        DIR.to_uppercase(),
+        format!(r"{DIR}\"),
+        format!(r#""{DIR}""#),
+        r"%ProgramFiles%\reverse-tunnel".to_string(),
     ] {
-        assert_eq!(with_entry(&named, DIR), None, "{named:?}");
-        assert_eq!(without_entry(&named, DIR).unwrap(), "", "{named:?}");
+        assert_eq!(without_entry(&other, DIR), None, "{other}");
+        assert_eq!(with_entry(&other, DIR).unwrap(), format!("{other};{DIR}"));
+        assert_eq!(without_entry(&format!("{other};{DIR}"), DIR).unwrap(), other);
     }
 }
