@@ -1,0 +1,55 @@
+# Probe for #125 (never merges): can a virtual service account hard-link a file it cannot write into a directory it may
+# modify, and does an administrator re-applying that directory's inheritable DACL then rewrite the file's ACL?
+name: probe-hardlink
+on:
+  push:
+    branches: [azhukova/125]
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Set up the directories and the targets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory C:\probe\logs, C:\probe\targets | Out-Null
+          'readable by the account' | Set-Content C:\probe\targets\read.txt
+          'no access for the account' | Set-Content C:\probe\targets\none.txt
+          @'
+          mklink /H C:\probe\logs\link-read.txt C:\probe\targets\read.txt
+          mklink /H C:\probe\logs\link-none.txt C:\probe\targets\none.txt
+          whoami
+          echo done
+          '@ | Set-Content -Encoding ascii C:\probe\probe.cmd
+          sc.exe create rtprobe binPath= "cmd.exe /c C:\probe\probe.cmd > C:\probe\logs\out.txt 2>&1" obj= "NT SERVICE\rtprobe"
+          $sid = ([System.Security.Principal.NTAccount]'NT SERVICE\rtprobe').Translate([System.Security.Principal.SecurityIdentifier]).Value
+          "SID=$sid" >> $env:GITHUB_ENV
+          # logs/ as install makes it: the account may modify, Everyone reads.
+          $logs = Get-Acl C:\probe\logs
+          $logs.SetSecurityDescriptorSddlForm("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$sid)(A;OICI;0x1200a9;;;WD)")
+          Set-Acl C:\probe\logs $logs
+          # Targets outside logs/: one the account may read, one it has no access to.
+          foreach ($t in @(@('read.txt', "(A;;FR;;;$sid)"), @('none.txt', ''))) {
+            $a = Get-Acl "C:\probe\targets\$($t[0])"
+            $a.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)$($t[1])")
+            Set-Acl "C:\probe\targets\$($t[0])" $a
+          }
+          icacls C:\probe\probe.cmd /grant "*${sid}:(RX)"
+          icacls C:\probe /grant "*${sid}:(RX)"
+          "--- before"; icacls C:\probe\targets\read.txt; icacls C:\probe\targets\none.txt
+      - name: Run mklink as the service account
+        shell: pwsh
+        run: |
+          sc.exe start rtprobe
+          # The run is the service's process; `done` ends its output (the job's timeout bounds a run that never ends).
+          while (-not ((Test-Path C:\probe\logs\out.txt) -and (Select-String -Quiet done C:\probe\logs\out.txt))) { Start-Sleep 1 }
+          "--- out.txt"; Get-Content C:\probe\logs\out.txt
+          "--- logs/"; Get-ChildItem C:\probe\logs | Format-Table Name, Length
+      - name: Re-apply logs/'s descriptor as Administrator, as make_dir does, and read the targets
+        shell: pwsh
+        run: |
+          $logs = Get-Acl C:\probe\logs
+          $logs.SetSecurityDescriptorSddlForm("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$env:SID)(A;OICI;0x1200a9;;;WD)")
+          Set-Acl C:\probe\logs $logs
+          "--- after"; icacls C:\probe\targets\read.txt; icacls C:\probe\targets\none.txt
+          "--- windows"; [Environment]::OSVersion.VersionString
