@@ -3,21 +3,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Where cargo put the stub, which it builds for `cargo test` and not for `cargo test --lib`: the profile directory,
-/// taken as the nearest ancestor of the test executable that holds `build/`. A test executable is in `deps/` or, since
-/// cargo 1.100, in `build/<package>/<hash>/out/`; both are below the profile directory.
+/// Where cargo put the stub, which it builds for `cargo test` and not for `cargo test --lib`: the nearest ancestor of the
+/// test executable that holds it. A test executable is in `deps/` or, since cargo 1.100, in `build/<package>/<hash>/out/`.
 fn built() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    let profile = exe
-        .ancestors()
-        .find(|dir| dir.join("build").is_dir())
-        .unwrap_or_else(|| panic!("no cargo profile directory above {exe:?}"));
-    let stub = profile.join("stub-frpc");
-    assert!(
-        stub.is_file(),
-        "{stub:?} is missing: run `cargo test`, which builds the `stub-frpc` binary"
-    );
-    stub
+    exe.ancestors()
+        .map(|dir| dir.join("stub-frpc"))
+        .find(|stub| stub.is_file())
+        .unwrap_or_else(|| panic!("no stub-frpc above {exe:?}: run `cargo test`, which builds the `stub-frpc` binary"))
 }
 
 /// Copies the stub to `to`.
