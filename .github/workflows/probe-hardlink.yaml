@@ -29,7 +29,7 @@ jobs:
           $logs.SetSecurityDescriptorSddlForm("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$sid)(A;OICI;0x1200a9;;;WD)")
           Set-Acl C:\probe\logs $logs
           # Targets outside logs/: one the account may read, one it has no access to.
-          foreach ($t in @(@('read.txt', "(A;;FR;;;$sid)"), @('none.txt', ''))) {
+          foreach ($t in @(@('read.txt', "(A;;FR;;;$sid)"), @('none.txt', ''), @('write.txt', "(A;;0x1301bf;;;$sid)"))) {
             $a = Get-Acl "C:\probe\targets\$($t[0])"
             $a.SetSecurityDescriptorSddlForm("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)$($t[1])")
             Set-Acl "C:\probe\targets\$($t[0])" $a
@@ -45,6 +45,7 @@ jobs:
           while (-not ((Test-Path C:\probe\logs\out.txt) -and (Select-String -Quiet done C:\probe\logs\out.txt))) { Start-Sleep 1 }
           "--- out.txt"; Get-Content C:\probe\logs\out.txt
           "--- logs/"; Get-ChildItem C:\probe\logs | Format-Table Name, Length
+          "--- owner of out.txt"; (Get-Acl C:\probe\logs\out.txt).Owner
       - name: Re-apply logs/'s descriptor as Administrator, as make_dir does, and read the targets
         shell: pwsh
         run: |
