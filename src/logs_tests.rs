@@ -65,6 +65,35 @@ fn tail_keeps_whole_lines_from_the_end_and_leaves_the_file_at_its_end() {
     }
 }
 
+/// A log whose 8 KiB read buffer ends right after a newline: the next block starts a line.
+#[test]
+fn tail_counts_a_line_that_starts_a_read_block() {
+    // 64-byte lines: the 128th ends at byte 8192, the default `BufReader` capacity.
+    let lines: String = (1..=200)
+        .map(|n| {
+            format!(
+                "{:<63}
+",
+                format!("line {n}")
+            )
+        })
+        .collect();
+    assert!(lines.len() > 8192);
+
+    let (got, _) = tailed(&lines, 73);
+
+    let want: String = (128..=200)
+        .map(|n| {
+            format!(
+                "{:<63}
+",
+                format!("line {n}")
+            )
+        })
+        .collect();
+    assert_eq!(String::from_utf8(got).unwrap(), want);
+}
+
 /// A log longer than the buffer it is read through.
 #[test]
 fn tail_of_a_long_log_is_its_last_lines() {

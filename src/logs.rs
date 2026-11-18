@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, ErrorKind, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -23,8 +23,8 @@ pub fn open(path: &Path) -> Result<Option<File>> {
     }
 }
 
-/// Copies the last `n` lines of `file`, a final line without its newline included, to `out`, and leaves `file` at its
-/// end, so `follow` continues from there. One pass over the file keeps the offsets of the last `n` line starts, so a long
+/// Copies the last `n` lines of `file`, a final line without its newline included, to `out`, and leaves `file` where
+/// they end, so `follow` continues from there with what was appended meanwhile. One pass over the file keeps the offsets of the last `n` line starts, so a long
 /// log is not held in memory.
 pub fn tail(file: &mut File, n: usize, out: &mut impl Write) -> io::Result<()> {
     file.seek(SeekFrom::End(0))?;
@@ -55,9 +55,10 @@ pub fn tail(file: &mut File, n: usize, out: &mut impl Write) -> io::Result<()> {
         reader.consume(read);
     }
     drop(reader);
-    if let Some(first) = starts.front() {
-        file.seek(SeekFrom::Start(*first))?;
-        io::copy(file, out)?;
+    // Up to where the scan ended: what is appended meanwhile is not among the last `n` lines it found.
+    if let Some(&first) = starts.front() {
+        file.seek(SeekFrom::Start(first))?;
+        io::copy(&mut Read::by_ref(file).take(at - first), out)?;
     }
     Ok(())
 }
@@ -113,7 +114,8 @@ struct Follower<'a> {
 
 impl Follower<'_> {
     /// Prints what has been appended since the last call, and when the log has been replaced, the rest of the file it
-    /// replaced and then the new one. A file that a second rotation moved on meanwhile is not recovered.
+    /// replaced and then the new one. What only a file it never held got (one that a second rotation moved on, or the
+    /// log rotated before it was found) is not shown: `<log>.1` has it.
     fn poll(&mut self, out: &mut impl Write) -> Result<()> {
         if self.file.is_none() {
             self.file = open(self.path)?;
