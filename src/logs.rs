@@ -23,8 +23,9 @@ pub fn open(path: &Path) -> Result<Option<File>> {
 }
 
 /// Copies the last `n` lines of `file`, a final line without its newline included, to `out`, and leaves `file` where
-/// they end, so `follow` continues from there with what was appended meanwhile. Two passes in constant memory: the first
-/// counts the lines up to where it ends, the second finds where the last `n` of them start.
+/// they end, so `follow` continues from there with what was appended meanwhile. Two passes keep memory constant: the
+/// first counts the lines and fixes the end; the second, which reads no further than that end, finds where the last `n`
+/// start.
 pub fn tail(file: &mut File, n: usize, out: &mut impl Write) -> io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(&mut *file);
@@ -38,11 +39,13 @@ pub fn tail(file: &mut File, n: usize, out: &mut impl Write) -> io::Result<()> {
         reader.consume(len);
     }
     let mut skip = (newlines + usize::from(last != b'\n')).saturating_sub(n);
-    reader.seek(SeekFrom::Start(0))?;
+    drop(reader);
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(Read::by_ref(file).take(end));
     let mut start = 0u64;
     while skip > 0 {
         let block = reader.fill_buf()?;
-        // Shorter than at the first pass: truncated meanwhile.
+        // At `end`, or before it if the log was truncated meanwhile.
         if block.is_empty() {
             break;
         }
@@ -59,7 +62,7 @@ pub fn tail(file: &mut File, n: usize, out: &mut impl Write) -> io::Result<()> {
     }
     drop(reader);
     file.seek(SeekFrom::Start(start))?;
-    io::copy(&mut Read::by_ref(file).take(end.saturating_sub(start)), out)?;
+    io::copy(&mut Read::by_ref(file).take(end - start), out)?;
     Ok(())
 }
 
@@ -113,9 +116,8 @@ struct Follower<'a> {
 }
 
 impl Follower<'_> {
-    /// Prints what has been appended since the last call, and when the log has been replaced, the rest of the file it
-    /// replaced and then the new one. What only a file it never held got (one that a second rotation moved on, or the
-    /// log rotated before it was found) is not shown: `<log>.1` has it if it was the one file between, else it is gone.
+    /// Prints what has been appended since the last call; after a replacement, the rest of the old file, then the new one.
+    /// Lines that reached only a file it never held are not shown, as with `tail -F`.
     fn poll(&mut self, out: &mut impl Write) -> Result<()> {
         if self.file.is_none() {
             self.file = open(self.path)?;

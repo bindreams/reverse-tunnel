@@ -65,7 +65,7 @@ fn tail_keeps_whole_lines_from_the_end_and_leaves_the_file_at_its_end() {
     }
 }
 
-/// A log whose 8 KiB read buffer ends right after the last newline `tail` skips: the next block starts the first line.
+/// The last line `tail` skips ends a read block.
 #[test]
 fn tail_starts_at_a_line_that_starts_a_read_block() {
     // 64-byte lines: the 128th ends at byte 8192, the default `BufReader` capacity, so the last 72 start a block.
@@ -257,7 +257,29 @@ second
     );
 }
 
-/// A follower that starts before the log exists prints the file it finds from its start, and not `<log>.1`.
+/// Two rotations between polls: the rest of the held file, then the current one; the file between, now `<log>.1`, is
+/// not shown.
+#[test]
+fn a_follower_skips_the_file_between_two_rotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("frpc.log");
+    let log = LogFile::open(log_path.clone(), 10).unwrap();
+    let mut follower = follower_of(&log_path);
+    let mut out = Vec::new();
+
+    // At 10 bytes each write after the first starts a new file.
+    log.write(b"first, in the file the follower holds\n");
+    log.write(b"second, in the file between\n");
+    log.write(b"third, in the file now\n");
+    follower.poll(&mut out).unwrap();
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "first, in the file the follower holds\nthird, in the file now\n"
+    );
+}
+
+/// Not `<log>.1`, which an earlier rotation may have filled.
 #[test]
 fn a_follower_without_a_log_prints_the_file_it_finds_from_its_start() {
     let dir = tempfile::tempdir().unwrap();
