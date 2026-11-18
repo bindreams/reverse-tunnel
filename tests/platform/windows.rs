@@ -16,7 +16,6 @@ use base64::engine::general_purpose::STANDARD;
 use reverse_tunnel::account;
 use reverse_tunnel::leftovers;
 use reverse_tunnel::security::{Sid, owner_of};
-use reverse_tunnel::system_path;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID, LocalFree, WAIT_OBJECT_0};
 use windows_sys::Win32::Security::Authorization::{
     GetEffectiveRightsFromAclW, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, TRUSTEE_IS_SID,
@@ -26,6 +25,7 @@ use windows_sys::Win32::Security::{
     DACL_SECURITY_INFORMATION, GetTokenInformation, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_GROUPS,
     TOKEN_INFORMATION_CLASS, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenGroups, TokenPrivileges,
 };
+use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
@@ -481,19 +481,34 @@ pub fn names_scheduled_at_reboot() -> Vec<String> {
         .collect()
 }
 
-/// How many entries of the machine's `Path` name `dir`, as the product decides it.
-pub fn path_entries_naming(dir: &Path) -> usize {
+/// Counts entries equal to `dir`, the product's own match.
+pub fn path_entries_equal_to(dir: &Path) -> usize {
     let dir = dir.to_str().unwrap();
-    machine_path()
-        .split(';')
-        .filter(|entry| system_path::names(entry, dir).unwrap())
-        .count()
+    machine_path().split(';').filter(|entry| *entry == dir).count()
 }
 
 /// The machine's `Path` as a process started now would have it, each `%NAME%` expanded: the environment of a shell
 /// opened after `install`, unlike this process's own.
 pub fn fresh_path() -> String {
-    system_path::expand(&machine_path()).unwrap()
+    let wide: Vec<u16> = machine_path().encode_utf16().chain([0]).collect();
+    // SAFETY: `wide` is NUL-terminated; the buffer has the length that is passed, and it is read up to what is written.
+    unsafe {
+        let needed = ExpandEnvironmentStringsW(wide.as_ptr(), null_mut(), 0);
+        assert_ne!(
+            needed,
+            0,
+            "expanding the machine's Path: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut expanded = vec![0u16; needed as usize];
+        let written = ExpandEnvironmentStringsW(wide.as_ptr(), expanded.as_mut_ptr(), needed);
+        assert!(
+            (1..=needed).contains(&written),
+            "expanding the machine's Path: {}",
+            std::io::Error::last_os_error()
+        );
+        String::from_utf16_lossy(&expanded[..written as usize - 1])
+    }
 }
 
 /// Waits, with no cap, until the removal's task has deleted every file matching `leftovers::pattern`.
