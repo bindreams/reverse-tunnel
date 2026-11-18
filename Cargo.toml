@@ -53,16 +53,16 @@ known-folders = "1.4.2"
 winreg = "0.56.0"
 # The virtual account's SID is the SHA-1 of its name.
 sha1 = "0.11.0"
-# Security descriptors, ACEs and SID lookups (src/security.rs), `Path` expansion and its broadcast, and process listing
+# Security descriptors, ACEs and SID lookups (src/security.rs), `Path` broadcast, and process listing
 # (src/processes.rs).
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Environment", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_RemoteDesktop", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 # Task Scheduler's COM API, for the removal's task (src/schtasks.rs): the modules it imports. `RegisterTask` takes VARIANTs,
 # and is gated on Ole and Variant.
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
 
 [target."cfg(windows)".dev-dependencies]
-# tests/platform.rs: a job object that ends a session, and a DACL's effective rights.
-windows-sys = { version = "0.61.2", features = ["Win32_System_JobObjects"] }
+# tests/platform.rs: a job object that ends a session, a DACL's effective rights and the machine `Path`'s expansion.
+windows-sys = { version = "0.61.2", features = ["Win32_System_Environment", "Win32_System_JobObjects"] }
 
 # Stands in for frpc in tests/, and for a binary's `run --check` in src/ops_tests.rs and src/install_tests.rs.
 [[bin]]
