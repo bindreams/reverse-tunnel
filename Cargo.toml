@@ -61,7 +61,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant"] }
 
 [target."cfg(windows)".dev-dependencies]
-# tests/platform.rs: a job object that ends a session, a DACL's effective rights and the machine `Path`'s expansion.
+# tests/platform.rs and tests/platform/windows.rs: a job object that ends a session, a DACL's effective rights and the
+# machine `Path`'s expansion.
 windows-sys = { version = "0.61.2", features = ["Win32_System_Environment", "Win32_System_JobObjects"] }
 
 # Stands in for frpc in tests/, and for a binary's `run --check` in src/ops_tests.rs and src/install_tests.rs.

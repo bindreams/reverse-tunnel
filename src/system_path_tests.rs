@@ -42,7 +42,7 @@ fn an_entry_that_only_starts_with_the_directory_does_not_name_it() {
 }
 
 #[test]
-fn every_entry_that_names_the_directory_is_removed_and_nothing_else_changes() {
+fn every_entry_equal_to_the_directory_is_removed_and_nothing_else_changes() {
     let path = format!(r"C:\Windows;;{DIR};C:\Tools\;{DIR};%SystemRoot%\x;");
 
     // The empty entries stay as they were.
@@ -94,6 +94,6 @@ fn an_entry_differing_only_in_case_is_not_ours() {
 }
 
 #[test]
-fn a_directory_that_is_named_already_is_not_added() {
+fn a_directory_already_there_is_not_added() {
     assert_eq!(with_entry(&format!(r"C:\Windows;{DIR};C:\Tools"), DIR), None);
 }

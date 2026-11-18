@@ -215,7 +215,7 @@ impl Machine {
         );
         #[cfg(windows)]
         assert_eq!(
-            windows::path_entries_naming(&paths.bin_dir),
+            windows::path_entries_equal_to(&paths.bin_dir),
             0,
             "the machine's Path names {} from before",
             paths.bin_dir.display()
@@ -429,7 +429,7 @@ fn snapshot(machine: &Machine) -> BTreeSet<String> {
         if schtasks::state(schtasks::REMOVAL).unwrap() != TaskState::Gone {
             seen.insert(format!("task {}", schtasks::REMOVAL));
         }
-        if windows::path_entries_naming(&paths.bin_dir) > 0 {
+        if windows::path_entries_equal_to(&paths.bin_dir) > 0 {
             seen.insert("a Path entry for the bin dir".to_string());
         }
     }
@@ -1856,7 +1856,7 @@ fn assert_nothing_left(machine: &Machine, said: &str) {
     }
     assert_eq!(schtasks::state(schtasks::REMOVAL).unwrap(), TaskState::Gone);
     assert_eq!(
-        windows::path_entries_naming(&machine.paths.bin_dir),
+        windows::path_entries_equal_to(&machine.paths.bin_dir),
         0,
         "the Path entry is left"
     );
@@ -2064,9 +2064,9 @@ fn the_removal_deletes_leftover_images_after_its_task_is_gone() {
 fn install_puts_the_bin_dir_on_the_machine_path_once() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
-    assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
+    assert_eq!(windows::path_entries_equal_to(&machine.paths.bin_dir), 1);
 
     machine.install(&join_code("tunnel.example.test"));
 
-    assert_eq!(windows::path_entries_naming(&machine.paths.bin_dir), 1);
+    assert_eq!(windows::path_entries_equal_to(&machine.paths.bin_dir), 1);
 }
