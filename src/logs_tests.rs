@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::thread;
 
@@ -39,44 +39,43 @@ const INPUTS: [(&str, usize, &str); 8] = [
     ("a\nb", usize::MAX, "a\nb"),
 ];
 
-#[test]
-fn last_lines_keeps_whole_lines_from_the_end() {
-    for (text, n, expected) in INPUTS {
-        assert_eq!(last_lines(text.as_bytes(), n), expected.as_bytes(), "{n} of {text:?}");
-    }
-}
-
-/// Block sizes below the length of a line put a block's edge on every kind of line boundary.
-#[test]
-fn tail_is_the_same_whatever_the_block_size() {
+/// `tail` of `text` as a file, and what is left to read in the file afterwards.
+fn tailed(text: &str, n: usize) -> (Vec<u8>, Vec<u8>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("frpc.log");
-    for (text, n, expected) in INPUTS {
-        fs::write(&path, text).unwrap();
-        for block in 1..=7 {
-            let mut file = File::open(&path).unwrap();
-            let got = tail_in_blocks(&mut file, n, block).unwrap();
-            assert_eq!(got, expected.as_bytes(), "{n} of {text:?} in blocks of {block}");
-        }
-    }
-}
-
-/// The tail of a log longer than a few blocks, and the file left at the end it read to.
-#[test]
-fn tail_of_a_long_log_leaves_the_file_at_its_end() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("frpc.log");
-    let lines: String = (1..=5000).map(|n| format!("line {n}\n")).collect();
-    assert!(lines.len() > 3 * BLOCK);
-    fs::write(&path, &lines).unwrap();
+    fs::write(&path, text).unwrap();
     let mut file = File::open(&path).unwrap();
-
-    let got = tail(&mut file, 3).unwrap();
-
-    assert_eq!(got, b"line 4998\nline 4999\nline 5000\n");
+    let mut out = Vec::new();
+    tail(&mut file, n, &mut out).unwrap();
     let mut rest = Vec::new();
     file.read_to_end(&mut rest).unwrap();
-    assert!(rest.is_empty(), "{} bytes after the tail", rest.len());
+    (out, rest)
+}
+
+#[test]
+fn tail_keeps_whole_lines_from_the_end_and_leaves_the_file_at_its_end() {
+    for (text, n, expected) in INPUTS {
+        let (got, rest) = tailed(text, n);
+        assert_eq!(got, expected.as_bytes(), "{n} of {text:?}");
+        assert!(
+            rest.is_empty(),
+            "{} bytes after the tail of {n} of {text:?}",
+            rest.len()
+        );
+    }
+}
+
+/// The last line `tail` skips ends a read block.
+#[test]
+fn tail_starts_at_a_line_that_starts_a_read_block() {
+    // 64-byte lines: the 128th ends at byte 8192, the default `BufReader` capacity, so the last 72 start a block.
+    let lines = |range: std::ops::RangeInclusive<usize>| -> String {
+        range.map(|n| format!("{:<63}\n", format!("line {n}"))).collect()
+    };
+
+    let (got, _) = tailed(&lines(1..=200), 72);
+
+    assert_eq!(String::from_utf8(got).unwrap(), lines(129..=200));
 }
 
 #[test]
@@ -158,14 +157,7 @@ impl Write for AppendsAfterTheStart {
 fn following_goes_on_from_the_end_of_what_was_shown() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("frpc.log");
-    let lines: String = (1..=12)
-        .map(|n| {
-            format!(
-                "line {n}
-"
-            )
-        })
-        .collect();
+    let lines: String = (1..=12).map(|n| format!("line {n}\n")).collect();
     fs::write(&log, &lines).unwrap();
     let mut out = AppendsAfterTheStart {
         log: log.clone(),
@@ -175,14 +167,7 @@ fn following_goes_on_from_the_end_of_what_was_shown() {
 
     show(&log, None, true, &mut out).unwrap();
 
-    let expected: String = (3..=12)
-        .map(|n| {
-            format!(
-                "line {n}
-"
-            )
-        })
-        .collect::<String>()
+    let expected: String = (3..=12).map(|n| format!("line {n}\n")).collect::<String>()
         + "appended
 ";
     assert_eq!(String::from_utf8(out.shown).unwrap(), expected);
@@ -224,9 +209,9 @@ fn a_follower_prints_each_appended_line_once() {
     )
     .unwrap();
     let mut follower = follower_of(&log);
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
+    let mut out = Vec::new();
 
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
     assert!(out.is_empty(), "printed what was already shown: {out:?}");
     let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
     file.write_all(
@@ -234,15 +219,14 @@ fn a_follower_prints_each_appended_line_once() {
 ",
     )
     .unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
+    follower.poll(&mut out).unwrap();
 
     assert_eq!(
         out,
         b"new
 "
     );
-    assert!(notes.is_empty());
 }
 
 /// A follower that began before the log existed prints all of it once it is there.
@@ -251,9 +235,9 @@ fn a_follower_without_a_log_prints_it_from_the_start() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("frpc.log");
     let mut follower = Follower { path: &log, file: None };
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
+    let mut out = Vec::new();
 
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
     assert!(out.is_empty());
     fs::write(
         &log,
@@ -262,8 +246,8 @@ second
 ",
     )
     .unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
+    follower.poll(&mut out).unwrap();
 
     assert_eq!(
         out,
@@ -273,34 +257,46 @@ second
     );
 }
 
-/// A follower that began before the log existed and finds it rotated already prints `<log>.1` before it.
+/// Two rotations between polls: the rest of the held file, then the current one; the file between, now `<log>.1`, is
+/// not shown.
 #[test]
-fn a_follower_without_a_log_prints_the_rotated_log_before_it() {
+fn a_follower_skips_the_file_between_two_rotations() {
     let dir = tempfile::tempdir().unwrap();
-    let log = dir.path().join("frpc.log");
-    let mut follower = Follower { path: &log, file: None };
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
+    let log_path = dir.path().join("frpc.log");
+    let log = LogFile::open(log_path.clone(), 10).unwrap();
+    let mut follower = follower_of(&log_path);
+    let mut out = Vec::new();
 
-    fs::write(
-        dir.path().join("frpc.log.1"),
-        "rotated
-",
-    )
-    .unwrap();
-    fs::write(
-        &log, "current
-",
-    )
-    .unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
+    // At 10 bytes each write after the first starts a new file.
+    log.write(b"first, in the file the follower holds\n");
+    log.write(b"second, in the file between\n");
+    log.write(b"third, in the file now\n");
+    follower.poll(&mut out).unwrap();
 
     assert_eq!(
-        out,
-        b"rotated
-current
-"
+        String::from_utf8(out).unwrap(),
+        "first, in the file the follower holds\nthird, in the file now\n"
     );
+}
+
+/// Not `<log>.1`, which an earlier rotation may have filled.
+#[test]
+fn a_follower_without_a_log_prints_the_file_it_finds_from_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("frpc.log");
+    let mut follower = Follower {
+        path: &log_path,
+        file: None,
+    };
+    let mut out = Vec::new();
+    follower.poll(&mut out).unwrap();
+
+    let log = LogFile::open(log_path.clone(), 10).unwrap();
+    log.write(b"before the rotation\n");
+    log.write(b"after it\n");
+    follower.poll(&mut out).unwrap();
+
+    assert_eq!(out, b"after it\n");
 }
 
 /// What the old file got that the follower had not read, then the new file's lines, in order and once.
@@ -310,7 +306,7 @@ fn a_follower_goes_on_in_the_file_a_rotation_starts() {
     let log_path = dir.path().join("frpc.log");
     let log = LogFile::open(log_path.clone(), 10).unwrap();
     let mut follower = follower_of(&log_path);
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
+    let mut out = Vec::new();
 
     log.write(
         b"first, before the rotation
@@ -320,93 +316,18 @@ fn a_follower_goes_on_in_the_file_a_rotation_starts() {
         b"second, after it
 ",
     );
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
     log.write(
         b"third, appended
 ",
     );
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
 
     let all = "first, before the rotation
 second, after it
 third, appended
 ";
     assert_eq!(String::from_utf8(out).unwrap(), all);
-}
-
-/// After a second rotation the file the follower holds is no longer `frpc.log.1`, which the second replaced: the file
-/// between is, and its lines are not lost. With rotations past that the lines of the files before it are, and the
-/// follower says so; it cannot tell two rotations from more, so it says so for two as well.
-#[test]
-fn a_follower_recovers_two_rotations_and_says_when_it_may_have_missed_lines() {
-    let dir = tempfile::tempdir().unwrap();
-    let log_path = dir.path().join("frpc.log");
-    let log = LogFile::open(log_path.clone(), 10).unwrap();
-    let mut follower = follower_of(&log_path);
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
-
-    log.write(
-        b"first, in the file the follower holds
-",
-    );
-    log.write(
-        b"second, in the file between
-",
-    );
-    log.write(
-        b"third, in the file now
-",
-    );
-    follower.poll(&mut out, &mut notes).unwrap();
-
-    let all = "first, in the file the follower holds
-second, in the file between
-third, in the file now
-";
-    assert_eq!(String::from_utf8(out).unwrap(), all);
-
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
-    log.write(
-        b"fourth, in a file that the next rotation unlinks
-",
-    );
-    log.write(
-        b"fifth, in the file between
-",
-    );
-    log.write(
-        b"sixth, in the file now
-",
-    );
-    follower.poll(&mut out, &mut notes).unwrap();
-
-    let kept = "fifth, in the file between
-sixth, in the file now
-";
-    assert_eq!(String::from_utf8(out).unwrap(), kept);
-    assert!(String::from_utf8(notes).unwrap().contains("rotated away"));
-}
-
-/// One rotation loses nothing and says nothing.
-#[test]
-fn a_follower_says_nothing_of_one_rotation() {
-    let dir = tempfile::tempdir().unwrap();
-    let log_path = dir.path().join("frpc.log");
-    let log = LogFile::open(log_path.clone(), 10).unwrap();
-    let mut follower = follower_of(&log_path);
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
-
-    log.write(
-        b"first, in the file the follower holds
-",
-    );
-    log.write(
-        b"second, in the file now
-",
-    );
-    follower.poll(&mut out, &mut notes).unwrap();
-
-    assert!(notes.is_empty(), "{:?}", String::from_utf8_lossy(&notes));
 }
 
 /// Between a rotation's rename and its new file there is no log: that is not an error, and the next poll finds it.
@@ -420,16 +341,16 @@ fn a_follower_waits_for_a_log_that_is_not_there() {
     )
     .unwrap();
     let mut follower = follower_of(&log);
-    let (mut out, mut notes) = (Vec::new(), Vec::new());
+    let mut out = Vec::new();
 
     fs::rename(&log, dir.path().join("frpc.log.1")).unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
     fs::write(
         &log, "new
 ",
     )
     .unwrap();
-    follower.poll(&mut out, &mut notes).unwrap();
+    follower.poll(&mut out).unwrap();
 
     assert_eq!(
         out,

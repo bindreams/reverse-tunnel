@@ -310,7 +310,8 @@ fn read_tail(log: &Path) -> Result<Option<Vec<u8>>> {
     let Some(mut file) = logs::open(log)? else {
         return Ok(None);
     };
-    let tail = logs::tail(&mut file, logs::TAIL).with_context(|| format!("reading {}", log.display()))?;
+    let mut tail = Vec::new();
+    logs::tail(&mut file, logs::TAIL, &mut tail).with_context(|| format!("reading {}", log.display()))?;
     Ok(Some(tail))
 }
 
