@@ -1,7 +1,8 @@
 //! The machine's `Path` on Windows, which `install` adds the bin dir to and `uninstall` removes it from, as rustup does
 //! to the user's `Path`: edited in the registry, then every program is told to read the environment again.
 //!
-//! The edit is a read, a change and a write: a concurrent edit by another program can lose one of the two.
+//! An entry is the bin dir's only if it equals it character for character: no case, quote, `%VAR%` or backslash
+//! folding. The edit is a read, a change and a write: a concurrent edit by another program can lose one of the two.
 
 use std::io::ErrorKind;
 use std::path::Path;
@@ -25,12 +26,12 @@ fn value() -> String {
 /// programs', which may hang; the notification is a courtesy, and the edit is already made.
 const BROADCAST_TIMEOUT: u32 = 5000;
 
-/// Puts `dir` on the machine's `Path`, unless an entry equals it exactly.
+/// Puts `dir` on the machine's `Path`, unless an entry equals it.
 pub fn add(dir: &Path) -> Result<()> {
     edit(dir, with_entry)
 }
 
-/// Removes every entry that equals `dir` exactly from the machine's `Path`.
+/// Removes every entry that equals `dir` from the machine's `Path`.
 pub fn remove(dir: &Path) -> Result<()> {
     edit(dir, without_entry)
 }
@@ -84,7 +85,7 @@ pub fn broadcast() {
     }
 }
 
-/// `path` with `dir` appended, or none if an entry equals it exactly. A trailing separator is kept as it was, so that
+/// `path` with `dir` appended, or none if an entry equals it. A trailing separator is kept as it was, so that
 /// `without_entry` gives `path` back: `A;B;` becomes `A;B;dir;`, and `A;B` becomes `A;B;dir`.
 fn with_entry(path: &str, dir: &str) -> Option<String> {
     if path.split(';').any(|entry| entry == dir) {
@@ -99,7 +100,7 @@ fn with_entry(path: &str, dir: &str) -> Option<String> {
     })
 }
 
-/// `path` without the entries that equal `dir` exactly, each with its separator; none if no entry does. Other entries,
+/// `path` without the entries that equal `dir`, each with its separator; none if no entry does. Other entries,
 /// empty ones too, are as they were.
 fn without_entry(path: &str, dir: &str) -> Option<String> {
     let kept: Vec<&str> = path.split(';').filter(|entry| *entry != dir).collect();

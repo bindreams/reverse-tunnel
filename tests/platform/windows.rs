@@ -481,7 +481,7 @@ pub fn names_scheduled_at_reboot() -> Vec<String> {
         .collect()
 }
 
-/// How many entries of the machine's `Path` equal `dir`, which is how the product matches them.
+/// Counts entries equal to `dir`, the product's own match.
 pub fn path_entries_equal_to(dir: &Path) -> usize {
     let dir = dir.to_str().unwrap();
     machine_path().split(';').filter(|entry| *entry == dir).count()

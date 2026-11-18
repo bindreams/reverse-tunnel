@@ -32,11 +32,7 @@ fn removing_the_directory_that_was_added_gives_the_path_back_exactly() {
 #[test]
 fn an_entry_that_only_starts_with_the_directory_does_not_name_it() {
     let longer = format!("{DIR}-old");
-    assert_eq!(
-        with_entry(&longer, DIR).unwrap(),
-        format!("{longer};{DIR}"),
-        "a longer name is another directory"
-    );
+    assert_eq!(with_entry(&longer, DIR).unwrap(), format!("{longer};{DIR}"));
     assert_eq!(without_entry(&longer, DIR), None);
     assert_eq!(without_entry(&format!(r"{DIR}\bin"), DIR), None);
 }
@@ -45,7 +41,6 @@ fn an_entry_that_only_starts_with_the_directory_does_not_name_it() {
 fn every_entry_equal_to_the_directory_is_removed_and_nothing_else_changes() {
     let path = format!(r"C:\Windows;;{DIR};C:\Tools\;{DIR};%SystemRoot%\x;");
 
-    // The empty entries stay as they were.
     assert_eq!(
         without_entry(&path, DIR).unwrap(),
         r"C:\Windows;;C:\Tools\;%SystemRoot%\x;"
@@ -82,18 +77,15 @@ fn a_path_value_survives_being_stored_and_read_back() {
 }
 
 #[test]
-fn an_entry_differing_only_in_case_is_not_ours() {
-    let other = DIR.to_uppercase();
-
-    assert_eq!(without_entry(&other, DIR), None);
-    assert_eq!(
-        with_entry(&other, DIR).unwrap(),
-        format!("{other};{DIR}"),
-        "ours is added beside it"
-    );
-}
-
-#[test]
-fn a_directory_already_there_is_not_added() {
-    assert_eq!(with_entry(&format!(r"C:\Windows;{DIR};C:\Tools"), DIR), None);
+fn an_entry_written_another_way_is_not_ours() {
+    for other in [
+        DIR.to_uppercase(),
+        format!(r"{DIR}\"),
+        format!(r#""{DIR}""#),
+        r"%ProgramFiles%\reverse-tunnel".to_string(),
+    ] {
+        assert_eq!(without_entry(&other, DIR), None, "{other}");
+        assert_eq!(with_entry(&other, DIR).unwrap(), format!("{other};{DIR}"));
+        assert_eq!(without_entry(&format!("{other};{DIR}"), DIR).unwrap(), other);
+    }
 }
