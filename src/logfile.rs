@@ -122,8 +122,8 @@ impl Active {
 
 /// Opens `path` for appending, created if missing. A file this creates on Unix is made mode 0644 whatever the umask:
 /// every local account may read a log (`logs`, `status`). A mode that cannot be set is reported and does not stop the
-/// log; a file that already exists keeps its mode (`install` widens those of an older version). On Windows the log
-/// directory's ACL, which `install` sets, gives Everyone read on each new file.
+/// log; a file that already exists keeps its mode. On Windows the log directory's ACL, which `install` sets, gives
+/// Everyone read on each new file.
 fn open(path: &Path) -> Result<File> {
     loop {
         let mut create = OpenOptions::new();
