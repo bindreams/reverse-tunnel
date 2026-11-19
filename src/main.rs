@@ -28,8 +28,7 @@ enum Command {
     /// The service's entry point; not for humans.
     #[command(hide = true)]
     Run {
-        /// Render the configuration, have frpc verify it, and exit. On Windows it first checks that the service
-        /// account has access to what `run` opens.
+        /// Render the configuration, have frpc verify it, and exit.
         #[arg(long)]
         check: bool,
     },

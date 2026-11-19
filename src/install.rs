@@ -247,6 +247,8 @@ fn set_up(
     changed |= write_settings(paths, account, host, join)?;
     verify_tools(paths, &new.bytes, Some(*account))?;
     changed |= place_binaries(paths, new)?;
+    #[cfg(windows)]
+    own(paths, account)?;
     changed |= register(manager, &spec, paths)?;
     // Only now: until the service is registered on the new image, it is registered on the old one, which may be the
     // binary on the `PATH`.
@@ -929,9 +931,7 @@ fn widen_logs(paths: &Paths) -> Result<()> {
 /// rewrites the `bridge:` line, `bridge.pem` and `secrets/bridge.token`. Whether any file changed.
 fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Option<&JoinInfo>) -> Result<bool> {
     let secret = Perm::new(0o640).group(*account);
-    make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
-    // Readable by everyone: the logs in it are (`logfile::open`).
-    make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))?;
+    make_state_dirs(paths, account)?;
     #[cfg(unix)]
     widen_logs(paths)?;
 
@@ -972,6 +972,52 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
     }
     record_host_token_hash(paths)?;
     Ok(changed)
+}
+
+/// Makes `secrets/` and `logs/`, the directories the service account uses, with their final mode and owner.
+fn make_state_dirs(paths: &Paths, account: &Account) -> Result<()> {
+    make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
+    // Readable by everyone: the logs in it are (`logfile::open`).
+    make_dir(&paths.log_dir, Perm::new(0o755).owner(*account).group(*account))
+}
+
+/// Windows: gives what `run` reads the access `install` gives it, whatever was done to it since:
+/// - the four directories, `config_dir`, `bin_dir`, `secrets/` and `logs/`: their descriptors, which replace the owner
+///   and every ACE. Applying one propagates its inheritable ACEs to what the directory holds, so every file in `logs/`
+///   gets them too. An explicit ACE on a file there, a deny ACE or a protected DACL included, stays, and the service
+///   then fails to open that file.
+/// - `config.yaml`, `bridge.pem`, the two tokens and every regular file directly in the bin dir (frpc, the copy on the
+///   `PATH`, the service images): the ACL their directory gives, their owner staying. One that is missing is an error
+///   that names it.
+///
+/// Files are reset one by one only in directories that Administrators own (`make_dir` refuses another owner), so no
+/// link the service account planted is followed. A registered image outside the bin dir is not reset.
+#[cfg(windows)]
+pub fn own(paths: &Paths, account: &Account) -> Result<()> {
+    make_dir(&paths.config_dir, PUBLIC_DIR)?;
+    make_dir(&paths.bin_dir, PUBLIC_DIR)?;
+    make_state_dirs(paths, account)?;
+    for path in [
+        paths.config_file(),
+        paths.bridge_pem(),
+        paths.bridge_token(),
+        paths.host_token(),
+    ] {
+        reset_acl(&path)?;
+    }
+    for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("listing {}", paths.bin_dir.display()))? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            reset_acl(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// Gives `path` the ACL its directory gives, its owner staying.
+#[cfg(windows)]
+fn reset_acl(path: &Path) -> Result<()> {
+    crate::security::inherit_dacl(path).with_context(|| format!("resetting the ACL of {}", path.display()))
 }
 
 /// Writes the hash of the host token, which is no secret, where `status` reads it without the right to read the token

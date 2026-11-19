@@ -1,5 +1,3 @@
-#[cfg(windows)]
-pub mod access;
 pub mod account;
 pub mod command;
 pub mod config;
