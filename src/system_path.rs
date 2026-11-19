@@ -1,13 +1,13 @@
 //! The machine's `Path` on Windows, which `install` adds the bin dir to and `uninstall` removes it from, as rustup does
 //! to the user's `Path`: edited in the registry, then every program is told to read the environment again.
 //!
-//! The edit is a read, a change and a write: a concurrent edit by another program can lose one of the two.
+//! An entry is the bin dir's only if it equals it character for character: no case, quote, `%VAR%` or backslash
+//! folding. The edit is a read, a change and a write: a concurrent edit by another program can lose one of the two.
 
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
-use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
@@ -26,19 +26,19 @@ fn value() -> String {
 /// programs', which may hang; the notification is a courtesy, and the edit is already made.
 const BROADCAST_TIMEOUT: u32 = 5000;
 
-/// Puts `dir` on the machine's `Path`, unless an entry names it already.
+/// Puts `dir` on the machine's `Path`, unless an entry equals it.
 pub fn add(dir: &Path) -> Result<()> {
     edit(dir, with_entry)
 }
 
-/// Removes every entry that names `dir` from the machine's `Path`.
+/// Removes every entry that equals `dir` from the machine's `Path`.
 pub fn remove(dir: &Path) -> Result<()> {
     edit(dir, without_entry)
 }
 
 /// Replaces the `Path` by what `change` makes of it, if it makes anything, keeping the value's type, then tells the
 /// programs that run to read their environment again.
-fn edit(dir: &Path, change: fn(&str, &str) -> Result<Option<String>>) -> Result<()> {
+fn edit(dir: &Path, change: fn(&str, &str) -> Option<String>) -> Result<()> {
     let dir = dir.to_str().context("the directory is not Unicode")?;
     let key = winreg::RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey_with_flags(KEY, KEY_READ | KEY_WRITE)
@@ -51,7 +51,7 @@ fn edit(dir: &Path, change: fn(&str, &str) -> Result<Option<String>>) -> Result<
     if !matches!(vtype, REG_SZ | REG_EXPAND_SZ) {
         bail!("{} is not a string, so it was not changed", value());
     }
-    let Some(changed) = change(&current, dir)? else {
+    let Some(changed) = change(&current, dir) else {
         return Ok(());
     };
     key.set_raw_value(
@@ -85,85 +85,27 @@ pub fn broadcast() {
     }
 }
 
-/// `text` with its `%NAME%` environment variables expanded, as a process that reads the `Path` would; one that is not
-/// set stays as it is. Fails with the OS error if the expansion cannot be made.
-pub fn expand(text: &str) -> Result<String> {
-    let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
-    // SAFETY: `wide` is NUL-terminated; the buffer has the length that is passed, and it is read up to what is written.
-    unsafe {
-        let needed = ExpandEnvironmentStringsW(wide.as_ptr(), std::ptr::null_mut(), 0);
-        if needed == 0 {
-            return Err(io::Error::last_os_error()).with_context(|| format!("expanding the variables in {text}"));
-        }
-        let mut expanded = vec![0u16; needed as usize];
-        let written = ExpandEnvironmentStringsW(wide.as_ptr(), expanded.as_mut_ptr(), needed);
-        if written == 0 {
-            return Err(io::Error::last_os_error()).with_context(|| format!("expanding the variables in {text}"));
-        }
-        if written > needed {
-            bail!("expanding the variables in {text}: the result grew while it was made");
-        }
-        Ok(String::from_utf16_lossy(&expanded[..written as usize - 1]))
-    }
-}
-
-/// `text` as the entries of the `Path` are compared: without surrounding whitespace and quotes and a trailing
-/// backslash, by whatever case.
-fn bare(text: &str) -> String {
-    let trimmed = text.trim_matches(|c: char| c.is_whitespace() || c == '"');
-    trimmed.trim_end_matches('\\').to_lowercase()
-}
-
-/// `dir` as entries are compared with it, once per edit. It has no `%` (see `Paths::system`), so an expansion that fails
-/// fails the edit.
-fn compared_dir(dir: &str) -> Result<String> {
-    Ok(bare(&expand(dir)?))
-}
-
-/// `entry` as it is compared: its `expanded` text, or as written if it could not be expanded. An unrelated entry that
-/// cannot be expanded must not fail the edit, and we write our entry literally, so a literal compare finds it.
-fn compared_entry(entry: &str, expanded: Result<String>) -> String {
-    bare(&expanded.unwrap_or_else(|_| entry.to_string()))
-}
-
-/// Whether the `Path` entry `entry` names `dir`, as `compared_dir` made it.
-fn names_compared(entry: &str, dir: &str) -> bool {
-    compared_entry(entry, expand(entry)) == dir
-}
-
-/// Whether the `Path` entry `entry` names the directory `dir`: once its variables are expanded, by whatever case, with
-/// or without surrounding whitespace and quotes and a trailing backslash. An entry that cannot be expanded is compared
-/// as written.
-pub fn names(entry: &str, dir: &str) -> Result<bool> {
-    Ok(names_compared(entry, &compared_dir(dir)?))
-}
-
-/// `path` with `dir` appended, or none if an entry names it already. A trailing separator is kept as it was, so that
+/// `path` with `dir` appended, or none if an entry equals it. A trailing separator is kept as it was, so that
 /// `without_entry` gives `path` back: `A;B;` becomes `A;B;dir;`, and `A;B` becomes `A;B;dir`.
-fn with_entry(path: &str, dir: &str) -> Result<Option<String>> {
-    let compared = compared_dir(dir)?;
-    if path.split(';').any(|entry| names_compared(entry, &compared)) {
-        return Ok(None);
+fn with_entry(path: &str, dir: &str) -> Option<String> {
+    if path.split(';').any(|entry| entry == dir) {
+        return None;
     }
-    Ok(Some(if path.is_empty() {
+    Some(if path.is_empty() {
         dir.to_string()
     } else if path.ends_with(';') {
         format!("{path}{dir};")
     } else {
         format!("{path};{dir}")
-    }))
+    })
 }
 
-/// `path` without the entries that name `dir`, each with its separator; none if no entry does. Other entries, empty
-/// ones too, are as they were.
-fn without_entry(path: &str, dir: &str) -> Result<Option<String>> {
-    let compared = compared_dir(dir)?;
-    let kept: Vec<&str> = path
-        .split(';')
-        .filter(|entry| !names_compared(entry, &compared))
-        .collect();
+/// `path` without the entries that equal `dir`, each with its separator; none if no entry does. Other entries,
+/// empty ones too, are as they were.
+fn without_entry(path: &str, dir: &str) -> Option<String> {
+    let kept: Vec<&str> = path.split(';').filter(|entry| *entry != dir).collect();
     let changed = kept.join(";");
-    Ok((changed != path).then_some(changed))
+    (changed != path).then_some(changed)
 }
 
 /// The text of the machine `Path` value, a registry string: UTF-16 with its terminating NULs. Its errors name that
