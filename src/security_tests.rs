@@ -23,7 +23,6 @@ fn no_sid_is_a_null_sid() {
     assert!(!unsafe { system.is(null_mut()) });
 }
 
-/// `path`'s DACL as SDDL.
 fn dacl_of(path: &Path) -> String {
     use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
 

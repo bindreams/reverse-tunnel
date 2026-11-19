@@ -974,7 +974,7 @@ fn write_settings(paths: &Paths, account: &Account, host: Option<&str>, join: Op
     Ok(changed)
 }
 
-/// Makes `secrets/` and `logs/`, the directories the service account has a part of, with their final mode and owner.
+/// Makes `secrets/` and `logs/`, the directories the service account uses, with their final mode and owner.
 fn make_state_dirs(paths: &Paths, account: &Account) -> Result<()> {
     make_dir(&paths.secrets_dir, Perm::new(SECRETS_DIR_MODE).group(*account))?;
     // Readable by everyone: the logs in it are (`logfile::open`).
@@ -987,8 +987,8 @@ fn make_state_dirs(paths: &Paths, account: &Account) -> Result<()> {
 ///   gets them too. An explicit ACE on a file there, a deny ACE or a protected DACL included, stays, and the service
 ///   then fails to open that file.
 /// - `config.yaml`, `bridge.pem`, the two tokens and every regular file directly in the bin dir (frpc, the copy on the
-///   `PATH`, the service images): the ACL their directory gives, their owner staying. One that is missing is skipped
-///   (`bridge.pem` is, before a join).
+///   `PATH`, the service images): the ACL their directory gives, their owner staying. One that is missing is an error
+///   that names it.
 ///
 /// Files are reset one by one only in directories that Administrators own (`make_dir` refuses another owner), so no
 /// link the service account planted is followed. A registered image outside the bin dir is not reset.
@@ -1003,24 +1003,21 @@ pub fn own(paths: &Paths, account: &Account) -> Result<()> {
         paths.bridge_token(),
         paths.host_token(),
     ] {
-        inherit_dacl_if_there(&path)?;
+        reset_acl(&path)?;
     }
     for entry in fs::read_dir(&paths.bin_dir).with_context(|| format!("listing {}", paths.bin_dir.display()))? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
-            inherit_dacl_if_there(&entry.path())?;
+            reset_acl(&entry.path())?;
         }
     }
     Ok(())
 }
 
-/// `restore_binary`, unless `path` is not there.
+/// Gives `path` the ACL its directory gives, its owner staying.
 #[cfg(windows)]
-fn inherit_dacl_if_there(path: &Path) -> Result<()> {
-    match restore_binary(path) {
-        Err(err) if crate::files::is_not_found(&err) => Ok(()),
-        reset => reset,
-    }
+fn reset_acl(path: &Path) -> Result<()> {
+    crate::security::inherit_dacl(path).with_context(|| format!("resetting the ACL of {}", path.display()))
 }
 
 /// Writes the hash of the host token, which is no secret, where `status` reads it without the right to read the token

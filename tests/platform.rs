@@ -1378,8 +1378,7 @@ fn restart_checks_the_configuration_as_the_service_account() {
     assert_eq!((status.state, status.pid), (State::Running, running));
 }
 
-/// An Administrator's hand edit of what `run` reads is undone by `restart`: it resets every file it names to install's
-/// ACL and `logs/` to its descriptor, so the service reads each again and may add files to `logs/`, and runs again.
+/// `restart` undoes an Administrator's hand edit of what `run` reads.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
@@ -1392,7 +1391,9 @@ fn restart_resets_access_to_what_the_service_reads() {
     let first = machine.status().pid.expect("a running service has a pid");
     let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
     let paths = &machine.paths;
-    // Each file or directory, the principal the service uses it through, and the rights it needs there.
+    // A stray file in the bin dir, which `own` resets with the rest.
+    let stray = paths.bin_dir.join("stray.txt");
+    fs::write(&stray, b"stray").unwrap();
     let files = [
         (paths.config_file(), "S-1-1-0".to_string(), FILE_GENERIC_READ),
         (paths.bridge_pem(), "S-1-1-0".to_string(), FILE_GENERIC_READ),
@@ -1405,6 +1406,7 @@ fn restart_resets_access_to_what_the_service_reads() {
         ),
         (service::exe(paths), "S-1-1-0".to_string(), windows::READ_EXECUTE),
         (machine.image(), "S-1-1-0".to_string(), windows::READ_EXECUTE),
+        (stray, "S-1-1-0".to_string(), FILE_GENERIC_READ),
         (paths.log_dir.clone(), service.clone(), FILE_ADD_FILE),
     ];
     for (file, who, _) in &files {
@@ -1428,6 +1430,8 @@ fn restart_resets_access_to_what_the_service_reads() {
         let status = machine.status();
         status.state == State::Running && status.pid.is_some_and(|pid| pid != first)
     });
+    // frpc starts only after `run` has read the config and tokens and opened its logs.
+    machine.wait_for_frpc();
     for (file, who, needed) in &files {
         assert_eq!(
             windows::effective_rights(file, &windows::sid(who)) & needed,

@@ -42,9 +42,7 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 /// check runs as the caller, so this is not so there for a file in `logs/` with an explicit deny ACE or a protected
 /// DACL: it is not reset, and the service fails to open it.
 ///
-/// On Windows it first resets the access to what `run` reads to what `install` gives (`install::own`): the directories'
-/// descriptors, `config.yaml`, `bridge.pem`, the two tokens and every regular file directly in the bin dir. A registered
-/// image outside the bin dir is not reset.
+/// On Windows it first resets access with `install::own` (see there for what it does not reset).
 pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     refuse_while_uninstalling(paths)?;
     // Not decided from the account database, which can answer for an account that has just been removed.
@@ -100,8 +98,8 @@ fn check_and_restart_as(
 /// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
 /// install's and open to the account by contract.
 ///
-/// On Windows it runs as the caller, whom a file the account cannot read does not stop: `restart` and `install` reset
-/// the access to what `run` reads beforehand (`install::own`).
+/// On Windows it runs as the caller, so it cannot see files the account cannot read; `restart` and `install` call
+/// `install::own` first.
 pub(crate) fn check(exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
     // Windows runs the check as the caller, whoever is asked for.
     #[cfg(windows)]
