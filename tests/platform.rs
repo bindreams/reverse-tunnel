@@ -669,7 +669,14 @@ fn reinstall_puts_the_installed_binarys_access_back() {
         assert_eq!((meta.uid(), meta.gid()), (0, 0), "kept {}", binary.display());
     }
     #[cfg(windows)]
-    reverse_tunnel::access::check(&machine.paths, &binaries[0], &binaries[1]).unwrap();
+    for binary in &binaries {
+        assert_eq!(
+            windows::effective_rights(binary, &windows::sid("S-1-1-0")) & windows::READ_EXECUTE,
+            windows::READ_EXECUTE,
+            "Everyone on {}",
+            binary.display()
+        );
+    }
 }
 
 #[test]
@@ -1371,126 +1378,67 @@ fn restart_checks_the_configuration_as_the_service_account() {
     assert_eq!((status.state, status.pid), (State::Running, running));
 }
 
-/// What `access::check` relies on is in the token of the running service, enabled: a credited group missing from it
-/// would let `restart` pass a file that only that group may read, and without SeChangeNotifyPrivilege the service
-/// would not pass through the directories the check does not look at (see `access::opens`). The service also owns the
-/// files it makes, which is what lets CREATOR OWNER count (`access::barrier_of`).
+/// `restart` undoes an Administrator's hand edit of what `run` reads.
 #[test]
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
-fn the_services_token_holds_the_groups_and_the_privilege_the_check_relies_on() {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-    let pid = machine.wait_for_frpc()[0].pid;
-    let enabled = windows::enabled_groups(pid);
+fn restart_resets_access_to_what_the_service_reads() {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_ADD_FILE, FILE_GENERIC_READ};
 
-    for (sid, name) in reverse_tunnel::access::CREDITED {
-        assert!(
-            enabled.iter().any(|held| held == sid),
-            "{name} ({sid}) is not enabled in the service's token: {enabled:?}"
-        );
-    }
-    assert!(
-        windows::holds_enabled_privilege(pid, "SeChangeNotifyPrivilege"),
-        "SeChangeNotifyPrivilege is not enabled in the service's token"
-    );
-    // CREATOR OWNER counts for the files the service makes only if the service owns them.
-    let log = machine.paths.log_dir.join(reverse_tunnel::paths::LOG_SUPERVISOR);
-    let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
-    assert_eq!(
-        reverse_tunnel::security::owner_of(&log).unwrap(),
-        service,
-        "owner of {}",
-        log.display()
-    );
-}
-
-/// `restart` refuses each path in `access::opens`, naming it and every earlier one broken, and leaves the service as it
-/// was. The service is stopped first so its own file activity cannot change what is measured, and the rotated logs,
-/// which `run` makes only when a log fills, are made so that their need is measured too.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-#[cfg(windows)]
-fn restart_checks_every_path_run_opens() {
     let machine = Machine::begin();
     machine.install(&join_code("tunnel.example.test"));
     machine.wait_for_frpc();
-    let mut stop = Command::new(BIN);
-    stop.arg("stop");
-    machine.run_ok(stop);
-    let before = machine.status();
-    assert_ne!(before.state, State::Running);
-    let no_service = reverse_tunnel::security::Descriptor::parse("D:P(A;;FA;;;SY)(A;;FA;;;BA)").unwrap();
-    for log in [reverse_tunnel::paths::LOG_SUPERVISOR, reverse_tunnel::paths::LOG_FRPC] {
-        let rotated = machine
-            .paths
-            .log_dir
-            .join(format!("{log}{}", reverse_tunnel::logfile::ROTATED));
-        fs::write(rotated, "").unwrap();
-    }
-    let mut broken = Vec::new();
-
-    let (exe, frpc) = (machine.image(), reverse_tunnel::download::tools(&machine.paths).frpc);
-    for need in reverse_tunnel::access::opens(&machine.paths, &exe, &frpc) {
-        assert!(need.path.exists(), "{} is missing", need.path.display());
-        no_service.apply(&need.path).unwrap();
-        broken.push(need.path.display().to_string());
-
-        let failed = Command::new(BIN).arg("restart").output().unwrap();
-
-        let stderr = String::from_utf8_lossy(&failed.stderr);
-        assert!(
-            !failed.status.success() && broken.iter().all(|path| stderr.contains(path)),
-            "restart should refuse all of {broken:?}: {stderr}"
-        );
-        let after = machine.status();
-        assert_eq!((after.state, after.pid), (before.state, before.pid));
-    }
-}
-
-/// An administrator reads what the service account cannot, so `restart`'s check as the caller passes `config.yaml`:
-/// the DACLs are what refuse it, naming the file, and the service is left running as it was.
-#[test]
-#[ignore = "installs a real service; CI's platform job runs it"]
-#[cfg(windows)]
-fn restart_refuses_a_config_the_service_account_cannot_read() {
-    let machine = Machine::begin();
-    machine.install(&join_code("tunnel.example.test"));
-    machine.wait_for_frpc();
-    let before = machine.status();
-    let config = machine.paths.config_file();
+    let first = machine.status().pid.expect("a running service has a pid");
     let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
-    let label = reverse_tunnel::security::Sid::parse(&service).unwrap().label();
-    for (acl, says, named) in [
+    let paths = &machine.paths;
+    // A stray file in the bin dir, which `own` resets with the rest.
+    let stray = paths.bin_dir.join("stray.txt");
+    fs::write(&stray, b"stray").unwrap();
+    let files = [
+        (paths.config_file(), "S-1-1-0".to_string(), FILE_GENERIC_READ),
+        (paths.bridge_pem(), "S-1-1-0".to_string(), FILE_GENERIC_READ),
+        (paths.bridge_token(), service.clone(), FILE_GENERIC_READ),
+        (paths.host_token(), service.clone(), FILE_GENERIC_READ),
         (
-            format!("D:P(D;;FR;;;{service})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;WD)"),
-            "denies",
-            label,
+            reverse_tunnel::download::tools(paths).frpc,
+            "S-1-1-0".to_string(),
+            windows::READ_EXECUTE,
         ),
-        (
-            "D:P(A;;FA;;;SY)(A;;FA;;;BA)".to_string(),
-            "no ACE",
-            service::ACCOUNT.to_string(),
-        ),
-    ] {
-        reverse_tunnel::security::Descriptor::parse(&acl)
+        (service::exe(paths), "S-1-1-0".to_string(), windows::READ_EXECUTE),
+        (machine.image(), "S-1-1-0".to_string(), windows::READ_EXECUTE),
+        (stray, "S-1-1-0".to_string(), FILE_GENERIC_READ),
+        (paths.log_dir.clone(), service.clone(), FILE_ADD_FILE),
+    ];
+    for (file, who, _) in &files {
+        reverse_tunnel::security::Descriptor::parse(&format!("D:P(D;;FA;;;{who})(A;;FA;;;SY)(A;;FA;;;BA)"))
             .unwrap()
-            .apply(&config)
+            .apply(file)
             .unwrap();
-
-        let failed = Command::new(BIN).arg("restart").output().unwrap();
-
-        let stderr = String::from_utf8_lossy(&failed.stderr);
-        assert!(
-            !failed.status.success()
-                && stderr.contains(&config.display().to_string())
-                && stderr.contains(&named)
-                && stderr.contains(says),
-            "restart should refuse {} ({says}): {stderr}",
-            config.display()
+        assert_eq!(
+            windows::effective_rights(file, &windows::sid(who)),
+            0,
+            "{who} is denied {}",
+            file.display()
         );
-        let after = machine.status();
-        assert_eq!((after.state, after.pid), (before.state, before.pid));
+    }
+
+    let mut restart = Command::new(BIN);
+    restart.arg("restart");
+    machine.run_ok(restart);
+
+    wait_until("the manager runs a new supervisor", || {
+        let status = machine.status();
+        status.state == State::Running && status.pid.is_some_and(|pid| pid != first)
+    });
+    // frpc starts only after `run` has read the config and tokens and opened its logs.
+    machine.wait_for_frpc();
+    for (file, who, needed) in &files {
+        assert_eq!(
+            windows::effective_rights(file, &windows::sid(who)) & needed,
+            *needed,
+            "{who} cannot read {}",
+            file.display()
+        );
     }
 }
 
@@ -1632,11 +1580,25 @@ fn install_refuses_a_data_directory_someone_else_made() {
 #[ignore = "installs a real service; CI's platform job runs it"]
 #[cfg(windows)]
 fn install_removes_a_stray_ace_from_secrets() {
+    use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
+
     let machine = Machine::begin();
     let everyone = windows::sid("S-1-1-0");
     let code = join_code("tunnel.example.test");
     machine.install(&code);
-    // An Administrator's hand edit: Everyone may read the tokens.
+    // An Administrator's hand edit: Everyone may read the tokens, and the service may not read `config.yaml` (not Everyone:
+    // the check of the installed binary runs as the caller, whom that would stop).
+    let service = reverse_tunnel::account::ensure(service::ACCOUNT).unwrap().sid();
+    let config = machine.paths.config_file();
+    reverse_tunnel::security::Descriptor::parse(&format!("D:P(D;;FA;;;{service})(A;;FA;;;SY)(A;;FA;;;BA)"))
+        .unwrap()
+        .apply(&config)
+        .unwrap();
+    assert_eq!(
+        windows::effective_rights(&config, &windows::sid(&service)),
+        0,
+        "the deny did not reach config.yaml"
+    );
     let secrets = machine.paths.secrets_dir.display().to_string();
     output_of("icacls", &[&secrets, "/grant", "*S-1-1-0:(OI)(CI)R"]);
     let token = machine.paths.host_token();
@@ -1654,6 +1616,13 @@ fn install_removes_a_stray_ace_from_secrets() {
         "Everyone has secrets/"
     );
     assert_eq!(windows::effective_rights(&token, &everyone), 0, "Everyone has a token");
+    for who in [everyone, windows::sid(&service)] {
+        assert_eq!(
+            windows::effective_rights(&config, &who) & FILE_GENERIC_READ,
+            FILE_GENERIC_READ,
+            "a hand-set deny is still on config.yaml"
+        );
+    }
 }
 
 #[test]

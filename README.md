@@ -82,11 +82,12 @@ every installer does, by reading it and writing it back: another program that ed
 the two edits, and running that program's installer again restores its entry. `install` and `uninstall` match an entry
 only if it equals the folder's full path exactly: one written another way (other case, a trailing backslash,
 `%ProgramFiles%`) is not ours, so `install` adds ours beside it and `uninstall` leaves it. `install` refuses a Program
-Files folder whose path contains `%`, which Windows reads as a variable in the commands that finish `uninstall` and in the system
-`PATH`. `restart` and `install` run `run --check`, which checks the ACLs of what `run` opens (the binaries, the
-configuration and token files, the log folder) before the configuration: `NT SERVICE\reverse-tunnel` needs a plain
-allow (not a conditional, object or compound one), its own or a group every service has (Everyone, SERVICE and
-others), and no deny ACE may name anyone.
+Files folder whose path contains `%`, which Windows reads as a variable in the commands that finish `uninstall` and in
+the system `PATH`. `install` and `restart` reset the ACLs of what `run` reads (the binaries, `config.yaml`,
+`bridge.pem`, the two token files), the other files in the install folder, and the four folders (install, data,
+`secrets`, `logs`) to the ones `install` gives, so a hand edit of them does not outlast either. A deny ACE or a protected
+DACL you put by hand on a file inside `logs\` is not reset, and the service then fails to open it: delete the file and
+the service makes it again.
 
 ```powershell
 Invoke-WebRequest -Uri https://github.com/bindreams/reverse-tunnel/releases/latest/download/reverse-tunnel-x86_64-pc-windows-msvc.exe -OutFile reverse-tunnel.exe
