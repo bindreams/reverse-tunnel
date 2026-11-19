@@ -215,6 +215,7 @@ The files:
 Anyone on the machine can read the logs, with `reverse-tunnel logs` or directly (`less /var/log/reverse-tunnel/frpc.log`
 on Linux, `less /Library/Logs/reverse-tunnel/frpc.log` on macOS): nothing secret is in them. `frpc.log` is the tunnel's;
 `supervisor.log` is the service's own, with one local time stamp per line, and `reverse-tunnel logs` does not show it.
+On a host upgraded from v0.1.0, logs it made under a restrictive umask stay readable only by root until they rotate.
 Each log is rotated at 10 MB to `<name>.1`, replacing the previous one; `logs` shows only the current file.
 
 ### Upgrade
