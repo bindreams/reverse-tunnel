@@ -38,7 +38,11 @@ pub fn stop(manager: &dyn ServiceManager) -> Result<()> {
 }
 
 /// Has the service read its configuration again, after the installed binary has checked it as the service account: a
-/// file that account cannot read, or that the installed binary rejects, leaves the service as it is.
+/// file that account cannot read, or that the installed binary rejects, leaves the service as it is. On Windows the
+/// check runs as the caller, so this is not so there for a file in `logs/` with an explicit deny ACE or a protected
+/// DACL: it is not reset, and the service fails to open it.
+///
+/// On Windows it first resets access with `install::own` (see there for what it does not reset).
 pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths, out: &mut impl Write) -> Result<()> {
     refuse_while_uninstalling(paths)?;
     // Not decided from the account database, which can answer for an account that has just been removed.
@@ -51,6 +55,8 @@ pub fn check_and_restart(manager: &dyn ServiceManager, paths: &Paths, out: &mut 
     );
     #[cfg(not(windows))]
     ensure!(exe.try_exists()?, "the service is not installed");
+    #[cfg(windows)]
+    crate::install::own(paths, &account::ensure(service::ACCOUNT)?)?;
     check_and_restart_as(manager, paths, &exe, service_identity()?, out)
 }
 
@@ -92,8 +98,8 @@ fn check_and_restart_as(
 /// macOS's effective gid 0), so a file it reads only through another group is refused. The files it reads are
 /// install's and open to the account by contract.
 ///
-/// On Windows it runs as the caller, whom a file the account cannot read does not stop, so `run --check` also judges
-/// the DACLs for the account (`access::check`).
+/// On Windows it runs as the caller, so it cannot see files the account cannot read; `restart` and `install` call
+/// `install::own` first.
 pub(crate) fn check(exe: &Path, run_as: Option<RunAs>, what: &str) -> Result<()> {
     // Windows runs the check as the caller, whoever is asked for.
     #[cfg(windows)]
